@@ -254,6 +254,7 @@ def _artifact_path(root: Path, raw_path: Any) -> Path:
 
 def _write_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
     _reject_unknown_args(args, {"relative_path", "content", "title", "role", "mime_type", "overwrite"})
+    _reject_manager_owned_artifact_path(workspace, args.get("relative_path"))
     final_root, write_root = _artifact_roots(workspace)
     path = _artifact_path(write_root, args.get("relative_path"))
     content = str(args.get("content") or "")
@@ -269,6 +270,7 @@ def _write_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> d
 
 def _edit_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
     _reject_unknown_args(args, {"relative_path", "content", "operation", "create_if_missing", "title", "role", "mime_type"})
+    _reject_manager_owned_artifact_path(workspace, args.get("relative_path"))
     final_root, write_root = _artifact_roots(workspace)
     path = _artifact_path(write_root, args.get("relative_path"))
     operation = str(args.get("operation") or "append").strip().lower() or "append"
@@ -319,6 +321,21 @@ def _reject_unknown_args(args: dict[str, Any], allowed: set[str]) -> None:
     unknown = sorted(str(key) for key in args if str(key) not in allowed)
     if unknown:
         raise ValueError(f"unknown argument(s): {', '.join(unknown)}")
+
+
+def _reject_manager_owned_artifact_path(workspace: dict[str, Any], raw_path: Any) -> None:
+    if bool(workspace.get("manager_submission_write")):
+        return
+    relative = str(raw_path or "").replace("\\", "/").strip().lstrip("./")
+    reserved = {
+        str(item).replace("\\", "/").strip().lstrip("./")
+        for item in list(workspace.get("manager_owned_submission_paths") or [])
+        if str(item).strip()
+    }
+    if relative in reserved:
+        raise ValueError(
+            f"artifact path {relative!r} is Manager-owned; use the bound no-argument submit tool"
+        )
 
 
 def _next_available_artifact_path(path: Path) -> Path:

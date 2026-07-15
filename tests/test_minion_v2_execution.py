@@ -23,7 +23,9 @@ from pal.minion.v2.execution import (
     WorkspaceLockRegistry,
     prepare_node_dependency_baseline,
     provision_verification_worktree,
+    format_workspace_process_holders,
     terminate_process_group,
+    workspace_process_holders,
 )
 
 
@@ -65,14 +67,14 @@ def _contract(unit_id: str, requirement_id: str, evidence_id: str, owned_area: s
         "responsibility": f"Implement {unit_id}.",
         "owned_area": [owned_area],
         "reference_only_paths": ["references/**"],
-        "provided_interfaces": [],
+        "provided_interfaces": [{"name": f"{unit_id}_output"}],
         "consumed_interfaces": [],
-        "ownership": {},
+        "ownership": {"rule": f"{unit_id} exclusively owns its output."},
         "lifecycle": "N/A",
         "state_model": "stateless",
         "invariants": [f"{unit_id} remains deterministic"],
-        "error_behavior": [],
-        "compatibility": [],
+        "error_behavior": ["Invalid input fails deterministically."],
+        "compatibility": ["The public output shape remains stable."],
         "dependency_constraints": [],
         "requirement_ids": [requirement_id],
         "verification_obligations": [{"kind": "consumer_probe"}],
@@ -112,6 +114,24 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 os.killpg(process_group, 9)
             except ProcessLookupError:
                 pass
+
+    def test_workspace_process_holders_report_read_and_write_access(self) -> None:
+        if not Path("/proc").is_dir():
+            self.skipTest("process holder diagnostics require procfs")
+        workspace = self.runtime_root / "holder-worktree"
+        workspace.mkdir()
+        held_file = workspace / "held.txt"
+        held_file.write_text("content\n", encoding="utf-8")
+
+        with held_file.open("rb"), held_file.open("ab"):
+            holders = workspace_process_holders(workspace)
+
+        current = next(item for item in holders if item.pid == os.getpid())
+        self.assertIn("held.txt", current.read_paths)
+        self.assertIn("held.txt", current.write_paths)
+        rendered = format_workspace_process_holders(holders)
+        self.assertIn(f'"pid":{os.getpid()}', rendered)
+        self.assertIn('"write_paths":["held.txt"]', rendered)
 
     def _manifest(self):
         requirements = self.architecture.publish_requirements(

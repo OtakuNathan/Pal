@@ -104,6 +104,8 @@ class LspManager:
             return await self.rescan()
         if method == "doctor":
             return await self.doctor(dict(params or {}))
+        if method == "release_workspace":
+            return await self.release_workspace(dict(params or {}))
         if method in {
             "hover",
             "definition",
@@ -295,6 +297,39 @@ class LspManager:
     async def close_all(self) -> None:
         for state in list(self.states.values()):
             await self._detach_state(state)
+
+    async def release_workspace(self, params: dict[str, Any]) -> dict[str, Any]:
+        raw_workspace = str(params.get("workspace_root") or "").strip()
+        if not raw_workspace:
+            raise ValueError("release_workspace requires workspace_root")
+        workspace_root = Path(raw_workspace).expanduser().resolve()
+        key = _workspace_session_key(workspace_root)
+        released: list[dict[str, Any]] = []
+        for state in list(self.states.values()):
+            async with state.lock:
+                session = state.sessions.pop(key, None)
+                if session is None:
+                    continue
+                if state.connector is session.connector:
+                    state.connector = None
+                if not any(
+                    candidate.connector is session.connector
+                    for candidate in state.sessions.values()
+                ):
+                    await session.connector.close()
+                released.append(
+                    {
+                        "server_id": state.server_id,
+                        "workspace_root": str(session.workspace_root),
+                    }
+                )
+                _refresh_state_attachment(state)
+        return {
+            "status": "ok",
+            "workspace_root": str(workspace_root),
+            "released_count": len(released),
+            "released": released,
+        }
 
     async def evict_idle_sessions(
         self,

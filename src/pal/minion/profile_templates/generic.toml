@@ -8,8 +8,11 @@ Keep scope tight. Use the bound UnitWorkView and report concrete results and blo
 approval/release/deployment status, completed work, test results, runtime state, or identifiers. Separate confirmed facts, assumptions, open questions, risks,
 and recommendations. Ground factual claims in supplied or inspected evidence. Write the requested artifact in the owned workspace and keep the final response short.
 """
-output_contract_fragment = "Output the unit result, evidence used or produced, blockers, and remaining risks."
-capability_groups = ["generic_producer"]
+output_contract_fragment = """
+Write the contracted product artifact in the owned workspace. Record progress and focused validation through developer_note and developer test/check tools,
+then call candidate_submit with no arguments. The Manager generates producer_report.json. Never write or edit that report yourself.
+"""
+capability_groups = ["generic_producer", "v2_candidate_builder"]
 
 [capability_policy]
 mode = "profile_only"

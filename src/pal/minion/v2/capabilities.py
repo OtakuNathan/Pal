@@ -21,6 +21,47 @@ if TYPE_CHECKING:
     from pal.core.main_context import MainContext
 
 
+_STRING_MAP_SCHEMA = {"type": "object", "additionalProperties": {"type": ["string", "null"]}}
+_PROFILE_OVERRIDE_CHANGES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "display_name": {"type": ["string", "null"]},
+        "identity_fragment": {"type": ["string", "null"]},
+        "behavior_fragment": {"type": ["string", "null"]},
+        "output_contract_fragment": {"type": ["string", "null"]},
+        "preferred_endpoint_id": {"type": ["string", "null"]},
+        "capability_groups": {"type": ["array", "null"], "items": {"type": "string"}},
+        "default_allowed_capabilities": {"type": ["array", "null"], "items": {"type": "string"}},
+        "skill_refs": {"type": ["array", "null"], "items": {"type": "string"}},
+        "default_approval_policy": {"type": ["object", "null"]},
+        "workspace_policy": {"type": ["object", "null"]},
+        "workspace_environment_policy": {"type": ["object", "null"]},
+        "completion_policy": {"type": ["object", "null"]},
+        "capability_policy": {"type": ["object", "null"]},
+        "capability_description_overrides": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
+        "output_policy": {"type": ["object", "null"]},
+        "metadata": {"type": ["object", "null"]},
+    },
+    "additionalProperties": False,
+}
+_FAMILY_OVERRIDE_CHANGES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "display_name": {"type": ["string", "null"]},
+        "domain": {"type": ["string", "null"]},
+        "domain_keywords": {"type": ["array", "null"], "items": {"type": "string"}},
+        "workflow_template": {"type": ["string", "null"]},
+        "roles": {**_STRING_MAP_SCHEMA, "type": ["object", "null"]},
+        "builders": {**_STRING_MAP_SCHEMA, "type": ["object", "null"]},
+        "adapters": {**_STRING_MAP_SCHEMA, "type": ["object", "null"]},
+        "policies": {"type": ["object", "null"]},
+        "capability_groups": {"type": ["object", "null"]},
+        "metadata": {"type": ["object", "null"]},
+    },
+    "additionalProperties": False,
+}
+
+
 @capability_node(
     namespace=INTROSPECTION_NAMESPACE,
     scope="minion_workflow",
@@ -28,6 +69,30 @@ if TYPE_CHECKING:
     kind="module",
     source="builtin:minion-v2",
     target_kind="workflow",
+)
+@capability_node(
+    namespace=INTROSPECTION_NAMESPACE,
+    scope="minion_task",
+    path_module_id="minion_task",
+    kind="module",
+    source="builtin:minion-v2",
+    target_kind="task",
+)
+@capability_node(
+    namespace=INTROSPECTION_NAMESPACE,
+    scope="minion_catalog",
+    path_module_id="minion_catalog",
+    kind="module",
+    source="builtin:minion-v2",
+    target_kind="catalog",
+)
+@capability_node(
+    namespace=OPERATION_NAMESPACE,
+    scope="minion_catalog",
+    path_module_id="minion_catalog",
+    kind="module",
+    source="builtin:minion-v2",
+    target_kind="catalog",
 )
 @capability_node(
     namespace=OPERATION_NAMESPACE,
@@ -43,6 +108,7 @@ class MinionV2PublicProvider:
     wake_manager: Callable[[], None] | None = None
     attach_manager: Callable[[], dict[str, Any]] | None = None
     detach_manager: Callable[[], None] | None = None
+    manager_request: Callable[[str, dict[str, Any] | None], dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         self.service = MinionV2WorkflowService(Path(self.runtime_root))
@@ -70,6 +136,170 @@ class MinionV2PublicProvider:
             structured={"manager_running": False},
             llm_text="Minion sidecar detached.",
         )
+
+    @capability_action(
+        namespace=INTROSPECTION_NAMESPACE,
+        scope="minion_catalog",
+        action_name="read",
+        description=(
+            "Read the effective Minion profile/family catalog from the attached sidecar. Builtins come from the installed package and explicit "
+            "user overrides are marked separately. Use semantic names such as software_engineering.v2_coder; no runtime files or Manager IDs are exposed."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["all", "profiles", "families"], "default": "all"},
+                "query": {"type": "string", "default": ""},
+                "include_definitions": {"type": "boolean", "default": False},
+            },
+            "additionalProperties": False,
+        },
+    )
+    def read_catalog(self, call: IntrospectionCall) -> IntrospectionResult:
+        try:
+            payload = self._request_manager("catalog_snapshot", dict(call.args or {}))
+            return IntrospectionResult(
+                status=RuntimeStatus.OK,
+                text="minion catalog",
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Minion catalog", payload),
+            )
+        except Exception as exc:
+            payload = {"error": str(exc), "error_type": exc.__class__.__name__}
+            return IntrospectionResult(
+                status=RuntimeStatus.ERROR,
+                text="minion catalog read failed",
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Minion catalog read failed", payload),
+            )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion_catalog",
+        action_name="set_profile_override",
+        description=(
+            "Atomically patch one Minion profile inside the sidecar. The profile is selected by semantic name; omitted fields retain their current "
+            "effective value and null removes an optional field. Existing workflows keep their pinned FamilyBindingArtifact, so this affects only future work."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "profile": {"type": "string", "description": "Semantic profile name, for example software_engineering.v2_coder."},
+                "changes": {
+                    **_PROFILE_OVERRIDE_CHANGES_SCHEMA,
+                    "description": "Typed merge patch for the profile definition; null removes an optional field.",
+                },
+            },
+            "required": ["profile", "changes"],
+            "additionalProperties": False,
+        },
+    )
+    def set_profile_override(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, _channel = self._actor_and_channel(call)
+            payload = self._request_manager(
+                "catalog_set_profile_override",
+                {**dict(call.args or {}), "actor": actor},
+            )
+            return _public_result("minion profile override updated", payload)
+        except Exception as exc:
+            return _error("minion profile override failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion_catalog",
+        action_name="reset_profile_override",
+        description="Remove one explicit profile override in the sidecar and restore the current package builtin when one exists.",
+        args_schema={
+            "type": "object",
+            "properties": {"profile": {"type": "string"}},
+            "required": ["profile"],
+            "additionalProperties": False,
+        },
+    )
+    def reset_profile_override(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, _channel = self._actor_and_channel(call)
+            payload = self._request_manager(
+                "catalog_reset_profile_override",
+                {"profile": str(call.args.get("profile") or ""), "actor": actor},
+            )
+            return _public_result("minion profile override reset", payload)
+        except Exception as exc:
+            return _error("minion profile override reset failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion_catalog",
+        action_name="set_family_override",
+        description=(
+            "Atomically patch one data-driven Minion family inside the sidecar using its semantic family name. Role references and profile availability "
+            "are validated before the override becomes visible to future workflows."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "family": {"type": "string", "description": "Semantic family name, for example software_engineering."},
+                "changes": {
+                    **_FAMILY_OVERRIDE_CHANGES_SCHEMA,
+                    "description": "Typed merge patch for the family definition; null removes an optional field.",
+                },
+            },
+            "required": ["family", "changes"],
+            "additionalProperties": False,
+        },
+    )
+    def set_family_override(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, _channel = self._actor_and_channel(call)
+            payload = self._request_manager(
+                "catalog_set_family_override",
+                {**dict(call.args or {}), "actor": actor},
+            )
+            return _public_result("minion family override updated", payload)
+        except Exception as exc:
+            return _error("minion family override failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion_catalog",
+        action_name="reset_family_override",
+        description="Remove one explicit family override in the sidecar and restore the current package builtin when one exists.",
+        args_schema={
+            "type": "object",
+            "properties": {"family": {"type": "string"}},
+            "required": ["family"],
+            "additionalProperties": False,
+        },
+    )
+    def reset_family_override(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, _channel = self._actor_and_channel(call)
+            payload = self._request_manager(
+                "catalog_reset_family_override",
+                {"family": str(call.args.get("family") or ""), "actor": actor},
+            )
+            return _public_result("minion family override reset", payload)
+        except Exception as exc:
+            return _error("minion family override reset failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion_catalog",
+        action_name="refresh",
+        description=(
+            "Ask the attached Minion sidecar to reload package builtins, migrate any legacy managed seeds, validate explicit overrides, and return the "
+            "new effective catalog generation. The Pal process does not read or modify Minion catalog files."
+        ),
+        args_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+    def refresh_catalog(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, _channel = self._actor_and_channel(call)
+            payload = self._request_manager("catalog_refresh", {"actor": actor})
+            return _public_result("minion catalog refreshed", payload)
+        except Exception as exc:
+            return _error("minion catalog refresh failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -105,7 +335,11 @@ class MinionV2PublicProvider:
                 },
                 "sections": {
                     "type": "object",
-                    "description": "Immutable Requirement text grouped by natural-language section.",
+                    "description": (
+                        "Immutable user/product Requirement text grouped by natural-language section, including delivery-relevant compatibility, "
+                        "platform, source-of-truth, and implementation constraints. Do not restate Minion roles, gates, review order, tool rules, "
+                        "or other workflow policy here; the Manager enforces those through the selected family binding."
+                    ),
                     "additionalProperties": {"type": "array", "items": {"type": "string"}},
                 },
                 "requirements": {
@@ -122,7 +356,13 @@ class MinionV2PublicProvider:
                     },
                 },
                 "strengths": {"type": "object"},
-                "constraints": {"type": "array"},
+                "constraints": {
+                    "type": "array",
+                    "description": (
+                        "Optional machine/environment constraints for execution and fingerprinting. Product-visible obligations belong in sections; "
+                        "Minion orchestration policy belongs to the family binding."
+                    ),
+                },
                 "approved_evidence": {
                     "type": "array",
                     "description": "Already-approved evidence entries used when research_mode=none; source_kind must be approved, user_supplied, or input_artifact.",
@@ -200,6 +440,64 @@ class MinionV2PublicProvider:
             return _invalid("minion V2 artifact invalid", exc)
         except Exception as exc:
             return _error("minion V2 artifact publish failed", exc)
+
+    @capability_action(
+        namespace=INTROSPECTION_NAMESPACE,
+        scope="minion_task",
+        action_name="search",
+        description=(
+            "Search the durable Minion V2 Task Ledger across channels for the current actor. Use this before claiming that a workflow cannot be "
+            "found, and when the current channel has no bound workflow. Returns semantic Task details and compact Workflow phase/liveness summaries "
+            "without exposing Manager identities. An empty query lists the most recently updated Tasks."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "default": ""},
+                "family_id": {"type": "string"},
+                "include_archived": {"type": "boolean", "default": False},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+            },
+            "additionalProperties": False,
+        },
+    )
+    def search_tasks(self, call: IntrospectionCall) -> IntrospectionResult:
+        try:
+            actor, channel = self._actor_and_channel(call)
+            payload = self.service.search_task_ledger(
+                {
+                    **dict(call.args or {}),
+                    "actor": actor,
+                    "source_channel": channel,
+                }
+            )
+            public = _public_payload(payload)
+            return IntrospectionResult(
+                status=RuntimeStatus.OK,
+                text="minion task search",
+                structured=public,
+                llm_text=render_titled_structured_for_llm("Minion task search", public),
+            )
+        except ValueError as exc:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="minion V2 task search invalid",
+                structured={"error": str(exc), "error_type": exc.__class__.__name__},
+                llm_text=render_titled_structured_for_llm(
+                    "Minion V2 task search invalid",
+                    {"error": str(exc), "error_type": exc.__class__.__name__},
+                ),
+            )
+        except Exception as exc:
+            return IntrospectionResult(
+                status=RuntimeStatus.ERROR,
+                text="minion V2 task search failed",
+                structured={"error": str(exc), "error_type": exc.__class__.__name__},
+                llm_text=render_titled_structured_for_llm(
+                    "Minion V2 task search failed",
+                    {"error": str(exc), "error_type": exc.__class__.__name__},
+                ),
+            )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -423,6 +721,11 @@ class MinionV2PublicProvider:
         if self.wake_manager is None:
             raise RuntimeError("minion sidecar lifecycle is not configured")
         self.wake_manager()
+
+    def _request_manager(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self.manager_request is None:
+            raise RuntimeError("minion sidecar request transport is not configured")
+        return self.manager_request(method, dict(params or {}))
 
 
 def _public_result(title: str, payload: dict[str, Any]) -> CapabilityResult:

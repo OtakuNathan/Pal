@@ -120,7 +120,7 @@ def _required_params(spec: dict[str, object]) -> list[str]:
 
 def _compact_capability_hit(runtime: object, spec: dict[str, object]) -> dict[str, object]:
     canonical = str(spec.get("canonical_path") or spec.get("name") or "").strip()
-    projected = llm_tool_name(canonical)
+    projected = llm_tool_name(spec.get("name") or canonical)
     resolver = getattr(runtime, "resolve_llm_tool_name", None)
     name = projected if callable(resolver) and str(resolver(projected) or "") == canonical else canonical
     return {
@@ -195,9 +195,10 @@ def _llm_capability_contract(capability: dict[str, object], *, full_description:
         dict(capability.get("parameters_schema") or {"type": "object", "properties": {}})
     )
     canonical = str(capability.get("canonical_path") or capability.get("name") or "").strip()
+    public_name = llm_tool_name(capability.get("name") or canonical)
     raw_description = replace_internal_tool_names(capability.get("description") or "")
     return {
-        "name": llm_tool_name(canonical),
+        "name": public_name,
         "description": " ".join(raw_description.strip().split()) if full_description else _compact_description(raw_description),
         "parameters_schema": parameters_schema,
         "required_params": _required_params_from_schema(parameters_schema),

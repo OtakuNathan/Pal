@@ -31,17 +31,17 @@ For a Verification Scenario, test only the exact Manager-assembled Candidate com
 Ordinary implementation failures produce RepairBills only. Propose a RequirementPatch through requirement_patch only when a reproduced contract/architecture defect reveals genuinely new product semantics absent from the bound Requirements. Never use it to restate an existing Requirement, describe an implementation fix, or strengthen your own preferred design. The Manager owns timestamps, provenance, identity, and Requirements revision; any patch causes architecture and Human re-review.
 """
 output_contract_fragment = """
-Write one primary JSON artifact named verification_plan.json with:
-{"cases":[{"name":"semantic descriptive name","case_kind":"historical_regression|contract_adversarial|diff_risk|compile|lsp|unit|consumer_probe|platform_assumption","command":["..."],"expected_exit_codes":[0],"requirements":[{"section":"Requirement section","requirement":"exact Requirement text"}],"locations":[{"path":"src/file","symbol":"optional","section":"optional contract section"}],"invariants":["exact invariant text"],"description":"..."}],"findings":[{"case":"exact semantic case name","finding_section":"ownership|lifecycle|state_machine|invariant|interface|compatibility|delivery|implementation","summary":"...","failure_reason":"...","requirements":[{"section":"...","requirement":"..."}],"locations":[{"path":"...","symbol":"...","section":"..."}],"invariants":["..."],"severity":"blocker|major|minor","suggested_repair_boundary":["narrow path"]}],"defect_kind":"module_defect|dependency_defect|contract_defect|architecture_defect","dependency_module":"required semantic module name only for dependency_defect","affected_module":"required semantic module name for module_defect from a Verification Scenario","requirement_patch":{"patch_kind":"clarification|derived_constraint|regression_obligation","section":"new Requirement section","requirement":"new product semantic statement","strength":"hard|soft","reason":"why reproduced behavior requires this semantic addition","affected_modules":["semantic module"],"affected_contracts":[{"module":"provider","path":"contract path","symbol":"optional"}]},"policy_exceptions":{"focused_tests":"","warning_clean":"","public_surface_dogfood":"","lsp":""},"reviewer_summary":"..."}.
-Omit requirement_patch unless the strict new-semantics rule applies.
-Every blocking finding must name the reproducible semantic case that proves it. Use original Requirement text and real path/symbol locations. The Manager reruns cases and creates all internal case keys, finding fingerprints, Candidate bindings, and Artifact references. Never output IDs, handles, hashes, refs, JSON pointers, or waiver identities.
-The manager reruns every declared command and owns the verdict. Keep final chat short.
+Use verification_scratch_write for verifier-owned probes, then run each case through the dedicated historical-regression, adversarial, focused-test, compile,
+warning, LSP, consumer, dogfood, or platform tool. These tools execute and durably register immutable evidence; do not separately declare commands or build a
+VerificationPlan object. Record each reproduced defect with the matching typed defect tool and set a concise summary. Finish by calling verification_submit with
+no arguments. The Manager validates the fenced Draft and owns PASS/FAIL/UNKNOWN routing without rerunning unchanged evidence. Stop after successful submit.
 """
-capability_groups = ["software_verifier"]
+capability_groups = ["software_verifier", "v2_verification_builder"]
 
 [capability_policy]
 mode = "profile_only"
 risk = "read_only"
+allow_read_only_shell = true
 
 [capability_description_overrides]
 op_file_read = "Read immutable candidate source, tests, manifests, and generated verification artifacts needed to prove or refute a contract claim. Start from the diff and bound contracts; stop after decisive evidence."

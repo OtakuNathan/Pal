@@ -64,6 +64,15 @@ class LspManagerClient:
     def doctor_sync(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.request_sync("doctor", params)
 
+    async def release_workspace(self, workspace_root: Path) -> dict[str, Any]:
+        return await self.request(
+            "release_workspace",
+            {"workspace_root": str(Path(workspace_root).expanduser().resolve())},
+        )
+
+    def release_workspace_sync(self, workspace_root: Path) -> dict[str, Any]:
+        return run_blocking(self.release_workspace(workspace_root))
+
     def operation_sync(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         return self.request_sync(method, params)
 

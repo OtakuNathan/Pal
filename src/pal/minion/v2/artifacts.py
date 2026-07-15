@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
+from pal.minion.v2.paths import artifact_store_root
+
 
 @dataclass(frozen=True)
 class ArtifactRef:
@@ -67,7 +69,7 @@ class ContentAddressedArtifactStore:
     root: Path = field(init=False)
 
     def __post_init__(self) -> None:
-        self.root = Path(self.runtime_root) / "data" / "minion" / "v2" / "artifacts" / "sha256"
+        self.root = artifact_store_root(self.runtime_root)
 
     def put_json(
         self,

@@ -39,11 +39,26 @@ class MinionEventDelivery:
             for event in backlog:
                 writer.write(pack_sidecar_message({"type": "event", "event": event}))
             await writer.drain()
-            while not shutdown_event.is_set():
+            while True:
+                read_task = asyncio.create_task(read_sidecar_message(reader))
+                shutdown_task = asyncio.create_task(shutdown_event.wait())
                 try:
-                    message = await read_sidecar_message(reader)
-                except asyncio.IncompleteReadError:
+                    done, pending = await asyncio.wait(
+                        {read_task, shutdown_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                    if shutdown_task in done and shutdown_event.is_set():
+                        return
+                    message = read_task.result()
+                except (asyncio.CancelledError, asyncio.IncompleteReadError):
                     return
+                finally:
+                    for task in (read_task, shutdown_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(read_task, shutdown_task, return_exceptions=True)
                 if str(message.get("method") or "") == "unsubscribe_events":
                     return
         finally:

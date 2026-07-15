@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +47,7 @@ class AsyncLspConnector:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         self._stderr_tail = ""
         self._pending.clear()
@@ -78,18 +81,32 @@ class AsyncLspConnector:
             await self._cancel_reader_task(reader_task)
             await self._cancel_stderr_task(stderr_task)
             return
+        try:
+            process_group = os.getpgid(process.pid)
+        except (OSError, ProcessLookupError):
+            process_group = 0
+        owns_process_group = process_group == process.pid
         if process.returncode is None:
             with contextlib.suppress(Exception):
-                await self.request("shutdown", {})
+                await asyncio.wait_for(self.request("shutdown", {}), timeout=1.0)
             with contextlib.suppress(Exception):
                 await self.notify("exit", {})
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(process.wait(), timeout=1.0)
         if process.returncode is None:
             with contextlib.suppress(ProcessLookupError):
-                process.kill()
+                if owns_process_group:
+                    os.killpg(process_group, signal.SIGKILL)
+                else:
+                    process.kill()
             with contextlib.suppress(Exception):
                 await process.wait()
+        elif owns_process_group:
+            # A language server may leave helper processes behind after its
+            # leader exits. New sessions make the server PID its process-group
+            # ID, so the complete workspace-owning tree can be reaped.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process_group, signal.SIGKILL)
         self.process = None
         self._fail_pending(LspProtocolError("language server closed"))
         await self._cancel_reader_task(reader_task)

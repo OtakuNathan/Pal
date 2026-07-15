@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,11 +25,24 @@ from pal.minion.v2.contract_builder import (
     contract_builder_tool_result,
     is_contract_builder_capability,
 )
+from pal.minion.v2.candidate_builder import (
+    CANDIDATE_BUILDER_CAPABILITIES,
+    CANDIDATE_BUILDER_TOOL_SPECS,
+    candidate_builder_tool_result,
+    is_candidate_builder_capability,
+)
 from pal.minion.v2.skeleton_builder import (
     SKELETON_BUILDER_CAPABILITIES,
     SKELETON_BUILDER_TOOL_SPECS,
     is_skeleton_builder_capability,
     skeleton_builder_tool_result,
+)
+from pal.minion.v2.verification_builder import (
+    VERIFICATION_BUILDER_CAPABILITIES,
+    VERIFICATION_BUILDER_TOOL_SPECS,
+    VERIFICATION_TOOL_CAPABILITIES,
+    is_verification_builder_capability,
+    verification_builder_tool_result,
 )
 from pal.minion.workspace_file_tools import (
     WORKSPACE_FILE_TOOL_SPECS,
@@ -81,7 +95,9 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_minion_artifact_write",
     "op_minion_artifact_edit",
     *CONTRACT_BUILDER_CAPABILITIES,
+    *CANDIDATE_BUILDER_CAPABILITIES,
     *SKELETON_BUILDER_CAPABILITIES,
+    *VERIFICATION_TOOL_CAPABILITIES,
     "op_web_search",
     "op_web_read",
     "op_memory_recall",
@@ -166,7 +182,9 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     **WORKSPACE_FILE_TOOL_SPECS,
     **CONTRACT_BUILDER_TOOL_SPECS,
+    **CANDIDATE_BUILDER_TOOL_SPECS,
     **SKELETON_BUILDER_TOOL_SPECS,
+    **VERIFICATION_BUILDER_TOOL_SPECS,
 }
 
 
@@ -176,9 +194,19 @@ class _HydratedTool:
     spec: dict[str, Any]
     handler: Any
     display_name: str = ""
-    family: str = "minion"
-    tags: tuple[str, ...] = ("minion",)
+    family: str = "workflow"
+    tags: tuple[str, ...] = ("workflow",)
     keywords: tuple[str, ...] = ()
+
+    @property
+    def public_name(self) -> str:
+        configured = str(self.spec.get("name") or self.name)
+        if configured != self.name:
+            return configured
+        projected = llm_tool_name(self.name)
+        if projected.startswith("minion_"):
+            return projected.removeprefix("minion_")
+        return projected
 
     @property
     def aliases(self) -> tuple[str, ...]:
@@ -228,19 +256,22 @@ class _ExecutionOverlay:
 
     def register_tool(self, tool: Any) -> None:
         canonical = str(tool.name)
+        public_name = llm_tool_name(getattr(tool, "public_name", "") or canonical)
         self.runtime.register_tool(tool)
         self.runtime.register_capability(
             CapabilityDescriptor(
-                name=llm_tool_name(canonical),
+                name=public_name,
                 canonical_path=canonical,
                 display_name=str(getattr(tool, "display_name", "") or canonical),
                 family=str(getattr(tool, "family", "") or "minion"),
-                description=replace_internal_tool_names(getattr(tool, "description", "") or canonical),
-                source="minion:v2-scoped",
+                description=replace_internal_tool_names(
+                    _replace_worker_internal_tool_names(getattr(tool, "description", "") or canonical)
+                ),
+                source="workflow:scoped-worker",
                 aliases=tuple(getattr(tool, "aliases", ()) or ()),
                 parameters_schema=dict(getattr(tool, "args_schema", {}) or {}),
                 result_schema=dict(getattr(tool, "result_schema", {}) or {}),
-                module_id="minion_scoped",
+                module_id="workflow_scoped",
             ),
             lambda _call: CapabilityResult(status=RuntimeStatus.ERROR, text="missing async binding"),
         )
@@ -342,8 +373,24 @@ class MinionScopedExecutionRuntime:
                 self.base_runtime.register_tool(_HydratedTool(name=name, spec=spec, handler=handler))
 
     def _handler(self, name: str) -> Any | None:
+        if is_candidate_builder_capability(name):
+            return lambda call, ctx: candidate_builder_tool_result(
+                call,
+                self.workspace,
+                self.produced_artifacts,
+                original_adapter=self._original_adapter,
+                turn_id=str(ctx.get("turn_id") or "") or None,
+            )
         if is_skeleton_builder_capability(name):
             return lambda call, _ctx: skeleton_builder_tool_result(call, self.workspace, self.produced_artifacts)
+        if is_verification_builder_capability(name):
+            return lambda call, ctx: verification_builder_tool_result(
+                call,
+                self.workspace,
+                self.produced_artifacts,
+                original_adapter=self._original_adapter,
+                turn_id=str(ctx.get("turn_id") or "") or None,
+            )
         if is_contract_builder_capability(name):
             return lambda call, _ctx: contract_builder_tool_result(call, self.workspace, self.produced_artifacts)
         if name == "op_minion_input_read":
@@ -444,12 +491,38 @@ def _scrub_spec(spec: dict[str, Any], description_overrides: dict[str, str] | No
     value = dict(spec)
     canonical = str(value.get("canonical_path") or value.get("name") or "")
     value["canonical_path"] = canonical
-    value["name"] = llm_tool_name(canonical)
+    value["name"] = llm_tool_name(value.get("name") or canonical)
     override = str(dict(description_overrides or {}).get(canonical) or "").strip()
-    value["description"] = replace_internal_tool_names(override or value.get("description") or canonical)
+    value["description"] = replace_internal_tool_names(
+        _replace_worker_internal_tool_names(override or value.get("description") or canonical)
+    )
     for key in ("parameters_schema", "result_schema"):
         if key in value:
-            value[key] = replace_internal_tool_names_in_value(dict(value.get(key) or {}))
+            value[key] = replace_internal_tool_names_in_value(
+                _replace_worker_internal_tool_names_in_value(dict(value.get(key) or {}))
+            )
+    return value
+
+
+_WORKER_INTERNAL_TOOL_RE = re.compile(r"\bop_minion_([A-Za-z0-9_]+)\b")
+
+
+def _replace_worker_internal_tool_names(value: object) -> str:
+    return _WORKER_INTERNAL_TOOL_RE.sub(
+        lambda match: llm_tool_name(f"op_{match.group(1)}"),
+        str(value or ""),
+    )
+
+
+def _replace_worker_internal_tool_names_in_value(value: object) -> object:
+    if isinstance(value, str):
+        return _replace_worker_internal_tool_names(value)
+    if isinstance(value, dict):
+        return {key: _replace_worker_internal_tool_names_in_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_worker_internal_tool_names_in_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_replace_worker_internal_tool_names_in_value(item) for item in value)
     return value
 
 

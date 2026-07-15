@@ -11,15 +11,15 @@ Trace requirement coverage through unit contracts, cross-unit contracts, topolog
 Check module coherence, API/dataflow end-to-end reachability, ownership, lifecycle/state closure, invariants, and directional contracts in one breadth-first pass.
 Do not require implementation to be predetermined: choices confined to one owning unit that do not alter module boundaries, inter-unit contracts, ownership,
 lifecycle/state semantics, public interfaces, or topology are implementation details, not findings. PASS means producers can make local implementation choices
-without renegotiating architecture. For every FAIL finding, mark stable semantic revision_targets: section, id, optional fields, and operation.
-Hard requirements are immutable. If any source, reference, or contract contradicts one, return requirements_defect targeting that requirement ID; never choose
+without renegotiating architecture. For every material defect, name its semantic target section and natural target name; Manager resolves revision identity.
+Hard requirements are immutable. If any source, reference, or contract contradicts one, return requirements_defect targeting the exact Requirement text; never choose
 an authority or reinterpret the requirement on behalf of the user.
 section is requirements, constraint, design_decision, gate_check, unit, cross_unit_contract, topology, integration_contract, assumption_ledger, or
-risk_ledger; operation is create, update, or delete. Use the contract's existing semantic IDs, never artifact handles or JSON pointers. Return only typed
+risk_ledger; operation is create, update, or delete. Use natural target names and exact Requirement section/text, never internal IDs, artifact handles, or JSON pointers. Return only typed
 requirements, contract, or architecture findings.
 """
 output_contract_fragment = """
-Use architecture_review_submit with {"verdict":"PASS|FAIL","findings":[{"finding_kind":"requirements_defect|contract_defect|architecture_defect","summary":"...","revision_targets":[{"section":"unit","id":"stable-unit-id","fields":["ownership"],"operation":"update"}]}]}. Pal writes architecture_review.json; do not use generic write tools.
+Record each finding through architecture_review_finding using a semantic target name, then call architecture_review_submit with no arguments. Manager infers PASS/FAIL and writes architecture_review.json.
 """
 capability_groups = ["workspace_read", "v2_architecture_review_builder"]
 

@@ -1,102 +1,304 @@
 from __future__ import annotations
 
 import json
-import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
 from pal.llm.contracts import CanonicalToolCall
+from pal.minion.scoped_execution import MinionScopedExecutionRuntime, _WORKSPACE_TOOL_SPECS
 from pal.minion.v2.contract_builder import (
     CONTRACT_BUILDER_TOOL_SPECS,
     contract_builder_tool_result,
     seed_contract_builder_draft,
 )
-from pal.minion.scoped_execution import _WORKSPACE_TOOL_SPECS
-
-
-def _unit(unit_id: str) -> dict:
-    return {
-        "unit_id": unit_id,
-        "unit_behavior_kind": "stateless",
-        "responsibility": "Produce one bounded result.",
-        "owned_area": [f"artifact:{unit_id}"],
-        "reference_only_paths": [],
-        "provided_interfaces": [],
-        "consumed_interfaces": [],
-        "ownership": {"owner": unit_id},
-        "lifecycle": "n/a",
-        "state_model": "stateless",
-        "invariants": ["Output is deterministic for the same inputs."],
-        "error_behavior": [],
-        "compatibility": [],
-        "dependency_constraints": [],
-        "requirement_ids": ["R-1"],
-        "verification_obligations": ["Verify the output contract."],
-        "complexity_budget": {
-            "target_file_count": 1,
-            "estimated_context_tokens": 1000,
-            "public_interface_count": 1,
-            "cross_unit_contract_count": 0,
-            "stateful_resource_count": 0,
-            "expected_candidate_cycles": 1,
-            "platform_dependency_level": 0,
-        },
-        "split_conditions": [],
-    }
+from pal.minion.v2.candidate_builder import CANDIDATE_BUILDER_TOOL_SPECS
+from pal.minion.v2.skeleton_builder import SKELETON_BUILDER_TOOL_SPECS
+from pal.minion.v2.verification_builder import VERIFICATION_BUILDER_TOOL_SPECS
+from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
+from pal.execution.runtime import ExecutionRuntime
 
 
 class ContractBuilderTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.root = Path(tempfile.mkdtemp(prefix="pal_v2_contract_builder_"))
-        self.workspace = {
-            "artifact_dir": str(self.root / "artifacts"),
-            "artifact_stage_dir": str(self.root / "stage"),
+        self.root = Path(tempfile.mkdtemp(prefix="pal-v2-contract-builder-"))
+        self.repository = MinionV2Repository(self.root)
+        self.repository.ensure_schema()
+        self.invocation = "inv_contract"
+        self.resource = "architecture:arch_1:contract"
+        lease = self.repository.claim_lease(self.resource, self.invocation, ttl_seconds=60)
+        self.requirements = {
+            "title": "Bound requirements",
+            "requirements": [
+                {
+                    "section": "Delivery",
+                    "statement": "Produce a deterministic report through a real entrypoint.",
+                    "strength": "hard",
+                }
+            ],
         }
-        self.produced: list[dict] = []
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.root, ignore_errors=True)
+        requirements_path = self.root / "requirements.json"
+        requirements_path.write_text(json.dumps(self.requirements), encoding="utf-8")
+        self.workspace = {
+            "runtime_root": str(self.root),
+            "artifact_dir": str(self.root / "artifacts"),
+            "artifact_stage_dir": str(self.root / "artifact-stage"),
+            "reference_paths": [
+                {
+                    "name": "requirements",
+                    "path": str(requirements_path),
+                    "bound_input": True,
+                }
+            ],
+            "minion_v2": {
+                "workflow_id": "wf_contract",
+                "invocation_id": self.invocation,
+                "lease_resource_key": self.resource,
+                "fencing_token": lease.fencing_token,
+                "role": "architect",
+                "authoring_input_fingerprint": "contract-input-v1",
+                "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
+            },
+        }
+        self.produced: list[dict[str, object]] = []
+        self.call_index = 0
 
     def call(self, stage: str, name: str, args: dict | None = None):
+        self.call_index += 1
         self.workspace["contract_builder_stage"] = stage
         return contract_builder_tool_result(
-            CanonicalToolCall(name=name, args=args or {}),
+            CanonicalToolCall(name=name, args=args or {}, call_id=f"call-{self.call_index}"),
             self.workspace,
             self.produced,
         )
 
-    def test_registered_builder_schemas_have_no_opaque_objects(self) -> None:
-        def opaque_paths(value: object, path: str) -> list[str]:
-            if isinstance(value, list):
-                return [item for index, child in enumerate(value) for item in opaque_paths(child, f"{path}[{index}]")]
-            if not isinstance(value, dict):
-                return []
-            found = []
-            if value.get("type") == "object":
-                additional = value.get("additionalProperties")
-                if "properties" not in value and not isinstance(additional, dict):
-                    found.append(path)
-            for key, child in value.items():
-                found.extend(opaque_paths(child, f"{path}.{key}"))
-            return found
-
-        opaque = [
-            path
-            for name, spec in CONTRACT_BUILDER_TOOL_SPECS.items()
-            for path in opaque_paths(spec["parameters_schema"], name)
+    def add_complete_unit(
+        self,
+        name: str,
+        *,
+        depends_on: list[str] | None = None,
+    ) -> None:
+        operations = [
+            (
+                "op_minion_contract_unit_upsert",
+                {
+                    "name": name,
+                    "behavior_kind": "stateless",
+                    "responsibility": f"Own the {name} report boundary.",
+                    "owned_area": [f"{name}/"],
+                    "reference_only_paths": [],
+                    "depends_on": depends_on or [],
+                },
+            ),
+            (
+                "op_minion_contract_unit_add_interface",
+                {
+                    "unit": name,
+                    "direction": "provided",
+                    "name": f"{name}_report",
+                    "data_shape": "immutable report value",
+                    "valid_when": "input has been normalized",
+                    "lifetime": "valid for the delivery call",
+                    "ownership": f"{name} owns construction; consumer owns returned value",
+                    "error_behavior": "invalid input returns a deterministic error",
+                    "compatibility": "preserve the public report shape",
+                },
+            ),
+            (
+                "op_minion_contract_unit_set_ownership",
+                {"unit": name, "statement": f"{name} exclusively owns its mutable state."},
+            ),
+            (
+                "op_minion_contract_unit_set_lifecycle",
+                {"unit": name, "description": "process/import lifetime; no runtime resources"},
+            ),
+            (
+                "op_minion_contract_unit_set_state",
+                {"unit": name, "description": "stateless"},
+            ),
+            (
+                "op_minion_contract_unit_add_rule",
+                {
+                    "unit": name,
+                    "kind": "invariant",
+                    "statement": "Equal normalized inputs produce equal report values.",
+                },
+            ),
+            (
+                "op_minion_contract_unit_add_rule",
+                {
+                    "unit": name,
+                    "kind": "error_behavior",
+                    "statement": "Invalid input returns an explicit error value.",
+                },
+            ),
+            (
+                "op_minion_contract_unit_add_rule",
+                {
+                    "unit": name,
+                    "kind": "compatibility",
+                    "statement": "The public report shape remains stable.",
+                },
+            ),
+            (
+                "op_minion_contract_unit_set_complexity",
+                {
+                    "unit": name,
+                    "target_file_count": 2,
+                    "estimated_context_tokens": 4000,
+                    "public_interface_count": 1,
+                    "cross_unit_contract_count": len(depends_on or []),
+                    "stateful_resource_count": 0,
+                    "expected_candidate_cycles": 1,
+                    "platform_dependency_level": 0,
+                },
+            ),
+            (
+                "op_minion_contract_unit_cover_requirement",
+                {
+                    "unit": name,
+                    "section": "Delivery",
+                    "requirement": "Produce a deterministic report through a real entrypoint.",
+                },
+            ),
         ]
-        self.assertEqual(opaque, [])
+        for capability, args in operations:
+            result = self.call("contract", capability, args)
+            self.assertTrue(result.ok, result.text)
 
-    def test_unit_kind_enum_is_visible_in_schema_and_description(self) -> None:
-        spec = CONTRACT_BUILDER_TOOL_SPECS["op_minion_contract_add_unit_outlines_batch"]
-        kind = spec["parameters_schema"]["properties"]["units"]["items"]["properties"]["unit_behavior_kind"]
-        expected = ["stateless", "resource_owner", "service", "workflow", "adapter"]
-        self.assertEqual(kind["enum"], expected)
-        for value in expected:
-            self.assertIn(value, spec["description"])
+    def test_requirements_are_built_incrementally_and_submitted_without_payload(self) -> None:
+        result = self.call(
+            "requirements",
+            "op_minion_requirement_upsert",
+            {
+                "section": "Delivery",
+                "statement": "Produce a deterministic report through a real entrypoint.",
+                "strength": "hard",
+            },
+        )
+        self.assertTrue(result.ok, result.text)
+        submitted = self.call("requirements", "op_minion_requirements_submit")
+        self.assertTrue(submitted.ok, submitted.text)
+        artifact = json.loads((Path(self.workspace["artifact_stage_dir"]) / "requirements.json").read_text())
+        self.assertEqual(artifact["requirements"][0]["section"], "Delivery")
+        self.assertTrue(artifact["requirements"][0]["requirement_id"].startswith("req_"))
 
-    def test_all_scoped_tool_enum_values_are_named_in_descriptions(self) -> None:
+    def test_contract_submit_compiles_manager_owned_identity(self) -> None:
+        self.add_complete_unit("report")
+        integration = self.call(
+            "contract",
+            "op_minion_contract_set_integration",
+            {
+                "depends_on": ["report"],
+                "entrypoint": "report_cli",
+                "dataflow": ["input -> report -> output"],
+                "completion_condition": "the report is emitted",
+                "failure_behavior": "return a deterministic non-zero result",
+            },
+        )
+        self.assertTrue(integration.ok, integration.text)
+        submitted = self.call("contract", "op_minion_contract_submit")
+        self.assertTrue(submitted.ok, submitted.text)
+
+        artifact = json.loads(
+            (Path(self.workspace["artifact_stage_dir"]) / "architecture_bundle.json").read_text()
+        )
+        self.assertEqual(artifact["units"][0]["unit_id"], "report")
+        self.assertTrue(artifact["units"][0]["requirement_ids"][0].startswith("req_"))
+        self.assertEqual(artifact["topology"]["depends_on"], {"report": []})
+
+    def test_submit_rejects_cycle_after_local_semantic_edits(self) -> None:
+        self.add_complete_unit("source", depends_on=["sink"])
+        self.add_complete_unit("sink", depends_on=["source"])
+        self.assertTrue(
+            self.call(
+                "contract",
+                "op_minion_contract_set_integration",
+                {
+                    "depends_on": ["source", "sink"],
+                    "entrypoint": "report_cli",
+                    "completion_condition": "the report is emitted",
+                    "failure_behavior": "return a deterministic error",
+                },
+            ).ok
+        )
+        rejected = self.call("contract", "op_minion_contract_submit")
+        self.assertFalse(rejected.ok)
+        self.assertIn("dependency cycle", rejected.text)
+
+    def test_review_finding_uses_semantic_target_and_manager_resolves_identity(self) -> None:
+        base = self._complete_base_contract()
+        self.workspace.update(
+            {
+                "contract_review_base_payload": base,
+                "contract_review_requirements_payload": self.requirements,
+            }
+        )
+        finding = self.call(
+            "architecture_review",
+            "op_minion_contract_review_finding",
+            {
+                "finding_kind": "contract_defect",
+                "summary": "The ownership rule does not cover the returned report value.",
+                "severity": "error",
+                "target_section": "unit",
+                "target_name": "report",
+                "fields": ["ownership"],
+                "operation": "update",
+                "refs": ["report::report_report"],
+            },
+        )
+        self.assertTrue(finding.ok, finding.text)
+        submitted = self.call("architecture_review", "op_minion_architecture_review_submit")
+        self.assertTrue(submitted.ok, submitted.text)
+        artifact = json.loads(
+            (Path(self.workspace["artifact_stage_dir"]) / "architecture_review.json").read_text()
+        )
+        self.assertEqual(artifact["verdict"], "FAIL")
+        target = artifact["findings"][0]["revision_targets"][0]
+        self.assertEqual(target, {"section": "unit", "id": "report", "fields": ["ownership"], "operation": "update"})
+
+    def test_revision_scope_rejects_unrelated_semantic_change(self) -> None:
+        base = self._complete_base_contract()
+        self._advance_fence()
+        seed_contract_builder_draft(
+            self.workspace,
+            base,
+            revision_scope={
+                "write_targets": [
+                    {"section": "unit", "id": "report", "fields": ["ownership"], "operation": "update"}
+                ]
+            },
+        )
+        allowed = self.call(
+            "contract",
+            "op_minion_contract_unit_set_ownership",
+            {"unit": "report", "statement": "report owns construction and transfers the immutable value."},
+        )
+        self.assertTrue(allowed.ok, allowed.text)
+        rejected = self.call(
+            "contract",
+            "op_minion_contract_unit_add_rule",
+            {
+                "unit": "report",
+                "kind": "compatibility",
+                "statement": "A new unrelated compatibility rule.",
+            },
+        )
+        self.assertFalse(rejected.ok)
+        self.assertIn("outside its bound scope", rejected.text)
+
+    def test_old_document_compiler_tools_are_not_hydrated(self) -> None:
+        scoped = MinionScopedExecutionRuntime(
+            ExecutionRuntime(),
+            ["op_minion_contract_read", "op_minion_contract_add_unit_outlines_batch"],
+            workspace=self.workspace,
+        )
+        self.assertIsNone(scoped.get_capability_spec("op_minion_contract_read"))
+        self.assertIsNone(scoped.get_capability_spec("op_minion_contract_add_unit_outlines_batch"))
+
+    def test_authoring_enums_are_named_in_tool_descriptions(self) -> None:
         gaps: list[str] = []
 
         def inspect(value: object, *, description: str, path: str) -> None:
@@ -113,298 +315,51 @@ class ContractBuilderTests(unittest.TestCase):
             for key, child in value.items():
                 inspect(child, description=description, path=f"{path}.{key}")
 
+        authoring_specs = {
+            **CONTRACT_BUILDER_TOOL_SPECS,
+            **CANDIDATE_BUILDER_TOOL_SPECS,
+            **SKELETON_BUILDER_TOOL_SPECS,
+            **VERIFICATION_BUILDER_TOOL_SPECS,
+        }
         for name, spec in _WORKSPACE_TOOL_SPECS.items():
-            inspect(
-                spec.get("parameters_schema") or {},
-                description=str(spec.get("description") or ""),
-                path=name,
-            )
+            if name in authoring_specs:
+                inspect(
+                    spec.get("parameters_schema") or {},
+                    description=str(spec.get("description") or ""),
+                    path=name,
+                )
         self.assertEqual(gaps, [])
 
-    def test_requirements_submit_is_builder_owned(self) -> None:
-        replaced = self.call(
-            "requirements",
-            "op_minion_requirements_replace_batch",
-            {"requirements": [{"statement": "Produce a report", "strength": "hard"}]},
-        )
-        self.assertTrue(replaced.ok)
-        submitted = self.call("requirements", "op_minion_requirements_submit")
-        self.assertTrue(submitted.ok)
-        payload = json.loads(Path(self.produced[-1]["path"]).read_text(encoding="utf-8"))
-        self.assertEqual(payload["requirements"][0]["requirement_id"], "R-1")
-        self.assertEqual(self.produced[-1]["role"], "primary")
-
-    def test_architect_builder_exposes_contract_only(self) -> None:
-        self.assertTrue(self.call("architect", "op_minion_contract_read").ok)
-        rejected = self.call(
-            "architect",
-            "op_minion_requirements_replace_batch",
-            {"requirements": [{"statement": "Produce a report", "strength": "hard"}]},
-        )
-        self.assertFalse(rejected.ok)
-        self.assertIn("not available to architect", rejected.text)
-
-    def test_builder_rejects_missing_writable_artifact_stage(self) -> None:
-        result = contract_builder_tool_result(
-            CanonicalToolCall(name="op_minion_contract_read", args={}),
-            {"contract_builder_stage": "contract"},
-            [],
-        )
-
-        self.assertFalse(result.ok)
-        self.assertIn("requires artifact_stage_dir", result.text)
-
-    def test_contract_builder_rejects_cycles_and_milestones(self) -> None:
-        invalid = _unit("a")
-        invalid["milestones"] = [{"title": "forbidden"}]
-        rejected = self.call("contract", "op_minion_contract_add_unit_outlines_batch", {"units": [invalid]})
-        self.assertFalse(rejected.ok)
-
-        for unit_id in ("a", "b"):
-            accepted = self.call("contract", "op_minion_contract_add_unit_outlines_batch", {"units": [_unit(unit_id)]})
-            self.assertTrue(accepted.ok)
-        self.call(
-            "contract",
-            "op_minion_contract_set_integration",
-            {
-                "topology": {"depends_on": {"a": ["b"], "b": ["a"]}},
-                "integration_contract": {"depends_on": ["a", "b"]},
-                "assumption_ledger": {"assumptions": []},
-                "risk_ledger": {"risks": []},
-            },
-        )
-        submitted = self.call("contract", "op_minion_contract_submit_sketch")
-        self.assertFalse(submitted.ok)
-        self.assertIn("dependency cycle", submitted.text)
-
-    def test_architecture_review_is_validated_before_submission(self) -> None:
-        invalid = self.call(
-            "architecture_review",
-            "op_minion_architecture_review_submit",
-            {"verdict": "FAIL", "findings": [{"kind": "contract_defect", "summary": "missing ownership"}]},
-        )
-        self.assertFalse(invalid.ok)
-        self.assertIn("invalid finding_kind", invalid.text)
-
-        contradictory = self.call(
-            "architecture_review",
-            "op_minion_architecture_review_submit",
-            {
-                "verdict": "PASS",
-                "findings": [
-                    {
-                        "finding_kind": "contract_defect",
-                        "summary": "missing ownership",
-                    }
-                ],
-            },
-        )
-        self.assertFalse(contradictory.ok)
-        self.assertIn("PASS architecture review cannot contain findings", contradictory.text)
-
-        valid = self.call(
-            "architecture_review",
-            "op_minion_architecture_review_submit",
-            {
-                "verdict": "FAIL",
-                "findings": [
-                    {
-                        "finding_kind": "contract_defect",
-                        "summary": "missing ownership",
-                        "refs": ["R-1"],
-                        "revision_targets": [
-                            {"section": "unit", "id": "report", "fields": ["ownership"]}
-                        ],
-                    }
-                ],
-            },
-        )
-        self.assertTrue(valid.ok)
-
-    def test_scoped_revision_rejects_unmarked_semantic_drift(self) -> None:
-        base = {
-            "global_constraints": [{"id": "C-1", "constraint": "Keep ownership explicit."}],
-            "design_decisions": [],
-            "gate_checks": [],
-            "units": [_unit("foundation"), _unit("window")],
-            "cross_unit_contracts": [],
-            "topology": {"depends_on": {"foundation": [], "window": ["foundation"]}},
-            "integration_contract": {"depends_on": ["foundation", "window"]},
-            "assumption_ledger": {"assumptions": []},
-            "risk_ledger": {"risks": []},
-        }
-        self.workspace["contract_builder_stage"] = "contract"
-        seed_contract_builder_draft(
-            self.workspace,
-            base,
-            revision_scope={
-                "write_targets": [
-                    {"section": "unit", "id": "foundation", "fields": ["ownership"], "operation": "update"}
-                ]
-            },
-        )
-        scoped_read = self.call("contract", "op_minion_contract_revision_read")
-        self.assertTrue(scoped_read.ok, scoped_read.text)
-        self.assertEqual(scoped_read.structured["current_values"][0]["target"]["id"], "foundation")
-
-        allowed = _unit("foundation")
-        allowed["ownership"] = {"owner": "revised-foundation"}
-        self.assertTrue(
-            self.call("contract", "op_minion_contract_replace_unit_outlines_batch", {"units": [allowed]}).ok
-        )
-        forbidden = _unit("window")
-        forbidden["ownership"] = {"owner": "revised-window"}
-        result = self.call("contract", "op_minion_contract_replace_unit_outlines_batch", {"units": [forbidden]})
-        self.assertFalse(result.ok)
-        self.assertIn("outside its bound scope", result.text)
-
-    def test_contract_submit_compiles_canonical_bundle(self) -> None:
-        self.assertTrue(self.call("contract", "op_minion_contract_add_unit_outlines_batch", {"units": [_unit("report")]}).ok)
+    def _complete_base_contract(self) -> dict:
+        self.add_complete_unit("report")
         self.assertTrue(
             self.call(
                 "contract",
                 "op_minion_contract_set_integration",
                 {
-                    "topology": {"depends_on": {"report": []}},
-                    "integration_contract": {"depends_on": ["report"]},
-                    "assumption_ledger": {"assumptions": []},
-                    "risk_ledger": {"risks": []},
+                    "depends_on": ["report"],
+                    "entrypoint": "report_cli",
+                    "completion_condition": "the report is emitted",
+                    "failure_behavior": "return a deterministic error",
                 },
             ).ok
         )
-        submitted = self.call("contract", "op_minion_contract_submit_sketch")
-        self.assertTrue(submitted.ok)
-        bundle = json.loads(Path(self.produced[-1]["path"]).read_text(encoding="utf-8"))
-        self.assertEqual(bundle["units"][0]["unit_id"], "report")
-        self.assertNotIn("milestones", json.dumps(bundle))
-
-    def test_preseeded_revision_replaces_only_existing_units(self) -> None:
-        base = {
-            "global_constraints": [],
-            "design_decisions": [],
-            "gate_checks": [],
-            "units": [_unit("foundation"), _unit("window")],
-            "cross_unit_contracts": [],
-            "topology": {"depends_on": {"foundation": [], "window": ["foundation"]}},
-            "integration_contract": {"depends_on": ["foundation", "window"]},
-            "assumption_ledger": {"assumptions": []},
-            "risk_ledger": {"risks": []},
-        }
-        self.workspace["contract_builder_stage"] = "contract"
-        seed_contract_builder_draft(self.workspace, base)
-        replacement = _unit("foundation")
-        replacement["requirement_ids"] = ["R-1", "R-2"]
-
-        replaced = self.call(
-            "contract",
-            "op_minion_contract_replace_unit_outlines_batch",
-            {"units": [replacement]},
-        )
-        unknown = self.call(
-            "contract",
-            "op_minion_contract_replace_unit_outlines_batch",
-            {"units": [_unit("invented")]},
-        )
-
-        self.assertTrue(replaced.ok, replaced.text)
-        self.assertFalse(unknown.ok)
-        self.assertIn("unknown unit_id", unknown.text)
-        submitted = self.call("contract", "op_minion_contract_submit_sketch")
+        submitted = self.call("contract", "op_minion_contract_submit")
         self.assertTrue(submitted.ok, submitted.text)
-        payload = json.loads(Path(self.produced[-1]["path"]).read_text(encoding="utf-8"))
-        self.assertEqual(payload["units"][0]["requirement_ids"], ["R-1", "R-2"])
-        self.assertEqual(payload["units"][1], base["units"][1])
-
-    def test_preseeded_revision_upserts_stable_id_collections(self) -> None:
-        base = {
-            "global_constraints": [{"id": "C-1", "constraint": "Header-only delivery."}],
-            "design_decisions": [{"id": "D-1", "decision": "Keep the old boundary."}],
-            "gate_checks": [{"id": "G-1", "check": "Compile headers."}],
-            "units": [_unit("implementation")],
-            "cross_unit_contracts": [{"id": "X-1", "producer": "implementation", "consumer": "integration"}],
-            "topology": {"depends_on": {"implementation": []}},
-            "integration_contract": {"depends_on": ["implementation"]},
-            "assumption_ledger": {"assumptions": []},
-            "risk_ledger": {"risks": []},
-        }
-        self.workspace["contract_builder_stage"] = "contract"
-        seed_contract_builder_draft(self.workspace, base)
-
-        self.assertTrue(
-            self.call(
-                "contract",
-                "op_minion_contract_add_constraints_batch",
-                {"constraints": [{"id": "C-1", "constraint": "Create the production implementation."}]},
-            ).ok
-        )
-        self.assertTrue(
-            self.call(
-                "contract",
-                "op_minion_contract_add_gate_checks_batch",
-                {"gate_checks": [{"id": "G-1", "check": "Exercise the production behavior."}]},
-            ).ok
-        )
-        submitted = self.call("contract", "op_minion_contract_submit_sketch")
-
-        self.assertTrue(submitted.ok, submitted.text)
-        payload = json.loads(Path(self.produced[-1]["path"]).read_text(encoding="utf-8"))
-        self.assertEqual(payload["global_constraints"], [{"id": "C-1", "constraint": "Create the production implementation."}])
-        self.assertEqual(payload["gate_checks"], [{"id": "G-1", "check": "Exercise the production behavior."}])
-
-    def test_contract_validation_rejects_duplicate_stable_ids(self) -> None:
-        base = {
-            "global_constraints": [
-                {"id": "C-1", "constraint": "First."},
-                {"id": "C-1", "constraint": "Contradiction."},
-            ],
-            "design_decisions": [],
-            "gate_checks": [],
-            "units": [_unit("implementation")],
-            "cross_unit_contracts": [],
-            "topology": {"depends_on": {"implementation": []}},
-            "integration_contract": {"depends_on": ["implementation"]},
-            "assumption_ledger": {"assumptions": []},
-            "risk_ledger": {"risks": []},
-        }
-        self.workspace["contract_builder_stage"] = "contract"
-        stage = Path(self.workspace["artifact_stage_dir"]) / ".contract_builder" / "contract.json"
-        stage.parent.mkdir(parents=True, exist_ok=True)
-        stage.write_text(
-            json.dumps({"schema_version": "1", "stage": "contract", "lifecycle": "editing", "payload": base}),
-            encoding="utf-8",
+        return json.loads(
+            (Path(self.workspace["artifact_stage_dir"]) / "architecture_bundle.json").read_text()
         )
 
-        result = self.call("contract", "op_minion_contract_validate")
-
-        self.assertFalse(result.ok)
-        self.assertIn("duplicate global_constraints id: C-1", result.text)
-
-    def test_revision_seed_collapses_legacy_duplicate_ids_using_latest_value(self) -> None:
-        base = {
-            "global_constraints": [
-                {"id": "C-1", "constraint": "Header-only delivery."},
-                {"id": "C-1", "constraint": "Create the production implementation."},
-            ],
-            "design_decisions": [],
-            "gate_checks": [],
-            "units": [_unit("implementation")],
-            "cross_unit_contracts": [],
-            "topology": {"depends_on": {"implementation": []}},
-            "integration_contract": {"depends_on": ["implementation"]},
-            "assumption_ledger": {"assumptions": []},
-            "risk_ledger": {"risks": []},
-        }
-        self.workspace["contract_builder_stage"] = "contract"
-
-        seed_contract_builder_draft(self.workspace, base)
-        submitted = self.call("contract", "op_minion_contract_submit_sketch")
-
-        self.assertTrue(submitted.ok, submitted.text)
-        payload = json.loads(Path(self.produced[-1]["path"]).read_text(encoding="utf-8"))
-        self.assertEqual(
-            payload["global_constraints"],
-            [{"id": "C-1", "constraint": "Create the production implementation."}],
+    def _advance_fence(self) -> None:
+        binding = dict(self.workspace["minion_v2"])
+        self.repository.release_lease(
+            self.resource,
+            self.invocation,
+            int(binding["fencing_token"]),
         )
+        lease = self.repository.claim_lease(self.resource, self.invocation, ttl_seconds=60)
+        binding["fencing_token"] = lease.fencing_token
+        self.workspace["minion_v2"] = binding
 
 
 if __name__ == "__main__":

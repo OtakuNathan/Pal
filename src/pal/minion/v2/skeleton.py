@@ -14,11 +14,17 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.minion.v2.paths import (
+    minion_data_root,
+    project_git_layout_lock,
+    resolve_project_git_layout,
+)
 
 
 ARCHITECTURE_SKELETON_ARTIFACT = "ArchitectureSkeletonArtifact"
 ARCHITECTURE_SKELETON_BUNDLE_ARTIFACT = "ArchitectureSkeletonGitBundleArtifact"
 ARCHITECTURE_SUBMISSION_ARTIFACT = "ArchitectureSkeletonSubmissionArtifact"
+ARCHITECTURE_REPAIR_BASELINE_ARTIFACT = "ArchitectureSkeletonRepairBaselineArtifact"
 SKELETON_MODULE_CONTRACT_ARTIFACT = "SkeletonModuleContractArtifact"
 
 MODULE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,79}$")
@@ -36,6 +42,7 @@ CONTRACT_COMMENT_SECTIONS = (
     "Compatibility",
 )
 PATH_SCOPE_KINDS = frozenset({"file", "directory"})
+MODULE_KINDS = frozenset({"implementation", "contract_only"})
 VERIFICATION_KINDS = frozenset({"consumer_probe", "end_to_end", "dogfood", "platform"})
 VERIFICATION_ENTRYPOINT_KINDS = frozenset(
     {"source_symbol", "build_target", "product_entrypoint", "platform_probe"}
@@ -127,6 +134,43 @@ class ArchitectureWorkspace:
     original_head: str
     source_fingerprint: str
     workspace_snapshot_ref: ArtifactRef
+    project_name: str = ""
+    project_key: str = ""
+    workflow_name: str = ""
+    workflow_key: str = ""
+    workflow_branch: str = ""
+    architecture_branch: str = ""
+
+
+@dataclass(frozen=True)
+class ArchitectureReviewWorkspace:
+    root: Path
+    worktree: Path
+    common_git_dir: Path
+    temporary_common_git_dir: bool = False
+
+    def cleanup(self) -> None:
+        if self.worktree.exists() and self.common_git_dir.is_dir():
+            subprocess.run(
+                [
+                    "git",
+                    f"--git-dir={self.common_git_dir}",
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(self.worktree),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            subprocess.run(
+                ["git", f"--git-dir={self.common_git_dir}", "worktree", "prune"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        shutil.rmtree(self.root, ignore_errors=True)
 
 
 @dataclass(frozen=True)
@@ -336,9 +380,14 @@ def validate_architecture_submission(
         module = dict(raw_module)
         depends_on = _unique_text(module.get("depends_on"))
         consumes = [_normalize_contract_reference(item) for item in list(module.get("consumes") or [])]
-        paths = _normalize_module_paths(name, module.get("paths"))
+        module_kind = str(module.get("module_kind") or "").strip()
+        if module_kind not in MODULE_KINDS:
+            raise ValueError(
+                f"module {name} module_kind must be implementation or contract_only"
+            )
+        paths = _normalize_module_paths(name, module.get("paths"), module_kind=module_kind)
         covers = [
-            resolve_requirement_reference(dict(item or {}), requirements_payload).to_dict()
+            _architecture_requirement_reference(dict(item or {}), requirements_payload)
             for item in list(module.get("covers") or [])
         ]
         if not covers:
@@ -353,6 +402,7 @@ def validate_architecture_submission(
             for item in list(module.get("evidence") or [])
         ]
         modules[name] = {
+            "module_kind": module_kind,
             "depends_on": depends_on,
             "consumes": consumes,
             "paths": paths,
@@ -504,6 +554,7 @@ def compile_skeleton_markdown(
             [
                 f"### {name}",
                 "",
+                f"- Module kind: {module.get('module_kind', '')}",
                 f"- Starts after: {dependencies}",
                 f"- Contracts: {', '.join(f'`{item}`' for item in list(paths.get('contract_paths') or []))}",
                 f"- Consumes: {', '.join(_format_contract_reference(item) for item in list(module.get('consumes') or [])) or 'none'}",
@@ -528,6 +579,292 @@ def compile_skeleton_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def architecture_revision_scope(
+    base_submission: Mapping[str, Any],
+    finding_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compile a reviewer finding into semantic names and exact writable paths."""
+
+    findings = list(finding_payload.get("findings") or [])
+    if not findings and finding_payload:
+        findings = [dict(finding_payload)]
+    modules = {str(name): dict(value or {}) for name, value in dict(base_submission.get("modules") or {}).items()}
+    affected_modules: set[str] = set()
+    allowed_paths: set[str] = set()
+    finding_kinds: set[str] = set()
+    for raw_finding in findings:
+        finding = dict(raw_finding or {})
+        finding_kinds.add(str(finding.get("finding_kind") or ""))
+        affected_modules.update(
+            str(item).strip()
+            for item in list(finding.get("affected_modules") or [])
+            if str(item).strip()
+        )
+        module_name = str(finding.get("module_name") or "").strip()
+        if module_name in modules:
+            affected_modules.add(module_name)
+        elif module_name in dict(base_submission.get("verification_nodes") or {}):
+            verification_node = dict(
+                dict(base_submission.get("verification_nodes") or {}).get(module_name) or {}
+            )
+            affected_modules.update(
+                str(item)
+                for item in list(verification_node.get("depends_on") or [])
+                if str(item) in modules
+            )
+        locations = [dict(item or {}) for item in list(finding.get("locations") or [])]
+        locations.extend(
+            {"path": str(path)}
+            for path in list(finding.get("suggested_repair_boundary") or [])
+            if str(path).strip()
+        )
+        semantic_reference_error = dict(finding.get("semantic_reference_error") or {})
+        semantic_reference = dict(semantic_reference_error.get("reference") or {})
+        if semantic_reference:
+            locations.append(
+                {
+                    key: semantic_reference[key]
+                    for key in ("path", "symbol", "section")
+                    if str(semantic_reference.get(key) or "").strip()
+                }
+            )
+            for module_name, module in modules.items():
+                if any(
+                    _semantic_reference_matches(
+                        dict(item or {}),
+                        semantic_reference,
+                        error=str(semantic_reference_error.get("error") or ""),
+                    )
+                    for item in list(module.get("evidence") or [])
+                ):
+                    affected_modules.add(module_name)
+        for raw_location in locations:
+            path = _normalized_repo_path(str(dict(raw_location or {}).get("path") or ""))
+            if not path:
+                continue
+            allowed_paths.add(path)
+            for module_name, module in modules.items():
+                if _module_declares_path(module, path):
+                    affected_modules.add(module_name)
+    allow_topology_changes = bool(
+        finding_kinds.intersection({"architecture_defect", "requirements_defect"})
+    )
+    unknown_modules = sorted(affected_modules - set(modules))
+    if unknown_modules and not allow_topology_changes:
+        raise ValueError(
+            "architecture finding names unknown modules: " + ", ".join(unknown_modules)
+        )
+    affected_modules.intersection_update(modules)
+    affected_verification_nodes = {
+        str(name)
+        for name, raw_node in dict(base_submission.get("verification_nodes") or {}).items()
+        if affected_modules.intersection(
+            {
+                *(str(item) for item in list(dict(raw_node or {}).get("depends_on") or [])),
+                *(
+                    str(dict(item or {}).get("module") or "")
+                    for item in list(dict(raw_node or {}).get("consumes") or [])
+                ),
+            }
+        )
+    }
+    if not affected_modules and not allowed_paths and not allow_topology_changes:
+        raise ValueError("architecture finding has no semantic module or source-location scope")
+    return {
+        "affected_modules": sorted(affected_modules),
+        "affected_verification_nodes": sorted(affected_verification_nodes),
+        "allowed_paths": sorted(allowed_paths),
+        "allow_topology_changes": allow_topology_changes,
+    }
+
+
+def _semantic_reference_matches(
+    candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
+    *,
+    error: str = "",
+) -> bool:
+    normalized_error = str(error or "").casefold()
+    if "path does not exist" in normalized_error or "reference root" in normalized_error:
+        # A missing physical source invalidates every claim that uses the same
+        # root/path, regardless of the symbol or section each module cites.
+        identity_fields = ("kind", "path", "reference_name")
+    else:
+        identity_fields = (
+            "kind",
+            "path",
+            "reference_name",
+            "symbol",
+            "source",
+            "section",
+            "conclusion",
+        )
+    compared = False
+    for field in identity_fields:
+        if field not in reference:
+            continue
+        compared = True
+        if str(candidate.get(field) or "").strip() != str(reference.get(field) or "").strip():
+            return False
+    return compared
+
+
+def validate_architecture_revision_scope(
+    *,
+    base_submission: Mapping[str, Any],
+    revised_submission: Mapping[str, Any],
+    changed_paths: Sequence[str],
+    scope: Mapping[str, Any],
+) -> None:
+    base_modules = {
+        str(name): _revision_comparable_contract(dict(value or {}))
+        for name, value in dict(base_submission.get("modules") or {}).items()
+    }
+    revised_modules = {
+        str(name): _revision_comparable_contract(dict(value or {}))
+        for name, value in dict(revised_submission.get("modules") or {}).items()
+    }
+    base_module_names = set(base_modules)
+    revised_module_names = set(revised_modules)
+    added_modules = revised_module_names - base_module_names
+    removed_modules = base_module_names - revised_module_names
+    updated_modules = {
+        name
+        for name in base_module_names & revised_module_names
+        if base_modules.get(name) != revised_modules.get(name)
+    }
+    base_verification = {
+        str(name): _revision_comparable_contract(dict(value or {}))
+        for name, value in dict(base_submission.get("verification_nodes") or {}).items()
+    }
+    revised_verification = {
+        str(name): _revision_comparable_contract(dict(value or {}))
+        for name, value in dict(revised_submission.get("verification_nodes") or {}).items()
+    }
+    base_verification_names = set(base_verification)
+    revised_verification_names = set(revised_verification)
+    added_verification = revised_verification_names - base_verification_names
+    removed_verification = base_verification_names - revised_verification_names
+    updated_verification = {
+        name
+        for name in base_verification_names & revised_verification_names
+        if base_verification.get(name) != revised_verification.get(name)
+    }
+    affected_modules = set(scope.get("affected_modules") or [])
+    affected_verification = set(scope.get("affected_verification_nodes") or [])
+    allow_topology_changes = bool(scope.get("allow_topology_changes"))
+    unexpected_modules = sorted(
+        (updated_modules | removed_modules) - affected_modules
+    )
+    if not allow_topology_changes:
+        unexpected_modules.extend(sorted(added_modules))
+    unexpected_verification = sorted(
+        (updated_verification | removed_verification) - affected_verification
+    )
+    if not allow_topology_changes:
+        unexpected_verification.extend(sorted(added_verification))
+    unexpected_paths = sorted(
+        path
+        for path in set(str(item) for item in changed_paths)
+        if not _revision_path_is_allowed(
+            path,
+            base_modules=base_modules,
+            revised_modules=revised_modules,
+            added_modules=added_modules,
+            removed_modules=removed_modules,
+            affected_modules=affected_modules,
+            explicit_paths=set(scope.get("allowed_paths") or []),
+            allow_topology_changes=allow_topology_changes,
+        )
+    )
+    if unexpected_modules:
+        raise ValueError(
+            "revision changes modules outside the finding scope: " + ", ".join(unexpected_modules)
+        )
+    if unexpected_verification:
+        raise ValueError(
+            "revision changes Verification Nodes outside the finding scope: "
+            + ", ".join(unexpected_verification)
+        )
+    if unexpected_paths:
+        raise ValueError(
+            "revision changes source paths outside the finding scope: " + ", ".join(unexpected_paths)
+        )
+
+
+def _revision_comparable_contract(value: Mapping[str, Any]) -> dict[str, Any]:
+    comparable = json.loads(json.dumps(dict(value)))
+    comparable["covers"] = [
+        {
+            "section": str(dict(item or {}).get("section") or ""),
+            "requirement": str(dict(item or {}).get("requirement") or ""),
+        }
+        for item in list(comparable.get("covers") or [])
+    ]
+    return comparable
+
+
+def _revision_path_is_allowed(
+    path: str,
+    *,
+    base_modules: Mapping[str, Any],
+    revised_modules: Mapping[str, Any],
+    added_modules: set[str],
+    removed_modules: set[str],
+    affected_modules: set[str],
+    explicit_paths: set[str],
+    allow_topology_changes: bool,
+) -> bool:
+    if path in explicit_paths:
+        return True
+    if not allow_topology_changes:
+        return False
+    if any(
+        _module_declares_writable_skeleton_path(dict(revised_modules[name] or {}), path)
+        for name in added_modules
+    ):
+        return True
+    if any(
+        _module_declares_writable_skeleton_path(dict(base_modules[name] or {}), path)
+        for name in removed_modules & affected_modules
+    ):
+        return True
+    for name in affected_modules & (set(base_modules) & set(revised_modules)):
+        before = _module_declares_writable_skeleton_path(dict(base_modules[name] or {}), path)
+        after = _module_declares_writable_skeleton_path(dict(revised_modules[name] or {}), path)
+        if after and not before:
+            return True
+    return False
+
+
+def _module_declares_writable_skeleton_path(module: Mapping[str, Any], path: str) -> bool:
+    paths = dict(module.get("paths") or {})
+    if path in set(str(item) for item in list(paths.get("contract_paths") or [])):
+        return True
+    return any(
+        PathScope(str(item.get("kind") or ""), str(item.get("path") or "")).matches(path)
+        for item in [
+            *list(paths.get("implementation_scopes") or []),
+            *list(paths.get("test_scopes") or []),
+        ]
+    )
+
+
+def _module_declares_path(module: Mapping[str, Any], path: str) -> bool:
+    paths = dict(module.get("paths") or {})
+    if path in set(str(item) for item in list(paths.get("contract_paths") or [])):
+        return True
+    if path in set(str(item) for item in list(paths.get("reference_only") or [])):
+        return True
+    return any(
+        PathScope(str(item.get("kind") or ""), str(item.get("path") or "")).matches(path)
+        for item in [
+            *list(paths.get("implementation_scopes") or []),
+            *list(paths.get("test_scopes") or []),
+        ]
+    )
+
+
 @dataclass
 class GitBackedSkeletonService:
     runtime_root: Path
@@ -537,50 +874,67 @@ class GitBackedSkeletonService:
         self,
         *,
         workflow_id: str,
+        workflow_name: str = "",
         revision_name: str,
         workspace: Mapping[str, Any],
         requirements_ref: ArtifactRef,
         base_artifact: Mapping[str, Any] | None = None,
     ) -> ArchitectureWorkspace:
-        root = Path(self.runtime_root) / "data" / "minion" / "v2" / "architecture" / _safe_component(workflow_id)
-        common_git_dir = root / "project.git"
-        snapshot_marker = root / "workspace_snapshot_ref.json"
+        stored_layout = dict(dict(base_artifact or {}).get("repository_layout") or {})
+        layout = resolve_project_git_layout(
+            self.runtime_root,
+            workspace=workspace,
+            workflow_id=workflow_id,
+            workflow_name=workflow_name or workflow_id,
+            stored_layout=stored_layout,
+        )
+        common_git_dir = layout.common_git_dir
+        snapshot_marker = layout.workspace_snapshot_marker
         source = str(workspace.get("repo_path") or workspace.get("cwd") or "").strip()
-        if not common_git_dir.exists():
-            snapshot = self._create_synthetic_snapshot(common_git_dir, Path(source).expanduser() if source else None)
-            snapshot_ref = self.artifacts.put_json(
-                snapshot,
-                artifact_type="WorkspaceSnapshotArtifact",
-                provenance={"workflow_name": workflow_id},
-                child_refs=((requirements_ref.sha256, "requirements"),),
+        with project_git_layout_lock(layout):
+            if not snapshot_marker.is_file():
+                snapshot = self._create_synthetic_snapshot(
+                    common_git_dir,
+                    Path(source).expanduser() if source else None,
+                    snapshot_ref=f"refs/minion/snapshots/{layout.workflow_key}",
+                )
+                snapshot_ref = self.artifacts.put_json(
+                    snapshot,
+                    artifact_type="WorkspaceSnapshotArtifact",
+                    provenance={"workflow_name": layout.workflow_name},
+                    child_refs=((requirements_ref.sha256, "requirements"),),
+                )
+                snapshot_marker.parent.mkdir(parents=True, exist_ok=True)
+                _write_json_atomic(snapshot_marker, snapshot_ref.to_dict())
+            else:
+                snapshot_ref = ArtifactRef.from_mapping(
+                    json.loads(snapshot_marker.read_text(encoding="utf-8"))
+                )
+                snapshot = self.artifacts.read_json(snapshot_ref)
+            base_sha = str(
+                dict(base_artifact or {}).get("skeleton_commit_sha")
+                or snapshot["snapshot_commit_sha"]
             )
-            _write_json_atomic(snapshot_marker, snapshot_ref.to_dict())
-        elif snapshot_marker.is_file():
-            snapshot_ref = ArtifactRef.from_mapping(json.loads(snapshot_marker.read_text(encoding="utf-8")))
-            snapshot = self.artifacts.read_json(snapshot_ref)
-        else:
-            snapshot_ref = self._existing_workspace_snapshot_ref(common_git_dir, requirements_ref, workflow_id)
-            snapshot = self.artifacts.read_json(snapshot_ref)
-            _write_json_atomic(snapshot_marker, snapshot_ref.to_dict())
-        base_sha = str(dict(base_artifact or {}).get("skeleton_commit_sha") or snapshot["snapshot_commit_sha"])
-        if base_artifact:
-            bundle_value = dict(base_artifact.get("git_bundle_ref") or {})
-            if bundle_value:
-                self._import_bundle(common_git_dir, ArtifactRef.from_mapping(bundle_value))
-        _git_dir(common_git_dir, "cat-file", "-e", f"{base_sha}^{{commit}}")
-        worktree = root / "worktrees" / _safe_component(revision_name)
-        branch = f"pal/architecture/{_safe_component(revision_name)}"
-        if not worktree.exists():
-            worktree.parent.mkdir(parents=True, exist_ok=True)
-            completed = subprocess.run(
-                ["git", f"--git-dir={common_git_dir}", "worktree", "add", "-b", branch, str(worktree), base_sha],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
+            if base_artifact:
+                bundle_value = dict(base_artifact.get("git_bundle_ref") or {})
+                if bundle_value:
+                    self._import_bundle(common_git_dir, ArtifactRef.from_mapping(bundle_value))
+            _git_dir(common_git_dir, "cat-file", "-e", f"{base_sha}^{{commit}}")
+            _ensure_git_branch(
+                common_git_dir,
+                layout.workflow_branch,
+                str(snapshot["snapshot_commit_sha"]),
             )
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr or completed.stdout or "failed to create architecture worktree")
+            worktree = layout.architecture_worktree(revision_name)
+            branch = layout.architecture_branch(revision_name)
+            if not worktree.exists():
+                worktree.parent.mkdir(parents=True, exist_ok=True)
+                _add_git_worktree(
+                    common_git_dir,
+                    worktree=worktree,
+                    branch=branch,
+                    start_sha=base_sha,
+                )
         return ArchitectureWorkspace(
             worktree=worktree,
             common_git_dir=common_git_dir,
@@ -589,6 +943,12 @@ class GitBackedSkeletonService:
             original_head=str(snapshot.get("original_head") or ""),
             source_fingerprint=str(snapshot.get("source_fingerprint") or ""),
             workspace_snapshot_ref=snapshot_ref,
+            project_name=layout.project_name,
+            project_key=layout.project_key,
+            workflow_name=layout.workflow_name,
+            workflow_key=layout.workflow_key,
+            workflow_branch=layout.workflow_branch,
+            architecture_branch=branch,
         )
 
     def snapshot_architecture(
@@ -601,6 +961,9 @@ class GitBackedSkeletonService:
         requirements_ref: ArtifactRef,
         reference_roots: Mapping[str, Path] | None = None,
         evidence_catalog_ref: ArtifactRef | None = None,
+        revision_base_artifact: Mapping[str, Any] | None = None,
+        revision_scope: Mapping[str, Any] | None = None,
+        revision_base_path_states: Mapping[str, str] | None = None,
     ) -> ArtifactRef:
         requirements = self.artifacts.read_json(requirements_ref)
         evidence_catalog = self.artifacts.read_json(evidence_catalog_ref) if evidence_catalog_ref else None
@@ -612,9 +975,25 @@ class GitBackedSkeletonService:
             evidence_catalog=evidence_catalog,
         )
         changed_paths = _git_changed_paths(architecture_workspace.worktree, architecture_workspace.base_sha)
-        undeclared = [path for path in changed_paths if not _architect_path_is_declared(path, normalized)]
-        if undeclared:
-            raise ValueError("Architect changed paths outside declared contract/implementation/test skeleton scopes: " + ", ".join(undeclared))
+        if revision_base_artifact is not None:
+            if revision_scope is None:
+                raise ValueError("architecture revision snapshot requires an explicit semantic scope")
+            scope_changed_paths = (
+                architecture_revision_changed_paths_since(
+                    architecture_workspace.worktree,
+                    architecture_workspace.base_sha,
+                    revision_base_path_states,
+                )
+                if revision_base_path_states is not None
+                else changed_paths
+            )
+            validate_architecture_revision_scope(
+                base_submission=dict(revision_base_artifact.get("submission") or {}),
+                revised_submission=normalized,
+                changed_paths=scope_changed_paths,
+                scope=revision_scope,
+            )
+        validate_architecture_changed_paths(normalized, changed_paths)
         _git(architecture_workspace.worktree, "add", "-A")
         submission_hash = _stable_hash(normalized)
         commit_key = hashlib.sha256(
@@ -654,7 +1033,14 @@ class GitBackedSkeletonService:
         }
         with tempfile.TemporaryDirectory(prefix="pal-skeleton-bundle-") as temporary:
             bundle_path = Path(temporary) / "architecture.bundle"
-            _git(architecture_workspace.worktree, "bundle", "create", str(bundle_path), "--all")
+            bundle_source = architecture_workspace.architecture_branch or "--all"
+            _git(
+                architecture_workspace.worktree,
+                "bundle",
+                "create",
+                str(bundle_path),
+                bundle_source,
+            )
             bundle_ref = self.artifacts.put_bytes(
                 bundle_path.read_bytes(),
                 artifact_type=ARCHITECTURE_SKELETON_BUNDLE_ARTIFACT,
@@ -668,7 +1054,7 @@ class GitBackedSkeletonService:
             child_refs=((requirements_ref.sha256, "requirements"),),
         )
         payload = {
-            "schema_version": "2",
+            "schema_version": "3",
             "requirements_ref": requirements_ref.to_dict(),
             "evidence_catalog_ref": evidence_catalog_ref.to_dict() if evidence_catalog_ref else {},
             "submission": normalized,
@@ -684,6 +1070,13 @@ class GitBackedSkeletonService:
             "path_policy": _compiled_path_policy(normalized),
             "original_workspace_head": architecture_workspace.original_head,
             "source_fingerprint": architecture_workspace.source_fingerprint,
+            "repository_layout": {
+                "project_name": architecture_workspace.project_name,
+                "project_key": architecture_workspace.project_key,
+                "workflow_name": architecture_workspace.workflow_name,
+                "workflow_key": architecture_workspace.workflow_key,
+                "workflow_branch": architecture_workspace.workflow_branch,
+            },
         }
         children = [
             (requirements_ref.sha256, "requirements"),
@@ -709,14 +1102,21 @@ class GitBackedSkeletonService:
         *,
         artifact: Mapping[str, Any],
         review_name: str,
-    ) -> Path:
-        root = Path(self.runtime_root) / "data" / "minion" / "v2" / "architecture-reviews" / _safe_component(review_name)
-        bare = root / "project.git"
+    ) -> ArchitectureReviewWorkspace:
+        root = Path(tempfile.mkdtemp(prefix=f"pal-architecture-review-{_safe_component(review_name)}-"))
+        stored_layout = dict(artifact.get("repository_layout") or {})
+        project_key = _safe_component(str(stored_layout.get("project_key") or ""))
+        shared_bare = minion_data_root(self.runtime_root) / "repos" / project_key / "project.git"
+        bare = shared_bare
+        temporary_common_git_dir = False
         worktree = root / "worktree"
         bundle_ref = ArtifactRef.from_mapping(dict(artifact.get("git_bundle_ref") or {}))
         skeleton_sha = str(artifact.get("skeleton_commit_sha") or "")
-        if not bare.exists():
-            root.mkdir(parents=True, exist_ok=True)
+        if project_key and bare.is_dir() and not _git_object_exists(bare, skeleton_sha):
+            self._import_bundle(bare, bundle_ref)
+        if not project_key or not bare.is_dir():
+            temporary_common_git_dir = True
+            bare = root / "project.git"
             bundle = root / "architecture.bundle"
             self.materialize_bundle(bundle_ref, bundle)
             completed = subprocess.run(
@@ -729,19 +1129,25 @@ class GitBackedSkeletonService:
             bundle.unlink(missing_ok=True)
             if completed.returncode != 0:
                 raise RuntimeError(completed.stderr or completed.stdout or "failed to restore architecture review repository")
-        if not worktree.exists():
-            completed = subprocess.run(
-                ["git", f"--git-dir={bare}", "worktree", "add", "--detach", str(worktree), skeleton_sha],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr or completed.stdout or "failed to restore architecture review worktree")
+        completed = subprocess.run(
+            ["git", f"--git-dir={bare}", "worktree", "add", "--detach", str(worktree), skeleton_sha],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            shutil.rmtree(root, ignore_errors=True)
+            raise RuntimeError(completed.stderr or completed.stdout or "failed to restore architecture review worktree")
         if _git(worktree, "rev-parse", "HEAD").strip() != skeleton_sha:
+            shutil.rmtree(root, ignore_errors=True)
             raise RuntimeError("architecture review worktree is not bound to the skeleton commit")
-        return worktree
+        return ArchitectureReviewWorkspace(
+            root=root,
+            worktree=worktree,
+            common_git_dir=bare,
+            temporary_common_git_dir=temporary_common_git_dir,
+        )
 
     def _import_bundle(self, common_git_dir: Path, bundle_ref: ArtifactRef) -> None:
         with tempfile.TemporaryDirectory(prefix="pal-skeleton-import-") as temporary:
@@ -764,7 +1170,13 @@ class GitBackedSkeletonService:
             if completed.returncode != 0:
                 raise RuntimeError(completed.stderr or completed.stdout or "failed to import architecture bundle")
 
-    def _create_synthetic_snapshot(self, common_git_dir: Path, source: Path | None) -> dict[str, Any]:
+    def _create_synthetic_snapshot(
+        self,
+        common_git_dir: Path,
+        source: Path | None,
+        *,
+        snapshot_ref: str,
+    ) -> dict[str, Any]:
         common_git_dir.parent.mkdir(parents=True, exist_ok=True)
         original_head = ""
         files: list[str] = []
@@ -794,13 +1206,36 @@ class GitBackedSkeletonService:
             )
             snapshot_sha = _git(seed, "rev-parse", "HEAD").strip()
             snapshot_tree = _git(seed, "rev-parse", "HEAD^{tree}").strip()
-            completed = subprocess.run(
-                ["git", "clone", "--bare", str(seed), str(common_git_dir)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
+            if common_git_dir.exists():
+                completed = subprocess.run(
+                    [
+                        "git",
+                        f"--git-dir={common_git_dir}",
+                        "fetch",
+                        str(seed),
+                        f"+{snapshot_sha}:{snapshot_ref}",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+            else:
+                completed = subprocess.run(
+                    ["git", "clone", "--bare", str(seed), str(common_git_dir)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                if completed.returncode == 0:
+                    completed = subprocess.run(
+                        ["git", f"--git-dir={common_git_dir}", "update-ref", snapshot_ref, snapshot_sha],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                    )
             if completed.returncode != 0:
                 raise RuntimeError(completed.stderr or completed.stdout or "failed to persist synthetic workspace snapshot")
         return {
@@ -812,38 +1247,30 @@ class GitBackedSkeletonService:
             "included_paths": files,
         }
 
-    def _existing_workspace_snapshot_ref(
-        self,
-        common_git_dir: Path,
-        requirements_ref: ArtifactRef,
-        workflow_id: str,
-    ) -> ArtifactRef:
-        snapshot_sha = _git_dir(common_git_dir, "rev-list", "--max-parents=0", "HEAD").splitlines()[-1]
-        payload = {
-            "schema_version": "1",
-            "snapshot_commit_sha": snapshot_sha,
-            "snapshot_tree_sha": _git_dir(common_git_dir, "rev-parse", f"{snapshot_sha}^{{tree}}").strip(),
-            "original_head": "",
-            "source_fingerprint": "",
-            "included_paths": [],
-        }
-        return self.artifacts.put_json(
-            payload,
-            artifact_type="WorkspaceSnapshotArtifact",
-            provenance={"workflow_name": workflow_id, "recovered": True},
-            child_refs=((requirements_ref.sha256, "requirements"),),
-        )
-
-
-def _normalize_module_paths(module_name: str, value: Any) -> dict[str, Any]:
+def _normalize_module_paths(
+    module_name: str,
+    value: Any,
+    *,
+    module_kind: str,
+) -> dict[str, Any]:
     paths = dict(value or {}) if isinstance(value, Mapping) else {}
     contracts = [_normalized_repo_path(str(item)) for item in list(paths.get("contract_paths") or [])]
     if not contracts:
         raise ValueError(f"module {module_name} requires paths.contract_paths")
     implementation = _normalize_path_scopes(
-        paths.get("implementation_scopes"), field=f"{module_name}.implementation_scopes"
+        paths.get("implementation_scopes"),
+        field=f"{module_name}.implementation_scopes",
+        allow_empty=module_kind == "contract_only",
     )
-    tests = _normalize_path_scopes(paths.get("test_scopes"), field=f"{module_name}.test_scopes")
+    tests = _normalize_path_scopes(
+        paths.get("test_scopes"),
+        field=f"{module_name}.test_scopes",
+        allow_empty=module_kind == "contract_only",
+    )
+    if module_kind == "contract_only" and (implementation or tests):
+        raise ValueError(
+            f"contract_only module {module_name} cannot declare implementation_scopes or test_scopes"
+        )
     references = [_normalized_repo_path(str(item)) for item in list(paths.get("reference_only") or [])]
     return {
         "contract_paths": list(dict.fromkeys(contracts)),
@@ -867,6 +1294,19 @@ def _normalize_contract_reference(value: Any) -> dict[str, str]:
     return result
 
 
+def _architecture_requirement_reference(
+    value: Mapping[str, Any],
+    requirements_payload: Mapping[str, Any],
+) -> dict[str, str]:
+    resolved = resolve_requirement_reference(value, requirements_payload)
+    # Strength remains owned by the immutable RequirementsArtifact. The DAG
+    # references only the natural-language Requirement identity.
+    return {
+        "section": resolved.section,
+        "requirement": resolved.requirement,
+    }
+
+
 def _normalize_verification_nodes(
     value: Any,
     *,
@@ -887,13 +1327,11 @@ def _normalize_verification_nodes(
         if kind not in VERIFICATION_KINDS:
             raise ValueError(f"Verification Node {name} has invalid kind: {kind or '<empty>'}")
         depends_on = _unique_text(node.get("depends_on"))
-        if not depends_on:
-            raise ValueError(f"Verification Node {name} must combine at least one implementation module")
         consumes = [_normalize_contract_reference(item) for item in list(node.get("consumes") or [])]
         if not consumes:
             raise ValueError(f"Verification Node {name} must consume at least one declared contract")
         covers = [
-            resolve_requirement_reference(dict(item or {}), requirements_payload).to_dict()
+            _architecture_requirement_reference(dict(item or {}), requirements_payload)
             for item in list(node.get("covers") or [])
         ]
         if not covers:
@@ -956,7 +1394,12 @@ def _normalize_verification_entrypoint(
     return result
 
 
-def _normalize_path_scopes(value: Any, *, field: str) -> tuple[PathScope, ...]:
+def _normalize_path_scopes(
+    value: Any,
+    *,
+    field: str,
+    allow_empty: bool = False,
+) -> tuple[PathScope, ...]:
     result: list[PathScope] = []
     for raw in list(value or []):
         if isinstance(raw, str):
@@ -970,7 +1413,7 @@ def _normalize_path_scopes(value: Any, *, field: str) -> tuple[PathScope, ...]:
         if not path or (kind != "file" and "/" not in path):
             raise ValueError(f"{field} must use a file or narrow subdirectory/prefix, never the repository root")
         result.append(PathScope(kind, path.rstrip("/")))
-    if not result:
+    if not result and not allow_empty:
         raise ValueError(f"{field} requires at least one narrow writable path scope")
     return tuple(dict.fromkeys(result))
 
@@ -1024,16 +1467,39 @@ def _validate_contract_graph(
             _validate_contract_reference(provider, path, contract_paths, consumer=f"module {consumer_name}")
             consumed.add((provider, path))
     names = set(modules)
+    implementation_names = {
+        name
+        for name, module in modules.items()
+        if str(module.get("module_kind") or "") == "implementation"
+    }
     construction_dependencies = {
         name: set(str(item) for item in list(module.get("depends_on") or []))
         for name, module in modules.items()
     }
+    for module_name, dependencies in construction_dependencies.items():
+        module_kind = str(modules[module_name].get("module_kind") or "")
+        if module_kind == "contract_only" and dependencies:
+            raise ValueError(
+                f"contract_only module {module_name} cannot declare construction dependencies"
+            )
+        non_candidate_dependencies = sorted(dependencies - implementation_names)
+        if non_candidate_dependencies:
+            raise ValueError(
+                f"module {module_name} construction depends_on may name implementation modules only: "
+                + ", ".join(non_candidate_dependencies)
+            )
     for node_name, node in verification_nodes.items():
         dependencies = set(str(item) for item in list(node.get("depends_on") or []))
         unknown = sorted(dependencies - names)
         if unknown:
             raise ValueError(
                 f"Verification Node {node_name} references unknown implementation modules: {', '.join(unknown)}"
+            )
+        non_candidate_dependencies = sorted(dependencies - implementation_names)
+        if non_candidate_dependencies:
+            raise ValueError(
+                f"Verification Node {node_name} depends_on may name implementation Candidates only; "
+                f"reference contract_only modules through consumes: {', '.join(non_candidate_dependencies)}"
             )
         required_closure = _dependency_closure(dependencies, construction_dependencies)
         missing_dependencies = sorted(required_closure - dependencies)
@@ -1046,7 +1512,8 @@ def _validate_contract_graph(
             provider = str(reference["module"])
             path = str(reference["path"])
             _validate_contract_reference(provider, path, contract_paths, consumer=f"Verification Node {node_name}")
-            if provider not in dependencies:
+            provider_kind = str(modules[provider].get("module_kind") or "")
+            if provider_kind == "implementation" and provider not in dependencies:
                 raise ValueError(
                     f"Verification Node {node_name} consumes {provider}:{path} but does not include {provider} in depends_on"
                 )
@@ -1171,12 +1638,31 @@ def _compiled_path_policy(submission: Mapping[str, Any]) -> dict[str, Any]:
     for name, raw_module in dict(submission.get("modules") or {}).items():
         paths = dict(dict(raw_module).get("paths") or {})
         modules[name] = {
+            "module_kind": str(dict(raw_module).get("module_kind") or ""),
             "contract_paths": list(paths.get("contract_paths") or []),
             "implementation_scopes": list(paths.get("implementation_scopes") or []),
             "test_scopes": list(paths.get("test_scopes") or []),
             "reference_only": list(paths.get("reference_only") or []),
         }
     return {"modules": modules}
+
+
+def validate_architecture_changed_paths(
+    submission: Mapping[str, Any],
+    changed_paths: Sequence[str],
+) -> tuple[str, ...]:
+    normalized_paths = tuple(
+        sorted({_normalized_repo_path(str(path)) for path in changed_paths if str(path).strip()})
+    )
+    undeclared = [
+        path for path in normalized_paths if not _architect_path_is_declared(path, submission)
+    ]
+    if undeclared:
+        raise ValueError(
+            "Architect changed paths outside declared contract/implementation/test skeleton scopes: "
+            + ", ".join(undeclared)
+        )
+    return normalized_paths
 
 
 def _architect_path_is_declared(path: str, submission: Mapping[str, Any]) -> bool:
@@ -1283,6 +1769,47 @@ def _git_changed_paths(worktree: Path, base_sha: str) -> list[str]:
     result = _git_null_paths(worktree, "diff", "--name-only", "--no-renames", "-z", base_sha)
     result.extend(_git_null_paths(worktree, "ls-files", "--others", "--exclude-standard", "-z"))
     return sorted(dict.fromkeys(result))
+
+
+def architecture_revision_path_states(worktree: Path, base_sha: str) -> dict[str, str]:
+    """Fingerprint only paths whose working-tree state differs from the Git base."""
+
+    states: dict[str, str] = {}
+    for relative in _git_changed_paths(worktree, base_sha):
+        path = worktree / relative
+        if not path.exists() and not path.is_symlink():
+            states[relative] = "absent"
+            continue
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            payload = os.readlink(path).encode("utf-8", errors="surrogateescape")
+            kind = "symlink"
+        elif stat.S_ISREG(mode):
+            payload = path.read_bytes()
+            kind = "file"
+        else:
+            payload = b""
+            kind = "other"
+        states[relative] = (
+            f"{kind}:{mode & 0o777:o}:{hashlib.sha256(payload).hexdigest()}"
+        )
+    return states
+
+
+def architecture_revision_changed_paths_since(
+    worktree: Path,
+    base_sha: str,
+    baseline_states: Mapping[str, str],
+) -> list[str]:
+    """Return the local delta since a rejected, stable architecture candidate."""
+
+    current = architecture_revision_path_states(worktree, base_sha)
+    baseline = {str(path): str(value) for path, value in baseline_states.items()}
+    return sorted(
+        path
+        for path in set(current) | set(baseline)
+        if current.get(path) != baseline.get(path)
+    )
 
 
 def _find_architecture_commit(worktree: Path, commit_key: str) -> str:
@@ -1405,6 +1932,65 @@ def _stable_hash(value: Any) -> str:
 
 def _safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "")).strip("._-") or "item"
+
+
+def _git_object_exists(git_dir: Path, object_name: str) -> bool:
+    if not object_name or not git_dir.is_dir():
+        return False
+    completed = subprocess.run(
+        ["git", f"--git-dir={git_dir}", "cat-file", "-e", f"{object_name}^{{commit}}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _git_branch_exists(git_dir: Path, branch: str) -> bool:
+    completed = subprocess.run(
+        ["git", f"--git-dir={git_dir}", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _ensure_git_branch(git_dir: Path, branch: str, start_sha: str) -> None:
+    if _git_branch_exists(git_dir, branch):
+        return
+    _git_dir(git_dir, "branch", branch, start_sha)
+
+
+def _add_git_worktree(
+    git_dir: Path,
+    *,
+    worktree: Path,
+    branch: str,
+    start_sha: str,
+) -> None:
+    if _git_branch_exists(git_dir, branch):
+        command = ["git", f"--git-dir={git_dir}", "worktree", "add", str(worktree), branch]
+    else:
+        command = [
+            "git",
+            f"--git-dir={git_dir}",
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            str(worktree),
+            start_sha,
+        ]
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout or f"failed to create Git worktree {worktree}")
 
 
 def _git(worktree: Path, *args: str) -> str:

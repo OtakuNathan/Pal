@@ -43,10 +43,11 @@ class ResolvedFamilyBinding:
     policies: Mapping[str, Any]
     manifest: Mapping[str, Any]
     profile_hashes: Mapping[str, str]
+    profile_definitions: Mapping[str, Mapping[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "1",
+            "schema_version": "2",
             "family_id": self.family_id,
             "workflow_template": self.workflow_template,
             "roles": dict(self.roles),
@@ -55,6 +56,10 @@ class ResolvedFamilyBinding:
             "policies": dict(self.policies),
             "manifest": dict(self.manifest),
             "profile_hashes": dict(self.profile_hashes),
+            "profile_definitions": {
+                str(role): dict(definition)
+                for role, definition in self.profile_definitions.items()
+            },
         }
 
 
@@ -84,11 +89,14 @@ class MinionV2Catalog:
                     f"family {family.family_id} is missing contract_dag roles: {', '.join(missing_roles)}"
                 )
         profile_hashes: dict[str, str] = {}
+        profile_definitions: dict[str, dict[str, Any]] = {}
         for role, profile_id in roles.items():
             profile = profile_registry.get(profile_id)
             if profile is None:
                 raise ValueError(f"family {family.family_id} role {role} references unknown profile {profile_id}")
-            profile_hashes[role] = _stable_hash(profile.to_dict())
+            definition = profile.to_dict()
+            profile_hashes[role] = _stable_hash(definition)
+            profile_definitions[role] = definition
         unknown_builders = sorted(set(family.builders.values()) - REGISTERED_BUILDERS)
         if unknown_builders:
             raise ValueError(f"family {family.family_id} references unknown builders: {', '.join(unknown_builders)}")
@@ -104,6 +112,7 @@ class MinionV2Catalog:
             policies=dict(family.policies),
             manifest=family.to_dict(),
             profile_hashes=profile_hashes,
+            profile_definitions=profile_definitions,
         )
         return self.artifacts.put_json(
             binding.to_dict(),

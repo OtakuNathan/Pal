@@ -502,6 +502,17 @@ language_ids = ["foo"]
         self.assertEqual(third["result"][0]["workspace_root"], str(workspace_a.resolve()))
         summary = self.manager._server_summary(state)
         self.assertEqual(summary["attached_count"], 2)
+
+        released = await self.manager.release_workspace(
+            {"workspace_root": str(workspace_a)}
+        )
+
+        self.assertEqual(released["released_count"], 1)
+        self.assertEqual(released["released"][0]["server_id"], "fake_python")
+        self.assertEqual(closed, [workspace_a.resolve()])
+        self.assertNotIn(str(workspace_a.resolve()), state.sessions)
+        self.assertIn(str(workspace_b.resolve()), state.sessions)
+        self.assertTrue(state.attached)
         await self.manager.close_all()
         self.assertEqual(sorted(str(path) for path in closed), sorted(str(path.resolve()) for path in (workspace_a, workspace_b)))
 

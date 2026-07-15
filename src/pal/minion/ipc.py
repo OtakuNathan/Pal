@@ -78,6 +78,81 @@ class MinionManagerClient:
     def reload_runtime_config_sync(self) -> dict[str, Any]:
         return self.request_sync("reload_runtime_config")
 
+    def catalog_snapshot_sync(
+        self,
+        *,
+        kind: str = "all",
+        query: str = "",
+        include_definitions: bool = False,
+    ) -> dict[str, Any]:
+        return self.request_sync(
+            "catalog_snapshot",
+            {"kind": kind, "query": query, "include_definitions": include_definitions},
+        )
+
+    def refresh_catalog_sync(self, *, actor: str = "pal") -> dict[str, Any]:
+        return self.request_sync("catalog_refresh", {"actor": actor})
+
+    def set_profile_override_sync(
+        self,
+        *,
+        profile: str,
+        changes: dict[str, Any],
+        actor: str = "pal",
+        if_generation: str = "",
+    ) -> dict[str, Any]:
+        return self.request_sync(
+            "catalog_set_profile_override",
+            {
+                "profile": profile,
+                "changes": dict(changes),
+                "actor": actor,
+                "if_generation": if_generation,
+            },
+        )
+
+    def reset_profile_override_sync(
+        self,
+        *,
+        profile: str,
+        actor: str = "pal",
+        if_generation: str = "",
+    ) -> dict[str, Any]:
+        return self.request_sync(
+            "catalog_reset_profile_override",
+            {"profile": profile, "actor": actor, "if_generation": if_generation},
+        )
+
+    def set_family_override_sync(
+        self,
+        *,
+        family: str,
+        changes: dict[str, Any],
+        actor: str = "pal",
+        if_generation: str = "",
+    ) -> dict[str, Any]:
+        return self.request_sync(
+            "catalog_set_family_override",
+            {
+                "family": family,
+                "changes": dict(changes),
+                "actor": actor,
+                "if_generation": if_generation,
+            },
+        )
+
+    def reset_family_override_sync(
+        self,
+        *,
+        family: str,
+        actor: str = "pal",
+        if_generation: str = "",
+    ) -> dict[str, Any]:
+        return self.request_sync(
+            "catalog_reset_family_override",
+            {"family": family, "actor": actor, "if_generation": if_generation},
+        )
+
     def shutdown_sync(self, *, graceful: bool = True, timeout_seconds: float | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {"graceful": graceful}
         if timeout_seconds is not None:

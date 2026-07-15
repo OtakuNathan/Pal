@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import shutil
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -23,6 +24,12 @@ from pal.minion.v2.adapters import (
 )
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
+from pal.minion.v2.paths import (
+    ProjectGitLayout,
+    project_git_layout_lock,
+    resolve_project_git_layout,
+    verification_scratch_root,
+)
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_SKELETON_ARTIFACT,
@@ -72,6 +79,28 @@ class QuiesceResult:
     exclusive_workspace_lock: bool
     workspace_fingerprint: str
     lock_path: Path
+
+
+@dataclass(frozen=True)
+class WorkspaceProcessHolder:
+    pid: int
+    process_group: int
+    command: str
+    holds_cwd: bool = False
+    read_paths: tuple[str, ...] = ()
+    write_paths: tuple[str, ...] = ()
+    unknown_paths: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pid": self.pid,
+            "process_group": self.process_group,
+            "command": self.command,
+            "holds_cwd": self.holds_cwd,
+            "read_paths": list(self.read_paths),
+            "write_paths": list(self.write_paths),
+            "unknown_paths": list(self.unknown_paths),
+        }
 
 
 @dataclass
@@ -257,6 +286,8 @@ class ExecutionCompiler:
         if execution_adapter == SOFTWARE_GIT_ADAPTER:
             workspaces = provision_epoch_worktrees(
                 self.repository.runtime_root,
+                workflow_id=workflow_id,
+                workflow_name=str(request.get("workflow_name") or request.get("goal") or workflow_id),
                 epoch_id=epoch_id,
                 unit_ids=sorted(unit_refs_by_id),
                 workspace=dict(request.get("workspace") or {}),
@@ -375,7 +406,14 @@ class ExecutionCompiler:
         modules = {str(name): dict(value or {}) for name, value in dict(submission.get("modules") or {}).items()}
         if not modules:
             raise ValueError("ArchitectureSkeletonArtifact has no modules")
-        if initial_repair_bill_ref and len(modules) != 1:
+        implementation_modules = {
+            name: module
+            for name, module in modules.items()
+            if str(module.get("module_kind") or "") == "implementation"
+        }
+        if not implementation_modules:
+            raise ValueError("ArchitectureSkeletonArtifact has no implementation modules")
+        if initial_repair_bill_ref and len(implementation_modules) != 1:
             raise ValueError("an initial RepairBill requires a bounded single-module skeleton")
         depends_on = {
             name: [str(item) for item in list(module.get("depends_on") or [])]
@@ -412,6 +450,7 @@ class ExecutionCompiler:
             module_refs[name] = self.architecture.artifacts.put_json(
                 {
                     "module_name": name,
+                    "module_kind": str(module.get("module_kind") or ""),
                     "depends_on": depends_on[name],
                     "consumes": list(module.get("consumes") or []),
                     "paths": paths,
@@ -452,19 +491,23 @@ class ExecutionCompiler:
         self.repository.dispatch(
             _action("START_EXECUTION", workflow_id, AggregateType.EXECUTION_EPOCH, epoch_id, actor, 1, {})
         )
-        all_workspace_names = [*sorted(modules), *sorted(verification_nodes)]
-        workspaces = provision_skeleton_epoch_worktrees(
-            self.repository.runtime_root,
-            artifacts=self.architecture.artifacts,
-            epoch_id=epoch_id,
-            unit_ids=all_workspace_names,
-            architecture_artifact=artifact,
-        )
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
         request = (
             self.architecture.artifacts.read_json(dict(workflow.payload.get("request_ref") or {}))
             if workflow is not None and workflow.payload.get("request_ref")
             else {}
+        )
+        all_workspace_names = [*sorted(implementation_modules), *sorted(verification_nodes)]
+        workspaces = provision_skeleton_epoch_worktrees(
+            self.repository.runtime_root,
+            artifacts=self.architecture.artifacts,
+            workflow_id=workflow_id,
+            workflow_name=str(request.get("workflow_name") or request.get("goal") or workflow_id),
+            epoch_id=epoch_id,
+            unit_ids=all_workspace_names,
+            verification_unit_ids=set(verification_nodes),
+            workspace=dict(request.get("workspace") or {}),
+            architecture_artifact=artifact,
         )
         environment_fingerprint = _stable_json_hash(
             {
@@ -481,8 +524,8 @@ class ExecutionCompiler:
                 "requirements": self.architecture.artifacts.read_json(dict(artifact.get("requirements_ref") or {})),
             }
         )
-        unit_node_ids = {name: f"{epoch_id}:node:{name}" for name in modules}
-        for name in sorted(modules):
+        unit_node_ids = {name: f"{epoch_id}:node:{name}" for name in implementation_modules}
+        for name in sorted(implementation_modules):
             paths = dict(modules[name].get("paths") or {})
             self.repository.dispatch(
                 _action(
@@ -1397,6 +1440,7 @@ class UnitWorkViewBuilder:
         payload = {
             "schema_version": "1",
             "module_name": str(contract.get("module_name") or node.payload.get("module_name") or ""),
+            "module_kind": str(contract.get("module_kind") or ""),
             "requirements": {
                 "title": str(requirements.get("title") or "Requirements"),
                 "sections": requirement_sections,
@@ -1609,78 +1653,38 @@ def dependency_fingerprint(node: AggregateSnapshot, node_by_id: Mapping[str, Agg
 def provision_epoch_worktrees(
     runtime_root: Path,
     *,
+    workflow_id: str,
+    workflow_name: str,
     epoch_id: str,
     unit_ids: list[str],
     workspace: Mapping[str, Any],
 ) -> dict[str, dict[str, str]]:
-    epoch_root = Path(runtime_root) / "data" / "minion" / "v2" / "repos" / epoch_id
-    common_git_dir = epoch_root / "project.git"
-    worktree_root = epoch_root / "worktrees"
-    if not common_git_dir.exists():
-        epoch_root.mkdir(parents=True, exist_ok=True)
-        source = str(workspace.get("repo_path") or workspace.get("cwd") or "").strip()
-        if source:
-            completed = subprocess.run(
-                ["git", "clone", "--bare", "--no-hardlinks", str(Path(source).expanduser()), str(common_git_dir)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr or completed.stdout or "failed to clone V2 epoch repository")
-        else:
-            seed = epoch_root / "seed"
-            seed.mkdir(parents=True, exist_ok=True)
-            _git(seed, "init", "-q", "-b", "main")
-            _git(seed, "-c", "user.name=Pal Minion", "-c", "user.email=minion@localhost", "commit", "--allow-empty", "-qm", "V2 epoch base")
-            completed = subprocess.run(
-                ["git", "clone", "--bare", str(seed), str(common_git_dir)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            shutil.rmtree(seed, ignore_errors=True)
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr or completed.stdout or "failed to initialize V2 epoch repository")
-        base_sha = subprocess.check_output(
-        ["git", f"--git-dir={common_git_dir}", "rev-parse", "HEAD"],
-        text=True,
-    ).strip()
-    base_tree_sha = subprocess.check_output(
-        ["git", f"--git-dir={common_git_dir}", "rev-parse", "HEAD^{tree}"],
-        text=True,
-    ).strip()
+    layout = resolve_project_git_layout(
+        runtime_root,
+        workspace=workspace,
+        workflow_id=workflow_id,
+        workflow_name=workflow_name,
+    )
+    common_git_dir = layout.common_git_dir
+    base_sha, base_tree_sha = _ensure_generic_project_repository(
+        layout,
+        workspace=workspace,
+    )
     result: dict[str, dict[str, str]] = {}
     for unit_id in [*unit_ids, "integration"]:
-        safe_id = _safe_ref(unit_id)
-        worktree = worktree_root / safe_id
-        branch = f"v2/{_safe_ref(epoch_id)}/{safe_id}"
+        worktree = layout.node_worktree(epoch_id, unit_id)
+        branch = layout.node_branch(epoch_id, unit_id)
         if not worktree.exists():
             worktree.parent.mkdir(parents=True, exist_ok=True)
-            completed = subprocess.run(
-                [
-                    "git",
-                    f"--git-dir={common_git_dir}",
-                    "worktree",
-                    "add",
-                    "-b",
-                    branch,
-                    str(worktree),
-                    base_sha,
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr or completed.stdout or f"failed to provision node worktree {unit_id}")
+            _add_branch_worktree(common_git_dir, worktree=worktree, branch=branch, start_sha=base_sha)
         result[unit_id] = {
             "workspace_path": str(worktree),
             "common_git_dir": str(common_git_dir),
             "worktree_branch": branch,
+            "workflow_branch": layout.workflow_branch,
+            "workflow_key": layout.workflow_key,
+            "project_name": layout.project_name,
+            "project_key": layout.project_key,
             "epoch_base_sha": base_sha,
             "epoch_base_tree_sha": base_tree_sha,
             "base_digest": base_sha,
@@ -1693,66 +1697,71 @@ def provision_skeleton_epoch_worktrees(
     runtime_root: Path,
     *,
     artifacts: ContentAddressedArtifactStore,
+    workflow_id: str,
+    workflow_name: str,
     epoch_id: str,
     unit_ids: list[str],
+    verification_unit_ids: set[str] | None = None,
+    workspace: Mapping[str, Any] | None = None,
     architecture_artifact: Mapping[str, Any],
 ) -> dict[str, dict[str, str]]:
-    epoch_root = Path(runtime_root) / "data" / "minion" / "v2" / "repos" / epoch_id
-    common_git_dir = epoch_root / "project.git"
-    worktree_root = epoch_root / "worktrees"
+    layout = resolve_project_git_layout(
+        runtime_root,
+        workspace=dict(workspace or {}),
+        workflow_id=workflow_id,
+        workflow_name=workflow_name,
+        stored_layout=dict(architecture_artifact.get("repository_layout") or {}),
+    )
+    common_git_dir = layout.common_git_dir
     skeleton_sha = str(architecture_artifact.get("skeleton_commit_sha") or "")
     skeleton_tree = str(architecture_artifact.get("skeleton_tree_sha") or "")
     bundle_ref = ArtifactRef.from_mapping(dict(architecture_artifact.get("git_bundle_ref") or {}))
     if not skeleton_sha or not skeleton_tree or not bundle_ref.sha256:
         raise ValueError("ArchitectureSkeletonArtifact is missing its commit, tree, or Git bundle")
-    if not common_git_dir.exists():
-        epoch_root.mkdir(parents=True, exist_ok=True)
-        bundle_path = epoch_root / "architecture.bundle"
-        bundle_path.write_bytes(artifacts.read_bytes(bundle_ref))
-        completed = subprocess.run(
-            ["git", "clone", "--bare", str(bundle_path), str(common_git_dir)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        bundle_path.unlink(missing_ok=True)
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stderr or completed.stdout or "failed to restore skeleton epoch repository")
-    restored_tree = _git_dir(common_git_dir, "rev-parse", f"{skeleton_sha}^{{tree}}").strip()
-    if restored_tree != skeleton_tree:
-        raise RuntimeError("restored skeleton Git bundle does not match the accepted tree")
+    with project_git_layout_lock(layout):
+        if not common_git_dir.exists():
+            _clone_bundle_repository(
+                common_git_dir,
+                bundle_bytes=artifacts.read_bytes(bundle_ref),
+            )
+        elif not _git_commit_exists(common_git_dir, skeleton_sha):
+            _fetch_bundle_repository(
+                common_git_dir,
+                bundle_bytes=artifacts.read_bytes(bundle_ref),
+                namespace=f"refs/minion/imports/{bundle_ref.sha256[:16]}",
+            )
+        restored_tree = _git_dir(
+            common_git_dir,
+            "rev-parse",
+            f"{skeleton_sha}^{{tree}}",
+        ).strip()
+        if restored_tree != skeleton_tree:
+            raise RuntimeError("restored skeleton Git bundle does not match the accepted tree")
+        _force_branch(common_git_dir, layout.workflow_branch, skeleton_sha)
+    verification_names = set(verification_unit_ids or set())
     result: dict[str, dict[str, str]] = {}
     for unit_id in unit_ids:
-        safe_id = _safe_ref(unit_id)
-        worktree = worktree_root / safe_id
-        branch = f"v2/{_safe_ref(epoch_id)}/{safe_id}"
+        verification = unit_id in verification_names
+        worktree = layout.node_worktree(epoch_id, unit_id)
+        branch = layout.node_branch(epoch_id, unit_id, verification=verification)
         if not worktree.exists():
             worktree.parent.mkdir(parents=True, exist_ok=True)
-            completed = subprocess.run(
-                [
-                    "git",
-                    f"--git-dir={common_git_dir}",
-                    "worktree",
-                    "add",
-                    "-b",
-                    branch,
-                    str(worktree),
-                    skeleton_sha,
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
+            _add_branch_worktree(
+                common_git_dir,
+                worktree=worktree,
+                branch=branch,
+                start_sha=skeleton_sha,
             )
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr or completed.stdout or f"failed to provision skeleton node {unit_id}")
         if _git(worktree, "rev-parse", "HEAD").strip() != skeleton_sha:
             raise RuntimeError(f"node {unit_id} did not start from the accepted skeleton commit")
         result[unit_id] = {
             "workspace_path": str(worktree),
             "common_git_dir": str(common_git_dir),
             "worktree_branch": branch,
+            "workflow_branch": layout.workflow_branch,
+            "workflow_key": layout.workflow_key,
+            "project_name": layout.project_name,
+            "project_key": layout.project_key,
             "epoch_base_sha": skeleton_sha,
             "epoch_base_tree_sha": skeleton_tree,
             "base_digest": skeleton_sha,
@@ -1774,10 +1783,7 @@ def provision_verification_worktree(
     if not common_git_dir.is_dir():
         raise ValueError("verification worktree requires the epoch common Git directory")
     review_root = (
-        Path(runtime_root)
-        / "data"
-        / "minion"
-        / "v2"
+        verification_scratch_root(runtime_root)
         / "reviews"
         / _safe_ref(node.aggregate_id)
         / _safe_ref(candidate_digest)
@@ -1911,31 +1917,135 @@ def workspace_content_fingerprint(worktree: Path) -> str:
     return digest.hexdigest()
 
 
-def workspace_has_live_processes(worktree: Path) -> bool:
-    """Detect processes whose cwd or open files still touch a worktree."""
+def workspace_process_holders(worktree: Path) -> tuple[WorkspaceProcessHolder, ...]:
+    """Describe processes whose cwd or open files still touch a worktree."""
     proc_root = Path("/proc")
     if not proc_root.is_dir():
-        return False
-    resolved = str(worktree.resolve())
+        return ()
+    resolved_path = worktree.resolve()
+    resolved = str(resolved_path)
     prefix = resolved + os.sep
+    holders: list[WorkspaceProcessHolder] = []
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue
-        links = [entry / "cwd"]
+        holds_cwd = _proc_link_touches_workspace(entry / "cwd", resolved, prefix)
+        read_paths: list[str] = []
+        write_paths: list[str] = []
+        unknown_paths: list[str] = []
         fd_dir = entry / "fd"
         try:
-            links.extend(fd_dir.iterdir())
+            fd_links = tuple(fd_dir.iterdir())
         except OSError:
-            pass
-        for link in links:
-            try:
-                target = os.readlink(link)
-            except OSError:
+            fd_links = ()
+        for link in fd_links:
+            target = _proc_link_workspace_target(link, resolved, prefix)
+            if target is None:
                 continue
-            normalized = target.removesuffix(" (deleted)")
-            if normalized == resolved or normalized.startswith(prefix):
-                return True
-    return False
+            relative = _workspace_relative_process_path(target, resolved_path)
+            access = _proc_fd_access(entry, link.name)
+            if access == "write":
+                write_paths.append(relative)
+            elif access == "read":
+                read_paths.append(relative)
+            else:
+                unknown_paths.append(relative)
+        if not holds_cwd and not read_paths and not write_paths and not unknown_paths:
+            continue
+        pid = int(entry.name)
+        try:
+            process_group = os.getpgid(pid)
+        except (OSError, ProcessLookupError):
+            process_group = 0
+        try:
+            command = (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            command = ""
+        holders.append(
+            WorkspaceProcessHolder(
+                pid=pid,
+                process_group=process_group,
+                command=command,
+                holds_cwd=holds_cwd,
+                read_paths=tuple(sorted(set(read_paths))),
+                write_paths=tuple(sorted(set(write_paths))),
+                unknown_paths=tuple(sorted(set(unknown_paths))),
+            )
+        )
+    return tuple(sorted(holders, key=lambda item: item.pid))
+
+
+def format_workspace_process_holders(
+    holders: tuple[WorkspaceProcessHolder, ...],
+    *,
+    max_holders: int = 12,
+    max_paths_per_access: int = 8,
+) -> str:
+    records: list[dict[str, Any]] = []
+    for holder in holders[:max_holders]:
+        record = holder.to_dict()
+        for field_name in ("read_paths", "write_paths", "unknown_paths"):
+            paths = list(record[field_name])
+            record[field_name] = paths[:max_paths_per_access]
+            if len(paths) > max_paths_per_access:
+                record[f"{field_name}_omitted"] = len(paths) - max_paths_per_access
+        records.append(record)
+    payload: dict[str, Any] = {"holders": records}
+    if len(holders) > max_holders:
+        payload["holders_omitted"] = len(holders) - max_holders
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def workspace_has_live_processes(worktree: Path) -> bool:
+    """Detect processes whose cwd or open files still touch a worktree."""
+    return bool(workspace_process_holders(worktree))
+
+
+def _proc_link_touches_workspace(link: Path, resolved: str, prefix: str) -> bool:
+    return _proc_link_workspace_target(link, resolved, prefix) is not None
+
+
+def _proc_link_workspace_target(link: Path, resolved: str, prefix: str) -> str | None:
+    try:
+        target = os.readlink(link)
+    except OSError:
+        return None
+    normalized = target.removesuffix(" (deleted)")
+    if normalized == resolved or normalized.startswith(prefix):
+        return normalized
+    return None
+
+
+def _workspace_relative_process_path(target: str, worktree: Path) -> str:
+    try:
+        relative = Path(target).relative_to(worktree)
+    except ValueError:
+        return target
+    return str(relative) if str(relative) else "."
+
+
+def _proc_fd_access(process_entry: Path, fd_name: str) -> str:
+    try:
+        lines = (process_entry / "fdinfo" / fd_name).read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines()
+    except OSError:
+        return "unknown"
+    flags_text = next(
+        (line.partition(":")[2].strip() for line in lines if line.startswith("flags:")),
+        "",
+    )
+    try:
+        flags = int(flags_text, 8)
+    except ValueError:
+        return "unknown"
+    mode = flags & os.O_ACCMODE
+    if mode in {os.O_WRONLY, os.O_RDWR}:
+        return "write"
+    if mode == os.O_RDONLY:
+        return "read"
+    return "unknown"
 
 
 async def terminate_process_group(process_group: int, *, timeout_seconds: float = 5.0) -> bool:
@@ -2077,6 +2187,172 @@ def _action(
         idempotency_key=f"{aggregate_id}:{action_type}:{expected_version}",
         payload=dict(payload),
     )
+
+
+def _git_commit_exists(git_dir: Path, commit_sha: str) -> bool:
+    if not git_dir.is_dir() or not commit_sha:
+        return False
+    return subprocess.run(
+        ["git", f"--git-dir={git_dir}", "cat-file", "-e", f"{commit_sha}^{{commit}}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+
+
+def _ensure_generic_project_repository(
+    layout: ProjectGitLayout,
+    *,
+    workspace: Mapping[str, Any],
+) -> tuple[str, str]:
+    common_git_dir = layout.common_git_dir
+    with project_git_layout_lock(layout):
+        if not common_git_dir.exists():
+            source = str(workspace.get("repo_path") or workspace.get("cwd") or "").strip()
+            if source:
+                completed = subprocess.run(
+                    [
+                        "git",
+                        "clone",
+                        "--bare",
+                        "--no-hardlinks",
+                        str(Path(source).expanduser()),
+                        str(common_git_dir),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+            else:
+                with tempfile.TemporaryDirectory(
+                    prefix="pal-generic-project-",
+                    dir=layout.project_root,
+                ) as temporary:
+                    seed = Path(temporary) / "seed"
+                    seed.mkdir()
+                    _git(seed, "init", "-q", "-b", "main")
+                    _git(
+                        seed,
+                        "-c",
+                        "user.name=Pal Minion",
+                        "-c",
+                        "user.email=minion@localhost",
+                        "commit",
+                        "--allow-empty",
+                        "-qm",
+                        "V2 epoch base",
+                    )
+                    completed = subprocess.run(
+                        ["git", "clone", "--bare", str(seed), str(common_git_dir)],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                    )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    completed.stderr
+                    or completed.stdout
+                    or "failed to initialize project repository"
+                )
+        base_sha = _git_dir(common_git_dir, "rev-parse", "HEAD").strip()
+        base_tree_sha = _git_dir(common_git_dir, "rev-parse", "HEAD^{tree}").strip()
+        _force_branch(common_git_dir, layout.workflow_branch, base_sha)
+    return base_sha, base_tree_sha
+
+
+def _git_branch_exists(git_dir: Path, branch: str) -> bool:
+    return subprocess.run(
+        ["git", f"--git-dir={git_dir}", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+
+
+def _force_branch(git_dir: Path, branch: str, commit_sha: str) -> None:
+    subprocess.run(
+        ["git", "check-ref-format", "--branch", branch],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    _git_dir(git_dir, "update-ref", f"refs/heads/{branch}", commit_sha)
+
+
+def _add_branch_worktree(
+    git_dir: Path,
+    *,
+    worktree: Path,
+    branch: str,
+    start_sha: str,
+) -> None:
+    if _git_branch_exists(git_dir, branch):
+        command = ["git", f"--git-dir={git_dir}", "worktree", "add", str(worktree), branch]
+    else:
+        command = [
+            "git",
+            f"--git-dir={git_dir}",
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            str(worktree),
+            start_sha,
+        ]
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout or f"failed to create node worktree {worktree}")
+
+
+def _clone_bundle_repository(common_git_dir: Path, *, bundle_bytes: bytes) -> None:
+    common_git_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="pal-skeleton-clone-") as temporary:
+        bundle = Path(temporary) / "architecture.bundle"
+        bundle.write_bytes(bundle_bytes)
+        completed = subprocess.run(
+            ["git", "clone", "--bare", str(bundle), str(common_git_dir)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout or "failed to restore project repository")
+
+
+def _fetch_bundle_repository(
+    common_git_dir: Path,
+    *,
+    bundle_bytes: bytes,
+    namespace: str,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="pal-skeleton-fetch-") as temporary:
+        bundle = Path(temporary) / "architecture.bundle"
+        bundle.write_bytes(bundle_bytes)
+        completed = subprocess.run(
+            [
+                "git",
+                f"--git-dir={common_git_dir}",
+                "fetch",
+                str(bundle),
+                f"+refs/heads/*:{namespace}/*",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout or "failed to import skeleton bundle")
 
 
 def _git(worktree: Path, *args: str) -> str:

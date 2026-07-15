@@ -30,8 +30,13 @@ from pal.minion.v2.contracts import (
     TaskState,
 )
 from pal.minion.v2.recovery import MinionV2Recovery
-from pal.minion.v2.sessions import architect_session_id, coder_session_id
+from pal.minion.v2.sessions import (
+    architect_session_id,
+    architect_session_id_for_revision,
+    coder_session_id,
+)
 from pal.minion.v2.service import MinionV2WorkflowService
+from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.minion.v2.machines import all_transition_specs
 from pal.minion.v2.orchestration import MECHANICAL_EFFECT_TYPES
 from pal.minion.v2.workers import SEMANTIC_EFFECT_TYPES
@@ -120,6 +125,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
             role="requirements",
+            authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt_ref.to_dict(),
         )
 
@@ -154,6 +160,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
             role="v2_architect",
+            authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt.to_dict(),
         )
         repository.suspend_worker_invocation(
@@ -173,6 +180,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             lease_resource_key=resumed_lease.resource_key,
             fencing_token=resumed_lease.fencing_token,
             role="v2_architect",
+            authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=resumed_prompt.to_dict(),
         )
 
@@ -183,8 +191,78 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertEqual(invocation["prompt_pack_ref"]["sha256"], resumed_prompt.sha256)
 
     def test_role_session_ids_are_stable_across_response_effects(self) -> None:
-        self.assertEqual(architect_session_id("wf-1"), architect_session_id("wf-1"))
-        self.assertNotEqual(architect_session_id("wf-1"), architect_session_id("wf-2"))
+        self.assertEqual(
+            architect_session_id("wf-1", "arch-1"),
+            architect_session_id("wf-1", "arch-1"),
+        )
+        self.assertNotEqual(
+            architect_session_id("wf-1", "arch-1"),
+            architect_session_id("wf-1", "arch-2"),
+        )
+        self.assertNotEqual(
+            architect_session_id("wf-1", "arch-1"),
+            architect_session_id("wf-2", "arch-1"),
+        )
+        self.assertEqual(
+            architect_session_id_for_revision(
+                "wf-1",
+                "arch-1",
+                {"finding_artifact_ref": {"sha256": "finding-a"}},
+            ),
+            architect_session_id_for_revision(
+                "wf-1",
+                "arch-1",
+                {"finding_artifact_ref": {"sha256": "finding-a"}},
+            ),
+        )
+        self.assertNotEqual(
+            architect_session_id_for_revision(
+                "wf-1",
+                "arch-1",
+                {"finding_artifact_ref": {"sha256": "finding-a"}},
+            ),
+            architect_session_id_for_revision(
+                "wf-1",
+                "arch-1",
+                {"finding_artifact_ref": {"sha256": "finding-b"}},
+            ),
+        )
+        self.assertNotEqual(
+            architect_session_id_for_revision(
+                "wf-1",
+                "arch-1",
+                {
+                    "finding_artifact_ref": {"sha256": "finding-a"},
+                    "architecture_repair_baseline_ref": {"sha256": "candidate-a"},
+                },
+            ),
+            architect_session_id_for_revision(
+                "wf-1",
+                "arch-1",
+                {
+                    "finding_artifact_ref": {"sha256": "finding-a"},
+                    "architecture_repair_baseline_ref": {"sha256": "candidate-b"},
+                },
+            ),
+        )
+        self.assertNotEqual(
+            architect_session_id_for_revision(
+                "wf-1",
+                "arch-1",
+                {
+                    "architecture_repair_baseline_ref": {"sha256": "candidate-a"},
+                    "architect_session_generation": 1,
+                },
+            ),
+            architect_session_id_for_revision(
+                "wf-1",
+                "arch-1",
+                {
+                    "architecture_repair_baseline_ref": {"sha256": "candidate-a"},
+                    "architect_session_generation": 2,
+                },
+            ),
+        )
         self.assertEqual(coder_session_id("node-1"), coder_session_id("node-1"))
         self.assertNotEqual(coder_session_id("node-1"), coder_session_id("node-2"))
 
@@ -195,6 +273,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             DagNodeRunState.SNAPSHOTTING: "REBIND_SNAPSHOTTER",
             DagNodeRunState.REVIEWING: "REBIND_REVIEWER",
             DagNodeRunState.REPAIRING: "REBIND_REPAIRER",
+            DagNodeRunState.VERIFYING: "REBIND_SCENARIO_VERIFIER",
         }
         for state, action_type in node_cases.items():
             with self.subTest(state=state):
@@ -204,7 +283,11 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     workflow_id="wf_test",
                     state=state,
                     version=3,
-                    payload={"fencing_token": 1},
+                    payload={
+                        "fencing_token": 1,
+                        "blocker": {"kind": "effect_failed"},
+                        "failure_artifact_ref": {"sha256": "stale"},
+                    },
                     created_at="2026-01-01T00:00:00+00:00",
                     updated_at="2026-01-01T00:00:00+00:00",
                 )
@@ -220,6 +303,8 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 )
                 self.assertEqual(result.snapshot.state, state)
                 self.assertEqual(result.snapshot.payload["fencing_token"], 2)
+                self.assertNotIn("blocker", result.snapshot.payload)
+                self.assertNotIn("failure_artifact_ref", result.snapshot.payload)
 
         review = AggregateSnapshot(
             aggregate_type=AggregateType.STANDALONE_REVIEW,
@@ -227,7 +312,11 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             workflow_id="wf_test",
             state=StandaloneReviewState.REVIEWING,
             version=4,
-            payload={"fencing_token": 1},
+            payload={
+                "fencing_token": 1,
+                "blocker": {"kind": "effect_failed"},
+                "failure_artifact_ref": {"sha256": "stale"},
+            },
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-01T00:00:00+00:00",
         )
@@ -242,6 +331,153 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ),
         )
         self.assertEqual(rebound.snapshot.state, StandaloneReviewState.REVIEWING)
+        self.assertNotIn("blocker", rebound.snapshot.payload)
+        self.assertNotIn("failure_artifact_ref", rebound.snapshot.payload)
+
+    def test_resolve_triage_clears_stale_worker_and_blocker_fields(self) -> None:
+        cases = (
+            (AggregateType.WORKFLOW, WorkflowState.ACTIVE, WorkflowState.ACTIVE),
+            (AggregateType.EXECUTION_EPOCH, ExecutionEpochState.RUNNING, ExecutionEpochState.RUNNING),
+            (AggregateType.DAG_NODE_RUN, DagNodeRunState.REVIEWING, DagNodeRunState.REVIEW_QUEUED),
+            (AggregateType.STANDALONE_REVIEW, StandaloneReviewState.REVIEWING, StandaloneReviewState.REVIEW_QUEUED),
+        )
+        for aggregate_type, resume_state, expected_state in cases:
+            with self.subTest(aggregate_type=aggregate_type):
+                snapshot = AggregateSnapshot(
+                    aggregate_type=aggregate_type,
+                    aggregate_id=f"triage-{aggregate_type.value}",
+                    workflow_id="wf_test",
+                    state="TRIAGE_REQUIRED",
+                    version=4,
+                    payload={
+                        "triage_resume_state": str(resume_state),
+                        "blocker": {"kind": "effect_failed"},
+                        "active_worker_id": "stale-worker",
+                        "fencing_token": 7,
+                        "lease_resource_key": "stale-lease",
+                    },
+                    created_at="2026-01-01T00:00:00+00:00",
+                    updated_at="2026-01-01T00:00:00+00:00",
+                )
+                result = self.engine.transition(
+                    snapshot,
+                    self.action(
+                        "RESOLVE_TRIAGE",
+                        aggregate_type,
+                        snapshot.aggregate_id,
+                        expected_version=4,
+                    ),
+                )
+                self.assertEqual(result.snapshot.state, expected_state)
+                for field in ("blocker", "active_worker_id", "fencing_token", "lease_resource_key"):
+                    self.assertNotIn(field, result.snapshot.payload)
+
+    def test_worker_completion_transitions_clear_active_lease_fields(self) -> None:
+        node_cases = (
+            (
+                DagNodeRunState.REVIEWING,
+                "REVIEW_PASSED",
+                DagNodeRunState.ACCEPTED,
+                {"verification_artifact_ref": "artifact:verification"},
+            ),
+            (
+                DagNodeRunState.REVIEWING,
+                "REVIEW_FAILED",
+                DagNodeRunState.REPAIR_QUEUED,
+                {
+                    "verification_artifact_ref": "artifact:verification",
+                    "repair_bill_ref": "artifact:repair",
+                    "finding_fingerprint": "finding",
+                },
+            ),
+            (
+                DagNodeRunState.REVIEWING,
+                "DEPENDENCY_DEFECT",
+                DagNodeRunState.STALE,
+                {"repair_bill_ref": "artifact:repair", "dependency_node_id": "dependency"},
+            ),
+            (
+                DagNodeRunState.VERIFYING,
+                "VERIFICATION_PASSED",
+                DagNodeRunState.ACCEPTED,
+                {
+                    "verification_artifact_ref": "artifact:verification",
+                    "scenario_fingerprint": "scenario",
+                },
+            ),
+            (
+                DagNodeRunState.VERIFYING,
+                "MODULE_DEFECT",
+                DagNodeRunState.STALE,
+                {"repair_bill_ref": "artifact:repair", "module_node_id": "module"},
+            ),
+            (
+                DagNodeRunState.PRODUCING,
+                "PRODUCER_ARCHITECTURE_DEFECT",
+                DagNodeRunState.STALE,
+                {"finding_artifact_ref": "artifact:finding"},
+            ),
+        )
+        for source_state, action_type, target_state, action_payload in node_cases:
+            with self.subTest(action_type=action_type):
+                snapshot = AggregateSnapshot(
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id="node-finished",
+                    workflow_id="wf_test",
+                    state=source_state,
+                    version=6,
+                    payload={
+                        "node_kind": "verification"
+                        if source_state == DagNodeRunState.VERIFYING
+                        else "unit",
+                        "active_worker_id": "finished-worker",
+                        "fencing_token": 7,
+                        "lease_resource_key": "finished-lease",
+                    },
+                    created_at="2026-01-01T00:00:00+00:00",
+                    updated_at="2026-01-01T00:00:00+00:00",
+                )
+                result = self.engine.transition(
+                    snapshot,
+                    self.action(
+                        action_type,
+                        AggregateType.DAG_NODE_RUN,
+                        snapshot.aggregate_id,
+                        payload=action_payload,
+                        expected_version=6,
+                    ),
+                )
+                self.assertEqual(result.snapshot.state, target_state)
+                for field in ("active_worker_id", "fencing_token", "lease_resource_key"):
+                    self.assertNotIn(field, result.snapshot.payload)
+
+        standalone = AggregateSnapshot(
+            aggregate_type=AggregateType.STANDALONE_REVIEW,
+            aggregate_id="standalone-finished",
+            workflow_id="wf_test",
+            state=StandaloneReviewState.REVIEWING,
+            version=2,
+            payload={
+                "active_worker_id": "finished-worker",
+                "fencing_token": 3,
+                "lease_resource_key": "finished-lease",
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        result = self.engine.transition(
+            standalone,
+            self.action(
+                "REPORT_PRODUCED",
+                AggregateType.STANDALONE_REVIEW,
+                standalone.aggregate_id,
+                payload={"verification_artifact_ref": "artifact:verification"},
+                expected_version=2,
+            ),
+        )
+        self.assertEqual(result.snapshot.state, StandaloneReviewState.REPORT_READY)
+        for field in ("active_worker_id", "fencing_token", "lease_resource_key"):
+            self.assertNotIn(field, result.snapshot.payload)
 
     def test_architecture_typed_findings_route_to_owning_stage(self) -> None:
         snapshot = AggregateSnapshot(
@@ -403,7 +639,10 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 "ARCHITECTURE_SNAPSHOT_REJECTED",
                 AggregateType.ARCHITECTURE_REVISION,
                 "arch_skeleton",
-                payload={"finding_artifact_ref": {"sha256": "preflight-finding"}},
+                payload={
+                    "finding_artifact_ref": {"sha256": "preflight-finding"},
+                    "architecture_repair_baseline_ref": {"sha256": "repair-baseline"},
+                },
                 expected_version=5,
             ),
         )
@@ -425,6 +664,105 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         )
         self.assertEqual(reviewed.snapshot.state, ArchitectureRevisionState.REVIEW_QUEUED)
         self.assertEqual(reviewed.effects[0].effect_type, "enqueue_architecture_review")
+
+    def test_start_architect_clears_stale_quiesce_state(self) -> None:
+        queued = AggregateSnapshot(
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch_restart",
+            workflow_id="wf_test",
+            state=ArchitectureRevisionState.ARCHITECT_QUEUED,
+            version=7,
+            payload={
+                "architecture_manifest_ref": {"sha256": "baseline"},
+                "finding_artifact_ref": {"sha256": "finding"},
+                "process_group_reaped": True,
+                "exclusive_workspace_lock": True,
+                "workspace_fingerprint": "old-tree",
+                "workspace_lock_path": "/tmp/old.lock",
+                "pending_architecture_submission_ref": {"sha256": "old-submission"},
+                "failure_artifact_ref": {"sha256": "old-failure"},
+                "blocker": {"kind": "old_failure"},
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        running = self.engine.transition(
+            queued,
+            self.action(
+                "START_ARCHITECT",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_restart",
+                payload={
+                    "fencing_token": 8,
+                    "active_worker_id": "inv_new",
+                    "lease_resource_key": "architecture:arch_restart:writer",
+                },
+                expected_version=7,
+            ),
+        ).snapshot
+
+        self.assertEqual(running.state, ArchitectureRevisionState.ARCHITECT_RUNNING)
+        self.assertEqual(running.payload["architecture_manifest_ref"], {"sha256": "baseline"})
+        self.assertEqual(running.payload["finding_artifact_ref"], {"sha256": "finding"})
+        self.assertEqual(running.payload["active_worker_id"], "inv_new")
+        for field in (
+            "process_group_reaped",
+            "exclusive_workspace_lock",
+            "workspace_fingerprint",
+            "workspace_lock_path",
+            "pending_architecture_submission_ref",
+            "failure_artifact_ref",
+            "blocker",
+        ):
+            self.assertNotIn(field, running.payload)
+
+    def test_resolve_architect_quiesce_triage_preserves_submission_only(self) -> None:
+        triage = AggregateSnapshot(
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch_quiesce_triage",
+            workflow_id="wf_test",
+            state=ArchitectureRevisionState.TRIAGE_REQUIRED,
+            version=11,
+            payload={
+                "triage_resume_state": "ARCHITECT_QUIESCING",
+                "pending_architecture_submission_ref": {"sha256": "submission"},
+                "process_group_reaped": True,
+                "exclusive_workspace_lock": True,
+                "workspace_fingerprint": "stale-tree",
+                "workspace_lock_path": "/tmp/stale.lock",
+                "failure_artifact_ref": {"sha256": "failure"},
+                "blocker": {"kind": "effect_failed"},
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        resumed = self.engine.transition(
+            triage,
+            self.action(
+                "RESOLVE_TRIAGE",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_quiesce_triage",
+                expected_version=11,
+            ),
+        ).snapshot
+
+        self.assertEqual(resumed.state, ArchitectureRevisionState.ARCHITECT_QUIESCING)
+        self.assertEqual(resumed.payload["architect_session_generation"], 1)
+        self.assertEqual(
+            resumed.payload["pending_architecture_submission_ref"],
+            {"sha256": "submission"},
+        )
+        for field in (
+            "process_group_reaped",
+            "exclusive_workspace_lock",
+            "workspace_fingerprint",
+            "workspace_lock_path",
+            "failure_artifact_ref",
+            "blocker",
+        ):
+            self.assertNotIn(field, resumed.payload)
 
     def test_cancel_wins_over_late_quiesce_completion(self) -> None:
         quiescing = AggregateSnapshot(
@@ -498,6 +836,50 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertNotIn("fencing_token", resumed.payload)
         self.assertNotIn("lease_resource_key", resumed.payload)
 
+    def test_replan_required_epoch_can_pause_and_resume(self) -> None:
+        replan_required = AggregateSnapshot(
+            aggregate_type=AggregateType.EXECUTION_EPOCH,
+            aggregate_id="epoch_replan_pause",
+            workflow_id="wf_test",
+            state=ExecutionEpochState.REPLAN_REQUIRED,
+            version=7,
+            payload={},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        requested = self.engine.transition(
+            replan_required,
+            self.action(
+                "REQUEST_PAUSE",
+                AggregateType.EXECUTION_EPOCH,
+                "epoch_replan_pause",
+                expected_version=7,
+            ),
+        ).snapshot
+        paused = self.engine.transition(
+            requested,
+            self.action(
+                "NODES_PAUSED",
+                AggregateType.EXECUTION_EPOCH,
+                "epoch_replan_pause",
+                expected_version=8,
+            ),
+        ).snapshot
+        resumed = self.engine.transition(
+            paused,
+            self.action(
+                "RESUME",
+                AggregateType.EXECUTION_EPOCH,
+                "epoch_replan_pause",
+                expected_version=9,
+            ),
+        ).snapshot
+
+        self.assertEqual(requested.state, ExecutionEpochState.PAUSE_REQUESTED)
+        self.assertEqual(paused.state, ExecutionEpochState.PAUSED)
+        self.assertEqual(resumed.state, ExecutionEpochState.REPLAN_REQUIRED)
+
     def test_architecture_review_handoff_clears_worker_and_persists_card(self) -> None:
         reviewing = AggregateSnapshot(
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -543,6 +925,21 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         ).snapshot
         self.assertEqual(published.state, ArchitectureRevisionState.HUMAN_REVIEW)
         self.assertEqual(published.payload["human_review_card_ref"], {"sha256": "card"})
+
+        reopened = self.engine.transition(
+            published,
+            self.action(
+                "REOPEN_ARCHITECTURE_REVIEW",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_human_review",
+                expected_version=6,
+                payload={"reason": "the previous reviewer input omitted Verification Topology"},
+            ),
+        )
+        self.assertEqual(reopened.snapshot.state, ArchitectureRevisionState.REVIEW_QUEUED)
+        self.assertNotIn("review_artifact_ref", reopened.snapshot.payload)
+        self.assertNotIn("human_review_card_ref", reopened.snapshot.payload)
+        self.assertEqual([effect.effect_type for effect in reopened.effects], ["enqueue_architecture_review"])
 
     def test_transition_table_uses_only_declared_aggregate_states(self) -> None:
         declared = {
@@ -662,6 +1059,75 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertFalse(self.repository.complete_outbox_effect(claimed[0]["effect_id"], worker_id="outbox_worker"))
         self.assertEqual(self.repository.claim_outbox("other_worker", limit=10), ())
 
+    def test_deferred_outbox_effect_returns_to_queue_without_spending_attempt(self) -> None:
+        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer"))
+        effect_id = result.outbox_effect_ids[0]
+        claimed = self.repository.claim_outbox("draining_manager", limit=1)
+        self.assertEqual(claimed[0]["attempt_count"], 1)
+
+        self.repository.defer_outbox_effect(
+            effect_id,
+            worker_id="draining_manager",
+            reason="manager restart safe point",
+        )
+
+        replay = self.repository.claim_outbox("fresh_manager", limit=1)
+        self.assertEqual(replay[0]["effect_id"], effect_id)
+        self.assertEqual(replay[0]["attempt_count"], 1)
+
+    def test_deferring_reclaimed_inflight_effect_does_not_erase_prior_attempt(self) -> None:
+        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer-replay"))
+        effect_id = result.outbox_effect_ids[0]
+        self.repository.claim_outbox("crashed_manager", limit=1)
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_outbox SET locked_until = '2000-01-01T00:00:00+00:00' WHERE effect_id = ?",
+                (effect_id,),
+            )
+        reclaimed = self.repository.claim_outbox("draining_manager", limit=1)
+        self.assertFalse(reclaimed[0]["claim_incremented_attempt"])
+
+        self.repository.defer_outbox_effect(
+            effect_id,
+            worker_id="draining_manager",
+            reason="manager restart safe point",
+            attempt_was_incremented=False,
+        )
+
+        replay = self.repository.claim_outbox("fresh_manager", limit=1)
+        self.assertEqual(replay[0]["attempt_count"], 2)
+
+    def test_expired_final_outbox_attempt_is_reclaimed_without_consuming_another_attempt(self) -> None:
+        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="crash-window"))
+        effect_id = result.outbox_effect_ids[0]
+        first_claim = self.repository.claim_outbox("crashed_worker", limit=1)
+        self.assertEqual(first_claim[0]["attempt_count"], 1)
+
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE minion_v2_outbox
+                SET max_attempts = 1, locked_until = '2000-01-01T00:00:00+00:00'
+                WHERE effect_id = ?
+                """,
+                (effect_id,),
+            )
+
+        replay = self.repository.claim_outbox("recovery_worker", limit=1)
+        self.assertEqual(len(replay), 1)
+        self.assertEqual(replay[0]["effect_id"], effect_id)
+        self.assertEqual(replay[0]["attempt_count"], 1)
+        self.assertEqual(
+            self.repository.retry_outbox_effect(
+                effect_id,
+                worker_id="recovery_worker",
+                error="replayed attempt failed",
+                retry_after_seconds=0,
+            ),
+            "failed",
+        )
+        self.assertEqual(self.repository.claim_outbox("third_worker", limit=1), ())
+
     def test_worker_timing_metrics_are_persisted_in_workflow_status_projection(self) -> None:
         self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="metrics-create"))
         self.repository.dispatch(self.action("START_WORKFLOW", version=1, key="metrics-start"))
@@ -682,6 +1148,7 @@ class MinionV2PersistenceTests(unittest.TestCase):
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
             role="v2_architecture_reviewer",
+            authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt.to_dict(),
         )
         self.repository.record_worker_turn(
@@ -713,6 +1180,7 @@ class MinionV2PersistenceTests(unittest.TestCase):
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
             role="architect",
+            authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt.to_dict(),
         )
         self.repository.record_worker_event(

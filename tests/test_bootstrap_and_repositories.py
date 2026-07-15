@@ -261,112 +261,11 @@ class PalV2BootstrapTests(unittest.TestCase):
     def test_wizard_provision_runtime_creates_third_party_plugin_directory(self) -> None:
         self.assertTrue((self.registration.runtime.runtime_root / "plugins").is_dir())
 
-    def test_wizard_provision_runtime_seeds_editable_minion_profile_templates(self) -> None:
-        profile_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles"
+    def test_wizard_leaves_minion_catalog_ownership_to_the_sidecar(self) -> None:
+        minion_plugin_root = self.registration.runtime.runtime_root / "plugins" / "minion"
 
-        self.assertTrue((profile_root / "generic.toml").is_file())
-        self.assertTrue((profile_root / "general" / "architect.toml").is_file())
-        self.assertFalse((profile_root / "software_engineering" / "planner.toml").is_file())
-        self.assertTrue((profile_root / "software_engineering" / "v2_coder.toml").is_file())
-        self.assertTrue((profile_root / "software_engineering" / "v2_verifier.toml").is_file())
-        self.assertTrue((profile_root / "lifestyle" / "nutrition_checkin_producer.toml").is_file())
-        self.assertIn(
-            'profile_id = "nutrition_checkin_producer"',
-            (profile_root / "lifestyle" / "nutrition_checkin_producer.toml").read_text(encoding="utf-8"),
-        )
-
-    def test_wizard_provision_runtime_seeds_editable_minion_family_templates(self) -> None:
-        family_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "families"
-
-        self.assertTrue((family_root / "general.toml").is_file())
-        self.assertTrue((family_root / "software_engineering.toml").is_file())
-        self.assertTrue((family_root / "lifestyle.toml").is_file())
-        software = tomllib.loads((family_root / "software_engineering.toml").read_text(encoding="utf-8"))
-        self.assertEqual(software["family_id"], "software_engineering")
-        self.assertTrue(software["metadata"]["builtin"])
-        self.assertEqual(software["workflow_template"], "contract_dag.v2")
-        self.assertEqual(software["roles"]["architect"], "software_engineering.v2_architect")
-
-    def test_wizard_minion_profile_template_seed_preserves_user_edits(self) -> None:
-        profile_path = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles" / "software_engineering" / "v2_coder.toml"
-        profile_path.write_text('profile_id = "v2_coder"\ndisplay_name = "Custom Runtime Producer"\n', encoding="utf-8")
-
-        self.wizard.provision_minion_profile_templates(self.registration)
-
-        self.assertEqual(
-            profile_path.read_text(encoding="utf-8"),
-            'profile_id = "v2_coder"\ndisplay_name = "Custom Runtime Producer"\n',
-        )
-
-    def test_wizard_minion_profile_template_seed_refreshes_builtin_copies(self) -> None:
-        profile_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles"
-        profile_path = profile_root / "software_engineering" / "v2_architect.toml"
-        profile_path.write_text(
-            "\n".join(
-                [
-                    'profile_id = "v2_architect"',
-                    'display_name = "Old Runtime Architect Seed"',
-                    'profile_group = "software_engineering"',
-                    "[metadata]",
-                    "builtin = true",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-        self.wizard.provision_minion_profile_templates(self.registration)
-
-        updated = profile_path.read_text(encoding="utf-8")
-        self.assertIn("V2 Software Architect", updated)
-        self.assertIn("v2_architecture_skeleton_builder", updated)
-        self.assertNotIn("v2_contract_sketch_builder", updated)
-        self.assertIn('primary_artifact = "architecture_submission.json"', updated)
-        self.assertNotIn('primary_artifact = "architecture_bundle.json"', updated)
-        backups = list((profile_root.parent / "profile_backups").glob("*/software_engineering/v2_architect.toml"))
-        self.assertEqual(len(backups), 1)
-        self.assertIn("Old Runtime Architect Seed", backups[0].read_text(encoding="utf-8"))
-
-    def test_wizard_minion_family_template_seed_preserves_user_edits(self) -> None:
-        family_path = self.registration.runtime.runtime_root / "plugins" / "minion" / "families" / "software_engineering.toml"
-        family_path.write_text(
-            "\n".join(
-                [
-                    'family_id = "software_engineering"',
-                    'display_name = "Custom Software Family"',
-                    'workflow_template = "custom.v1"',
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-        self.wizard.provision_minion_family_templates(self.registration)
-
-        self.assertIn("Custom Software Family", family_path.read_text(encoding="utf-8"))
-
-    def test_wizard_minion_family_template_seed_refreshes_builtin_copies(self) -> None:
-        family_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "families"
-        family_path = family_root / "software_engineering.toml"
-        family_path.write_text(
-            "\n".join(
-                [
-                    'family_id = "software_engineering"',
-                    'display_name = "Old Software Family Seed"',
-                    "[metadata]",
-                    "builtin = true",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-        self.wizard.provision_minion_family_templates(self.registration)
-
-        updated = family_path.read_text(encoding="utf-8")
-        self.assertIn('workflow_template = "contract_dag.v2"', updated)
-        backups = list((family_root.parent / "family_backups").glob("*/software_engineering.toml"))
-        self.assertEqual(len(backups), 1)
-        self.assertIn("Old Software Family Seed", backups[0].read_text(encoding="utf-8"))
+        self.assertFalse((minion_plugin_root / "profiles").exists())
+        self.assertFalse((minion_plugin_root / "families").exists())
 
     def test_identity_repository_bootstraps_singletons(self) -> None:
         repository = IdentityRepository()

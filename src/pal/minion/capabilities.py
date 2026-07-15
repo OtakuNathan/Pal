@@ -31,6 +31,9 @@ if TYPE_CHECKING:
     from pal.core.main_context import MainContext
 
 
+_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS = 600.0
+
+
 @dataclass(frozen=True)
 class MinionSnapshot:
     mounted: bool = True
@@ -158,19 +161,23 @@ class MinionManagerProvider:
                 self._stop_process_only(kill_process_group=True)
             else:
                 try:
-                    return self._validate_health(owned_health)
+                    health = self._validate_health(owned_health)
+                    if self._pid_from_health(health) != self.process.pid:
+                        raise RuntimeError("minion manager endpoint is not owned by this plugin attachment")
+                    return health
                 except Exception:
-                    self._retire_incompatible_manager(owned_health)
                     self._stop_process_only(kill_process_group=True)
+                    self._retire_existing_manager(owned_health)
+        elif self.process is not None:
+            self._stop_process_only()
         try:
             existing_health = self._lifecycle_client.health_sync()
         except Exception:
             existing_health = None
         if existing_health is not None:
-            try:
-                return self._validate_health(existing_health)
-            except Exception:
-                self._retire_incompatible_manager(existing_health)
+            # A manager not represented by self.process is not owned by this
+            # plugin attachment. Retire it instead of silently adopting it.
+            self._retire_existing_manager(existing_health)
         self._cleanup_stale_endpoint()
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(
@@ -183,7 +190,10 @@ class MinionManagerProvider:
                 self._stop_process_only()
                 raise RuntimeError("minion manager exited during startup")
             try:
-                return self._validate_health(self._lifecycle_client.health_sync())
+                health = self._validate_health(self._lifecycle_client.health_sync())
+                if self._pid_from_health(health) != self.process.pid:
+                    raise RuntimeError("minion manager endpoint is not owned by this plugin attachment")
+                return health
             except Exception:
                 time.sleep(0.2)
         raise RuntimeError("minion manager failed to start")
@@ -196,20 +206,28 @@ class MinionManagerProvider:
         self._event_stop.set()
         manager_pid = self._manager_pid()
         with contextlib.suppress(Exception):
-            self._lifecycle_client.shutdown_sync(graceful=True, timeout_seconds=5.0)
+            self._lifecycle_client.shutdown_sync(
+                graceful=True,
+                timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS,
+            )
         process = self.process
         if process is not None:
             with contextlib.suppress(Exception):
-                process.wait(timeout=6.0)
-        self._wait_for_manager_exit(timeout_seconds=6.0)
-        if self._manager_is_responding():
+                process.wait(timeout=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0)
+        self._wait_for_pid_exit(
+            manager_pid,
+            timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0,
+        )
+        if self._pid_is_running(manager_pid):
             self._terminate_manager(manager_pid)
         self._stop_process_only(kill_process_group=True)
-        self._wait_for_manager_exit(timeout_seconds=1.5)
+        self._wait_for_pid_exit(manager_pid, timeout_seconds=1.5)
         thread = self._event_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1.0)
         self._event_thread = None
+        if self._pid_is_running(manager_pid):
+            raise RuntimeError("minion manager process did not stop during detach")
         if self._manager_is_responding():
             raise RuntimeError("minion manager did not stop during detach")
         self._cleanup_stale_endpoint()
@@ -253,18 +271,26 @@ class MinionManagerProvider:
             raise RuntimeError("minion manager is shutting down")
         return dict(health)
 
-    def _retire_incompatible_manager(self, health: dict[str, Any] | None = None) -> None:
+    def _retire_existing_manager(self, health: dict[str, Any] | None = None) -> None:
         payload = dict(health or {})
+        manager_pid = self._pid_from_health(payload)
         with contextlib.suppress(Exception):
-            self._lifecycle_client.shutdown_sync(graceful=True, timeout_seconds=5.0)
-        self._wait_for_manager_exit(timeout_seconds=6.0)
+            self._lifecycle_client.shutdown_sync(
+                graceful=True,
+                timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS,
+            )
+        self._wait_for_pid_exit(
+            manager_pid,
+            timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0,
+        )
+        if self._pid_is_running(manager_pid):
+            self._terminate_manager(manager_pid)
+            self._wait_for_pid_exit(manager_pid, timeout_seconds=1.5)
+        self._wait_for_manager_exit(timeout_seconds=0.5)
+        if self._pid_is_running(manager_pid):
+            raise RuntimeError("existing minion manager process did not stop")
         if self._manager_is_responding():
-            manager_pid = self._pid_from_health(payload)
-            if manager_pid is not None:
-                self._terminate_manager(manager_pid)
-                self._wait_for_manager_exit(timeout_seconds=1.5)
-        if self._manager_is_responding():
-            raise RuntimeError("incompatible minion manager did not stop")
+            raise RuntimeError("existing minion manager did not stop")
         self._cleanup_stale_endpoint()
 
     def _manager_pid(self) -> int | None:
@@ -294,8 +320,32 @@ class MinionManagerProvider:
         while self._manager_is_responding() and time.monotonic() < deadline:
             time.sleep(0.05)
 
+    @classmethod
+    def _wait_for_pid_exit(cls, manager_pid: int | None, *, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while cls._pid_is_running(manager_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return not cls._pid_is_running(manager_pid)
+
     @staticmethod
-    def _terminate_manager(manager_pid: int | None) -> None:
+    def _pid_is_running(manager_pid: int | None) -> bool:
+        if manager_pid is None:
+            return False
+        proc_stat = Path(f"/proc/{manager_pid}/stat")
+        if proc_stat.exists():
+            with contextlib.suppress(OSError, IndexError):
+                if proc_stat.read_text(encoding="utf-8").split()[2] == "Z":
+                    return False
+        try:
+            os.kill(manager_pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @classmethod
+    def _terminate_manager(cls, manager_pid: int | None) -> None:
         if manager_pid is None:
             return
         process_group: int | None = None
@@ -309,11 +359,7 @@ class MinionManagerProvider:
             else:
                 os.kill(manager_pid, signal.SIGTERM)
         for _ in range(20):
-            try:
-                os.kill(manager_pid, 0)
-            except ProcessLookupError:
-                return
-            except PermissionError:
+            if not cls._pid_is_running(manager_pid):
                 return
             time.sleep(0.05)
         with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -321,6 +367,10 @@ class MinionManagerProvider:
                 os.killpg(process_group, signal.SIGKILL)
             else:
                 os.kill(manager_pid, signal.SIGKILL)
+        for _ in range(20):
+            if not cls._pid_is_running(manager_pid):
+                return
+            time.sleep(0.05)
 
     def _cleanup_stale_endpoint(self) -> None:
         for path in (self.client.socket_path, minion_port_path(self.runtime_root)):
@@ -407,6 +457,7 @@ def register_with_core(
         wake_manager=manager.wake_v2,
         attach_manager=manager.attach_manager,
         detach_manager=manager.detach_manager,
+        manager_request=manager.client.request_sync,
     )
     manager.event_notify = lambda: getattr(context.port_registry.get("core:core"), "notify_ready", lambda: None)()
     source = MinionEventSource(provider=manager)

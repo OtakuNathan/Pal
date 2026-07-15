@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+
+RequirementRef = tuple[str, str]
+
+
+def bound_reference_payload(
+    workspace: Mapping[str, Any],
+    name: str,
+    *,
+    required: bool = True,
+) -> dict[str, Any]:
+    for raw in list(workspace.get("reference_paths") or []):
+        item = dict(raw or {})
+        if str(item.get("name") or "") != name:
+            continue
+        path = Path(str(item.get("path") or "")).expanduser()
+        if not path.is_file():
+            raise ValueError(f"bound input {name!r} is unavailable at {path}")
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, Mapping):
+            raise ValueError(f"bound input {name!r} must contain a JSON object")
+        return dict(value)
+    if required:
+        raise ValueError(f"bound input {name!r} is required for submit preflight")
+    return {}
+
+
+def requirement_refs_from_view(view: Mapping[str, Any]) -> set[RequirementRef]:
+    raw_requirements: Any = view.get("requirements", view)
+    if isinstance(raw_requirements, Mapping):
+        requirements = dict(raw_requirements)
+        allowed = {
+            (str(section), str(requirement))
+            for section, values in dict(requirements.get("sections") or {}).items()
+            for requirement in list(values or [])
+            if str(section).strip() and str(requirement).strip()
+        }
+    else:
+        allowed = {
+            (
+                str(dict(item or {}).get("section") or "Requirements"),
+                str(dict(item or {}).get("statement") or dict(item or {}).get("requirement") or ""),
+            )
+            for item in list(raw_requirements or [])
+            if isinstance(item, Mapping)
+        }
+        allowed = {(section, requirement) for section, requirement in allowed if section and requirement}
+    integration = dict(view.get("integration_contract") or {})
+    allowed.update(
+        (str(item.get("section") or ""), str(item.get("requirement") or ""))
+        for item in list(integration.get("covers") or [])
+        if isinstance(item, Mapping)
+        and str(item.get("section") or "").strip()
+        and str(item.get("requirement") or "").strip()
+    )
+    return allowed
+
+
+def submission_requirement_refs(value: Mapping[str, Any]) -> set[RequirementRef]:
+    references: set[RequirementRef] = set()
+    for owner in (value, *list(value.get("cases") or []), *list(value.get("findings") or [])):
+        if not isinstance(owner, Mapping):
+            continue
+        for raw in list(owner.get("requirements") or []):
+            if not isinstance(raw, Mapping):
+                continue
+            section = str(raw.get("section") or "")
+            requirement = str(raw.get("requirement") or "")
+            if section or requirement:
+                references.add((section, requirement))
+    return references
+
+
+def validate_bound_requirement_refs(
+    references: Iterable[RequirementRef],
+    *,
+    allowed: set[RequirementRef],
+    owner: str,
+) -> None:
+    unknown = sorted(set(references) - allowed)
+    if not unknown:
+        return
+    rendered = "; ".join(f"{section}: {requirement}" for section, requirement in unknown)
+    allowed_rendered = "; ".join(
+        f"{section}: {requirement}" for section, requirement in sorted(allowed)
+    ) or "<none>"
+    raise ValueError(
+        f"{owner} referenced Requirement text outside its bound work view: {rendered}. "
+        f"Allowed exact Requirement references: {allowed_rendered}"
+    )
+
+
+def validate_submission_requirement_refs(
+    value: Mapping[str, Any],
+    *,
+    work_view: Mapping[str, Any],
+    owner: str,
+) -> None:
+    validate_bound_requirement_refs(
+        submission_requirement_refs(value),
+        allowed=requirement_refs_from_view(work_view),
+        owner=owner,
+    )

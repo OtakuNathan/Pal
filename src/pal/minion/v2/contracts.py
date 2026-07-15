@@ -57,9 +57,11 @@ class ExecutionEpochState(StrEnum):
     NOT_STARTED = "NOT_STARTED"
     STARTING = "STARTING"
     RUNNING = "RUNNING"
+    REPLAN_COLLECTING = "REPLAN_COLLECTING"
     PAUSE_REQUESTED = "PAUSE_REQUESTED"
     PAUSED = "PAUSED"
     REPLAN_REQUIRED = "REPLAN_REQUIRED"
+    SUPERSEDED = "SUPERSEDED"
     FINALIZING = "FINALIZING"
     COMPLETED = "COMPLETED"
     CANCEL_REQUESTED = "CANCEL_REQUESTED"
@@ -99,6 +101,18 @@ class StandaloneReviewState(StrEnum):
     CANCELLED = "CANCELLED"
     COMPLETED = "COMPLETED"
     TRIAGE_REQUIRED = "TRIAGE_REQUIRED"
+
+
+class PermanentEffectError(RuntimeError):
+    """An effect cannot become valid by replaying the same request."""
+
+
+class DeferredEffectError(RuntimeError):
+    """An effect stopped at a durable safe point and should be replayed later."""
+
+
+class SubmissionInvariantError(PermanentEffectError):
+    """A manager-side post-submit check disagreed with an accepted live submit."""
 
 
 @dataclass(frozen=True)

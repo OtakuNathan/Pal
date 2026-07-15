@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 6
+MINION_V2_SCHEMA_VERSION = 11
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -43,6 +43,13 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS minion_v2_task_search
         ON minion_v2_task_projection(state, family_id, updated_at);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS minion_v2_tasks_fts USING fts5(
+            task_id UNINDEXED,
+            title,
+            objective,
+            workspace
+        );
 
         CREATE TABLE IF NOT EXISTS minion_v2_domain_events (
             event_id TEXT PRIMARY KEY,
@@ -166,6 +173,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             lease_resource_key TEXT NOT NULL,
             fencing_token INTEGER NOT NULL,
             role TEXT NOT NULL,
+            authoring_contract_version TEXT NOT NULL DEFAULT '',
             prompt_pack_ref_json TEXT NOT NULL,
             continuation_ref_json TEXT NOT NULL DEFAULT '{}',
             status TEXT NOT NULL,
@@ -220,6 +228,45 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS minion_v2_submission_drafts (
+            draft_key TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            invocation_id TEXT NOT NULL,
+            lease_resource_key TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            draft_kind TEXT NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            authoring_contract_version TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            source_draft_key TEXT NOT NULL DEFAULT '',
+            submitted_artifact_ref_json TEXT NOT NULL DEFAULT '{}',
+            submission_payload_hash TEXT NOT NULL DEFAULT '',
+            submitted_at TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS minion_v2_submission_drafts_invocation
+        ON minion_v2_submission_drafts(invocation_id, role, draft_kind, fencing_token DESC);
+
+        CREATE INDEX IF NOT EXISTS minion_v2_submission_drafts_lineage
+        ON minion_v2_submission_drafts(
+            workflow_id, role, draft_kind, input_fingerprint, updated_at DESC
+        );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_submission_draft_ops (
+            draft_key TEXT NOT NULL,
+            operation_key TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(draft_key, operation_key),
+            FOREIGN KEY(draft_key) REFERENCES minion_v2_submission_drafts(draft_key)
+        );
+
         CREATE TABLE IF NOT EXISTS minion_v2_workflow_projection (
             workflow_id TEXT PRIMARY KEY,
             current_phase TEXT NOT NULL,
@@ -271,8 +318,12 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "minion_v2_worker_invocations", "total_tool_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_worker_invocations", "total_wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_worker_invocations", "continuation_ref_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "minion_v2_worker_invocations", "authoring_contract_version", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "minion_v2_worker_turns", "tool_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_worker_turns", "wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "minion_v2_submission_drafts", "submitted_artifact_ref_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "minion_v2_submission_drafts", "submission_payload_hash", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_submission_drafts", "submitted_at", "TEXT NOT NULL DEFAULT ''")
     connection.execute(
         """
         INSERT INTO minion_v2_schema_meta(schema_key, schema_value)

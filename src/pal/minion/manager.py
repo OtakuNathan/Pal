@@ -13,6 +13,7 @@ from pal.foundation import utc_now
 from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import dispatch_sidecar_request, pack_sidecar_message, read_sidecar_message
 from pal.llm.runtime import scoped_llm_event_sink
+from pal.minion.catalog import MinionCatalogService
 from pal.minion.config import effective_minion_runtime_config
 from pal.minion.event_delivery import MinionEventDelivery
 from pal.minion.ipc import cleanup_manager_endpoint, start_manager_server
@@ -32,8 +33,10 @@ from pal.shared import MinionApprovalDecision, MinionInvocationPack
 
 
 _DEFAULT_MAX_PARALLEL_NODES = 5
-_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 30.0
-_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled", "killed", "timeout"})
+_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600.0
+_TERMINAL_RUN_STATUSES = frozenset(
+    {"completed", "failed", "cancelled", "killed", "timeout", "suspended", "interrupted"}
+)
 
 
 @dataclass
@@ -86,18 +89,24 @@ class MinionManager:
     endpoint_info: dict[str, Any] = field(default_factory=dict)
     runs: dict[str, MinionRunState] = field(default_factory=dict)
     started_at: str = field(default_factory=utc_now)
+    catalog: MinionCatalogService = field(init=False)
+    catalog_bootstrap: dict[str, Any] = field(init=False, default_factory=dict)
     events: MinionEventDelivery = field(init=False)
     v2_service: MinionV2WorkflowService = field(init=False)
     v2_outbox: MinionV2OutboxProcessor = field(init=False)
     v2_semantic_worker: MinionV2SemanticWorker = field(init=False)
     _llm_broker_bundle: Any | None = field(default=None, init=False, repr=False)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _drain_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _v2_wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _v2_outbox_task: asyncio.Task[Any] | None = field(default=None, init=False, repr=False)
+    _drain_task: asyncio.Task[Any] | None = field(default=None, init=False, repr=False)
     _shutdown_reason: str = field(default="", init=False)
     _shutdown_started_at: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
+        self.catalog = MinionCatalogService(Path(self.runtime_root))
+        self.catalog_bootstrap = self.catalog.bootstrap()
         config = effective_minion_runtime_config(Path(self.runtime_root))
         configured = config.get("max_parallel_llm_nodes", config.get("max_parallel_modules", _DEFAULT_MAX_PARALLEL_NODES))
         self.max_parallel_modules = max(1, int(self.max_parallel_modules or configured or _DEFAULT_MAX_PARALLEL_NODES))
@@ -194,6 +203,40 @@ class MinionManager:
             return self.health()
         if method == "reload_runtime_config":
             return self.reload_runtime_config()
+        if method == "catalog_snapshot":
+            return self.catalog.snapshot(
+                kind=str(params.get("kind") or "all"),
+                query=str(params.get("query") or ""),
+                include_definitions=bool(params.get("include_definitions", False)),
+            )
+        if method == "catalog_refresh":
+            return self.catalog.refresh(actor=str(params.get("actor") or "pal"))
+        if method == "catalog_set_profile_override":
+            return self.catalog.set_profile_override(
+                profile=str(params.get("profile") or ""),
+                changes=dict(params.get("changes") or {}),
+                actor=str(params.get("actor") or "pal"),
+                if_generation=str(params.get("if_generation") or ""),
+            )
+        if method == "catalog_reset_profile_override":
+            return self.catalog.reset_profile_override(
+                profile=str(params.get("profile") or ""),
+                actor=str(params.get("actor") or "pal"),
+                if_generation=str(params.get("if_generation") or ""),
+            )
+        if method == "catalog_set_family_override":
+            return self.catalog.set_family_override(
+                family=str(params.get("family") or ""),
+                changes=dict(params.get("changes") or {}),
+                actor=str(params.get("actor") or "pal"),
+                if_generation=str(params.get("if_generation") or ""),
+            )
+        if method == "catalog_reset_family_override":
+            return self.catalog.reset_family_override(
+                family=str(params.get("family") or ""),
+                actor=str(params.get("actor") or "pal"),
+                if_generation=str(params.get("if_generation") or ""),
+            )
         if method == "v2_wake":
             self._v2_wake_event.set()
             return {"ok": True, "status": "woken"}
@@ -210,11 +253,15 @@ class MinionManager:
             return self.request_shutdown(
                 reason=str(params.get("reason") or "manager_shutdown"),
                 timeout_seconds=float(params.get("timeout_seconds") or self.graceful_shutdown_timeout_seconds),
+                graceful=bool(params.get("graceful", True)),
             )
         raise ValueError(f"unknown Minion V2 manager method: {method}")
 
     async def _run_v2_outbox(self) -> None:
         while not self._shutdown_event.is_set():
+            if self._drain_requested.is_set():
+                await asyncio.sleep(0.05)
+                continue
             try:
                 if self.v2_outbox.start_available(max_concurrency=self.max_parallel_modules + 8):
                     await asyncio.sleep(0)
@@ -407,13 +454,16 @@ class MinionManager:
             "run_count": len(self.runs),
             "active_count": len(active),
             "active_runs": [item.summary() for item in active],
-            "shutdown_requested": self._shutdown_event.is_set(),
+            "shutdown_requested": self._drain_requested.is_set() or self._shutdown_event.is_set(),
+            "draining": self._drain_requested.is_set() and not self._shutdown_event.is_set(),
             "shutdown_reason": self._shutdown_reason,
             "max_parallel_llm_nodes": self.max_parallel_modules,
             "pending_event_count": len(self.event_queue),
             "event_subscriber_count": len(self.event_subscribers),
             "minion_db_path": str(self.v2_service.repository.db_path),
             "log_sink": current_service_log_sink_description(),
+            "catalog_generation": str(self.catalog.snapshot()["generation"]),
+            "catalog_migration": dict(self.catalog_bootstrap.get("migration") or {}),
             **dict(self.endpoint_info),
         }
 
@@ -427,18 +477,81 @@ class MinionManager:
         self._v2_wake_event.set()
         return {"ok": True, "status": "ok", "config": config, "max_parallel_llm_nodes": self.max_parallel_modules}
 
-    def request_shutdown(self, *, reason: str, timeout_seconds: float) -> dict[str, Any]:
+    def request_shutdown(
+        self,
+        *,
+        reason: str,
+        timeout_seconds: float,
+        graceful: bool = True,
+    ) -> dict[str, Any]:
         self._shutdown_reason = reason
         self._shutdown_started_at = self._shutdown_started_at or utc_now()
         self.graceful_shutdown_timeout_seconds = max(0.0, timeout_seconds)
-        self._shutdown_event.set()
+        if graceful:
+            self._drain_requested.set()
+            if self._drain_task is None or self._drain_task.done():
+                self._drain_task = asyncio.create_task(
+                    self._drain_for_shutdown(),
+                    name="minion-manager-graceful-drain",
+                )
+        else:
+            self._drain_requested.set()
+            self._shutdown_event.set()
         return {
             "ok": True,
-            "status": "shutdown_requested",
+            "status": "draining" if graceful else "shutdown_requested",
             "reason": reason,
             "timeout_seconds": self.graceful_shutdown_timeout_seconds,
             "started_at": self._shutdown_started_at,
         }
+
+    async def _drain_for_shutdown(self) -> None:
+        deadline = asyncio.get_running_loop().time() + self.graceful_shutdown_timeout_seconds
+        notified_runs: set[str] = set()
+        while True:
+            for run_id, state in tuple(self.runs.items()):
+                process = state.process
+                if (
+                    run_id in notified_runs
+                    or state.status in _TERMINAL_RUN_STATUSES
+                    or process is None
+                    or process.returncode is not None
+                ):
+                    continue
+                sent = await self.v2_semantic_worker.send_worker_control(
+                    run_id,
+                    {
+                        "type": "restart_requested",
+                        "payload": {
+                            "reason": self._shutdown_reason or "manager_restart_requested",
+                            "summary": (
+                                "Manager restart requested; suspend after the current durable "
+                                "LLM/tool safe point."
+                            ),
+                        },
+                    },
+                )
+                if sent:
+                    notified_runs.add(run_id)
+            active_runs = [
+                state
+                for state in self.runs.values()
+                if state.process is not None
+                and state.process.returncode is None
+                and state.status not in _TERMINAL_RUN_STATUSES
+            ]
+            background_count = self.v2_outbox.active_background_count
+            if not active_runs and background_count == 0:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                self.logger.warning(
+                    "minion manager graceful drain timed out active_runs=%s background_effects=%s",
+                    len(active_runs),
+                    background_count,
+                )
+                break
+            await asyncio.sleep(0.05)
+        self._shutdown_event.set()
 
     async def close_all(self) -> None:
         for state in list(self.runs.values()):
@@ -461,7 +574,11 @@ class MinionManager:
         installed: list[signal.Signals] = []
 
         def request_stop() -> None:
-            self.request_shutdown(reason="signal", timeout_seconds=self.graceful_shutdown_timeout_seconds)
+            self.request_shutdown(
+                reason="signal",
+                timeout_seconds=self.graceful_shutdown_timeout_seconds,
+                graceful=True,
+            )
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError):

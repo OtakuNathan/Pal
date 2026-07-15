@@ -76,7 +76,7 @@ class CandidateUnionService:
             raise ValueError("invalid final branch name")
         if not verification_refs or set(scenario_fingerprints) == set():
             raise ValueError("final publish requires accepted scenario verification evidence")
-        _git(repository, "branch", "-f", branch_name, commit_sha)
+        _git(repository, "update-ref", f"refs/heads/{branch_name}", commit_sha)
         if _git(repository, "rev-parse", branch_name).strip() != commit_sha:
             raise RuntimeError("published branch does not resolve to the deterministic candidate union")
         children = [(union_ref.sha256, "candidate_union")]
@@ -148,7 +148,7 @@ class IntegrationService:
     ) -> ArtifactRef:
         if not branch_name.strip() or branch_name.startswith("-"):
             raise ValueError("invalid final branch name")
-        _git(repository, "branch", "-f", branch_name, integration_candidate_digest)
+        _git(repository, "update-ref", f"refs/heads/{branch_name}", integration_candidate_digest)
         resolved_sha = _git(repository, "rev-parse", branch_name).strip()
         if resolved_sha != integration_candidate_digest:
             raise RuntimeError("published branch does not resolve to accepted integration candidate")

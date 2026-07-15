@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Protocol
 import tomllib
 
+from pal.minion.catalog_store import family_override_root, load_json_objects
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
 
@@ -105,7 +106,7 @@ class MinionFamilyProvider(Protocol):
 class MinionFamilyRegistry:
     family_providers: tuple[MinionFamilyProvider, ...] = ()
     runtime_root: Path | None = None
-    builtin_families: tuple[MinionFamilyManifest, ...] = field(default_factory=lambda: BUILTIN_MINION_FAMILIES)
+    builtin_families: tuple[MinionFamilyManifest, ...] = field(default_factory=lambda: load_builtin_minion_families())
 
     def list_families(self) -> list[MinionFamilyManifest]:
         families: dict[str, MinionFamilyManifest] = {}
@@ -143,7 +144,7 @@ class MinionFamilyRegistry:
     def _runtime_families(self) -> list[MinionFamilyManifest]:
         if self.runtime_root is None:
             return []
-        return _load_families_from_dir(Path(self.runtime_root) / "plugins" / "minion" / "families")
+        return _load_family_overrides(Path(self.runtime_root))
 
 
 def load_builtin_minion_families() -> tuple[MinionFamilyManifest, ...]:
@@ -159,24 +160,16 @@ def load_builtin_minion_families() -> tuple[MinionFamilyManifest, ...]:
     return tuple(families)
 
 
-def _load_families_from_dir(family_dir: Path) -> list[MinionFamilyManifest]:
-    if not family_dir.exists():
-        return []
+def _load_family_overrides(runtime_root: Path) -> list[MinionFamilyManifest]:
     families: list[MinionFamilyManifest] = []
-    for path in sorted(family_dir.glob("*.toml")):
-        try:
-            payload = tomllib.loads(path.read_text(encoding="utf-8"))
-            family = MinionFamilyManifest.from_dict(payload)
-        except Exception:
-            continue
+    for path, payload in load_json_objects(family_override_root(runtime_root)):
+        family = MinionFamilyManifest.from_dict(payload)
         metadata = dict(family.metadata)
-        metadata.setdefault("source_path", str(path))
+        metadata["source_path"] = str(path)
+        metadata["catalog_source"] = "override"
         families.append(MinionFamilyManifest.from_dict({**family.to_dict(), "metadata": metadata}))
     return families
 
 
 def _normalize_family_id(value: str) -> str:
     return str(value or "general").strip().replace("/", ".") or "general"
-
-
-BUILTIN_MINION_FAMILIES = load_builtin_minion_families()

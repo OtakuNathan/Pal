@@ -185,11 +185,10 @@ class VerificationService:
     ) -> tuple[ArtifactRef, VerificationStatus]:
         if not case_results:
             raise ValueError("verification report requires at least one test case")
-        if node.payload.get("historical_repair_bill_refs") and not any(
-            item.case_kind == VerificationCaseKind.HISTORICAL_REGRESSION for item in case_results
-        ):
-            raise ValueError("verification must run historical RepairBill regressions first")
-        _validate_case_order(case_results)
+        validate_verification_case_order(
+            [item.case_kind for item in case_results],
+            historical_required=bool(node.payload.get("historical_repair_bill_refs")),
+        )
         status = aggregate_verification_status(item.status for item in case_results)
         payload = {
             "schema_version": "1",
@@ -243,11 +242,28 @@ class VerificationService:
         requirements: Sequence[Mapping[str, str]] = (),
         locations: Sequence[Mapping[str, str]] = (),
         invariants: Sequence[str] = (),
+        findings: Sequence[Mapping[str, Any]] = (),
     ) -> tuple[ArtifactRef, str]:
+        finding_values = [dict(item) for item in findings]
+        all_requirements = [
+            dict(reference)
+            for item in finding_values
+            for reference in list(item.get("requirements") or [])
+        ] or [dict(item) for item in requirements]
+        all_locations = [
+            dict(reference)
+            for item in finding_values
+            for reference in list(item.get("locations") or [])
+        ] or [dict(item) for item in locations]
+        all_invariants = [
+            str(reference)
+            for item in finding_values
+            for reference in list(item.get("invariants") or [])
+        ] or [str(item) for item in invariants]
         semantic_contract_refs = _semantic_reference_keys(
-            requirements=requirements,
-            locations=locations,
-            invariants=invariants,
+            requirements=all_requirements,
+            locations=all_locations,
+            invariants=all_invariants,
         )
         fingerprint = finding_fingerprint(
             defect_kind=defect_kind,
@@ -272,6 +288,7 @@ class VerificationService:
             "requirements": [dict(item) for item in requirements],
             "locations": [dict(item) for item in locations],
             "invariants": [str(item) for item in invariants],
+            "findings": finding_values,
             "finding_fingerprint": fingerprint,
             "minimal_reproducer_ref": dict(minimal_reproducer_ref),
             "test_artifact_ref": dict(test_artifact_ref),
@@ -562,6 +579,11 @@ def repair_bill_semantic_view(
         "requirements": [dict(item) for item in list(bill.get("requirements") or [])],
         "locations": [dict(item) for item in list(bill.get("locations") or [])],
         "invariants": [str(item) for item in list(bill.get("invariants") or [])],
+        "findings": [
+            semantic_finding_payload(dict(item))
+            for item in list(bill.get("findings") or [])
+            if isinstance(item, Mapping)
+        ],
         "reproducer": reproducer,
         "expected": bill.get("expected"),
         "actual": bill.get("actual"),
@@ -590,6 +612,21 @@ def semantic_finding_payload(value: Mapping[str, Any]) -> dict[str, Any]:
         "suggested_repair_boundary": [
             str(entry) for entry in list(item.get("suggested_repair_boundary") or [])
         ],
+        **(
+            {"defect_kind": str(item.get("defect_kind") or "")}
+            if str(item.get("defect_kind") or "").strip()
+            else {}
+        ),
+        **(
+            {"target_module": str(item.get("target_module") or "")}
+            if str(item.get("target_module") or "").strip()
+            else {}
+        ),
+        **(
+            {"routing_disposition": str(item.get("routing_disposition") or "")}
+            if str(item.get("routing_disposition") or "").strip()
+            else {}
+        ),
     }
 
 
@@ -685,20 +722,38 @@ def candidate_reuse_fingerprint(
     return _normalized_hash(payload)
 
 
-def _validate_case_order(case_results: Sequence[VerificationCaseResult]) -> None:
-    rank = {
-        VerificationCaseKind.HISTORICAL_REGRESSION: 0,
-        VerificationCaseKind.CONTRACT_ADVERSARIAL: 1,
-        VerificationCaseKind.DIFF_RISK: 2,
-        VerificationCaseKind.COMPILE: 3,
-        VerificationCaseKind.LSP: 3,
-        VerificationCaseKind.UNIT: 3,
-        VerificationCaseKind.CONSUMER_PROBE: 3,
-        VerificationCaseKind.PLATFORM_ASSUMPTION: 4,
-    }
-    ranks = [rank[item.case_kind] for item in case_results]
-    if ranks != sorted(ranks):
-        raise ValueError("verification cases must run historical failures before adversarial and diff-risk cases")
+def validate_verification_case_order(
+    case_kinds: Sequence[VerificationCaseKind | str],
+    *,
+    historical_required: bool,
+) -> None:
+    """Enforce the temporal RepairBill gate without ordering unrelated probes."""
+
+    if not historical_required:
+        return
+    normalized = [
+        item if isinstance(item, VerificationCaseKind) else VerificationCaseKind(str(item))
+        for item in case_kinds
+    ]
+    historical_positions = [
+        index
+        for index, kind in enumerate(normalized)
+        if kind == VerificationCaseKind.HISTORICAL_REGRESSION
+    ]
+    if not historical_positions:
+        raise ValueError("verification must run historical RepairBill regressions first")
+    risk_positions = [
+        index
+        for index, kind in enumerate(normalized)
+        if kind in {
+            VerificationCaseKind.CONTRACT_ADVERSARIAL,
+            VerificationCaseKind.DIFF_RISK,
+        }
+    ]
+    if risk_positions and max(historical_positions) > min(risk_positions):
+        raise ValueError(
+            "verification cases must run historical failures before adversarial and diff-risk cases"
+        )
 
 
 def _transitive_dependents(

@@ -12,6 +12,8 @@ from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.catalog import MinionV2Catalog
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.paths import inferred_project_name
+from pal.minion.v2.replan import compile_architecture_finding_markdown
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_SKELETON_ARTIFACT,
     GitBackedSkeletonService,
@@ -120,10 +122,60 @@ class MinionV2WorkflowService:
             query=str(data.get("query") or ""),
             task_id=str(data.get("task_id") or ""),
             family_id=str(data.get("family_id") or ""),
+            owner=str(data.get("owner") or ""),
             include_archived=bool(data.get("include_archived")),
             limit=int(data.get("limit") or 20),
         )
         return {"status": "ok", "tasks": list(tasks), "count": len(tasks)}
+
+    def search_task_ledger(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        data = dict(request)
+        actor = str(data.get("actor") or "pal")
+        source_channel = str(data.get("source_channel") or "")
+        tasks = self.repository.search_tasks(
+            query=str(data.get("query") or ""),
+            family_id=str(data.get("family_id") or ""),
+            owner=actor,
+            include_archived=bool(data.get("include_archived")),
+            limit=int(data.get("limit") or 10),
+        )
+        bound_workflow = self.repository.read_channel_workflow(actor_id=actor, channel_id=source_channel)
+        items: list[dict[str, Any]] = []
+        for task in tasks:
+            workflows = self.repository.search_workflows(
+                actor_id=actor,
+                channel_id="",
+                task_id=str(task["task_id"]),
+                include_terminal=True,
+                limit=20,
+            )
+            workflow_items: list[dict[str, Any]] = []
+            for workflow in workflows:
+                projection = self.repository.read_workflow_projection(str(workflow["workflow_id"])) or {}
+                workflow_items.append(
+                    {
+                        "state": str(workflow.get("workflow_state") or ""),
+                        "phase": str(projection.get("current_phase") or ""),
+                        "liveness": str(projection.get("liveness") or ""),
+                        "waiting_for_user": bool(projection.get("waiting_for_user")),
+                        "bound_to_current_channel": str(workflow["workflow_id"]) == bound_workflow,
+                        "updated_at": str(workflow.get("updated_at") or ""),
+                    }
+                )
+            items.append(
+                {
+                    "task_id": str(task["task_id"]),
+                    "title": str(task.get("title") or ""),
+                    "objective": str(task.get("objective") or ""),
+                    "family": str(task.get("family_id") or ""),
+                    "workspace": str(task.get("workspace_key") or ""),
+                    "state": str(task.get("state") or ""),
+                    "score": float(task.get("score") or 0.0),
+                    "updated_at": str(task.get("updated_at") or ""),
+                    "workflows": workflow_items,
+                }
+            )
+        return {"status": "ok", "query": str(data.get("query") or ""), "tasks": items, "count": len(items)}
 
     def update_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
@@ -274,7 +326,12 @@ class MinionV2WorkflowService:
             )
             repair_artifact = dict(self.artifacts.read_json(artifact_ref))
             repair_modules = dict(dict(repair_artifact.get("submission") or {}).get("modules") or {})
-            if len(repair_modules) != 1:
+            repair_implementation_modules = {
+                name: module
+                for name, module in repair_modules.items()
+                if str(dict(module or {}).get("module_kind") or "") == "implementation"
+            }
+            if len(repair_implementation_modules) != 1:
                 raise ValueError(
                     "software review_and_repair requires a bounded single-module ArchitectureSkeletonArtifact"
                 )
@@ -286,6 +343,7 @@ class MinionV2WorkflowService:
             "family_binding_ref": family_binding_ref.to_dict(),
             "operation": operation,
             "goal": goal,
+            "workflow_name": str(task_revision.get("title") or goal or "Minion workflow"),
             "requirements_ref": requirements_ref,
             "constraints": data.get("constraints") or [],
             "approved_evidence": list(data.get("approved_evidence") or []),
@@ -476,11 +534,14 @@ class MinionV2WorkflowService:
         query = str(selector or "").strip()
         if not query:
             return ""
-        candidates = [
-            item
-            for item in self.repository.search_tasks(query=query, include_archived=False, limit=20)
-            if str(item.get("owner") or "") == str(actor)
-        ]
+        candidates = list(
+            self.repository.search_tasks(
+                query=query,
+                owner=actor,
+                include_archived=False,
+                limit=20,
+            )
+        )
         exact = [item for item in candidates if str(item.get("title") or "").casefold() == query.casefold()]
         selected = exact or candidates
         if len(selected) == 1:
@@ -505,18 +566,23 @@ class MinionV2WorkflowService:
                 limit=2,
             )
         else:
+            task_id = self.resolve_task_selector(selector=query, actor=actor)
             candidates = self.repository.search_workflows(
                 actor_id=actor,
-                channel_id=source_channel,
-                query=query,
+                channel_id="",
+                task_id=task_id,
                 include_terminal=True,
                 limit=20,
             )
-            exact = [
-                item for item in candidates if str(item.get("task_title") or "").casefold() == query.casefold()
-            ]
-            if exact:
-                candidates = tuple(exact)
+            active = tuple(
+                item
+                for item in candidates
+                if str(item.get("workflow_state") or "") not in {"COMPLETED", "REJECTED", "CANCELLED"}
+            )
+            if active:
+                candidates = active
+            elif candidates:
+                candidates = candidates[:1]
         if len(candidates) == 1:
             workflow_id = str(candidates[0]["workflow_id"])
             self.repository.bind_channel_workflow(
@@ -562,6 +628,15 @@ class MinionV2WorkflowService:
         waiting_for_user = bool(projection["waiting_for_user"])
         active_worker = "" if waiting_for_user else str(projection.get("active_worker_id") or "")
         invocation = self.repository.read_worker_invocation(active_worker) if active_worker else None
+        worker_node = next(
+            (
+                item
+                for item in snapshots
+                if invocation is not None
+                and item.aggregate_id == str(invocation.get("aggregate_id") or "")
+            ),
+            None,
+        )
         latest_event = self.repository.read_latest_workflow_event(workflow_id)
         result = {
             "status": "ok",
@@ -572,7 +647,23 @@ class MinionV2WorkflowService:
             "active_aggregate_id": active_id,
             "active_node_state": active_state,
             "task_title": task_title,
-            "active_module": str((active.payload if active is not None else {}).get("module_name") or ""),
+            "active_module": str(
+                (
+                    worker_node.payload
+                    if worker_node is not None
+                    else active.payload
+                    if active is not None
+                    else {}
+                ).get("module_name")
+                or (
+                    worker_node.payload
+                    if worker_node is not None
+                    else active.payload
+                    if active is not None
+                    else {}
+                ).get("unit_id")
+                or ""
+            ),
             "active_worker": active_worker,
             "active_worker_role": str((invocation or {}).get("role") or ""),
             "blocker": projection["blocker"],
@@ -623,6 +714,15 @@ class MinionV2WorkflowService:
             else:
                 markdown = self.architecture.compile_human_review_markdown(manifest_ref)
             actions = ["accept", "edit", "reject"]
+        replan_batch_value = revision.payload.get("replan_finding_batch_ref")
+        if replan_batch_value and not card:
+            markdown = (
+                compile_architecture_finding_markdown(
+                    dict(self.artifacts.read_json(dict(replan_batch_value)))
+                )
+                + "\n"
+                + markdown
+            )
         review_ref = dict(revision.payload.get("review_artifact_ref") or {})
         review = dict(self.artifacts.read_json(review_ref)) if review_ref else {}
         return {
@@ -908,16 +1008,19 @@ class MinionV2WorkflowService:
                 child_record = self.repository.read_artifact_record(str(child.get("sha256") or ""))
                 if child_record is None or not child_record.get("durable"):
                     raise ValueError(f"ArchitectureSkeletonArtifact has no durable {key}")
-            worktree = self.skeleton.provision_review_worktree(
+            review_workspace = self.skeleton.provision_review_worktree(
                 artifact=artifact,
                 review_name=f"external-{str(record['sha256'])[:16]}",
             )
-            requirements = self.artifacts.read_json(dict(artifact["requirements_ref"]))
-            review = review_architecture_skeleton(
-                artifact,
-                worktree=worktree,
-                requirements_payload=requirements,
-            )
+            try:
+                requirements = self.artifacts.read_json(dict(artifact["requirements_ref"]))
+                review = review_architecture_skeleton(
+                    artifact,
+                    worktree=review_workspace.worktree,
+                    requirements_payload=requirements,
+                )
+            finally:
+                review_workspace.cleanup()
             if review.verdict != "PASS":
                 raise ValueError("external ArchitectureSkeletonArtifact failed mechanical skeleton validation")
             return
@@ -953,6 +1056,8 @@ def _normalize_workspace(value: Any) -> dict[str, Any]:
         workspace["repo_path"] = str(Path(_file_uri_path(str(workspace["repo_path"]))).expanduser())
     if workspace.get("repo_path") and not workspace.get("kind"):
         workspace["kind"] = "existing_repo"
+    if not str(workspace.get("project_name") or "").strip():
+        workspace["project_name"] = inferred_project_name(workspace)
     return workspace
 
 

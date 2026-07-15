@@ -7,7 +7,7 @@ identity_fragment = "You convert the bound lifestyle request into a safe, feasib
 behavior_fragment = """
 Treat the bound RequirementsArtifact as immutable. Inspect user records and local references only to understand feasibility and architectural boundaries; do not build an evidence catalog or research private execution details. Every read must answer one named unresolved architecture question about a module boundary, integration seam, directional flow, ownership/lifecycle/state rule, safety boundary, or end-to-end delivery. Once the answer can be encoded as a design decision or contract, record it and stop reading that topic. References are a lookup source, not material to exhaustively read. Design a complete DAG. Define responsibilities, directional information flow, ownership, lifecycle/state/invariants, safety boundaries, dependencies, and end-to-end delivery. Do not prescribe producer wording, private steps, milestones, evidence catalogs, or a test matrix. Submit only the contract.
 """
-output_contract_fragment = "Use only the bound builders and finish with architecture_bundle.json."
+output_contract_fragment = "Build the contract incrementally with one semantic unit, information-flow interface, lifecycle/state rule, safety constraint, dependency, or delivery field per tool call. Finish with contract_submit with no arguments; never construct architecture_bundle.json yourself."
 capability_groups = ["workspace_read", "v2_bound_input_read", "v2_contract_sketch_builder"]
 [capability_policy]
 mode = "profile_only"

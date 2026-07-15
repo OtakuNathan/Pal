@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.minion.v2.paths import (
+    artifact_epoch_root,
+    deliverable_root,
+    invocation_root,
+    role_workspace_root,
+    verification_scratch_root,
+)
 from pal.shared import MinionInvocationPack
 
 
@@ -128,11 +135,22 @@ def _dedupe(values: Sequence[str]) -> list[str]:
     return result
 
 
-def prepare_v2_role_workspace(runtime_root: Path, pack: MinionInvocationPack, *, run_id: str) -> MinionInvocationPack:
+def prepare_v2_role_workspace(
+    runtime_root: Path,
+    pack: MinionInvocationPack,
+    *,
+    run_id: str,
+    attempt_key: str = "",
+) -> MinionInvocationPack:
     workspace = dict(pack.workspace or {})
     source = str(workspace.get("repo_path") or workspace.get("cwd") or "").strip()
-    target = Path(runtime_root) / "data" / "minion" / "v2" / "role-workspaces" / _safe_component(run_id)
-    invocation_dir = Path(runtime_root) / "data" / "minion" / "v2" / "invocations" / _safe_component(pack.invocation_id)
+    target = role_workspace_root(runtime_root) / _safe_component(run_id)
+    invocation_dir = invocation_root(runtime_root) / _safe_component(pack.invocation_id)
+    attempt_dir = (
+        invocation_dir / "attempts" / _safe_component(attempt_key)
+        if str(attempt_key or "").strip()
+        else invocation_dir
+    )
     if source:
         source_path = Path(source).expanduser().resolve()
         if not source_path.is_dir():
@@ -156,10 +174,10 @@ def prepare_v2_role_workspace(runtime_root: Path, pack: MinionInvocationPack, *,
         target.mkdir(parents=True, exist_ok=True)
     writable_dirs = {
         "run_dir": invocation_dir,
-        "artifact_dir": invocation_dir / "artifacts",
-        "artifact_stage_dir": invocation_dir / "artifact-stage",
-        "log_dir": invocation_dir / "logs",
-        "review_scratch_dir": invocation_dir / "review-scratch",
+        "artifact_dir": attempt_dir / "artifacts",
+        "artifact_stage_dir": attempt_dir / "artifact-stage",
+        "log_dir": attempt_dir / "logs",
+        "review_scratch_dir": attempt_dir / "review-scratch",
     }
     for path in writable_dirs.values():
         path.mkdir(parents=True, exist_ok=True)
@@ -181,7 +199,7 @@ def provision_artifact_workspaces(
     epoch_id: str,
     unit_ids: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
-    root = Path(runtime_root) / "data" / "minion" / "v2" / "epochs" / epoch_id / "artifact-workspaces"
+    root = artifact_epoch_root(runtime_root) / epoch_id / "artifact-workspaces"
     result: dict[str, dict[str, Any]] = {}
     for unit_id in [*unit_ids, "integration"]:
         workspace = root / _safe_component(unit_id)
@@ -256,7 +274,7 @@ class ArtifactBundleAdapter:
         return destination
 
     def prepare_verification_workspace(self, *, review_id: str, candidate_ref: Mapping[str, Any]) -> tuple[Path, Path]:
-        root = Path(self.runtime_root) / "data" / "minion" / "v2" / "verification" / _safe_component(review_id)
+        root = verification_scratch_root(self.runtime_root) / _safe_component(review_id)
         candidate = root / "candidate"
         scratch = root / "scratch"
         if candidate.exists():
@@ -310,7 +328,7 @@ class ArtifactBundleAdapter:
         candidate_ref: Mapping[str, Any],
         verification_ref: ArtifactRef,
     ) -> ArtifactRef:
-        destination = Path(self.runtime_root) / "data" / "minion" / "v2" / "deliverables" / _safe_component(workflow_id)
+        destination = deliverable_root(self.runtime_root) / _safe_component(workflow_id)
         if destination.exists():
             shutil.rmtree(destination)
         self.materialize_candidate(candidate_ref, destination)

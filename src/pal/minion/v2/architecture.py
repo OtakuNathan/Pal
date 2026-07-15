@@ -889,11 +889,24 @@ def validate_unit_contract(
         state_text = str(state_model or "").strip().lower()
         if state_text not in {"stateless", "n/a", "none"}:
             raise ValueError("stateless module must declare state_model=stateless")
+        if lifecycle in (None, "", {}, []):
+            raise ValueError("stateless module must explicitly declare its process/import lifecycle")
     else:
         if lifecycle in (None, "", {}, []) or state_model in (None, "", {}, []):
             raise ValueError("stateful module needs explicit lifecycle and state_model")
-        if not invariants:
-            raise ValueError("stateful module needs explicit invariants")
+    if not invariants:
+        raise ValueError("unit contract needs at least one explicit invariant")
+    ownership = dict(payload.get("ownership") or {})
+    if not str(ownership.get("rule") or "").strip():
+        raise ValueError("unit contract needs an explicit ownership rule")
+    if not list(payload.get("provided_interfaces") or []):
+        raise ValueError("unit contract needs at least one provided interface")
+    if not list(payload.get("error_behavior") or []):
+        raise ValueError("unit contract needs explicit error behavior")
+    if not list(payload.get("compatibility") or []):
+        raise ValueError("unit contract needs explicit compatibility behavior")
+    if not _text_list(payload.get("requirement_ids")):
+        raise ValueError("unit contract must cover at least one Requirement")
     budget = dict(payload.get("complexity_budget") or {})
     if not budget:
         raise ValueError("unit contract needs a structured complexity_budget")
@@ -913,7 +926,7 @@ def validate_unit_contract(
             "reference_only_paths": _text_list(payload.get("reference_only_paths")),
             "provided_interfaces": list(payload.get("provided_interfaces") or []),
             "consumed_interfaces": list(payload.get("consumed_interfaces") or []),
-            "ownership": dict(payload.get("ownership") or {}),
+            "ownership": ownership,
             "lifecycle": lifecycle,
             "state_model": state_model,
             "invariants": invariants,

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pal.minion.v2.adapters import ArtifactBundleAdapter, prepare_v2_role_workspace, provision_artifact_workspaces
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
+from pal.minion.v2.paths import resolve_project_git_layout
 from pal.minion.v2.repository import MinionV2Repository
 from pal.shared import MinionInvocationPack
 
@@ -103,11 +104,75 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
 
         role_workspace = Path(prepared.workspace["repo_path"])
         self.assertEqual((role_workspace / "input.txt").read_text(encoding="utf-8"), "truth")
-        self.assertTrue(role_workspace.is_relative_to(self.root / "data" / "minion" / "v2" / "role-workspaces"))
+        self.assertTrue(
+            role_workspace.is_relative_to(
+                self.root / "data" / "minion" / "runtime" / "role-workspaces"
+            )
+        )
         for key in ("run_dir", "artifact_dir", "artifact_stage_dir", "log_dir", "review_scratch_dir"):
             path = Path(prepared.workspace[key])
             self.assertTrue(path.is_dir(), key)
-            self.assertTrue(path.is_relative_to(self.root / "data" / "minion" / "v2" / "invocations" / "inv-role-workspace"))
+            self.assertTrue(
+                path.is_relative_to(
+                    self.root
+                    / "data"
+                    / "minion"
+                    / "runtime"
+                    / "invocations"
+                    / "inv-role-workspace"
+                )
+            )
+
+    def test_role_workspace_isolates_attempt_artifacts_but_keeps_shared_run_journal(self) -> None:
+        source = self.root / "attempt-source"
+        source.mkdir()
+        pack = MinionInvocationPack(
+            invocation_id="inv-attempt-isolation",
+            workspace={"repo_path": str(source)},
+        )
+
+        first = prepare_v2_role_workspace(
+            self.root,
+            pack,
+            run_id="run-attempt-isolation",
+            attempt_key="fence-1",
+        )
+        second = prepare_v2_role_workspace(
+            self.root,
+            pack,
+            run_id="run-attempt-isolation",
+            attempt_key="fence-2",
+        )
+
+        self.assertEqual(first.workspace["run_dir"], second.workspace["run_dir"])
+        self.assertNotEqual(first.workspace["artifact_dir"], second.workspace["artifact_dir"])
+        self.assertIn("attempts/fence-1", first.workspace["artifact_stage_dir"])
+        self.assertIn("attempts/fence-2", second.workspace["artifact_stage_dir"])
+
+    def test_project_layout_uses_repo_name_and_disambiguates_same_named_sources(self) -> None:
+        first_source = self.root / "one" / "shared-project"
+        second_source = self.root / "two" / "shared-project"
+        first_source.mkdir(parents=True)
+        second_source.mkdir(parents=True)
+
+        first = resolve_project_git_layout(
+            self.root,
+            workspace={"repo_path": str(first_source)},
+            workflow_id="wf-first",
+            workflow_name="First delivery",
+        )
+        second = resolve_project_git_layout(
+            self.root,
+            workspace={"repo_path": str(second_source)},
+            workflow_id="wf-second",
+            workflow_name="Second delivery",
+        )
+
+        self.assertEqual(first.project_key, "shared-project")
+        self.assertTrue(second.project_key.startswith("shared-project-"))
+        self.assertNotEqual(first.project_root, second.project_root)
+        self.assertTrue(first.workflow_branch.endswith("/main"))
+        self.assertTrue(second.workflow_branch.endswith("/main"))
 
 
 if __name__ == "__main__":

@@ -12,10 +12,11 @@ boundary. Write the contracted JSON artifacts inside the workspace and stay with
 If the unit cannot fit its complexity budget, return architecture_defect instead of widening scope. Do not claim acceptance.
 """
 output_contract_fragment = """
-Write the contracted workspace artifact, then write producer_report.json as the primary artifact with current_micro_plan, completed_checklist,
-files_inspected, files_changed, tests_run, open_questions, known_failures, and status=candidate_ready|architecture_defect.
+Write the contracted workspace artifact. Record progress and focused validation through developer_note and developer test/check tools, then call
+candidate_submit with no arguments. The Manager generates producer_report.json. Never write or edit that report yourself. If the frozen contract cannot
+satisfy the Requirement, use candidate_report_architecture_defect instead of fabricating output.
 """
-capability_groups = ["lifestyle_producer"]
+capability_groups = ["lifestyle_producer", "v2_candidate_builder"]
 
 [capability_policy]
 mode = "profile_only"

@@ -15,15 +15,16 @@ positives, deduplicate overlap, and state unreviewed surfaces or residual uncert
 If the request is review-only, produce the report and stop. Do not begin repair merely because a fix appears straightforward.
 """
 output_contract_fragment = """
-Write standalone_review.json with this shape:
-{"verdict":"approved|changes_requested|blocked","scope":{},"reviewed_surfaces":["..."],"cases":[{"name":"semantic descriptive name","case_kind":"historical_regression|contract_adversarial|diff_risk|compile|lsp|unit|consumer_probe|platform_assumption","command":["..."],"expected_exit_codes":[0],"requirements":[{"section":"Requirement section","requirement":"exact Requirement text"}],"locations":[{"path":"src/file","symbol":"optional","section":"optional contract section"}],"invariants":["exact invariant"],"description":"..."}],"findings":[{"case":"optional exact semantic case name","finding_section":"ownership|lifecycle|state_machine|invariant|interface|compatibility|delivery|implementation","summary":"...","failure_reason":"...","requirements":[{"section":"...","requirement":"..."}],"locations":[{"path":"...","symbol":"...","section":"..."}],"invariants":["..."],"severity":"blocker|major|minor","evidence":["..."],"suggested_repair_boundary":["narrow path"]}],"commands_or_lsp_evidence":["..."],"test_gaps":["..."],"unreviewed_surfaces":["..."],"residual_risk":["..."],"reviewer_summary":"..."}.
-The Manager creates internal identities. Never output finding/case IDs, handles, hashes, refs, or JSON pointers. Keep final chat short.
+Write probes only through verification_scratch_write and execute them through the dedicated verification run tools. Record concrete defects with typed defect
+tools, review coverage/gaps through review_surface, and the final approved/changes_requested/blocked judgment through review_conclusion. Finish with review_submit
+with no arguments. The Manager compiles the report from the fenced Draft; never construct a nested report or expose internal identities.
 """
-capability_groups = ["software_verifier"]
+capability_groups = ["software_verifier", "v2_standalone_review_builder"]
 
 [capability_policy]
 mode = "profile_only"
 risk = "read_only"
+allow_read_only_shell = true
 
 [capability_description_overrides]
 op_file_read = "Read target source, tests, manifests, or configuration needed to prove a review claim. Start from the bound scope and changed/risky surfaces; do not perform unbounded repository archaeology."

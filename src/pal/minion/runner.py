@@ -178,6 +178,12 @@ class _MinionCooperativeCancel(Exception):
         self.payload = dict(payload)
 
 
+class _MinionCooperativeRestart(Exception):
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__(str(payload.get("summary") or "minion suspended for manager restart"))
+        self.payload = dict(payload)
+
+
 class _MinionLLMRuntimeAdapter:
     def __init__(self, runner: "MinionRunner", base_runtime: Any, state: "MinionAgentLoopState") -> None:
         self._runner = runner
@@ -493,6 +499,10 @@ class _MinionExecutionRuntimeAdapter:
             )
             raise
         self._state.tool_call_count += 1
+        self._runner._observed_tool_call_count = max(
+            self._runner._observed_tool_call_count,
+            self._state.tool_call_count,
+        )
         self._runner._append_debug_log(
             "tool_call_completed",
             {
@@ -554,6 +564,7 @@ class MinionRunner:
     read_decision: DecisionReader
     runtime_bundle: MinionRuntimeBundle | None = None
     blocked_summary: str = ""
+    blocked_kind: str = ""
     produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
     memory_candidates: list[dict[str, Any]] = field(default_factory=list)
     shell_mutation_violations: list[dict[str, Any]] = field(default_factory=list)
@@ -565,7 +576,9 @@ class MinionRunner:
     _memory_service: MemoryService | None = field(default=None, init=False, repr=False)
     _pending_control_messages: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _cancel_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _restart_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _agent_session_checkpoint: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _observed_tool_call_count: int = field(default=0, init=False, repr=False)
 
     async def run(self) -> int:
         bundle: MinionRuntimeBundle | None = None
@@ -595,6 +608,10 @@ class MinionRunner:
         except _MinionCooperativeCancel as cancel:
             with contextlib.suppress(Exception):
                 await self._emit("terminal", self._cancel_terminal_payload(cancel.payload))
+            return 0
+        except _MinionCooperativeRestart as restart:
+            with contextlib.suppress(Exception):
+                await self._emit("terminal", self._restart_terminal_payload(restart.payload))
             return 0
         except Exception as exc:
             with contextlib.suppress(Exception):
@@ -628,11 +645,42 @@ class MinionRunner:
         if prompt_observation_tag:
             payload["prompt_observation_tag"] = prompt_observation_tag
         await self._emit("phase_started", payload)
-        final_text = await self._run_agent_loop(bundle)
-        await self._raise_if_cancel_requested()
-        if self.blocked_summary:
-            await self._emit("terminal", self._terminal_payload("blocked", self.blocked_summary))
-            return 0
+        retry_note = ""
+        while True:
+            await self._raise_if_cancel_requested()
+            await self._raise_if_restart_requested()
+            progress_before = self._completion_gate_progress_marker()
+            final_text = await self._run_agent_loop(bundle, forced_retry_note=retry_note)
+            await self._raise_if_cancel_requested()
+            await self._raise_if_restart_requested()
+            if self.blocked_summary:
+                await self._emit("terminal", self._terminal_payload("blocked", self.blocked_summary))
+                return 0
+            if not self._required_primary_artifact_name() or self._completion_evidence_present():
+                break
+            progress_after = self._completion_gate_progress_marker()
+            if retry_note and progress_after == progress_before:
+                self.blocked_kind = "completion_gate_stalled"
+                self.blocked_summary = (
+                    "completion gate stalled: the required primary artifact is still absent after explicit "
+                    "submit feedback, and the worker made no capability or artifact progress"
+                )
+                await self._emit_progress(
+                    "completion_gate_stalled",
+                    round=0,
+                    summary=self.blocked_summary,
+                )
+                await self._emit(
+                    "terminal",
+                    self._terminal_payload("blocked", self.blocked_summary),
+                )
+                return 0
+            retry_note = self._missing_completion_evidence_feedback()
+            await self._emit_progress(
+                "completion_gate_rejected",
+                round=0,
+                summary=retry_note,
+            )
         await self._persist_text_deliverable_if_needed(final_text)
         self._finalize_produced_artifacts()
         await self._emit(
@@ -640,6 +688,50 @@ class MinionRunner:
             self._terminal_payload("completed", final_text or "Minion V2 invocation completed"),
         )
         return 0
+
+    def _completion_gate_progress_marker(self) -> tuple[int, tuple[tuple[str, str], ...]]:
+        tool_call_count = max(
+            self._observed_tool_call_count,
+            int(self._agent_session_checkpoint.get("tool_call_count") or 0),
+        )
+        artifacts = tuple(
+            sorted(
+                (
+                    str(item.get("role") or ""),
+                    str(
+                        item.get("relative_path")
+                        or item.get("requested_relative_path")
+                        or item.get("path")
+                        or ""
+                    ),
+                )
+                for item in self.produced_artifacts
+            )
+        )
+        return tool_call_count, artifacts
+
+    def _missing_completion_evidence_feedback(self) -> str:
+        primary = self._required_primary_artifact_name()
+        target = f"the required primary artifact {primary!r}" if primary else "required submit evidence"
+        submit_tool = {
+            "architecture_submission.json": "architecture_submit",
+            "architecture_review.json": "architecture_review_submit",
+            "coder_report.json": "candidate_submit",
+            "producer_report.json": "candidate_submit",
+            "verification_plan.json": "verification_submit",
+            "standalone_review.json": "review_submit",
+        }.get(primary, "the bound role-specific submit tool")
+        return (
+            f"Completion gate rejected the final response because {target} is absent. "
+            f"Continue in this same invocation, correct any prior submit rejection, and call {submit_tool}. "
+            "Do not answer with another completion summary until that submit call succeeds."
+        )
+
+    def _required_primary_artifact_name(self) -> str:
+        output_policy = dict((self.pack.workspace or {}).get("output_policy") or {})
+        if not output_policy:
+            output_policy = dict((self.pack.resolved_profile or {}).get("effective_output_policy") or {})
+        return str(output_policy.get("primary_artifact") or "").strip()
 
     async def _run_agent_loop(self, bundle: MinionRuntimeBundle, *, forced_retry_note: str = "") -> str:
         memory_l3, memory_service = self._runner_memory()
@@ -653,6 +745,8 @@ class MinionRunner:
         if isinstance(self.pack.metadata, dict):
             if isinstance(self.pack.metadata.get("requirements_brief"), dict):
                 workspace.setdefault("requirements_brief", dict(self.pack.metadata.get("requirements_brief") or {}))
+            if isinstance(self.pack.metadata.get("minion_v2"), dict):
+                workspace.setdefault("minion_v2", dict(self.pack.metadata.get("minion_v2") or {}))
         workspace.setdefault("review_tool_evidence_refs", self.review_tool_evidence_refs)
         workspace.setdefault("shell_mutation_violations", self.shell_mutation_violations)
         execution_runtime = MinionScopedExecutionRuntime(
@@ -700,6 +794,10 @@ class MinionRunner:
             tool_protocol_messages=tool_protocol_messages,
             llm_round_count=max(0, int(restored.get("llm_round_count") or 0)),
             tool_call_count=max(0, int(restored.get("tool_call_count") or 0)),
+        )
+        self._observed_tool_call_count = max(
+            self._observed_tool_call_count,
+            state.tool_call_count,
         )
         max_output_tokens = _resolve_minion_max_output_tokens(bundle.llm_runtime, self.pack)
 
@@ -763,6 +861,8 @@ class MinionRunner:
         current: EffectResult | None = None
         while True:
             await self._raise_if_cancel_requested()
+            if self._continuation_is_restart_safe(continuation):
+                await self._raise_if_restart_requested()
             try:
                 yielded = program.send(current) if current is not None else next(program)
             except StopIteration as completed:
@@ -788,6 +888,8 @@ class MinionRunner:
                     initial_instruction=initial_instruction,
                     response_keys=response_keys,
                 )
+                await self._raise_if_cancel_requested()
+                await self._raise_if_restart_requested()
                 return outcome.final_reply
             current = await self._execute_minion_agent_effect(
                 executor,
@@ -796,7 +898,7 @@ class MinionRunner:
                 yielded,
                 max_output_tokens=max_output_tokens,
             )
-            if not continuation.pending_tool_call_batch and not continuation.pending_tool_results:
+            if self._continuation_is_restart_safe(continuation):
                 self._persist_agent_session_checkpoint(
                     workspace,
                     state,
@@ -805,6 +907,12 @@ class MinionRunner:
                     response_keys=response_keys,
                 )
             await self._raise_if_cancel_requested()
+            if self._continuation_is_restart_safe(continuation):
+                await self._raise_if_restart_requested()
+
+    @staticmethod
+    def _continuation_is_restart_safe(continuation: TurnContinuation) -> bool:
+        return not continuation.pending_tool_call_batch and not continuation.pending_tool_results
 
     def _load_agent_session_checkpoint(self, workspace: dict[str, Any], *, session_id: str) -> dict[str, Any]:
         if not session_id:
@@ -889,6 +997,10 @@ class MinionRunner:
         message_type = str(message.get("type") or "").strip()
         if message_type in {"cancel_requested", "cancel"}:
             raise _MinionCooperativeCancel(self._remember_cancel_request(dict(message.get("payload") or message)))
+        if message_type in {"restart_requested", "manager_restart"}:
+            raise _MinionCooperativeRestart(
+                self._remember_restart_request(dict(message.get("payload") or message))
+            )
         return message
 
     async def _poll_cancel_requested(self) -> dict[str, Any]:
@@ -901,6 +1013,9 @@ class MinionRunner:
             message_type = str(message.get("type") or "").strip()
             if message_type in {"cancel_requested", "cancel"}:
                 return self._remember_cancel_request(dict(message.get("payload") or message))
+            if message_type in {"restart_requested", "manager_restart"}:
+                self._remember_restart_request(dict(message.get("payload") or message))
+                continue
             self._pending_control_messages.append(dict(message))
             return {}
 
@@ -908,6 +1023,10 @@ class MinionRunner:
         cancel = await self._poll_cancel_requested()
         if cancel:
             raise _MinionCooperativeCancel(cancel)
+
+    async def _raise_if_restart_requested(self) -> None:
+        if self._restart_requested:
+            raise _MinionCooperativeRestart(dict(self._restart_requested))
 
     def _remember_cancel_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._cancel_requested:
@@ -921,6 +1040,19 @@ class MinionRunner:
             "status": str(payload.get("status") or "killed"),
         }
         return dict(self._cancel_requested)
+
+    def _remember_restart_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._restart_requested:
+            return dict(self._restart_requested)
+        self._restart_requested = {
+            **dict(payload),
+            "reason": str(payload.get("reason") or "manager_restart_requested"),
+            "summary": str(
+                payload.get("summary")
+                or "minion suspended after the current durable LLM/tool safe point"
+            ),
+        }
+        return dict(self._restart_requested)
 
     def _build_minion_retry_note(self, outcome: Any, observations: list[Any], retry_count: int) -> str:
         if self.blocked_summary:
@@ -1050,6 +1182,14 @@ class MinionRunner:
     def _preflight_minion_llm_round(self, state: MinionAgentLoopState) -> EffectResult | None:
         if self.blocked_summary:
             return EffectResult(status=RuntimeStatus.OK, payload=CanonicalLLMOutcome(text=self.blocked_summary))
+        if self._required_primary_artifact_name() and self._completion_evidence_present():
+            return EffectResult(
+                status=RuntimeStatus.OK,
+                payload=CanonicalLLMOutcome(
+                    text="assignment produced completion evidence",
+                    finish_reason=LLMFinishReason.STOP,
+                ),
+            )
         max_rounds = _optional_positive_int(self.pack.metadata.get("max_tool_rounds") if isinstance(self.pack.metadata, dict) else None)
         if max_rounds is None or state.llm_round_count < max_rounds:
             state.llm_round_count += 1
@@ -1614,10 +1754,7 @@ class MinionRunner:
         return self._required_primary_artifact_present()
 
     def _required_primary_artifact_present(self) -> bool:
-        output_policy = dict((self.pack.workspace or {}).get("output_policy") or {})
-        if not output_policy:
-            output_policy = dict((self.pack.resolved_profile or {}).get("effective_output_policy") or {})
-        required = str(output_policy.get("primary_artifact") or "").strip()
+        required = self._required_primary_artifact_name()
         if not required:
             return bool(self.produced_artifacts)
         for artifact in self.produced_artifacts:
@@ -1858,6 +1995,8 @@ class MinionRunner:
             **experience_payload,
             **self._artifact_payload(),
         }
+        if self.blocked_kind:
+            payload["blocker_kind"] = self.blocked_kind
         if ask_user_question:
             payload["status"] = "blocked"
             payload["summary"] = _ask_user_question_summary(ask_user_question)
@@ -1872,6 +2011,16 @@ class MinionRunner:
             value = str(cancel.get(key) or "").strip()
             if value:
                 payload[key] = value
+        return payload
+
+    def _restart_terminal_payload(self, restart: dict[str, Any]) -> dict[str, Any]:
+        payload = self._terminal_payload(
+            "suspended",
+            restart.get("summary") or "minion suspended for manager restart",
+        )
+        payload["reason"] = str(restart.get("reason") or "manager_restart_requested")
+        payload["manager_restart"] = True
+        payload["durable_safe_point"] = True
         return payload
 
     def _finalize_produced_artifacts(self) -> None:

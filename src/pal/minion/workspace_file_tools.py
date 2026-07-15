@@ -139,6 +139,14 @@ async def workspace_file_tool_result(
         if (
             str(root_info.get("root_kind") or "") != "reference"
             and call.name in {"op_file_edit", "op_file_write", "op_path_delete"}
+            and _is_manager_owned_submission_path(workspace, relative)
+        ):
+            raise ValueError(
+                f"path {relative!r} is Manager-owned; use the bound no-argument submit tool"
+            )
+        if (
+            str(root_info.get("root_kind") or "") != "reference"
+            and call.name in {"op_file_edit", "op_file_write", "op_path_delete"}
             and workspace.get("write_path_scopes")
             and not any(_write_scope_matches(relative, dict(item or {})) for item in list(workspace["write_path_scopes"]))
         ):
@@ -293,6 +301,15 @@ def _write_scope_matches(path: str, scope: dict[str, Any]) -> bool:
         parent, _, name = normalized.rpartition("/")
         return parent == target_parent and name.startswith(target_name)
     return False
+
+
+def _is_manager_owned_submission_path(workspace: dict[str, Any], path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/").strip().lstrip("./")
+    return normalized in {
+        str(item).replace("\\", "/").strip().lstrip("./")
+        for item in list(workspace.get("manager_owned_submission_paths") or [])
+        if str(item).strip()
+    }
 
 
 def _workspace_result(

@@ -28,6 +28,7 @@ from pal.minion.v2.contracts import (
 from pal.minion.v2.engine import TransitionEngine
 from pal.minion.v2.machines import build_default_transition_engine
 from pal.minion.v2.schema import ensure_minion_v2_schema
+from pal.shared.text_search import compile_jieba_fts_queries, jieba_fts_text
 
 
 _QUEUED_STATES = {
@@ -39,6 +40,7 @@ _QUEUED_STATES = {
 }
 _HUMAN_WAIT_STATES = {"HUMAN_REVIEW", "CLARIFICATION_PENDING"}
 _TERMINAL_WORKFLOW_STATES = {"COMPLETED", "REJECTED", "CANCELLED"}
+_TASK_FTS_INDEX_VERSION = "jieba-v1"
 
 
 @dataclass
@@ -57,6 +59,7 @@ class MinionV2Repository:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA foreign_keys=ON")
             ensure_minion_v2_schema(connection)
+            self._ensure_task_fts_index_locked(connection)
 
     def dispatch(self, action: ActionEnvelope) -> DispatchResult:
         self.ensure_schema()
@@ -202,6 +205,15 @@ class MinionV2Repository:
             ).fetchall()
             return tuple(_snapshot_from_row(row) for row in rows)
 
+    def workflow_ids(self) -> tuple[str, ...]:
+        self.ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT aggregate_id FROM minion_v2_aggregate_snapshots WHERE aggregate_type = ? ORDER BY created_at, aggregate_id",
+                (AggregateType.WORKFLOW.value,),
+            ).fetchall()
+            return tuple(str(row["aggregate_id"]) for row in rows)
+
     def read_workflow_projection(self, workflow_id: str) -> dict[str, Any] | None:
         self.ensure_schema()
         with self._transaction() as connection:
@@ -268,6 +280,7 @@ class MinionV2Repository:
         *,
         actor_id: str,
         channel_id: str,
+        task_id: str = "",
         query: str = "",
         include_terminal: bool = False,
         limit: int = 20,
@@ -278,6 +291,9 @@ class MinionV2Repository:
         if channel_id:
             clauses.append("json_extract(s.payload_json, '$.active_channel') = ?")
             parameters.append(str(channel_id).strip())
+        if task_id:
+            clauses.append("json_extract(s.payload_json, '$.task_id') = ?")
+            parameters.append(str(task_id).strip())
         if not include_terminal:
             clauses.append("s.state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')")
         text = str(query or "").strip().lower()
@@ -375,6 +391,7 @@ class MinionV2Repository:
         query: str = "",
         task_id: str = "",
         family_id: str = "",
+        owner: str = "",
         include_archived: bool = False,
         limit: int = 20,
     ) -> tuple[dict[str, Any], ...]:
@@ -387,23 +404,115 @@ class MinionV2Repository:
         if family_id:
             clauses.append("family_id = ?")
             parameters.append(str(family_id))
+        if owner:
+            clauses.append("owner = ?")
+            parameters.append(str(owner))
         if not include_archived:
             clauses.append("state != 'ARCHIVED'")
         text = str(query or "").strip().lower()
-        if text:
-            clauses.append("(lower(title) LIKE ? OR lower(objective) LIKE ? OR lower(workspace_key) LIKE ?)")
-            pattern = f"%{text}%"
-            parameters.extend((pattern, pattern, pattern))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        parameters.append(max(1, min(int(limit), 100)))
+        resolved_limit = max(1, min(int(limit), 100))
         with self._connect() as connection:
+            if text:
+                scored: dict[str, tuple[float, dict[str, Any]]] = {}
+                fts_filters = [f"t.{clause}" for clause in clauses]
+                fts_where = " AND " + " AND ".join(fts_filters) if fts_filters else ""
+                for fts_query, query_weight in compile_jieba_fts_queries(text):
+                    try:
+                        rows = connection.execute(
+                            """
+                            SELECT t.*, -bm25(minion_v2_tasks_fts) AS fts_score
+                            FROM minion_v2_tasks_fts
+                            JOIN minion_v2_task_projection AS t
+                              ON t.task_id = minion_v2_tasks_fts.task_id
+                            WHERE minion_v2_tasks_fts MATCH ?
+                            """
+                            + fts_where
+                            + " ORDER BY bm25(minion_v2_tasks_fts), t.updated_at DESC LIMIT ?",
+                            (fts_query, *parameters, resolved_limit),
+                        ).fetchall()
+                    except sqlite3.OperationalError:
+                        continue
+                    for row in rows:
+                        item = dict(row)
+                        score = float(item.pop("fts_score")) * float(query_weight)
+                        current = scored.get(str(item["task_id"]))
+                        if current is None or score > current[0]:
+                            scored[str(item["task_id"])] = (score, item)
+                    if rows:
+                        break
+                if scored:
+                    ordered = sorted(
+                        scored.values(),
+                        key=lambda item: (-item[0], str(item[1]["task_id"])),
+                    )[:resolved_limit]
+                    return tuple({**item, "score": score} for score, item in ordered)
+
+                like_clauses = [
+                    *clauses,
+                    "(lower(title) LIKE ? OR lower(objective) LIKE ? OR lower(workspace_key) LIKE ?)",
+                ]
+                like_where = " WHERE " + " AND ".join(like_clauses)
+                pattern = f"%{text}%"
+                rows = connection.execute(
+                    "SELECT *, 1.0 AS score FROM minion_v2_task_projection"
+                    + like_where
+                    + " ORDER BY updated_at DESC, task_id LIMIT ?",
+                    (*parameters, pattern, pattern, pattern, resolved_limit),
+                ).fetchall()
+                return tuple(dict(row) for row in rows)
+
             rows = connection.execute(
                 "SELECT * FROM minion_v2_task_projection"
                 + where
                 + " ORDER BY updated_at DESC, task_id LIMIT ?",
-                tuple(parameters),
+                (*parameters, resolved_limit),
             ).fetchall()
             return tuple(dict(row) for row in rows)
+
+    def _ensure_task_fts_index_locked(self, connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            "SELECT schema_value FROM minion_v2_schema_meta WHERE schema_key = 'task_fts_index_version'"
+        ).fetchone()
+        if row is not None and str(row[0]) == _TASK_FTS_INDEX_VERSION:
+            return
+        connection.execute("DELETE FROM minion_v2_tasks_fts")
+        for task in connection.execute("SELECT * FROM minion_v2_task_projection").fetchall():
+            self._sync_task_fts_locked(connection, str(task["task_id"]), row=task)
+        connection.execute(
+            """
+            INSERT INTO minion_v2_schema_meta(schema_key, schema_value)
+            VALUES ('task_fts_index_version', ?)
+            ON CONFLICT(schema_key) DO UPDATE SET schema_value = excluded.schema_value
+            """,
+            (_TASK_FTS_INDEX_VERSION,),
+        )
+
+    def _sync_task_fts_locked(
+        self,
+        connection: sqlite3.Connection,
+        task_id: str,
+        *,
+        row: sqlite3.Row | None = None,
+    ) -> None:
+        connection.execute("DELETE FROM minion_v2_tasks_fts WHERE task_id = ?", (str(task_id),))
+        task = row or connection.execute(
+            "SELECT * FROM minion_v2_task_projection WHERE task_id = ?", (str(task_id),)
+        ).fetchone()
+        if task is None:
+            return
+        connection.execute(
+            """
+            INSERT INTO minion_v2_tasks_fts(task_id, title, objective, workspace)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                str(task["task_id"]),
+                jieba_fts_text(task["title"]),
+                jieba_fts_text(task["objective"]),
+                jieba_fts_text(task["workspace_key"]),
+            ),
+        )
 
     def has_nonterminal_workflows_for_task(self, task_id: str) -> bool:
         self.ensure_schema()
@@ -429,10 +538,9 @@ class MinionV2Repository:
             rows = connection.execute(
                 """
                 SELECT * FROM minion_v2_outbox
-                WHERE attempt_count < max_attempts
-                  AND next_retry_at <= ?
+                WHERE next_retry_at <= ?
                   AND (
-                    status = 'pending'
+                    (status = 'pending' AND attempt_count < max_attempts)
                     OR (status = 'inflight' AND locked_until <= ?)
                   )
                 ORDER BY created_at, effect_id
@@ -445,19 +553,30 @@ class MinionV2Repository:
                 cursor = connection.execute(
                     """
                     UPDATE minion_v2_outbox
-                    SET status = 'inflight', attempt_count = attempt_count + 1,
+                    SET status = 'inflight',
+                        attempt_count = CASE
+                            WHEN status = 'pending' THEN attempt_count + 1
+                            ELSE attempt_count
+                        END,
                         locked_by = ?, locked_until = ?, updated_at = ?
                     WHERE effect_id = ?
-                      AND (status = 'pending' OR (status = 'inflight' AND locked_until <= ?))
+                      AND (
+                        (status = 'pending' AND attempt_count < max_attempts)
+                        OR (status = 'inflight' AND locked_until <= ?)
+                      )
                     """,
                     (worker_id, locked_until, now_text, str(row["effect_id"]), now_text),
                 )
                 if cursor.rowcount == 1:
+                    attempt_count = int(row["attempt_count"])
+                    if str(row["status"]) == "pending":
+                        attempt_count += 1
                     item = dict(row)
                     item.update(
                         {
                             "status": "inflight",
-                            "attempt_count": int(row["attempt_count"]) + 1,
+                            "attempt_count": attempt_count,
+                            "claim_incremented_attempt": str(row["status"]) == "pending",
                             "locked_by": worker_id,
                             "locked_until": locked_until,
                             "payload": json.loads(str(row["payload_json"])),
@@ -570,6 +689,74 @@ class MinionV2Repository:
                 (status, next_retry_at, str(error), now.isoformat(), str(effect_id)),
             )
             return status
+
+    def defer_outbox_effect(
+        self,
+        effect_id: str,
+        *,
+        worker_id: str,
+        reason: str,
+        attempt_was_incremented: bool = True,
+    ) -> None:
+        """Return a claimed effect to the queue without spending a retry attempt."""
+
+        self.ensure_schema()
+        now = utc_now()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT status, locked_by, attempt_count FROM minion_v2_outbox WHERE effect_id = ?",
+                (str(effect_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown outbox effect: {effect_id}")
+            if str(row["status"]) != "inflight" or str(row["locked_by"]) != str(worker_id):
+                raise LeaseConflict("outbox effect is not claimed by this worker")
+            connection.execute(
+                """
+                UPDATE minion_v2_outbox
+                SET status = 'pending', attempt_count = ?, next_retry_at = ?,
+                    locked_by = '', locked_until = '', last_error = ?, updated_at = ?
+                WHERE effect_id = ?
+                """,
+                (
+                    max(
+                        0,
+                        int(row["attempt_count"]) - (1 if attempt_was_incremented else 0),
+                    ),
+                    now,
+                    str(reason),
+                    now,
+                    str(effect_id),
+                ),
+            )
+
+    def fail_outbox_effect(
+        self,
+        effect_id: str,
+        *,
+        worker_id: str,
+        error: str,
+    ) -> None:
+        self.ensure_schema()
+        now = utc_now()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT status, locked_by FROM minion_v2_outbox WHERE effect_id = ?",
+                (str(effect_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown outbox effect: {effect_id}")
+            if str(row["status"]) != "inflight" or str(row["locked_by"]) != str(worker_id):
+                raise LeaseConflict("outbox effect is not claimed by this worker")
+            connection.execute(
+                """
+                UPDATE minion_v2_outbox
+                SET status = 'failed', next_retry_at = ?, locked_by = '', locked_until = '',
+                    last_error = ?, updated_at = ?
+                WHERE effect_id = ?
+                """,
+                (now, str(error), now, str(effect_id)),
+            )
 
     def claim_lease(
         self,
@@ -896,6 +1083,14 @@ class MinionV2Repository:
                 raise ValueError("human decision token requires a durable architecture manifest")
             connection.execute(
                 """
+                UPDATE minion_v2_human_decisions
+                SET status = 'expired'
+                WHERE workflow_id = ? AND architecture_revision_id = ? AND status = 'issued'
+                """,
+                (workflow_id, architecture_revision_id),
+            )
+            connection.execute(
+                """
                 INSERT INTO minion_v2_human_decisions(
                     token_hash, workflow_id, architecture_revision_id, manifest_sha,
                     actor_id, active_channel_id, expires_at, issued_at
@@ -927,6 +1122,24 @@ class MinionV2Repository:
             result = dict(row)
             result.pop("token_hash", None)
             return result
+
+    def expire_human_decisions_for_revision(
+        self,
+        *,
+        workflow_id: str,
+        architecture_revision_id: str,
+    ) -> int:
+        self.ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minion_v2_human_decisions
+                SET status = 'expired'
+                WHERE workflow_id = ? AND architecture_revision_id = ? AND status = 'issued'
+                """,
+                (str(workflow_id), str(architecture_revision_id)),
+            )
+            return int(cursor.rowcount)
 
     def reissue_human_decision_token(
         self,
@@ -1030,6 +1243,7 @@ class MinionV2Repository:
         lease_resource_key: str,
         fencing_token: int,
         role: str,
+        authoring_contract_version: str,
         prompt_pack_ref: Mapping[str, Any],
     ) -> None:
         self.assert_fencing_token(lease_resource_key, invocation_id, fencing_token)
@@ -1041,8 +1255,9 @@ class MinionV2Repository:
                 """
                 INSERT INTO minion_v2_worker_invocations(
                     invocation_id, workflow_id, aggregate_type, aggregate_id, lease_resource_key,
-                    fencing_token, role, prompt_pack_ref_json, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                    fencing_token, role, authoring_contract_version, prompt_pack_ref_json,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
                 ON CONFLICT(invocation_id) DO UPDATE SET
                     workflow_id = excluded.workflow_id,
                     aggregate_type = excluded.aggregate_type,
@@ -1050,6 +1265,7 @@ class MinionV2Repository:
                     lease_resource_key = excluded.lease_resource_key,
                     fencing_token = excluded.fencing_token,
                     role = excluded.role,
+                    authoring_contract_version = excluded.authoring_contract_version,
                     prompt_pack_ref_json = excluded.prompt_pack_ref_json,
                     status = 'running',
                     updated_at = excluded.updated_at
@@ -1062,6 +1278,7 @@ class MinionV2Repository:
                     lease_resource_key,
                     fencing_token,
                     role,
+                    str(authoring_contract_version),
                     _json(dict(prompt_pack_ref)),
                     now,
                     now,
@@ -1547,6 +1764,7 @@ class MinionV2Repository:
                 snapshot.updated_at,
             ),
         )
+        self._sync_task_fts_locked(connection, snapshot.aggregate_id)
 
     def _rebuild_workflow_projection_locked(
         self,
@@ -1566,13 +1784,38 @@ class MinionV2Repository:
         phase = _current_phase(workflow, active)
         next_actions = self.engine.legal_actions(active.aggregate_type, active.state) if active is not None else ()
         waiting_for_user = bool(active is not None and active.state in _HUMAN_WAIT_STATES)
-        liveness = self._liveness_locked(connection, workflow, snapshots, waiting_for_user)
+        liveness = self._liveness_locked(
+            connection,
+            workflow,
+            snapshots,
+            waiting_for_user,
+            active,
+        )
         blocker = dict((active.payload if active is not None else workflow.payload).get("blocker") or {})
         active_worker_id = (
             ""
             if waiting_for_user
             else str((active.payload if active is not None else {}).get("active_worker_id") or "")
         )
+        if (
+            not active_worker_id
+            and active is not None
+            and active.aggregate_type == AggregateType.EXECUTION_EPOCH
+            and active.state == "REPLAN_COLLECTING"
+        ):
+            draining = sorted(
+                (
+                    item
+                    for item in snapshots
+                    if item.aggregate_type == AggregateType.DAG_NODE_RUN
+                    and str(item.payload.get("epoch_id") or "") == active.aggregate_id
+                    and item.state in {"REVIEWING", "VERIFYING"}
+                    and str(item.payload.get("active_worker_id") or "")
+                ),
+                key=lambda item: item.aggregate_id,
+            )
+            if draining:
+                active_worker_id = str(draining[0].payload.get("active_worker_id") or "")
         connection.execute(
             """
             INSERT INTO minion_v2_workflow_projection(
@@ -1617,12 +1860,17 @@ class MinionV2Repository:
         workflow: AggregateSnapshot,
         snapshots: list[AggregateSnapshot],
         waiting_for_user: bool,
+        active: AggregateSnapshot | None,
     ) -> str:
         if workflow.state in _TERMINAL_WORKFLOW_STATES:
             return "terminal"
         if workflow.state == "PAUSED":
             return "paused"
-        if workflow.state == "TRIAGE_REQUIRED" or any(item.state == "TRIAGE_REQUIRED" for item in snapshots):
+        if workflow.state == "TRIAGE_REQUIRED" or _active_lineage_has_triage(
+            workflow,
+            snapshots,
+            active,
+        ):
             return "operator_wait"
         if waiting_for_user:
             return "human_wait"
@@ -1894,6 +2142,25 @@ def _active_projection_snapshot(
     if execution_id:
         match = next((item for item in snapshots if item.aggregate_id == execution_id), None)
         if match is not None:
+            if match.state == "REPLAN_REQUIRED":
+                revision_id = str(
+                    match.payload.get("active_replan_revision_id")
+                    or workflow.payload.get("architecture_revision_id")
+                    or ""
+                )
+                revision = next(
+                    (
+                        item
+                        for item in snapshots
+                        if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+                        and item.aggregate_id == revision_id
+                        and str(item.payload.get("source_execution_epoch_id") or "")
+                        == match.aggregate_id
+                    ),
+                    None,
+                )
+                if revision is not None:
+                    return revision
             return match
     if architecture_id:
         match = next((item for item in snapshots if item.aggregate_id == architecture_id), None)
@@ -1918,10 +2185,49 @@ def _current_phase(workflow: AggregateSnapshot, active: AggregateSnapshot | None
             return "human_review"
         return f"architecture_{state.lower()}"
     if active.aggregate_type == AggregateType.EXECUTION_EPOCH:
+        if active.state == "REPLAN_COLLECTING":
+            return "replan_collecting"
+        if active.state == "REPLAN_REQUIRED":
+            return "replan_required"
         return "finalizing" if active.state == "FINALIZING" else "executing"
     if active.aggregate_type == AggregateType.DAG_NODE_RUN:
         return "executing"
     return "standalone_review"
+
+
+def _active_lineage_has_triage(
+    workflow: AggregateSnapshot,
+    snapshots: list[AggregateSnapshot],
+    active: AggregateSnapshot | None,
+) -> bool:
+    if active is not None and active.state == "TRIAGE_REQUIRED":
+        return True
+    execution_id = str(workflow.payload.get("execution_epoch_id") or "")
+    execution = next(
+        (
+            item
+            for item in snapshots
+            if item.aggregate_type == AggregateType.EXECUTION_EPOCH
+            and item.aggregate_id == execution_id
+        ),
+        None,
+    )
+    if execution is None:
+        return False
+    if execution.state != "REPLAN_REQUIRED":
+        return any(
+            item.aggregate_type == AggregateType.DAG_NODE_RUN
+            and str(item.payload.get("epoch_id") or "") == execution.aggregate_id
+            and item.state == "TRIAGE_REQUIRED"
+            for item in snapshots
+        )
+    revision_id = str(execution.payload.get("active_replan_revision_id") or "")
+    return any(
+        item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+        and item.aggregate_id == revision_id
+        and item.state == "TRIAGE_REQUIRED"
+        for item in snapshots
+    )
 
 
 def _decode_json_columns(row: sqlite3.Row, columns: Mapping[str, str]) -> dict[str, Any]:

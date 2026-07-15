@@ -45,11 +45,11 @@ def _unit_contract() -> dict:
         "reference_only_paths": ["references/**"],
         "provided_interfaces": [{"name": "Geometry", "lifetime": "value"}],
         "consumed_interfaces": [],
-        "ownership": {"values": "caller-owned"},
+        "ownership": {"rule": "Each value is owned by its caller."},
         "lifecycle": "N/A: pure value definitions",
         "state_model": "stateless",
         "invariants": ["value layout is stable"],
-        "error_behavior": [],
+        "error_behavior": ["Invalid values fail deterministic validation."],
         "compatibility": ["C ABI"],
         "dependency_constraints": [],
         "requirement_ids": ["R-1"],
@@ -617,6 +617,26 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                     "source_channel": "socket:test",
                 }
             )
+
+    def test_new_human_review_card_invalidates_prior_revision_token(self) -> None:
+        manifest = self.store.put_json({"version": 1}, artifact_type="ArchitectureSkeletonArtifact")
+        first = self.repository.issue_human_decision_token(
+            workflow_id="wf_review_reopened",
+            architecture_revision_id="arch_review_reopened",
+            manifest_sha=manifest.sha256,
+            actor_id="nathan",
+            active_channel_id="telegram:main",
+        )
+        second = self.repository.issue_human_decision_token(
+            workflow_id="wf_review_reopened",
+            architecture_revision_id="arch_review_reopened",
+            manifest_sha=manifest.sha256,
+            actor_id="nathan",
+            active_channel_id="telegram:main",
+        )
+
+        self.assertEqual(self.repository.inspect_human_decision_token(first)["status"], "expired")
+        self.assertEqual(self.repository.inspect_human_decision_token(second)["status"], "issued")
 
     def test_local_research_policy_removes_web_capabilities(self) -> None:
         pack = MinionInvocationPack(

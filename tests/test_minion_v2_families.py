@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.minion.profiles import MinionProfileRegistry
+from pal.minion.catalog import MinionCatalogService
+from pal.minion.profiles import MinionProfileRegistry, resolve_pinned_minion_pack
 from pal.minion.scoped_execution import MinionScopedExecutionRuntime
 from pal.execution.contracts import CapabilityDescriptor, CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
@@ -51,6 +52,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertTrue({"architect", "architecture_reviewer", "producer", "repair", "verifier"} <= set(binding["roles"]))
         self.assertEqual(set(binding["adapters"].values()), {"artifact_bundle.v2"})
         self.assertEqual(set(binding["profile_hashes"]), set(binding["roles"]))
+        self.assertEqual(set(binding["profile_definitions"]), set(binding["roles"]))
         self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
         self.assertEqual(binding["policies"]["llm"]["llm_round_timeout_seconds"], 900)
 
@@ -61,13 +63,40 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertTrue({"architect", "architecture_reviewer", "producer", "repair", "verifier"} <= set(binding["roles"]))
         self.assertEqual(set(binding["adapters"].values()), {"artifact_bundle.v2"})
         self.assertEqual(set(binding["profile_hashes"]), set(binding["roles"]))
+        self.assertEqual(set(binding["profile_definitions"]), set(binding["roles"]))
+
+    def test_family_binding_pins_profile_definition_across_catalog_refresh(self) -> None:
+        ref = MinionV2Catalog(self.root, self.store).publish_family_binding("software_engineering")
+        binding = self.store.read_json(ref)
+        pinned = dict(binding["profile_definitions"]["producer"])
+        original_name = str(pinned["display_name"])
+
+        MinionCatalogService(self.root).set_profile_override(
+            profile="software_engineering.v2_coder",
+            changes={"display_name": "Future Workflow Coder"},
+        )
+        current = MinionProfileRegistry(runtime_root=self.root).get("software_engineering.v2_coder")
+        resolved = resolve_pinned_minion_pack(
+            MinionInvocationPack(
+                invocation_id="inv-pinned-profile",
+                goal="test",
+                profile_group="software_engineering",
+                profile_name="v2_coder",
+                minion_profile="software_engineering.v2_coder",
+            ),
+            profile_payload=pinned,
+            family_payload=dict(binding["manifest"]),
+        )
+
+        self.assertEqual(current.display_name, "Future Workflow Coder")
+        self.assertEqual(resolved.resolved_profile["display_name"], original_name)
 
     def test_architect_cannot_bypass_builder_but_producer_can_write_workspace(self) -> None:
         planner = apply_v2_role_capability_policy(
             self._pack("lifestyle.architect"),
             role="architect",
         )
-        self.assertIn("op_minion_contract_submit_sketch", planner.allowed_capabilities)
+        self.assertIn("op_minion_contract_submit", planner.allowed_capabilities)
         self.assertNotIn("op_file_write", planner.allowed_capabilities)
         self.assertNotIn("op_minion_artifact_write", planner.allowed_capabilities)
 
@@ -77,7 +106,173 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         self.assertIn("op_file_write", producer.allowed_capabilities)
         self.assertIn("op_minion_artifact_write", producer.allowed_capabilities)
+        self.assertIn("op_minion_candidate_submit", producer.allowed_capabilities)
+        self.assertIn("op_minion_developer_test", producer.allowed_capabilities)
         self.assertNotIn("op_web_search", producer.allowed_capabilities)
+
+    def test_artifact_producer_cannot_fabricate_manager_submission_report(self) -> None:
+        repo = self.root / "guard-repo"
+        repo.mkdir()
+        scoped = MinionScopedExecutionRuntime(
+            ExecutionRuntime(),
+            ["op_minion_artifact_write", "op_file_write"],
+            workspace={
+                "repo_path": str(repo),
+                "artifact_dir": str(self.root / "guard-artifacts"),
+                "artifact_stage_dir": str(self.root / "guard-stage"),
+                "manager_owned_submission_paths": ["producer_report.json"],
+            },
+        )
+        rejected = asyncio.run(
+            scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="op_minion_artifact_write",
+                    args={
+                        "relative_path": "producer_report.json",
+                        "content": "{}",
+                    },
+                )
+            )
+        )
+        self.assertFalse(rejected.ok)
+        self.assertIn("Manager-owned", rejected.llm_text)
+
+        product = asyncio.run(
+            scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="op_minion_artifact_write",
+                    args={
+                        "relative_path": "checkin.json",
+                        "content": '{"status":"recorded"}',
+                        "role": "deliverable",
+                    },
+                )
+            )
+        )
+        self.assertTrue(product.ok, product.text)
+
+        workspace_report = asyncio.run(
+            scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="op_file_write",
+                    args={
+                        "path": "producer_report.json",
+                        "content": "{}",
+                        "mode": "create",
+                    },
+                )
+            )
+        )
+        self.assertFalse(workspace_report.ok)
+        self.assertIn("Manager-owned", workspace_report.llm_text)
+
+    def test_verifier_can_only_submit_through_the_schema_bound_builder(self) -> None:
+        for profile in (
+            "software_engineering.v2_verifier",
+            "general.verifier",
+            "lifestyle.verifier",
+        ):
+            with self.subTest(profile=profile):
+                verifier = apply_v2_role_capability_policy(self._pack(profile), role="verifier")
+                self.assertIn("op_minion_verification_submit", verifier.allowed_capabilities)
+                self.assertIn("op_exec_shell", verifier.allowed_capabilities)
+                self.assertNotIn("op_minion_artifact_write", verifier.allowed_capabilities)
+                self.assertNotIn("op_minion_artifact_edit", verifier.allowed_capabilities)
+
+        standalone = apply_v2_role_capability_policy(
+            self._pack("software_engineering.v2_reviewer"),
+            role="reviewer",
+        )
+        self.assertIn("op_minion_standalone_review_submit", standalone.allowed_capabilities)
+        self.assertIn("op_exec_shell", standalone.allowed_capabilities)
+        self.assertNotIn("op_minion_artifact_write", standalone.allowed_capabilities)
+        self.assertNotIn("op_minion_verification_submit", standalone.allowed_capabilities)
+
+        coder = apply_v2_role_capability_policy(
+            self._pack("software_engineering.v2_coder"),
+            role="producer",
+        )
+        self.assertIn("op_minion_candidate_submit", coder.allowed_capabilities)
+        self.assertNotIn("op_minion_artifact_write", coder.allowed_capabilities)
+
+    def test_verification_submit_is_hydrated_in_the_scoped_runtime(self) -> None:
+        scoped = MinionScopedExecutionRuntime(
+            ExecutionRuntime(),
+            ["op_minion_verification_submit"],
+            workspace={
+                "artifact_dir": str(self.root / "artifacts"),
+                "artifact_stage_dir": str(self.root / "artifact-stage"),
+            },
+        )
+        spec = scoped.get_capability_spec("op_minion_verification_submit")
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec["name"], "verification_submit")
+        self.assertEqual(
+            scoped.resolve_llm_tool_name("verification_submit"),
+            "op_minion_verification_submit",
+        )
+        self.assertEqual(
+            scoped.get_capability_spec("verification_submit")["name"],
+            "verification_submit",
+        )
+        self.assertFalse(spec["parameters_schema"]["additionalProperties"])
+        self.assertEqual(spec["parameters_schema"]["properties"], {})
+
+        result = asyncio.run(
+            scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="verification_submit",
+                    args={
+                        "cases": [
+                            {
+                                "name": "bounded smoke probe",
+                                "case_kind": "unit",
+                                "command": ["python", "-m", "pytest", "-q"],
+                                "expected_exit_codes": [0],
+                                "requirements": [],
+                                "locations": [],
+                                "invariants": [],
+                                "description": "Run the focused project suite.",
+                            }
+                        ],
+                        "findings": [],
+                        "reviewer_summary": "Run the bounded smoke probe.",
+                    },
+                )
+            )
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("takes no arguments", result.llm_text)
+        self.assertFalse((self.root / "artifact-stage" / "verification_plan.json").exists())
+
+    def test_worker_only_canonical_names_are_exposed_through_role_native_aliases(self) -> None:
+        scoped = MinionScopedExecutionRuntime(
+            ExecutionRuntime(),
+            [
+                "op_minion_input_read",
+                "op_minion_contract_submit",
+                "op_minion_candidate_submit",
+            ],
+            workspace={
+                "artifact_dir": str(self.root / "alias-artifacts"),
+                "artifact_stage_dir": str(self.root / "alias-stage"),
+            },
+        )
+
+        expected = {
+            "op_minion_input_read": "input_read",
+            "op_minion_contract_submit": "contract_submit",
+            "op_minion_candidate_submit": "candidate_submit",
+        }
+        for canonical, public_name in expected.items():
+            with self.subTest(canonical=canonical):
+                spec = scoped.get_capability_spec(canonical)
+                self.assertIsNotNone(spec)
+                assert spec is not None
+                self.assertEqual(spec["name"], public_name)
+                self.assertEqual(scoped.resolve_llm_tool_name(public_name), canonical)
+                self.assertNotIn("minion_", spec["description"])
 
     def test_architect_has_no_external_research_surface(self) -> None:
         architect = self._pack("lifestyle.architect")
@@ -107,13 +302,13 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 self.assertIn("op_file_read", requirements.allowed_capabilities)
                 self.assertIn("op_minion_input_read", requirements.allowed_capabilities)
                 self.assertNotIn("op_minion_evidence_submit", requirements.allowed_capabilities)
-                self.assertIn("op_minion_contract_submit_sketch", requirements.allowed_capabilities)
+                self.assertIn("op_minion_contract_submit", requirements.allowed_capabilities)
                 self.assertNotIn("op_file_write", requirements.allowed_capabilities)
                 self.assertEqual(requirements.workspace.get("workspace_policy", {}).get("mode"), "read_only_repo")
 
         software = self._pack("software_engineering.v2_architect")
         self.assertIn("op_minion_architecture_submit", software.allowed_capabilities)
-        self.assertNotIn("op_minion_contract_submit_sketch", software.allowed_capabilities)
+        self.assertNotIn("op_minion_contract_submit", software.allowed_capabilities)
         self.assertIn("op_file_write", software.allowed_capabilities)
         self.assertIn("op_file_edit", software.allowed_capabilities)
         self.assertEqual(software.workspace.get("workspace_policy", {}).get("mode"), "writable_git_branch")
@@ -208,6 +403,33 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             for field_name in forbidden_author_fields:
                 self.assertNotIn(field_name, output_contract, f"{profile_name} exposes {field_name}")
 
+    def test_product_requirements_do_not_absorb_family_workflow_policy(self) -> None:
+        service = MinionV2WorkflowService(self.root)
+        prepared = service.prepare_requirements(
+            {
+                "title": "Tiny router",
+                "sections": {
+                    "Routing": ["Route requests deterministically."],
+                },
+                # Workflow policy belongs to FamilyBindingArtifact even if a
+                # caller accidentally includes it in this request envelope.
+                "policies": {"verification": {"require_warning_clean": True}},
+            }
+        )
+        requirements = self.store.read_json(prepared["requirements_ref"])
+        binding = self.store.read_json(
+            MinionV2Catalog(self.root, self.store).publish_family_binding(
+                "software_engineering"
+            )
+        )
+
+        self.assertEqual(
+            requirements["sections"],
+            {"Routing": ["Route requests deterministically."]},
+        )
+        self.assertNotIn("policies", requirements)
+        self.assertTrue(binding["policies"]["verification"]["require_warning_clean"])
+
     def test_software_architecture_and_verification_profiles_preserve_rigorous_methods(self) -> None:
         architect = str(self._pack("software_engineering.v2_architect").resolved_profile["behavior_fragment"])
         architecture_review = str(
@@ -226,9 +448,16 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Never include opaque IDs, handles, SHA values, milestones", architect)
         self.assertIn("Audit breadth-first in one pass", architecture_review)
         self.assertIn("Verification Topology", architecture_review)
+        self.assertIn("covers entry is only the Architect's claim", architecture_review)
+        self.assertIn("one audit for every bound hard Requirement", str(
+            self._pack("software_engineering.v2_architecture_reviewer").resolved_profile["output_contract_fragment"]
+        ))
         self.assertIn("unique data/worker/object/resource ownership", architecture_review)
         self.assertIn("one candidate-review cycle", architecture_review)
-        self.assertIn("Confirm independent Coders can implement each module", architecture_review)
+        self.assertIn(
+            "Confirm independent Coders can implement each implementation module",
+            architecture_review,
+        )
         self.assertIn("verify a local repair without reopening unchanged architecture", architecture_review)
         self.assertIn("happens-before", verifier)
         self.assertIn("exact public delivery surface", verifier)
@@ -349,14 +578,14 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 "responsibility": "Produce the structured check-in artifact.",
                 "owned_area": ["artifact:checkin"],
                 "reference_only_paths": [],
-                "provided_interfaces": [],
+                "provided_interfaces": [{"name": "structured_checkin"}],
                 "consumed_interfaces": [],
-                "ownership": {"owner": "checkin"},
+                "ownership": {"rule": "checkin exclusively owns the emitted artifact."},
                 "lifecycle": "n/a",
                 "state_model": "stateless",
                 "invariants": ["No undeclared health facts are introduced."],
-                "error_behavior": [],
-                "compatibility": [],
+                "error_behavior": ["Invalid source observations fail deterministically."],
+                "compatibility": ["The declared check-in schema remains stable."],
                 "dependency_constraints": [],
                 "requirement_ids": ["R-1"],
                 "verification_obligations": ["Validate JSON and source coverage."],

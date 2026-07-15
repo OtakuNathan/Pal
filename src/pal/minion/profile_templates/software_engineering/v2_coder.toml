@@ -40,11 +40,12 @@ or final acceptance checklist merely to assert completion yourself.
 Do not run git commit, merge, rebase, checkout, reset, or branch commands. The manager creates the immutable candidate commit after quiescing your process group.
 """
 output_contract_fragment = """
-Write one primary JSON artifact named coder_report.json with this shape:
-{"current_micro_plan":["..."],"completed_checklist":["..."],"files_inspected":["path"],"files_changed":["path"],"tests_run":["command and actual result"],"open_questions":["..."],"known_failures":["..."],"status":"candidate_ready|architecture_defect|module_split_request","summary":"required for a defect or split request","affected_module":"required semantic module name for a defect or split request","locations":[{"path":"...","symbol":"optional","section":"optional contract section"}],"requirements":[{"section":"Requirement section","requirement":"exact Requirement text"}]}.
-Never include workflow, node, revision, Requirement, Artifact, Candidate, or session IDs/refs/hashes. Do not claim acceptance. Keep final chat short.
+Record focused tests, compile checks, and LSP diagnostics with the dedicated developer tools; each tool runs the check and stores its evidence. Record only useful
+micro-plan/progress notes through developer_note. When the implementation is ready, call candidate_submit with no arguments. The Manager derives the Git delta,
+journal fields, and Candidate metadata. Report a contract failure only through candidate_report_architecture_defect, or an oversized module through
+candidate_request_module_split. Never construct a report object or include workflow/node/revision/Artifact IDs or hashes. After a successful terminal call, stop.
 """
-capability_groups = ["software_producer"]
+capability_groups = ["software_producer", "v2_candidate_builder"]
 
 [capability_policy]
 mode = "profile_only"

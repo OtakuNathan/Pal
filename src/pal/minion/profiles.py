@@ -6,7 +6,8 @@ from pathlib import Path
 import tomllib
 from typing import Any, Protocol
 
-from pal.minion.families import MinionFamilyProvider, MinionFamilyRegistry
+from pal.minion.families import MinionFamilyManifest, MinionFamilyProvider, MinionFamilyRegistry
+from pal.minion.catalog_store import load_json_objects, profile_override_root
 from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
@@ -17,11 +18,18 @@ from pal.minion.v2.contract_builder import (
     REQUIREMENTS_BUILDER_CAPABILITIES,
     is_contract_builder_capability,
 )
+from pal.minion.v2.candidate_builder import CANDIDATE_BUILDER_CAPABILITIES
 from pal.minion.v2.skeleton_builder import (
     ARCHITECTURE_SKELETON_CAPABILITIES,
     SKELETON_BUILDER_CAPABILITIES,
     SKELETON_REVIEW_CAPABILITIES,
     is_skeleton_builder_capability,
+)
+from pal.minion.v2.verification_builder import (
+    STANDALONE_REVIEW_BUILDER_CAPABILITIES,
+    VERIFICATION_BUILDER_CAPABILITIES,
+    VERIFICATION_TOOL_CAPABILITIES,
+    is_verification_builder_capability,
 )
 from pal.shared import MinionInvocationPack
 
@@ -149,6 +157,14 @@ class MinionProfileCapabilityProvider(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class _PinnedFamilyProvider:
+    family: MinionFamilyManifest
+
+    def declared_minion_families(self) -> list[MinionFamilyManifest]:
+        return [self.family]
+
+
 @dataclass
 class MinionProfileRegistry:
     profile_providers: tuple[MinionProfileProvider, ...] = ()
@@ -156,7 +172,7 @@ class MinionProfileRegistry:
     family_providers: tuple[MinionFamilyProvider, ...] = ()
     ambient_capabilities: tuple[str, ...] = ()
     runtime_root: Path | None = None
-    builtin_profiles: tuple[MinionProfile, ...] = field(default_factory=lambda: BUILTIN_MINION_PROFILES)
+    builtin_profiles: tuple[MinionProfile, ...] = field(default_factory=lambda: load_builtin_minion_profiles())
 
     def list_profiles(self) -> list[MinionProfile]:
         profiles: dict[tuple[str, str], MinionProfile] = {}
@@ -307,14 +323,36 @@ class MinionProfileRegistry:
     def _runtime_profiles(self) -> list[MinionProfile]:
         if self.runtime_root is None:
             return []
-        profile_dir = Path(self.runtime_root) / "plugins" / "minion" / "profiles"
-        return _load_profiles_from_dir(profile_dir)
+        return _load_profile_overrides(Path(self.runtime_root))
 
     def family_registry(self) -> MinionFamilyRegistry:
         return MinionFamilyRegistry(
             family_providers=self.family_providers,
             runtime_root=self.runtime_root,
         )
+
+
+def resolve_pinned_minion_pack(
+    pack: MinionInvocationPack,
+    *,
+    profile_payload: dict[str, Any],
+    family_payload: dict[str, Any],
+) -> MinionInvocationPack:
+    """Resolve a worker pack from its immutable FamilyBindingArtifact."""
+
+    profile = MinionProfile.from_dict(dict(profile_payload or {}))
+    family = MinionFamilyManifest.from_dict(dict(family_payload or {}))
+    requested = str(pack.minion_profile or "").strip()
+    if requested and requested != profile.canonical_profile_id:
+        raise ValueError(
+            f"pinned profile {profile.canonical_profile_id} does not match worker binding {requested}"
+        )
+    registry = MinionProfileRegistry(
+        builtin_profiles=(profile,),
+        family_providers=(_PinnedFamilyProvider(family),),
+        runtime_root=None,
+    )
+    return registry.resolve_pack(pack, requested_profile=profile.canonical_profile_id)
 
 
 CORE_MINION_CAPABILITIES = (
@@ -346,6 +384,9 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "v2_architecture_review_builder": ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
     "v2_architecture_skeleton_builder": ARCHITECTURE_SKELETON_CAPABILITIES,
     "v2_skeleton_review_builder": SKELETON_REVIEW_CAPABILITIES,
+    "v2_candidate_builder": CANDIDATE_BUILDER_CAPABILITIES,
+    "v2_verification_builder": VERIFICATION_BUILDER_CAPABILITIES,
+    "v2_standalone_review_builder": STANDALONE_REVIEW_BUILDER_CAPABILITIES,
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
@@ -429,7 +470,9 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         "op_minion_input_read",
         "op_minion_memory_candidate_write",
         *CONTRACT_BUILDER_CAPABILITIES,
+        *CANDIDATE_BUILDER_CAPABILITIES,
         *SKELETON_BUILDER_CAPABILITIES,
+        *VERIFICATION_TOOL_CAPABILITIES,
     }
 )
 
@@ -470,9 +513,14 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
         capability in MINION_INTERNAL_ALLOWED_CAPABILITIES
         or is_contract_builder_capability(capability)
         or is_skeleton_builder_capability(capability)
+        or is_verification_builder_capability(capability)
     ):
         return False
-    if str(policy.get("risk") or "").strip().lower() == "read_only" and capability == "op_exec_shell":
+    if (
+        str(policy.get("risk") or "").strip().lower() == "read_only"
+        and capability == "op_exec_shell"
+        and not bool(policy.get("allow_read_only_shell", False))
+    ):
         return True
     prefixes = (*DEFAULT_MINION_DENIED_PREFIXES, *tuple(_string_list(policy.get("deny_prefixes"))))
     if any(capability.startswith(prefix) for prefix in prefixes):
@@ -491,21 +539,13 @@ def load_builtin_minion_profiles() -> tuple[MinionProfile, ...]:
     return tuple(profiles)
 
 
-def _load_profiles_from_dir(profile_dir: Path) -> list[MinionProfile]:
-    if not profile_dir.exists():
-        return []
+def _load_profile_overrides(runtime_root: Path) -> list[MinionProfile]:
     profiles: list[MinionProfile] = []
-    for path in sorted(profile_dir.rglob("*.toml")):
-        try:
-            payload = tomllib.loads(path.read_text(encoding="utf-8"))
-            relative_parent = path.parent.relative_to(profile_dir)
-            if str(relative_parent) != ".":
-                payload.setdefault("profile_group", str(relative_parent).replace("\\", "/"))
-            profile = MinionProfile.from_dict(payload)
-        except Exception:
-            continue
+    for path, payload in load_json_objects(profile_override_root(runtime_root)):
+        profile = MinionProfile.from_dict(payload)
         metadata = dict(profile.metadata)
-        metadata.setdefault("source_path", str(path))
+        metadata["source_path"] = str(path)
+        metadata["catalog_source"] = "override"
         profiles.append(MinionProfile.from_dict({**profile.to_dict(), "metadata": metadata}))
     return profiles
 
@@ -578,6 +618,3 @@ def _profile_key(profile: MinionProfile) -> tuple[str, str]:
 
 def _profile_scope(profile_group: str) -> str:
     return str(profile_group or "general").strip().replace("/", ".") or "general"
-
-
-BUILTIN_MINION_PROFILES = load_builtin_minion_profiles()
