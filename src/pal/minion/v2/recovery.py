@@ -96,6 +96,13 @@ class MinionV2Recovery:
             after = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
             if before is not None and after is not None and after.version != before.version:
                 reconciled_controls.append(workflow_id)
+            triaged.extend(
+                item["aggregate_id"]
+                for item in self.service.triage_orphaned_work_aggregates(
+                    workflow_id=workflow_id,
+                    actor="minion-v2-recovery",
+                )
+            )
         rebuilt = self.repository.rebuild_workflow_projections()
         orphaned = self.repository.orphaned_workflow_ids()
         for workflow_id in orphaned:

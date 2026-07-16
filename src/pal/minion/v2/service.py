@@ -11,6 +11,7 @@ from pal.minion.v2.architecture import ArchitectureArtifactService, ResearchMode
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.catalog import MinionV2Catalog
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
+from pal.minion.v2.machines import LIVENESS_REQUIRED_STATES
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.paths import inferred_project_name
 from pal.minion.v2.replan import compile_architecture_finding_markdown
@@ -785,6 +786,11 @@ class MinionV2WorkflowService:
                 )
             )
             return {"status": "resumed", "workflow_id": workflow_id, "state": result.snapshot.state}
+        self.triage_orphaned_work_aggregates(
+            workflow_id=workflow_id,
+            actor=actor,
+            source_channel=source_channel,
+        )
         triaged = [
             item
             for item in self.repository.list_workflow_snapshots(workflow_id)
@@ -794,7 +800,14 @@ class MinionV2WorkflowService:
         ]
         if triaged:
             resumed = []
-            for item in triaged:
+            for item in sorted(
+                triaged,
+                key=lambda value: (
+                    value.aggregate_type == AggregateType.EXECUTION_EPOCH,
+                    value.aggregate_type.value,
+                    value.aggregate_id,
+                ),
+            ):
                 result = self.repository.dispatch(
                     ActionEnvelope(
                         action_type="RESOLVE_TRIAGE",
@@ -814,13 +827,78 @@ class MinionV2WorkflowService:
                         "state": result.snapshot.state,
                     }
                 )
-            return {"status": "triage_resolved", "workflow_id": workflow_id, "state": workflow.state, "resumed": resumed}
+            return {
+                "status": "triage_resolved",
+                "workflow_id": workflow_id,
+                "state": workflow.state,
+                "resumed": resumed,
+            }
         return {
             "status": "not_resumable",
             "workflow_id": workflow_id,
             "state": workflow.state,
             "next_legal_actions": list(self.repository.engine.legal_actions(AggregateType.WORKFLOW, workflow.state)),
         }
+
+    def triage_orphaned_work_aggregates(
+        self,
+        *,
+        workflow_id: str,
+        actor: str,
+        source_channel: str = "",
+    ) -> list[dict[str, str]]:
+        """Move worker-owned aggregates with no durable executor into triage."""
+
+        normalized: list[dict[str, str]] = []
+        snapshots = self.repository.list_workflow_snapshots(workflow_id)
+        for item in snapshots:
+            required_states = LIVENESS_REQUIRED_STATES.get(item.aggregate_type, frozenset())
+            if item.state not in required_states:
+                continue
+            if self.repository.aggregate_liveness_sources(
+                workflow_id=workflow_id,
+                aggregate_type=item.aggregate_type,
+                aggregate_id=item.aggregate_id,
+                lease_resource_key=str(item.payload.get("lease_resource_key") or ""),
+            ):
+                continue
+            if "ENTER_TRIAGE" not in self.repository.engine.legal_actions(
+                item.aggregate_type,
+                item.state,
+            ):
+                continue
+            result = self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="ENTER_TRIAGE",
+                    workflow_id=workflow_id,
+                    aggregate_type=item.aggregate_type,
+                    aggregate_id=item.aggregate_id,
+                    actor=actor,
+                    source_channel=source_channel,
+                    expected_version=item.version,
+                    idempotency_key=(
+                        f"orphaned-work:{item.aggregate_type.value}:"
+                        f"{item.aggregate_id}:{item.version}"
+                    ),
+                    payload={
+                        "blocker": {
+                            "kind": "orphaned_worker",
+                            "reason": (
+                                "worker-owned state has no live lease, pending outbox "
+                                "effect, or durable worker assignment"
+                            ),
+                        }
+                    },
+                )
+            )
+            normalized.append(
+                {
+                    "aggregate_type": result.snapshot.aggregate_type.value,
+                    "aggregate_id": result.snapshot.aggregate_id,
+                    "previous_state": item.state,
+                }
+            )
+        return normalized
 
     def submit_human_decision(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)

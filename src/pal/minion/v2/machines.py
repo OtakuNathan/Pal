@@ -20,6 +20,49 @@ from pal.minion.v2.contracts import (
 from pal.minion.v2.engine import TransitionEngine
 
 
+# These states are not allowed to sit durably without an outbox effect, a
+# worker assignment, or a live fenced lease.  Recovery uses the same table as
+# the transition layer so worker liveness does not become a second, hidden
+# state machine.
+LIVENESS_REQUIRED_STATES: Mapping[AggregateType, frozenset[str]] = {
+    AggregateType.ARCHITECTURE_REVISION: frozenset(
+        {
+            ArchitectureRevisionState.ARCHITECT_QUEUED.value,
+            ArchitectureRevisionState.ARCHITECT_RUNNING.value,
+            ArchitectureRevisionState.ARCHITECT_QUIESCING.value,
+            ArchitectureRevisionState.ARCHITECT_SNAPSHOTTING.value,
+            ArchitectureRevisionState.REVIEW_QUEUED.value,
+            ArchitectureRevisionState.REVIEWING.value,
+            ArchitectureRevisionState.PAUSE_REQUESTED.value,
+        }
+    ),
+    AggregateType.DAG_NODE_RUN: frozenset(
+        {
+            DagNodeRunState.QUEUED.value,
+            DagNodeRunState.PRODUCING.value,
+            DagNodeRunState.QUIESCING.value,
+            DagNodeRunState.SNAPSHOTTING.value,
+            DagNodeRunState.REVIEW_QUEUED.value,
+            DagNodeRunState.REVIEWING.value,
+            DagNodeRunState.REPAIR_QUEUED.value,
+            DagNodeRunState.REPAIRING.value,
+            DagNodeRunState.VERIFY_PREPARING.value,
+            DagNodeRunState.VERIFYING.value,
+            DagNodeRunState.PAUSE_REQUESTED.value,
+        }
+    ),
+    AggregateType.STANDALONE_REVIEW: frozenset(
+        {
+            StandaloneReviewState.RECEIVED.value,
+            StandaloneReviewState.REVIEW_QUEUED.value,
+            StandaloneReviewState.REVIEWING.value,
+            StandaloneReviewState.REPORT_READY.value,
+            StandaloneReviewState.PAUSE_REQUESTED.value,
+        }
+    ),
+}
+
+
 def _no_guard(_payload: Mapping[str, Any], _action: ActionEnvelope) -> None:
     return None
 

@@ -1103,6 +1103,64 @@ class MinionV2Repository:
             ).fetchall()
             return tuple(str(row["workflow_id"]) for row in rows)
 
+    def aggregate_liveness_sources(
+        self,
+        *,
+        workflow_id: str,
+        aggregate_type: AggregateType,
+        aggregate_id: str,
+        lease_resource_key: str = "",
+    ) -> tuple[str, ...]:
+        """Return durable execution sources for one worker-owned aggregate."""
+
+        self.ensure_schema()
+        sources: list[str] = []
+        now = utc_now()
+        with self._connect() as connection:
+            if lease_resource_key:
+                lease = connection.execute(
+                    """
+                    SELECT 1 FROM minion_v2_leases
+                    WHERE resource_key = ? AND owner_id != '' AND expires_at > ?
+                    LIMIT 1
+                    """,
+                    (str(lease_resource_key), now),
+                ).fetchone()
+                if lease is not None:
+                    sources.append("live_lease")
+            pending_effect = connection.execute(
+                """
+                SELECT 1 FROM minion_v2_outbox
+                WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
+                  AND status IN ('pending', 'inflight')
+                LIMIT 1
+                """,
+                (str(workflow_id), aggregate_type.value, str(aggregate_id)),
+            ).fetchone()
+            if pending_effect is not None:
+                sources.append("outbox")
+            durable_assignment = connection.execute(
+                """
+                SELECT 1 FROM minion_v2_worker_assignments
+                WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
+                  AND state IN (?, ?, ?, ?, ?)
+                LIMIT 1
+                """,
+                (
+                    str(workflow_id),
+                    aggregate_type.value,
+                    str(aggregate_id),
+                    WorkerAssignmentState.QUEUED.value,
+                    WorkerAssignmentState.CLAIMED.value,
+                    WorkerAssignmentState.RUNNING.value,
+                    WorkerAssignmentState.RETRY_QUEUED.value,
+                    WorkerAssignmentState.RESULT_RECORDED.value,
+                ),
+            ).fetchone()
+            if durable_assignment is not None:
+                sources.append("worker_assignment")
+        return tuple(sources)
+
     def record_artifact(
         self,
         ref: ArtifactRef,

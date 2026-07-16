@@ -2048,6 +2048,99 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(result["status"], "triage_resolved")
         self.assertEqual(resumed.state, "ARCHITECT_QUEUED")
 
+    def test_resume_workflow_normalizes_orphaned_node_before_retry(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id="wf_orphaned_node",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_orphaned_node",
+                actor="test",
+                expected_version=0,
+                idempotency_key="orphaned-node:create-workflow",
+            )
+        )
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id="wf_orphaned_node",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_orphaned_node",
+                actor="test",
+                expected_version=1,
+                idempotency_key="orphaned-node:start-workflow",
+            )
+        )
+        contract_ref = service.artifacts.put_json(
+            {"module_name": "drawing"},
+            artifact_type="ModuleContractArtifact",
+        )
+        node_id = "epoch_orphaned:node:drawing"
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="wf_orphaned_node",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=node_id,
+                actor="test",
+                expected_version=0,
+                idempotency_key="orphaned-node:create-node",
+                payload={
+                    "unit_contract_ref": contract_ref.to_dict(),
+                    "epoch_id": "epoch_orphaned",
+                    "unit_id": "drawing",
+                    "node_kind": "unit",
+                    "dependency_node_ids": [],
+                },
+            )
+        )
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="DEPENDENCIES_ACCEPTED",
+                workflow_id="wf_orphaned_node",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=node_id,
+                actor="test",
+                expected_version=1,
+                idempotency_key="orphaned-node:dependencies",
+                payload={"accepted_dependency_node_ids": []},
+            )
+        )
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="START_PRODUCING",
+                workflow_id="wf_orphaned_node",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=node_id,
+                actor="test",
+                expected_version=2,
+                idempotency_key="orphaned-node:start-producing",
+                payload={
+                    "fencing_token": 1,
+                    "active_worker_id": "dead-worker",
+                    "lease_resource_key": "node:dead-worker",
+                },
+            )
+        )
+        with sqlite3.connect(str(service.repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                ("wf_orphaned_node",),
+            )
+
+        result = service.resume_workflow(
+            workflow_id="wf_orphaned_node",
+            actor="nathan",
+            source_channel="socket:test",
+        )
+
+        node = service.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+        self.assertEqual(result["status"], "triage_resolved")
+        self.assertEqual(node.state, "QUEUED")
+        self.assertNotIn("active_worker_id", node.payload)
+        self.assertNotIn("lease_resource_key", node.payload)
+
     def test_task_workspace_and_file_uri_references_are_normalized(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         repo = self.runtime_root / "repo"

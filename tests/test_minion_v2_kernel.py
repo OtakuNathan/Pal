@@ -40,7 +40,7 @@ from pal.minion.v2.sessions import (
 )
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
-from pal.minion.v2.machines import all_transition_specs
+from pal.minion.v2.machines import LIVENESS_REQUIRED_STATES, all_transition_specs
 from pal.minion.v2.orchestration import MECHANICAL_EFFECT_TYPES
 from pal.minion.v2.workers import SEMANTIC_EFFECT_TYPES
 from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
@@ -355,6 +355,15 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     },
                 ),
             )
+
+    def test_every_liveness_required_state_has_an_explicit_triage_transition(self) -> None:
+        for aggregate_type, states in LIVENESS_REQUIRED_STATES.items():
+            for state in states:
+                with self.subTest(aggregate_type=aggregate_type, state=state):
+                    self.assertIn(
+                        "ENTER_TRIAGE",
+                        self.engine.legal_actions(aggregate_type, state),
+                    )
 
     def test_reopened_terminal_node_gets_a_new_role_session_generation(self) -> None:
         accepted = AggregateSnapshot(
