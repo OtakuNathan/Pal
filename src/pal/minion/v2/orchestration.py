@@ -55,9 +55,10 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "propagate_pause",
     "propagate_resume",
     "propagate_cancel",
+    "freeze_workflow_children",
     "pause_epoch_nodes",
-    "resume_epoch_nodes",
     "cancel_epoch_nodes",
+    "freeze_epoch_nodes",
     "suspend_stale_node_assignments",
     "reopen_dependency_and_stale_descendants",
     "request_epoch_replan",
@@ -70,6 +71,43 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "reconcile_execution_epoch",
     "reconcile_workflow",
 })
+
+CONTROL_RECONCILIATION_EFFECT_TYPES = frozenset(
+    {
+        "reconcile_workflow",
+        "reconcile_architecture_revision",
+        "reconcile_execution_epoch",
+        "reconcile_node_run",
+        "reconcile_standalone_review",
+    }
+)
+
+CANCELLATION_EFFECT_TYPES = CONTROL_RECONCILIATION_EFFECT_TYPES | frozenset(
+    {
+        "propagate_cancel",
+        "cancel_epoch_nodes",
+        "cancel_node_worker",
+        "cancel_aggregate_work",
+    }
+)
+
+PAUSE_EFFECT_TYPES = CONTROL_RECONCILIATION_EFFECT_TYPES | frozenset(
+    {
+        "propagate_pause",
+        "pause_epoch_nodes",
+        "pause_node_worker",
+        "pause_aggregate_work",
+    }
+)
+
+TRIAGE_FREEZE_EFFECT_TYPES = frozenset(
+    {
+        "freeze_workflow_children",
+        "freeze_epoch_nodes",
+        "quiesce_node_for_triage",
+        "quiesce_aggregate_for_triage",
+    }
+)
 
 
 @dataclass
@@ -161,7 +199,23 @@ class MinionV2OutboxProcessor:
             return "deferred"
         except Exception as exc:
             snapshot = self._effect_snapshot(effect)
-            if snapshot.state in {"PAUSED", "CANCEL_REQUESTED", "CANCELLED", "STALE"}:
+            effect_type = str(effect.get("effect_type") or "")
+            superseded = (
+                snapshot.state in {"PAUSED", "CANCELLED", "STALE"}
+                or (
+                    snapshot.state == "PAUSE_REQUESTED"
+                    and effect_type not in PAUSE_EFFECT_TYPES
+                )
+                or (
+                    snapshot.state == "CANCEL_REQUESTED"
+                    and effect_type not in CANCELLATION_EFFECT_TYPES
+                )
+                or (
+                    snapshot.state == "TRIAGE_REQUIRED"
+                    and effect_type not in TRIAGE_FREEZE_EFFECT_TYPES
+                )
+            )
+            if superseded:
                 self.repository.complete_outbox_effect(effect_id, worker_id=self.worker_id)
                 self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
                 self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
@@ -227,9 +281,18 @@ class MinionV2OutboxProcessor:
             return self._prepare_verification_scenario(effect)
         if effect_type == "publish_accepted_memory_candidate":
             return self._publish_accepted_memory_candidate(effect)
-        if effect_type in {"propagate_pause", "propagate_resume", "propagate_cancel"}:
+        if effect_type in {
+            "propagate_pause",
+            "propagate_resume",
+            "propagate_cancel",
+            "freeze_workflow_children",
+        }:
             return self._propagate_workflow_control(effect_type, effect)
-        if effect_type in {"pause_epoch_nodes", "resume_epoch_nodes", "cancel_epoch_nodes"}:
+        if effect_type in {
+            "pause_epoch_nodes",
+            "cancel_epoch_nodes",
+            "freeze_epoch_nodes",
+        }:
             return self._control_epoch_nodes(effect_type, effect)
         if effect_type == "suspend_stale_node_assignments":
             node = self._effect_snapshot(effect)
@@ -324,27 +387,67 @@ class MinionV2OutboxProcessor:
         if effect_type == "reconcile_execution_epoch":
             return await self._reconcile_execution_epoch(effect)
         if effect_type == "reconcile_workflow":
-            self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
-            return {}
+            return self._reconcile_workflow(effect)
         raise ValueError(f"unsupported mechanical V2 effect: {effect_type}")
 
     async def _reconcile_execution_epoch(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         epoch = self._effect_snapshot(effect)
+        if epoch.state == "NOT_STARTED":
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="START_EXECUTION",
+                    workflow_id=epoch.workflow_id,
+                    aggregate_type=AggregateType.EXECUTION_EPOCH,
+                    aggregate_id=epoch.aggregate_id,
+                    actor="minion-v2-recovery",
+                    expected_version=epoch.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:start-execution",
+                )
+            )
+            return {}
+        if epoch.state == "PAUSE_REQUESTED":
+            return self._control_epoch_nodes("pause_epoch_nodes", effect)
+        if epoch.state == "CANCEL_REQUESTED":
+            return self._control_epoch_nodes("cancel_epoch_nodes", effect)
         if epoch.state == "REPLAN_COLLECTING":
             self._reconcile_replan_collection(epoch)
             return {}
+        if epoch.state == "REPLAN_REQUIRED":
+            if not str(epoch.payload.get("active_replan_revision_id") or ""):
+                return self._create_replan_revision(effect)
+            return {}
         if epoch.state == "RUNNING":
+            self._control_epoch_nodes("resume_epoch_nodes", effect)
             DagScheduler(self.repository).schedule_ready_nodes(
                 workflow_id=epoch.workflow_id,
                 epoch_id=epoch.aggregate_id,
                 max_new_nodes=self.max_parallel_nodes,
             )
+            nodes = self._epoch_nodes(epoch)
+            if nodes and all(item.state == "ACCEPTED" for item in nodes):
+                accepted = next(
+                    (
+                        item
+                        for item in nodes
+                        if str(item.payload.get("node_kind") or "") == "integration"
+                    ),
+                    sorted(nodes, key=lambda item: item.aggregate_id)[-1],
+                )
+                return self._node_accepted(
+                    {
+                        **dict(effect),
+                        "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                        "aggregate_id": accepted.aggregate_id,
+                        "effect_key": f"{effect['effect_key']}:accepted-node-reconcile",
+                    }
+                )
             return {}
         if epoch.state == "FINALIZING":
             return await self.semantic_effects.execute_semantic_effect(
                 {**dict(effect), "effect_type": "publish_final_deliverable"}
             )
         if epoch.state == "STARTING":
+            self._control_epoch_nodes("resume_epoch_nodes", effect)
             nodes = [
                 item
                 for item in self.repository.list_workflow_snapshots(epoch.workflow_id)
@@ -381,6 +484,266 @@ class MinionV2OutboxProcessor:
                 )
             )
         return {}
+
+    def _reconcile_workflow(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
+        workflow = self._effect_snapshot(effect)
+        if workflow.state == "CREATED":
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="START_WORKFLOW",
+                    workflow_id=workflow.workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW,
+                    aggregate_id=workflow.aggregate_id,
+                    actor="minion-v2-recovery",
+                    expected_version=workflow.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:start-workflow",
+                )
+            )
+            return {}
+        if workflow.state == "PAUSE_REQUESTED":
+            return self._propagate_workflow_control("propagate_pause", effect)
+        if workflow.state == "CANCEL_REQUESTED":
+            return self._propagate_workflow_control("propagate_cancel", effect)
+        if workflow.state != "ACTIVE":
+            return {}
+
+        self._propagate_workflow_control("propagate_resume", effect)
+        snapshots = list(self.repository.list_workflow_snapshots(workflow.workflow_id))
+        epoch_id = str(workflow.payload.get("execution_epoch_id") or "")
+        review_id = str(workflow.payload.get("standalone_review_id") or "")
+        revision_id = str(workflow.payload.get("architecture_revision_id") or "")
+        epoch = next(
+            (
+                item
+                for item in snapshots
+                if item.aggregate_type == AggregateType.EXECUTION_EPOCH
+                and item.aggregate_id == epoch_id
+            ),
+            None,
+        ) if epoch_id else None
+        revision = next(
+            (
+                item
+                for item in snapshots
+                if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+                and item.aggregate_id == revision_id
+            ),
+            None,
+        ) if revision_id else None
+
+        if revision_id and revision is None:
+            raise RuntimeError("workflow references a missing architecture revision")
+        if revision is not None:
+            revision_manifest_sha = str(
+                dict(revision.payload.get("architecture_manifest_ref") or {}).get("sha256")
+                or ""
+            )
+            epoch_manifest_sha = str(
+                dict((epoch.payload if epoch is not None else {}).get("architecture_manifest_ref") or {}).get("sha256")
+                or ""
+            )
+            revision_precedes_epoch = (
+                revision.state != "ACCEPTED"
+                or epoch is None
+                or not revision_manifest_sha
+                or revision_manifest_sha != epoch_manifest_sha
+            )
+            if revision_precedes_epoch:
+                return self._reconcile_linked_revision(
+                    workflow,
+                    revision,
+                    snapshots,
+                    effect,
+                )
+
+        if epoch_id:
+            if epoch is None:
+                raise RuntimeError("workflow references a missing execution epoch")
+            if epoch.state == "COMPLETED":
+                result_ref = dict(epoch.payload.get("published_deliverable_ref") or {})
+                if not result_ref:
+                    raise RuntimeError("completed execution epoch has no published deliverable")
+                self._complete_active_workflow(workflow, result_ref, str(effect["effect_key"]))
+            return {}
+
+        if review_id:
+            review = next(
+                (
+                    item
+                    for item in snapshots
+                    if item.aggregate_type == AggregateType.STANDALONE_REVIEW
+                    and item.aggregate_id == review_id
+                ),
+                None,
+            )
+            if review is None:
+                raise RuntimeError("workflow references a missing standalone review")
+            if review.state == "COMPLETED":
+                result_ref = dict(review.payload.get("verification_artifact_ref") or {})
+                if not result_ref:
+                    raise RuntimeError("completed standalone review has no verification artifact")
+                self._complete_active_workflow(workflow, result_ref, str(effect["effect_key"]))
+            return {}
+
+        if revision is not None:
+            return self._reconcile_linked_revision(workflow, revision, snapshots, effect)
+
+        unlinked_children = _active_control_children(snapshots, workflow)
+        if len(unlinked_children) > 1:
+            raise RuntimeError("workflow has multiple unlinked active child aggregates")
+        if unlinked_children:
+            child = unlinked_children[0]
+            action_type, payload_field = {
+                AggregateType.ARCHITECTURE_REVISION: (
+                    "LINK_ARCHITECTURE_REVISION",
+                    "architecture_revision_id",
+                ),
+                AggregateType.EXECUTION_EPOCH: (
+                    "LINK_EXECUTION_EPOCH",
+                    "execution_epoch_id",
+                ),
+                AggregateType.STANDALONE_REVIEW: (
+                    "LINK_STANDALONE_REVIEW",
+                    "standalone_review_id",
+                ),
+            }[child.aggregate_type]
+            self._link_workflow(
+                workflow.workflow_id,
+                action_type,
+                {payload_field: child.aggregate_id},
+                f"{effect['effect_key']}:relink-child",
+            )
+            return {}
+        return self._route_workflow(effect)
+
+    def _reconcile_linked_revision(
+        self,
+        workflow: AggregateSnapshot,
+        revision: AggregateSnapshot,
+        snapshots: list[AggregateSnapshot],
+        effect: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        if revision.state == "ACCEPTED":
+            return self._reconcile_accepted_revision(workflow, revision, snapshots, effect)
+        if revision.state == "SUPERSEDED":
+            successor = next(
+                (
+                    item
+                    for item in snapshots
+                    if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+                    and str(item.payload.get("parent_revision_id") or "") == revision.aggregate_id
+                ),
+                None,
+            )
+            if successor is not None:
+                self._link_workflow(
+                    workflow.workflow_id,
+                    "LINK_ARCHITECTURE_REVISION",
+                    {"architecture_revision_id": successor.aggregate_id},
+                    f"{effect['effect_key']}:successor",
+                )
+                return {}
+            return self._create_revision(
+                {
+                    **dict(effect),
+                    "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
+                    "aggregate_id": revision.aggregate_id,
+                    "effect_key": f"{effect['effect_key']}:recreate-revision",
+                }
+            )
+        if revision.state == "REJECTED":
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="REJECT_WORKFLOW",
+                    workflow_id=workflow.workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW,
+                    aggregate_id=workflow.aggregate_id,
+                    actor="minion-v2-recovery",
+                    expected_version=workflow.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:reject-workflow",
+                )
+            )
+        elif revision.state == "CANCELLED":
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="REQUEST_CANCEL",
+                    workflow_id=workflow.workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW,
+                    aggregate_id=workflow.aggregate_id,
+                    actor="minion-v2-recovery",
+                    expected_version=workflow.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:cancel-workflow",
+                )
+            )
+        return {}
+
+    def _reconcile_accepted_revision(
+        self,
+        workflow: AggregateSnapshot,
+        revision: AggregateSnapshot,
+        snapshots: list[AggregateSnapshot],
+        effect: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        manifest_ref = dict(revision.payload.get("architecture_manifest_ref") or {})
+        if not manifest_ref:
+            raise RuntimeError("accepted architecture revision has no manifest")
+        existing = next(
+            (
+                item
+                for item in snapshots
+                if item.aggregate_type == AggregateType.EXECUTION_EPOCH
+                and dict(item.payload.get("architecture_manifest_ref") or {}).get("sha256")
+                == manifest_ref.get("sha256")
+                and item.state not in {"SUPERSEDED", "CANCELLED"}
+            ),
+            None,
+        )
+        if existing is not None:
+            self._link_workflow(
+                workflow.workflow_id,
+                "LINK_EXECUTION_EPOCH",
+                {"execution_epoch_id": existing.aggregate_id},
+                f"{effect['effect_key']}:existing-epoch",
+            )
+            if existing.state == "COMPLETED":
+                result_ref = dict(existing.payload.get("published_deliverable_ref") or {})
+                if not result_ref:
+                    raise RuntimeError("completed execution epoch has no published deliverable")
+                latest_workflow = self.repository.read_snapshot(
+                    AggregateType.WORKFLOW,
+                    workflow.aggregate_id,
+                )
+                self._complete_active_workflow(
+                    latest_workflow,
+                    result_ref,
+                    f"{effect['effect_key']}:existing-epoch",
+                )
+            return {}
+        return self._compile_execution(
+            workflow_id=workflow.workflow_id,
+            manifest_ref=manifest_ref,
+            causation_key=f"reconcile:{revision.aggregate_id}:{manifest_ref.get('sha256')}",
+            reuse_from_epoch_id=str(revision.payload.get("source_execution_epoch_id") or ""),
+        )
+
+    def _complete_active_workflow(
+        self,
+        workflow: AggregateSnapshot,
+        result_ref: Mapping[str, Any],
+        effect_key: str,
+    ) -> None:
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="MARK_COMPLETED",
+                workflow_id=workflow.workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow.aggregate_id,
+                actor="minion-v2-recovery",
+                expected_version=workflow.version,
+                idempotency_key=f"effect:{effect_key}:complete-workflow",
+                payload={"result_artifact_ref": dict(result_ref)},
+            )
+        )
 
     def _submit_effect_action(self, effect: Mapping[str, Any], payload: Mapping[str, Any]) -> Mapping[str, Any]:
         action_type = str(payload.get("action_type") or "")
@@ -1090,13 +1453,10 @@ class MinionV2OutboxProcessor:
             "propagate_pause": "REQUEST_PAUSE",
             "propagate_resume": "RESUME",
             "propagate_cancel": "REQUEST_CANCEL",
+            "freeze_workflow_children": "REQUEST_PAUSE",
         }[effect_type]
         for child in active:
-            action_type = (
-                "RESOLVE_TRIAGE"
-                if effect_type == "propagate_resume" and child.state == "TRIAGE_REQUIRED"
-                else default_action_type
-            )
+            action_type = default_action_type
             if action_type not in self.repository.engine.legal_actions(child.aggregate_type, child.state):
                 continue
             self.repository.dispatch(
@@ -1110,10 +1470,13 @@ class MinionV2OutboxProcessor:
                     idempotency_key=f"effect:{effect['effect_key']}:{child.aggregate_id}",
                 )
             )
-        if not active:
+        if not active and effect_type in {"propagate_pause", "propagate_cancel"}:
             confirmation = "CHILDREN_PAUSED" if effect_type == "propagate_pause" else "CHILDREN_CANCELLED"
-            if effect_type != "propagate_resume":
-                latest = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow.workflow_id)
+            latest = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow.workflow_id)
+            if confirmation in self.repository.engine.legal_actions(
+                AggregateType.WORKFLOW,
+                latest.state,
+            ):
                 self.repository.dispatch(
                     ActionEnvelope(
                         action_type=confirmation,
@@ -1161,6 +1524,7 @@ class MinionV2OutboxProcessor:
             "pause_epoch_nodes": "REQUEST_PAUSE",
             "resume_epoch_nodes": "RESUME",
             "cancel_epoch_nodes": "REQUEST_CANCEL",
+            "freeze_epoch_nodes": "REQUEST_PAUSE",
         }[effect_type]
         for node in nodes:
             if requested_action not in self.repository.engine.legal_actions(AggregateType.DAG_NODE_RUN, node.state):
@@ -1209,33 +1573,55 @@ class MinionV2OutboxProcessor:
         return snapshot
 
     def _triage_failed_effect(self, effect: Mapping[str, Any], exc: Exception) -> None:
-        snapshot = self._effect_snapshot(effect)
-        if "ENTER_TRIAGE" not in self.repository.engine.legal_actions(snapshot.aggregate_type, snapshot.state):
-            return
+        source = self._effect_snapshot(effect)
+        target = source
+        if "ENTER_TRIAGE" not in self.repository.engine.legal_actions(
+            source.aggregate_type,
+            source.state,
+        ):
+            workflow = self.repository.read_snapshot(
+                AggregateType.WORKFLOW,
+                source.workflow_id,
+            )
+            if workflow is None or "ENTER_TRIAGE" not in self.repository.engine.legal_actions(
+                AggregateType.WORKFLOW,
+                workflow.state,
+            ):
+                return
+            target = workflow
         failure_ref = self.service.artifacts.put_json(
             {
                 "effect_id": effect.get("effect_id"),
                 "effect_type": effect.get("effect_type"),
                 "attempt_count": effect.get("attempt_count"),
                 "error": f"{exc.__class__.__name__}: {exc}",
+                "source_aggregate_type": source.aggregate_type.value,
+                "source_aggregate_id": source.aggregate_id,
+                "source_aggregate_state": source.state,
             },
             artifact_type="EffectFailureArtifact",
         )
         self.repository.dispatch(
             ActionEnvelope(
                 action_type="ENTER_TRIAGE",
-                workflow_id=snapshot.workflow_id,
-                aggregate_type=snapshot.aggregate_type,
-                aggregate_id=snapshot.aggregate_id,
+                workflow_id=target.workflow_id,
+                aggregate_type=target.aggregate_type,
+                aggregate_id=target.aggregate_id,
                 actor="minion-v2-outbox",
-                expected_version=snapshot.version,
-                idempotency_key=f"effect-failed:{effect['effect_key']}",
+                expected_version=target.version,
+                idempotency_key=(
+                    f"effect-failed:{effect['effect_key']}:"
+                    f"{target.aggregate_type.value}:{target.aggregate_id}"
+                ),
                 payload={
                     "failure_artifact_ref": failure_ref.to_dict(),
                     "blocker": {
                         "kind": "effect_failed",
                         "effect_type": effect.get("effect_type"),
                         "failure_artifact_ref": failure_ref.to_dict(),
+                        "source_aggregate_type": source.aggregate_type.value,
+                        "source_aggregate_id": source.aggregate_id,
+                        "source_aggregate_state": source.state,
                     },
                 },
             )
@@ -1300,6 +1686,27 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
                     ),
                 )
             )
+    elif workflow.state == "ACTIVE":
+        for child in _active_control_children(snapshots, workflow):
+            if child.state != "PAUSED" or "RESUME" not in repository.engine.legal_actions(
+                child.aggregate_type,
+                child.state,
+            ):
+                continue
+            repository.dispatch(
+                ActionEnvelope(
+                    action_type="RESUME",
+                    workflow_id=workflow_id,
+                    aggregate_type=child.aggregate_type,
+                    aggregate_id=child.aggregate_id,
+                    actor="minion-v2-control",
+                    expected_version=child.version,
+                    idempotency_key=(
+                        f"reconcile:{workflow_id}:resume:"
+                        f"{child.aggregate_id}:{child.version}"
+                    ),
+                )
+            )
 
     snapshots = list(repository.list_workflow_snapshots(workflow_id))
     for epoch in [
@@ -1343,6 +1750,27 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
                     idempotency_key=f"reconcile:{epoch.aggregate_id}:{epoch.version}:cancelled",
                 )
             )
+        elif epoch.state in {"STARTING", "RUNNING", "FINALIZING"}:
+            for node in nodes:
+                if node.state != "PAUSED" or "RESUME" not in repository.engine.legal_actions(
+                    AggregateType.DAG_NODE_RUN,
+                    node.state,
+                ):
+                    continue
+                repository.dispatch(
+                    ActionEnvelope(
+                        action_type="RESUME",
+                        workflow_id=workflow_id,
+                        aggregate_type=AggregateType.DAG_NODE_RUN,
+                        aggregate_id=node.aggregate_id,
+                        actor="minion-v2-control",
+                        expected_version=node.version,
+                        idempotency_key=(
+                            f"reconcile:{epoch.aggregate_id}:resume:"
+                            f"{node.aggregate_id}:{node.version}"
+                        ),
+                    )
+                )
 
     snapshots = list(repository.list_workflow_snapshots(workflow_id))
     workflow = next(
@@ -1395,26 +1823,28 @@ def _active_control_children(
         )
         if str(workflow.payload.get(field) or "")
     }
-    active_epoch_id = str(workflow.payload.get("execution_epoch_id") or "")
     children = [
         item
         for item in snapshots
-        if item.aggregate_type != AggregateType.WORKFLOW
-        and (
-            item.aggregate_id in active_ids
-            or (
-                item.aggregate_type == AggregateType.DAG_NODE_RUN
-                and active_epoch_id
-                and str(item.payload.get("epoch_id") or "") == active_epoch_id
-            )
-        )
+        if item.aggregate_type
+        in {
+            AggregateType.ARCHITECTURE_REVISION,
+            AggregateType.EXECUTION_EPOCH,
+            AggregateType.STANDALONE_REVIEW,
+        }
+        and item.aggregate_id in active_ids
     ]
     if active_ids:
         return children
     return [
         item
         for item in snapshots
-        if item.aggregate_type != AggregateType.WORKFLOW
+        if item.aggregate_type
+        in {
+            AggregateType.ARCHITECTURE_REVISION,
+            AggregateType.EXECUTION_EPOCH,
+            AggregateType.STANDALONE_REVIEW,
+        }
         and item.state
         not in {
             "ACCEPTED",

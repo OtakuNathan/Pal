@@ -211,8 +211,10 @@ SEMANTIC_EFFECT_TYPES = frozenset(
         "snapshot_candidate",
         "pause_node_worker",
         "cancel_node_worker",
+        "quiesce_node_for_triage",
         "pause_aggregate_work",
         "cancel_aggregate_work",
+        "quiesce_aggregate_for_triage",
         "resume_aggregate_work",
         "resume_node_work",
         "reconcile_node_run",
@@ -353,14 +355,18 @@ class MinionV2SemanticWorker:
             return await self._snapshot_candidate(effect)
         if effect_type in {"pause_node_worker", "cancel_node_worker"}:
             return await self._stop_node_worker(effect, cancel=effect_type == "cancel_node_worker")
+        if effect_type == "quiesce_node_for_triage":
+            return await self._stop_node_worker(effect, cancel=False, confirm=False)
         if effect_type in {"pause_aggregate_work", "cancel_aggregate_work"}:
             return await self._stop_aggregate_worker(effect, cancel=effect_type == "cancel_aggregate_work")
+        if effect_type == "quiesce_aggregate_for_triage":
+            return await self._stop_aggregate_worker(effect, cancel=False, confirm=False)
         if effect_type == "resume_aggregate_work":
             return await self._resume_aggregate(effect)
         if effect_type == "resume_node_work":
             return self._resume_node(effect)
         if effect_type == "reconcile_node_run":
-            return self._resume_node(effect)
+            return await self._reconcile_node(effect)
         if effect_type == "reconcile_standalone_review":
             return await self._resume_aggregate(effect)
         if effect_type == "publish_final_deliverable":
@@ -1870,7 +1876,13 @@ class MinionV2SemanticWorker:
         )
         return {"result_artifact_ref": candidate_ref.to_dict()}
 
-    async def _stop_node_worker(self, effect: Mapping[str, Any], *, cancel: bool) -> Mapping[str, Any]:
+    async def _stop_node_worker(
+        self,
+        effect: Mapping[str, Any],
+        *,
+        cancel: bool,
+        confirm: bool = True,
+    ) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
         invocation_id = str(node.payload.get("active_worker_id") or "")
         lease_resource = str(node.payload.get("lease_resource_key") or "")
@@ -1902,18 +1914,19 @@ class MinionV2SemanticWorker:
                 else "node paused"
             ),
         )
-        action_type = "CANCEL_CONFIRMED" if cancel or current.state == "CANCEL_REQUESTED" else "PAUSE_CONFIRMED"
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type=action_type,
-                workflow_id=node.workflow_id,
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=node.aggregate_id,
-                actor="minion-v2-manager",
-                expected_version=current.version,
-                idempotency_key=f"effect:{effect['effect_key']}:stopped",
+        if confirm:
+            action_type = "CANCEL_CONFIRMED" if cancel or current.state == "CANCEL_REQUESTED" else "PAUSE_CONFIRMED"
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=node.workflow_id,
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node.aggregate_id,
+                    actor="minion-v2-manager",
+                    expected_version=current.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:stopped",
+                )
             )
-        )
         fencing_token = int(node.payload.get("fencing_token") or 0)
         if lease_resource and invocation_id and fencing_token:
             try:
@@ -1937,7 +1950,13 @@ class MinionV2SemanticWorker:
             )
         return {}
 
-    async def _stop_aggregate_worker(self, effect: Mapping[str, Any], *, cancel: bool) -> Mapping[str, Any]:
+    async def _stop_aggregate_worker(
+        self,
+        effect: Mapping[str, Any],
+        *,
+        cancel: bool,
+        confirm: bool = True,
+    ) -> Mapping[str, Any]:
         snapshot = self._effect_snapshot(effect)
         invocation_id = str(snapshot.payload.get("active_worker_id") or "")
         lease_resource = str(snapshot.payload.get("lease_resource_key") or "")
@@ -1960,19 +1979,20 @@ class MinionV2SemanticWorker:
             aggregate_id=snapshot.aggregate_id,
             reason="aggregate cancelled" if cancel else "aggregate paused",
         )
-        current = self.repository.read_snapshot(snapshot.aggregate_type, snapshot.aggregate_id)
-        action_type = "CANCEL_CONFIRMED" if cancel else "PAUSE_CONFIRMED"
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type=action_type,
-                workflow_id=snapshot.workflow_id,
-                aggregate_type=snapshot.aggregate_type,
-                aggregate_id=snapshot.aggregate_id,
-                actor="minion-v2-manager",
-                expected_version=current.version,
-                idempotency_key=f"effect:{effect['effect_key']}:stopped",
+        if confirm:
+            current = self.repository.read_snapshot(snapshot.aggregate_type, snapshot.aggregate_id)
+            action_type = "CANCEL_CONFIRMED" if cancel else "PAUSE_CONFIRMED"
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=snapshot.workflow_id,
+                    aggregate_type=snapshot.aggregate_type,
+                    aggregate_id=snapshot.aggregate_id,
+                    actor="minion-v2-manager",
+                    expected_version=current.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:stopped",
+                )
             )
-        )
         fencing_token = int(snapshot.payload.get("fencing_token") or 0)
         if lease_resource and invocation_id and fencing_token:
             try:
@@ -1993,6 +2013,10 @@ class MinionV2SemanticWorker:
     async def _resume_aggregate(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         snapshot = self._effect_snapshot(effect)
         if snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+            if snapshot.state == "PAUSE_REQUESTED":
+                return await self._stop_aggregate_worker(effect, cancel=False)
+            if snapshot.state == "CANCEL_REQUESTED":
+                return await self._stop_aggregate_worker(effect, cancel=True)
             stage_by_state = {
                 "ARCHITECT_QUEUED": "architect",
                 "ARCHITECT_RUNNING": "architect",
@@ -2012,12 +2036,41 @@ class MinionV2SemanticWorker:
                 return await self._quiesce_architect(effect)
             if snapshot.state == "ARCHITECT_SNAPSHOTTING":
                 return await self._snapshot_architecture(effect)
+            if snapshot.state == "HUMAN_REVIEW":
+                return await self._publish_human_architecture_review(effect)
+            if snapshot.state == "CLARIFICATION_PENDING":
+                return await self._publish_human_clarification(effect)
         if snapshot.aggregate_type == AggregateType.STANDALONE_REVIEW:
+            if snapshot.state == "RECEIVED":
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="QUEUE_REVIEW",
+                        workflow_id=snapshot.workflow_id,
+                        aggregate_type=AggregateType.STANDALONE_REVIEW,
+                        aggregate_id=snapshot.aggregate_id,
+                        actor="minion-v2-recovery",
+                        expected_version=snapshot.version,
+                        idempotency_key=f"effect:{effect['effect_key']}:queue-review",
+                    )
+                )
+                return {}
+            if snapshot.state == "PAUSE_REQUESTED":
+                return await self._stop_aggregate_worker(effect, cancel=False)
+            if snapshot.state == "CANCEL_REQUESTED":
+                return await self._stop_aggregate_worker(effect, cancel=True)
             if snapshot.state == "REVIEW_QUEUED":
                 return self._admit_standalone_review(effect)
             if snapshot.state == "REPORT_READY":
                 return await self._publish_standalone_report(effect)
         return {}
+
+    async def _reconcile_node(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
+        node = self._effect_snapshot(effect)
+        if node.state == "PAUSE_REQUESTED":
+            return await self._stop_node_worker(effect, cancel=False)
+        if node.state == "CANCEL_REQUESTED":
+            return await self._stop_node_worker(effect, cancel=True)
+        return self._resume_node(effect)
 
     def _resume_node(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)

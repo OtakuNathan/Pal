@@ -2304,6 +2304,472 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(status["workflow_state"], "PAUSED")
         self.assertEqual(status["liveness"], "paused")
 
+    def test_failed_cancel_effect_enters_triage_and_replays_cancel_after_resolution(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id="wf_cancel_recovery",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_cancel_recovery",
+                actor="test",
+                expected_version=0,
+                idempotency_key="cancel-recovery:create-workflow",
+            )
+        )
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id="wf_cancel_recovery",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_cancel_recovery",
+                actor="test",
+                expected_version=1,
+                idempotency_key="cancel-recovery:start-workflow",
+            )
+        )
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_ARCHITECTURE_REVISION",
+                workflow_id="wf_cancel_recovery",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="arch_cancel_recovery",
+                actor="test",
+                expected_version=0,
+                idempotency_key="cancel-recovery:create-revision",
+            )
+        )
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="LINK_ARCHITECTURE_REVISION",
+                workflow_id="wf_cancel_recovery",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_cancel_recovery",
+                actor="test",
+                expected_version=2,
+                idempotency_key="cancel-recovery:link-revision",
+                payload={"architecture_revision_id": "arch_cancel_recovery"},
+            )
+        )
+        with sqlite3.connect(str(service.repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                ("wf_cancel_recovery",),
+            )
+        revision = service.repository.read_snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            "arch_cancel_recovery",
+        )
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="REQUEST_CANCEL",
+                workflow_id="wf_cancel_recovery",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="arch_cancel_recovery",
+                actor="test",
+                expected_version=revision.version,
+                idempotency_key="cancel-recovery:request-cancel",
+            )
+        )
+
+        failing = MinionV2OutboxProcessor(
+            service,
+            semantic_effects=_PermanentFailureSemanticEffects(),
+        )
+        asyncio.run(failing.process_once(limit=1))
+        triaged = service.repository.read_snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            "arch_cancel_recovery",
+        )
+        self.assertEqual(triaged.state, "TRIAGE_REQUIRED")
+        self.assertEqual(triaged.payload["triage_resume_state"], "CANCEL_REQUESTED")
+
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="RESOLVE_TRIAGE",
+                workflow_id="wf_cancel_recovery",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="arch_cancel_recovery",
+                actor="test",
+                expected_version=triaged.version,
+                idempotency_key="cancel-recovery:resolve-triage",
+            )
+        )
+        asyncio.run(failing.process_once(limit=1))
+        retriaged = service.repository.read_snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            "arch_cancel_recovery",
+        )
+        self.assertEqual(retriaged.state, "TRIAGE_REQUIRED")
+        self.assertEqual(retriaged.payload["triage_resume_state"], "CANCEL_REQUESTED")
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="RESOLVE_TRIAGE",
+                workflow_id="wf_cancel_recovery",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="arch_cancel_recovery",
+                actor="test",
+                expected_version=retriaged.version,
+                idempotency_key="cancel-recovery:resolve-triage-again",
+            )
+        )
+        recovery = MinionV2OutboxProcessor(
+            service,
+            semantic_effects=MinionV2SemanticWorker(service),
+        )
+        asyncio.run(recovery.process_once(limit=1))
+        cancelled = service.repository.read_snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            "arch_cancel_recovery",
+        )
+        self.assertEqual(cancelled.state, "CANCELLED")
+
+    def test_workflow_triage_freezes_epoch_without_bypassing_node_owner(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        repository = service.repository
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id="wf_triage_hierarchy",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_triage_hierarchy",
+                actor="test",
+                expected_version=0,
+                idempotency_key="triage-hierarchy:create-workflow",
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id="wf_triage_hierarchy",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_triage_hierarchy",
+                actor="test",
+                expected_version=1,
+                idempotency_key="triage-hierarchy:start-workflow",
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_EXECUTION_EPOCH",
+                workflow_id="wf_triage_hierarchy",
+                aggregate_type=AggregateType.EXECUTION_EPOCH,
+                aggregate_id="epoch_triage_hierarchy",
+                actor="test",
+                expected_version=0,
+                idempotency_key="triage-hierarchy:create-epoch",
+                payload={
+                    "architecture_manifest_ref": {"sha256": "manifest"},
+                    "topology_ref": {"sha256": "topology"},
+                },
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="START_EXECUTION",
+                workflow_id="wf_triage_hierarchy",
+                aggregate_type=AggregateType.EXECUTION_EPOCH,
+                aggregate_id="epoch_triage_hierarchy",
+                actor="test",
+                expected_version=1,
+                idempotency_key="triage-hierarchy:start-epoch",
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="wf_triage_hierarchy",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node_triage_hierarchy",
+                actor="test",
+                expected_version=0,
+                idempotency_key="triage-hierarchy:create-node",
+                payload={
+                    "unit_contract_ref": {"sha256": "contract"},
+                    "epoch_id": "epoch_triage_hierarchy",
+                    "node_kind": "unit",
+                    "dependency_node_ids": [],
+                },
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="DEPENDENCIES_ACCEPTED",
+                workflow_id="wf_triage_hierarchy",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node_triage_hierarchy",
+                actor="test",
+                expected_version=1,
+                idempotency_key="triage-hierarchy:node-ready",
+                payload={"accepted_dependency_node_ids": []},
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="NODES_COMPILED",
+                workflow_id="wf_triage_hierarchy",
+                aggregate_type=AggregateType.EXECUTION_EPOCH,
+                aggregate_id="epoch_triage_hierarchy",
+                actor="test",
+                expected_version=2,
+                idempotency_key="triage-hierarchy:nodes-compiled",
+                payload={"node_ids": ["node_triage_hierarchy"]},
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="LINK_EXECUTION_EPOCH",
+                workflow_id="wf_triage_hierarchy",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_triage_hierarchy",
+                actor="test",
+                expected_version=2,
+                idempotency_key="triage-hierarchy:link-epoch",
+                payload={"execution_epoch_id": "epoch_triage_hierarchy"},
+            )
+        )
+        with sqlite3.connect(str(repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                ("wf_triage_hierarchy",),
+            )
+        workflow = repository.read_snapshot(AggregateType.WORKFLOW, "wf_triage_hierarchy")
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="ENTER_TRIAGE",
+                workflow_id="wf_triage_hierarchy",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_triage_hierarchy",
+                actor="test",
+                expected_version=workflow.version,
+                idempotency_key="triage-hierarchy:enter-triage",
+                payload={"blocker": {"kind": "test"}},
+            )
+        )
+
+        processor = MinionV2OutboxProcessor(service, semantic_effects=_NoopSemanticEffects())
+        asyncio.run(processor.process_once(limit=1))
+
+        epoch = repository.read_snapshot(
+            AggregateType.EXECUTION_EPOCH,
+            "epoch_triage_hierarchy",
+        )
+        node = repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            "node_triage_hierarchy",
+        )
+        self.assertEqual(epoch.state, "PAUSE_REQUESTED")
+        self.assertEqual(node.state, "QUEUED")
+        with sqlite3.connect(str(repository.db_path)) as connection:
+            pending_effect_types = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT effect_type FROM minion_v2_outbox WHERE workflow_id = ? AND status = 'pending'",
+                    ("wf_triage_hierarchy",),
+                )
+            }
+        self.assertIn("pause_epoch_nodes", pending_effect_types)
+
+    def test_terminal_child_effect_failure_escalates_to_active_workflow(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        repository = service.repository
+        workflow_id = "wf_terminal_effect_failure"
+        revision_id = "arch_terminal_effect_failure"
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="test",
+                expected_version=0,
+                idempotency_key="terminal-effect:create-workflow",
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="test",
+                expected_version=1,
+                idempotency_key="terminal-effect:start-workflow",
+            )
+        )
+        manifest_ref = service.artifacts.put_json(
+            {"architecture": "accepted"},
+            artifact_type="ArchitectureSkeletonArtifact",
+        ).to_dict()
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="IMPORT_ARCHITECTURE_REVISION",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=revision_id,
+                actor="test",
+                expected_version=0,
+                idempotency_key="terminal-effect:import-revision",
+                payload={"architecture_manifest_ref": manifest_ref},
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="LINK_ARCHITECTURE_REVISION",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="test",
+                expected_version=2,
+                idempotency_key="terminal-effect:link-revision",
+                payload={"architecture_revision_id": revision_id},
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="START_ARCHITECTURE_REVIEW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=revision_id,
+                actor="test",
+                expected_version=1,
+                idempotency_key="terminal-effect:start-review",
+                payload={"fencing_token": 1},
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="ARCHITECTURE_REVIEW_PASSED",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=revision_id,
+                actor="test",
+                expected_version=2,
+                idempotency_key="terminal-effect:review-pass",
+                payload={
+                    "review_artifact_ref": {"sha256": "review"},
+                    "architecture_manifest_ref": manifest_ref,
+                },
+            )
+        )
+        with sqlite3.connect(str(repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+        decision_token = repository.issue_human_decision_token(
+            workflow_id=workflow_id,
+            architecture_revision_id=revision_id,
+            manifest_sha=str(manifest_ref["sha256"]),
+            actor_id="test",
+            active_channel_id="socket:test",
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="HUMAN_ACCEPT",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=revision_id,
+                actor="test",
+                source_channel="socket:test",
+                expected_version=3,
+                idempotency_key="terminal-effect:human-accept",
+                payload={
+                    "decision_token": decision_token,
+                    "architecture_manifest_ref": manifest_ref,
+                },
+            )
+        )
+        with sqlite3.connect(str(repository.db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE minion_v2_outbox
+                SET status = 'completed'
+                WHERE workflow_id = ? AND effect_type != 'materialize_plan_revision'
+                """,
+                (workflow_id,),
+            )
+
+        processor = MinionV2OutboxProcessor(
+            service,
+            semantic_effects=_PermanentFailureSemanticEffects(),
+        )
+        asyncio.run(processor.process_once(limit=1))
+
+        revision = repository.read_snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            revision_id,
+        )
+        workflow = repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        self.assertEqual(revision.state, "ACCEPTED")
+        self.assertEqual(workflow.state, "TRIAGE_REQUIRED")
+        self.assertEqual(workflow.payload["triage_resume_state"], "ACTIVE")
+        self.assertEqual(
+            workflow.payload["blocker"]["source_aggregate_id"],
+            revision_id,
+        )
+
+    def test_workflow_reconcile_relinks_an_existing_unlinked_child(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        repository = service.repository
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id="wf_relink_child",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_relink_child",
+                actor="test",
+                expected_version=0,
+                idempotency_key="relink-child:create-workflow",
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id="wf_relink_child",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_relink_child",
+                actor="test",
+                expected_version=1,
+                idempotency_key="relink-child:start-workflow",
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_ARCHITECTURE_REVISION",
+                workflow_id="wf_relink_child",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="arch_unlinked",
+                actor="test",
+                expected_version=0,
+                idempotency_key="relink-child:create-revision",
+            )
+        )
+        with sqlite3.connect(str(repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                ("wf_relink_child",),
+            )
+
+        processor = MinionV2OutboxProcessor(service, semantic_effects=_NoopSemanticEffects())
+        processor._reconcile_workflow(
+            {
+                "workflow_id": "wf_relink_child",
+                "aggregate_type": AggregateType.WORKFLOW.value,
+                "aggregate_id": "wf_relink_child",
+                "effect_key": "relink-child:reconcile",
+            }
+        )
+
+        workflow = repository.read_snapshot(AggregateType.WORKFLOW, "wf_relink_child")
+        revisions = [
+            item
+            for item in repository.list_workflow_snapshots("wf_relink_child")
+            if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+        ]
+        self.assertEqual(workflow.payload["architecture_revision_id"], "arch_unlinked")
+        self.assertEqual([item.aggregate_id for item in revisions], ["arch_unlinked"])
+
     def test_manager_has_no_v1_spawn_rpc(self) -> None:
         manager = MinionManager(self.runtime_root)
         with self.assertRaisesRegex(ValueError, "unknown Minion V2 manager method: spawn"):

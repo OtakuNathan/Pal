@@ -198,7 +198,7 @@ class MinionV2ReplanTests(unittest.TestCase):
             "PAUSED",
         )
 
-    def test_control_scope_ignores_superseded_revision(self) -> None:
+    def test_workflow_control_scope_uses_direct_children_only(self) -> None:
         def snapshot(
             aggregate_type: AggregateType,
             aggregate_id: str,
@@ -254,7 +254,7 @@ class MinionV2ReplanTests(unittest.TestCase):
 
         self.assertEqual(
             {item.aggregate_id for item in children},
-            {"arch_active", "epoch_active", "node_active"},
+            {"arch_active", "epoch_active"},
         )
 
     def test_legacy_mixed_repair_bill_does_not_promote_unknown_case(self) -> None:

@@ -42,6 +42,12 @@ from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.minion.v2.machines import LIVENESS_REQUIRED_STATES, all_transition_specs
 from pal.minion.v2.orchestration import MECHANICAL_EFFECT_TYPES
+from pal.minion.v2.formal import (
+    STATE_CLASSIFICATIONS,
+    STATE_ENUMS,
+    StateClass,
+    render_implementation_topology,
+)
 from pal.minion.v2.workers import SEMANTIC_EFFECT_TYPES
 from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
 
@@ -364,6 +370,154 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                         "ENTER_TRIAGE",
                         self.engine.legal_actions(aggregate_type, state),
                     )
+
+    def test_state_classification_is_exhaustive_and_matches_worker_liveness(self) -> None:
+        for aggregate_type, state_enum in STATE_ENUMS.items():
+            with self.subTest(aggregate_type=aggregate_type):
+                self.assertEqual(
+                    set(STATE_CLASSIFICATIONS[aggregate_type]),
+                    {state.value for state in state_enum},
+                )
+        classified_worker_liveness = {
+            aggregate_type: frozenset(
+                state
+                for state, state_class in states.items()
+                if state_class == StateClass.WORKER_LIVENESS
+            )
+            for aggregate_type, states in STATE_CLASSIFICATIONS.items()
+            if any(
+                state_class == StateClass.WORKER_LIVENESS
+                for state_class in states.values()
+            )
+        }
+        self.assertEqual(classified_worker_liveness, LIVENESS_REQUIRED_STATES)
+
+    def test_generated_transition_topology_is_current(self) -> None:
+        generated = Path("spec/minion_v2/ImplementationTopology.tla").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(generated, render_implementation_topology())
+
+    def test_triage_resolution_preserves_pending_control_intent(self) -> None:
+        cases = (
+            (AggregateType.WORKFLOW, "PAUSE_REQUESTED", "reconcile_workflow"),
+            (
+                AggregateType.ARCHITECTURE_REVISION,
+                "CANCEL_REQUESTED",
+                "reconcile_architecture_revision",
+            ),
+            (
+                AggregateType.EXECUTION_EPOCH,
+                "PAUSE_REQUESTED",
+                "reconcile_execution_epoch",
+            ),
+            (AggregateType.DAG_NODE_RUN, "CANCEL_REQUESTED", "reconcile_node_run"),
+            (
+                AggregateType.STANDALONE_REVIEW,
+                "PAUSE_REQUESTED",
+                "reconcile_standalone_review",
+            ),
+        )
+        for aggregate_type, resume_state, expected_effect in cases:
+            with self.subTest(aggregate_type=aggregate_type, resume_state=resume_state):
+                snapshot = AggregateSnapshot(
+                    aggregate_type=aggregate_type,
+                    aggregate_id=f"control-triage-{aggregate_type.value}",
+                    workflow_id="wf_test",
+                    state="TRIAGE_REQUIRED",
+                    version=4,
+                    payload={"triage_resume_state": resume_state},
+                    created_at="2026-01-01T00:00:00+00:00",
+                    updated_at="2026-01-01T00:00:00+00:00",
+                )
+                result = self.engine.transition(
+                    snapshot,
+                    self.action(
+                        "RESOLVE_TRIAGE",
+                        aggregate_type,
+                        snapshot.aggregate_id,
+                        expected_version=4,
+                    ),
+                )
+                self.assertEqual(result.snapshot.state, resume_state)
+                self.assertEqual(
+                    [effect.effect_type for effect in result.effects],
+                    [expected_effect],
+                )
+
+    def test_node_snapshot_failures_record_a_recoverable_resume_state(self) -> None:
+        for state, action_type in (
+            (DagNodeRunState.QUIESCING, "QUIESCE_FAILED"),
+            (DagNodeRunState.SNAPSHOTTING, "SNAPSHOT_FAILED"),
+        ):
+            with self.subTest(state=state):
+                snapshot = AggregateSnapshot(
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=f"snapshot-failure-{state.value}",
+                    workflow_id="wf_test",
+                    state=state,
+                    version=2,
+                    payload={},
+                    created_at="2026-01-01T00:00:00+00:00",
+                    updated_at="2026-01-01T00:00:00+00:00",
+                )
+                failed = self.engine.transition(
+                    snapshot,
+                    self.action(
+                        action_type,
+                        AggregateType.DAG_NODE_RUN,
+                        snapshot.aggregate_id,
+                        payload={"failure_artifact_ref": {"sha256": "failure"}},
+                        expected_version=2,
+                    ),
+                )
+                self.assertEqual(failed.snapshot.state, DagNodeRunState.TRIAGE_REQUIRED)
+                self.assertEqual(failed.snapshot.payload["triage_resume_state"], state.value)
+                self.assertEqual(
+                    [effect.effect_type for effect in failed.effects],
+                    ["quiesce_node_for_triage"],
+                )
+                resolved = self.engine.transition(
+                    failed.snapshot,
+                    self.action(
+                        "RESOLVE_TRIAGE",
+                        AggregateType.DAG_NODE_RUN,
+                        snapshot.aggregate_id,
+                        expected_version=3,
+                    ),
+                )
+                self.assertEqual(resolved.snapshot.state, DagNodeRunState.QUEUED)
+
+    def test_triage_can_record_a_later_failure_without_losing_resume_state(self) -> None:
+        snapshot = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="triage-refresh",
+            workflow_id="wf_test",
+            state=DagNodeRunState.TRIAGE_REQUIRED,
+            version=3,
+            payload={
+                "triage_resume_state": DagNodeRunState.REVIEWING.value,
+                "blocker": {"kind": "worker_failed"},
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        refreshed = self.engine.transition(
+            snapshot,
+            self.action(
+                "ENTER_TRIAGE",
+                AggregateType.DAG_NODE_RUN,
+                snapshot.aggregate_id,
+                expected_version=3,
+                payload={"blocker": {"kind": "triage_quiesce_failed"}},
+            ),
+        ).snapshot
+        self.assertEqual(refreshed.state, DagNodeRunState.TRIAGE_REQUIRED)
+        self.assertEqual(
+            refreshed.payload["triage_resume_state"],
+            DagNodeRunState.REVIEWING.value,
+        )
+        self.assertEqual(refreshed.payload["blocker"]["kind"], "triage_quiesce_failed")
 
     def test_reopened_terminal_node_gets_a_new_role_session_generation(self) -> None:
         accepted = AggregateSnapshot(

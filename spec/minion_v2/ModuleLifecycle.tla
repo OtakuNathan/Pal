@@ -16,7 +16,11 @@ RoleStates == {
 
 ActiveRoles == {"None", "Coder", "Verifier"}
 ReceiptStates == {"None", "Recorded", "Settled"}
-ResultKinds == {"None", "Candidate", "Pass", "Fail", "WorkerFailure"}
+FailureKinds == {
+    "WorkerFailure", "EffectFailure", "OrphanedWorker",
+    "QuiesceFailure", "SnapshotFailure"
+}
+ResultKinds == {"None", "Candidate", "Pass", "Fail"} \cup FailureKinds
 ControlStates == {"Run", "Pause", "Freeze", "Cancel"}
 ResumeStates == {"Ready", "Quiescing", "Snapshotting", "VerifyReady", "RevisionReady"}
 ExecutionModes == {"Initial", "Revision"}
@@ -48,8 +52,8 @@ TerminalStates == {"Accepted", "Cancelled"}
 RetryTarget(state, mode) ==
     CASE state = "Executing" -> IF mode = "Revision" THEN "RevisionReady" ELSE "Ready"
       [] state = "Verifying" -> "VerifyReady"
-      [] state = "Quiescing" -> "Quiescing"
-      [] state = "Snapshotting" -> "Snapshotting"
+      [] state = "Quiescing" -> "Ready"
+      [] state = "Snapshotting" -> "Ready"
       [] state = "VerifyReady" -> "VerifyReady"
       [] state = "RevisionReady" -> "RevisionReady"
       [] OTHER -> "Ready"
@@ -190,14 +194,19 @@ SettleVerifierFail ==
     /\ receiptState' = "Settled"
     /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
-RecordWorkerFailure ==
+RecordFailure(kind) ==
+    /\ kind \in FailureKinds
     /\ managerUp
     /\ desiredControl = "Run"
-    /\ nodeState \in {"Executing", "Verifying"}
-    /\ activeRole \in {"Coder", "Verifier"}
+    /\ nodeState \notin TerminalStates \cup {"Paused", "Frozen", "Triage"}
     /\ receiptState = "None"
+    /\ (kind = "WorkerFailure" =>
+        /\ nodeState \in {"Executing", "Verifying"}
+        /\ activeRole \in {"Coder", "Verifier"})
+    /\ (kind = "QuiesceFailure" => nodeState = "Quiescing")
+    /\ (kind = "SnapshotFailure" => nodeState = "Snapshotting")
     /\ receiptState' = "Recorded"
-    /\ resultKind' = "WorkerFailure"
+    /\ resultKind' = kind
     /\ triageResume' = RetryTarget(nodeState, executionMode)
     /\ coderState' = IF activeRole = "Coder" THEN "AwaitingSettlement" ELSE coderState
     /\ verifierState' = IF activeRole = "Verifier" THEN "AwaitingSettlement" ELSE verifierState
@@ -205,12 +214,12 @@ RecordWorkerFailure ==
     /\ writerLease' = FALSE
     /\ UNCHANGED <<nodeState, candidateVersion, verifiedVersion, desiredControl, pauseResume, executionMode, managerUp>>
 
-SettleWorkerFailure ==
+SettleFailure ==
     /\ managerUp
     /\ desiredControl \in {"Run", "Pause"}
     /\ receiptState = "Recorded"
-    /\ resultKind = "WorkerFailure"
-    /\ nodeState \in {"Executing", "Verifying"}
+    /\ resultKind \in FailureKinds
+    /\ nodeState \notin TerminalStates \cup {"Paused", "Frozen", "Triage"}
     /\ nodeState' = "Triage"
     /\ receiptState' = "Settled"
     /\ coderState' = IF coderState = "AwaitingSettlement" THEN "Suspended" ELSE coderState
@@ -222,7 +231,7 @@ ResolveTriage ==
     /\ desiredControl = "Run"
     /\ nodeState = "Triage"
     /\ receiptState = "Settled"
-    /\ resultKind = "WorkerFailure"
+    /\ resultKind \in FailureKinds
     /\ nodeState' = triageResume
     /\ coderState' = IF triageResume \in {"Ready", "RevisionReady"} THEN "Ready" ELSE coderState
     /\ verifierState' = IF triageResume = "VerifyReady" THEN "Ready" ELSE verifierState
@@ -324,7 +333,7 @@ SettleRecordedResult ==
     \/ SettleCandidateReceipt
     \/ SettleVerifierPass
     \/ SettleVerifierFail
-    \/ SettleWorkerFailure
+    \/ SettleFailure
 
 Next ==
     \/ StartCoder
@@ -337,8 +346,12 @@ Next ==
     \/ RecordVerifierResult("Fail")
     \/ SettleVerifierPass
     \/ SettleVerifierFail
-    \/ RecordWorkerFailure
-    \/ SettleWorkerFailure
+    \/ RecordFailure("WorkerFailure")
+    \/ RecordFailure("EffectFailure")
+    \/ RecordFailure("OrphanedWorker")
+    \/ RecordFailure("QuiesceFailure")
+    \/ RecordFailure("SnapshotFailure")
+    \/ SettleFailure
     \/ ResolveTriage
     \/ RequestPause
     \/ PauseNode
@@ -390,7 +403,8 @@ RecordedResultStopsRole ==
     receiptState = "Recorded" =>
         /\ activeRole = "None"
         /\ ~writerLease
-        /\ (coderState = "AwaitingSettlement" \/ verifierState = "AwaitingSettlement")
+        /\ (resultKind \in FailureKinds \/
+            coderState = "AwaitingSettlement" \/ verifierState = "AwaitingSettlement")
 
 AcceptedWasVerified ==
     nodeState = "Accepted" =>
@@ -409,7 +423,7 @@ TerminalClosesSessions ==
 TriageHasSettledFailure ==
     nodeState = "Triage" =>
         /\ receiptState = "Settled"
-        /\ resultKind = "WorkerFailure"
+        /\ resultKind \in FailureKinds
         /\ activeRole = "None"
         /\ ~writerLease
 
