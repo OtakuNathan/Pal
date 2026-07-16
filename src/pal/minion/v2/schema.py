@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 14
+MINION_V2_SCHEMA_VERSION = 15
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -417,6 +417,9 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "minion_v2_submission_drafts", "submitted_at", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "minion_v2_worker_attempts", "access_token_hash", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "minion_v2_worker_assignments", "execution_spec_json", "TEXT NOT NULL DEFAULT '{}'")
+    previous_version = _schema_version(connection)
+    if previous_version < 15:
+        _migrate_worker_state_ownership_v15(connection)
     connection.execute(
         """
         INSERT INTO minion_v2_schema_meta(schema_key, schema_value)
@@ -431,3 +434,98 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, decl
     columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _schema_version(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        "SELECT schema_value FROM minion_v2_schema_meta WHERE schema_key = 'schema_version'"
+    ).fetchone()
+    try:
+        return int(row[0]) if row is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _migrate_worker_state_ownership_v15(connection: sqlite3.Connection) -> None:
+    """Move obsolete activation roles and business states to the worker protocol."""
+
+    now = "strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')"
+    connection.execute(
+        """
+        UPDATE minion_v2_worker_sessions
+        SET role = CASE
+            WHEN role IN ('producer', 'repair') THEN 'coder'
+            WHEN role = 'scenario_verifier' THEN 'verifier'
+            ELSE role
+        END
+        WHERE role IN ('producer', 'repair', 'scenario_verifier')
+        """
+    )
+    connection.execute(
+        """
+        UPDATE minion_v2_worker_sessions
+        SET continuation_ref_json = (
+            SELECT invocation.continuation_ref_json
+            FROM minion_v2_worker_invocations AS invocation
+            WHERE invocation.invocation_id = minion_v2_worker_sessions.session_id
+        )
+        WHERE continuation_ref_json = '{}'
+          AND EXISTS (
+            SELECT 1
+            FROM minion_v2_worker_invocations AS invocation
+            WHERE invocation.invocation_id = minion_v2_worker_sessions.session_id
+              AND invocation.continuation_ref_json != '{}'
+          )
+        """
+    )
+    invalid_assignments = """
+        SELECT assignment_id
+        FROM minion_v2_worker_assignments
+        WHERE state NOT IN (
+            'queued', 'claimed', 'running', 'retry_queued',
+            'result_recorded', 'settled', 'cancelled'
+        )
+    """
+    connection.execute(
+        f"""
+        UPDATE minion_v2_worker_attempts
+        SET status = 'cancelled',
+            access_token_hash = '',
+            error_kind = CASE
+                WHEN error_kind = '' THEN 'obsolete_assignment_state'
+                ELSE error_kind
+            END,
+            error_text = CASE
+                WHEN error_text = '' THEN 'assignment state moved to its parent aggregate'
+                ELSE error_text
+            END,
+            finished_at = CASE WHEN finished_at = '' THEN {now} ELSE finished_at END,
+            updated_at = {now}
+        WHERE assignment_id IN ({invalid_assignments})
+          AND status IN ('starting', 'running', 'submitted')
+        """
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_worker_sessions
+        SET status = 'suspended', updated_at = {now}
+        WHERE status = 'active'
+          AND session_id IN (
+            SELECT session_id
+            FROM minion_v2_worker_assignments
+            WHERE assignment_id IN ({invalid_assignments})
+          )
+        """
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_worker_assignments
+        SET state = 'cancelled',
+            last_error = CASE
+                WHEN last_error = '' THEN 'assignment state moved to its parent aggregate'
+                ELSE last_error
+            END,
+            updated_at = {now}
+        WHERE assignment_id IN ({invalid_assignments})
+        """
+    )

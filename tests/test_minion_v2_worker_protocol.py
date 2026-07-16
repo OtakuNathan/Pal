@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -179,6 +180,38 @@ class MinionV2WorkerProtocolTests(unittest.TestCase):
                 WorkerAssignmentState.RESULT_RECORDED,
                 WorkerAssignmentAction.CANCEL,
             )
+
+    def test_v15_migrates_activation_roles_and_obsolete_assignment_states(self) -> None:
+        assignment = self.repository.create_worker_assignment(self.request())
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_schema_meta SET schema_value = '14' "
+                "WHERE schema_key = 'schema_version'"
+            )
+            connection.execute(
+                "UPDATE minion_v2_worker_sessions SET role = 'repair' "
+                "WHERE session_id = 'session-router'"
+            )
+            connection.execute(
+                "UPDATE minion_v2_worker_assignments SET state = 'triage_required' "
+                "WHERE assignment_id = ?",
+                (assignment["assignment_id"],),
+            )
+
+        self.repository.ensure_schema()
+
+        session = self.repository.read_worker_session("session-router")
+        migrated = self.repository.read_worker_assignment(assignment["assignment_id"])
+        self.assertEqual(session["role"], "coder")
+        self.assertEqual(session["status"], "suspended")
+        self.assertEqual(migrated["state"], "cancelled")
+        self.repository.ensure_worker_session(
+            session_id="session-router",
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-router",
+            role="repair",
+        )
 
     def test_failure_result_and_parent_triage_settle_atomically(self) -> None:
         self.repository.dispatch(
