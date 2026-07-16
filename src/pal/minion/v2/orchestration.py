@@ -18,6 +18,8 @@ from pal.minion.v2.contracts import (
 )
 from pal.minion.v2.execution import DagScheduler, ExecutionCompiler, workspace_content_fingerprint
 from pal.minion.v2.integration import CandidateUnionConflict, CandidateUnionService
+from pal.minion.v2.machine_dsl import ControlDisposition, ControlIntent
+from pal.minion.v2.machines import machine_spec_for
 from pal.minion.v2.replan import (
     ReplanRequirementConflict,
     collect_architecture_finding_batch,
@@ -1436,29 +1438,37 @@ class MinionV2OutboxProcessor:
     def _propagate_workflow_control(self, effect_type: str, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         workflow = self._effect_snapshot(effect)
         snapshots = self.repository.list_workflow_snapshots(workflow.workflow_id)
-        active = [
-            item
-            for item in _active_control_children(snapshots, workflow)
-            if item.state
-            not in {
-                "ACCEPTED",
-                "REJECTED",
-                "COMPLETED",
-                "CANCELLED",
-                "STALE",
-                "SUPERSEDED",
-            }
-        ]
-        default_action_type = {
-            "propagate_pause": "REQUEST_PAUSE",
-            "propagate_resume": "RESUME",
-            "propagate_cancel": "REQUEST_CANCEL",
-            "freeze_workflow_children": "REQUEST_PAUSE",
-        }[effect_type]
-        for child in active:
-            action_type = default_action_type
-            if action_type not in self.repository.engine.legal_actions(child.aggregate_type, child.state):
+        children = _active_control_children(snapshots, workflow)
+        if effect_type == "propagate_resume":
+            for child in children:
+                if "RESUME" not in self.repository.engine.legal_actions(
+                    child.aggregate_type,
+                    child.state,
+                ):
+                    continue
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="RESUME",
+                        workflow_id=workflow.workflow_id,
+                        aggregate_type=child.aggregate_type,
+                        aggregate_id=child.aggregate_id,
+                        actor="minion-v2-control",
+                        expected_version=child.version,
+                        idempotency_key=f"effect:{effect['effect_key']}:{child.aggregate_id}",
+                    )
+                )
+            return {}
+
+        intent = (
+            ControlIntent.CANCEL
+            if effect_type == "propagate_cancel"
+            else ControlIntent.PAUSE
+        )
+        for child in children:
+            machine = machine_spec_for(child.aggregate_type)
+            if machine.control_disposition(intent, child.state) != ControlDisposition.REQUEST:
                 continue
+            action_type = machine.control_policies[intent].request_action
             self.repository.dispatch(
                 ActionEnvelope(
                     action_type=action_type,
@@ -1470,9 +1480,32 @@ class MinionV2OutboxProcessor:
                     idempotency_key=f"effect:{effect['effect_key']}:{child.aggregate_id}",
                 )
             )
-        if not active and effect_type in {"propagate_pause", "propagate_cancel"}:
+
+        if effect_type in {"propagate_pause", "propagate_cancel"}:
+            latest_snapshots = self.repository.list_workflow_snapshots(workflow.workflow_id)
+            latest_workflow = self.repository.read_snapshot(
+                AggregateType.WORKFLOW,
+                workflow.workflow_id,
+            )
+            if latest_workflow is None:
+                raise RuntimeError("workflow disappeared during control propagation")
+            latest_children = _active_control_children(latest_snapshots, latest_workflow)
+            all_settled = all(
+                machine_spec_for(child.aggregate_type).control_disposition(
+                    intent,
+                    child.state,
+                )
+                == ControlDisposition.SETTLED
+                for child in latest_children
+            )
+        else:
+            all_settled = False
+        if all_settled:
             confirmation = "CHILDREN_PAUSED" if effect_type == "propagate_pause" else "CHILDREN_CANCELLED"
-            latest = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow.workflow_id)
+            latest = self.repository.read_snapshot(
+                AggregateType.WORKFLOW,
+                workflow.workflow_id,
+            )
             if confirmation in self.repository.engine.legal_actions(
                 AggregateType.WORKFLOW,
                 latest.state,
@@ -1520,18 +1553,30 @@ class MinionV2OutboxProcessor:
             if item.aggregate_type == AggregateType.DAG_NODE_RUN
             and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
         ]
-        requested_action = {
-            "pause_epoch_nodes": "REQUEST_PAUSE",
-            "resume_epoch_nodes": "RESUME",
-            "cancel_epoch_nodes": "REQUEST_CANCEL",
-            "freeze_epoch_nodes": "REQUEST_PAUSE",
-        }[effect_type]
+        node_machine = machine_spec_for(AggregateType.DAG_NODE_RUN)
+        intent = (
+            ControlIntent.CANCEL
+            if effect_type == "cancel_epoch_nodes"
+            else ControlIntent.PAUSE
+        )
         for node in nodes:
-            if requested_action not in self.repository.engine.legal_actions(AggregateType.DAG_NODE_RUN, node.state):
-                continue
+            if effect_type == "resume_epoch_nodes":
+                action_type = "RESUME"
+                if action_type not in self.repository.engine.legal_actions(
+                    AggregateType.DAG_NODE_RUN,
+                    node.state,
+                ):
+                    continue
+            else:
+                if (
+                    node_machine.control_disposition(intent, node.state)
+                    != ControlDisposition.REQUEST
+                ):
+                    continue
+                action_type = node_machine.control_policies[intent].request_action
             self.repository.dispatch(
                 ActionEnvelope(
-                    action_type=requested_action,
+                    action_type=action_type,
                     workflow_id=epoch.workflow_id,
                     aggregate_type=AggregateType.DAG_NODE_RUN,
                     aggregate_id=node.aggregate_id,
@@ -1641,37 +1686,19 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
     )
     if workflow is None:
         return
-    settled_pause = {
-        "PAUSED",
-        "ACCEPTED",
-        "REJECTED",
-        "COMPLETED",
-        "STALE",
-        "CANCELLED",
-        "SUPERSEDED",
-        "TRIAGE_REQUIRED",
-    }
-    settled_cancel = {
-        "CANCELLED",
-        "ACCEPTED",
-        "REJECTED",
-        "COMPLETED",
-        "STALE",
-        "SUPERSEDED",
-        "TRIAGE_REQUIRED",
-    }
-    requested_action = {
-        "PAUSE_REQUESTED": ("REQUEST_PAUSE", settled_pause),
-        "CANCEL_REQUESTED": ("REQUEST_CANCEL", settled_cancel),
+    requested_intent = {
+        "PAUSE_REQUESTED": ControlIntent.PAUSE,
+        "CANCEL_REQUESTED": ControlIntent.CANCEL,
     }.get(workflow.state)
-    if requested_action is not None:
-        action_type, settled_states = requested_action
+    if requested_intent is not None:
         for child in _active_control_children(snapshots, workflow):
-            if child.state in settled_states or action_type not in repository.engine.legal_actions(
-                child.aggregate_type,
-                child.state,
+            machine = machine_spec_for(child.aggregate_type)
+            if (
+                machine.control_disposition(requested_intent, child.state)
+                != ControlDisposition.REQUEST
             ):
                 continue
+            action_type = machine.control_policies[requested_intent].request_action
             repository.dispatch(
                 ActionEnvelope(
                     action_type=action_type,
@@ -1720,8 +1747,49 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
             if item.aggregate_type == AggregateType.DAG_NODE_RUN
             and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
         ]
+        node_machine = machine_spec_for(AggregateType.DAG_NODE_RUN)
+        epoch_intent = {
+            "PAUSE_REQUESTED": ControlIntent.PAUSE,
+            "CANCEL_REQUESTED": ControlIntent.CANCEL,
+        }.get(epoch.state)
+        if epoch_intent is not None:
+            for node in nodes:
+                if (
+                    node_machine.control_disposition(epoch_intent, node.state)
+                    != ControlDisposition.REQUEST
+                ):
+                    continue
+                action_type = node_machine.control_policies[epoch_intent].request_action
+                repository.dispatch(
+                    ActionEnvelope(
+                        action_type=action_type,
+                        workflow_id=workflow_id,
+                        aggregate_type=AggregateType.DAG_NODE_RUN,
+                        aggregate_id=node.aggregate_id,
+                        actor="minion-v2-control",
+                        expected_version=node.version,
+                        idempotency_key=(
+                            f"reconcile:{epoch.aggregate_id}:{action_type.lower()}:"
+                            f"{node.aggregate_id}:{node.version}"
+                        ),
+                    )
+                )
+            snapshots = list(repository.list_workflow_snapshots(workflow_id))
+            nodes = [
+                item
+                for item in snapshots
+                if item.aggregate_type == AggregateType.DAG_NODE_RUN
+                and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
+            ]
+            epoch = next(
+                item
+                for item in snapshots
+                if item.aggregate_type == AggregateType.EXECUTION_EPOCH
+                and item.aggregate_id == epoch.aggregate_id
+            )
         if epoch.state == "PAUSE_REQUESTED" and all(
-            item.state in {"PAUSED", "ACCEPTED", "STALE", "CANCELLED", "TRIAGE_REQUIRED"}
+            node_machine.control_disposition(ControlIntent.PAUSE, item.state)
+            == ControlDisposition.SETTLED
             for item in nodes
         ):
             repository.dispatch(
@@ -1736,7 +1804,8 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
                 )
             )
         elif epoch.state == "CANCEL_REQUESTED" and all(
-            item.state in {"CANCELLED", "ACCEPTED", "STALE", "TRIAGE_REQUIRED"}
+            node_machine.control_disposition(ControlIntent.CANCEL, item.state)
+            == ControlDisposition.SETTLED
             for item in nodes
         ):
             repository.dispatch(
@@ -1781,7 +1850,12 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
         return
     children = _active_control_children(snapshots, workflow)
     if workflow.state == "PAUSE_REQUESTED" and all(
-        item.state in settled_pause for item in children
+        machine_spec_for(item.aggregate_type).control_disposition(
+            ControlIntent.PAUSE,
+            item.state,
+        )
+        == ControlDisposition.SETTLED
+        for item in children
     ):
         repository.dispatch(
             ActionEnvelope(
@@ -1795,7 +1869,12 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
             )
         )
     elif workflow.state == "CANCEL_REQUESTED" and all(
-        item.state in settled_cancel for item in children
+        machine_spec_for(item.aggregate_type).control_disposition(
+            ControlIntent.CANCEL,
+            item.state,
+        )
+        == ControlDisposition.SETTLED
+        for item in children
     ):
         repository.dispatch(
             ActionEnvelope(

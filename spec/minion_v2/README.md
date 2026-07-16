@@ -18,9 +18,11 @@ the Python worker spine implements it.
 - `DurableEffects.tla` models Action deduplication, atomic event/outbox writes,
   at-least-once effects, receipts, leases, fencing, worker settlement, and
   manager crashes.
-- `ImplementationTopology.tla` is generated from the Python enums and
-  transition table. It checks exhaustive state classification, transition
-  endpoints, recovery actions, triage refresh, and paused-state resume.
+- `ImplementationTopology.tla` is generated from the executable Python
+  `MachineSpec` graph. It explores the same concrete source/action/target
+  relation used by `TransitionEngine` and checks exhaustive classification,
+  finite dynamic targets, recovery actions, control settlement, triage
+  refresh, and paused-state resume.
 
 The models intentionally abstract prompts, artifact contents, Git, and provider
 details. Those are values carried by transitions, not additional lifecycle
@@ -42,6 +44,14 @@ Regenerate the implementation topology after changing an enum or transition:
 python -c "from pathlib import Path; from pal.minion.v2.formal import write_implementation_topology; write_implementation_topology(Path('spec/minion_v2/ImplementationTopology.tla'))"
 ```
 
-TLC proves the abstract protocol. Python transition-table conformance and
-SQLite/outbox crash-window tests remain required because model correctness does
-not imply implementation correctness.
+`pal.minion.v2.machine_dsl.MachineSpec` is the concrete lifecycle source of
+truth. Runtime dispatch, recovery classification, control reconciliation, and
+the generated TLA+ topology consume it. Dynamic target functions must use the
+`target_resolver` decorator to declare their complete finite target set; the
+runtime rejects any result outside that declaration.
+
+The hand-written lifecycle modules remain higher-level protocol models for
+cross-aggregate behavior, effects, leases, and temporal properties. TLC proves
+those abstractions, while Python conformance and SQLite/outbox crash-window
+tests prove the concrete implementation boundary. Arbitrary Python guard or
+effect code is not automatically translated into TLA+.

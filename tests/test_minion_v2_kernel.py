@@ -40,13 +40,19 @@ from pal.minion.v2.sessions import (
 )
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
-from pal.minion.v2.machines import LIVENESS_REQUIRED_STATES, all_transition_specs
+from pal.minion.v2.machine_dsl import ControlDisposition, ControlIntent
+from pal.minion.v2.machines import (
+    LIVENESS_REQUIRED_STATES,
+    all_machine_specs,
+    all_transition_specs,
+)
 from pal.minion.v2.orchestration import MECHANICAL_EFFECT_TYPES
 from pal.minion.v2.formal import (
     STATE_CLASSIFICATIONS,
     STATE_ENUMS,
     StateClass,
     render_implementation_topology,
+    transition_topology,
 )
 from pal.minion.v2.workers import SEMANTIC_EFFECT_TYPES
 from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
@@ -392,11 +398,119 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         }
         self.assertEqual(classified_worker_liveness, LIVENESS_REQUIRED_STATES)
 
+    def test_machine_spec_control_states_form_exact_partitions(self) -> None:
+        for machine in all_machine_specs():
+            for intent in machine.control_policies:
+                with self.subTest(
+                    aggregate_type=machine.aggregate_type,
+                    intent=intent,
+                ):
+                    partitions = {
+                        disposition: machine.control_states(intent, disposition)
+                        for disposition in ControlDisposition
+                    }
+                    self.assertEqual(
+                        set().union(*partitions.values()),
+                        set(machine.states),
+                    )
+                    for left in ControlDisposition:
+                        for right in ControlDisposition:
+                            if left == right:
+                                continue
+                            self.assertFalse(partitions[left] & partitions[right])
+                    request_action = machine.control_policies[intent].request_action
+                    self.assertEqual(
+                        partitions[ControlDisposition.REQUEST],
+                        frozenset(
+                            state
+                            for state in machine.states
+                            if request_action in machine.legal_actions(state)
+                        ),
+                    )
+
+    def test_dependency_blocked_node_uses_the_declared_pause_cycle(self) -> None:
+        created = self.engine.transition(
+            None,
+            self.action(
+                "CREATE_NODE_RUN",
+                AggregateType.DAG_NODE_RUN,
+                "node_blocked_pause",
+                expected_version=0,
+                payload={
+                    "unit_contract_ref": {"sha256": "contract"},
+                    "epoch_id": "epoch_blocked_pause",
+                },
+            ),
+        )
+        requested = self.engine.transition(
+            created.snapshot,
+            self.action(
+                "REQUEST_PAUSE",
+                AggregateType.DAG_NODE_RUN,
+                "node_blocked_pause",
+                expected_version=1,
+            ),
+        )
+        paused = self.engine.transition(
+            requested.snapshot,
+            self.action(
+                "PAUSE_CONFIRMED",
+                AggregateType.DAG_NODE_RUN,
+                "node_blocked_pause",
+                expected_version=2,
+            ),
+        )
+        resumed = self.engine.transition(
+            paused.snapshot,
+            self.action(
+                "RESUME",
+                AggregateType.DAG_NODE_RUN,
+                "node_blocked_pause",
+                expected_version=3,
+            ),
+        )
+
+        self.assertEqual(requested.snapshot.state, "PAUSE_REQUESTED")
+        self.assertEqual(paused.snapshot.state, "PAUSED")
+        self.assertEqual(resumed.snapshot.state, "BLOCKED_BY_DEPS")
+        node_machine = next(
+            machine
+            for machine in all_machine_specs()
+            if machine.aggregate_type == AggregateType.DAG_NODE_RUN
+        )
+        self.assertEqual(
+            node_machine.control_disposition(
+                ControlIntent.PAUSE,
+                "BLOCKED_BY_DEPS",
+            ),
+            ControlDisposition.REQUEST,
+        )
+
     def test_generated_transition_topology_is_current(self) -> None:
         generated = Path("spec/minion_v2/ImplementationTopology.tla").read_text(
             encoding="utf-8"
         )
         self.assertEqual(generated, render_implementation_topology())
+
+    def test_generated_dynamic_edges_exactly_match_runtime_declarations(self) -> None:
+        topology = transition_topology()
+        resolved = set(topology["resolved_transitions"])
+        for machine in all_machine_specs():
+            for transition in machine.transitions:
+                if not callable(transition.target_state):
+                    continue
+                source = str(transition.source_state)
+                actual = {
+                    target
+                    for aggregate, edge_source, action, target in resolved
+                    if aggregate == machine.aggregate_type.value
+                    and edge_source == source
+                    and action == transition.action_type
+                }
+                self.assertEqual(
+                    actual,
+                    set(machine.transition_targets(transition)),
+                )
 
     def test_triage_resolution_preserves_pending_control_intent(self) -> None:
         cases = (

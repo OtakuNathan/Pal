@@ -12,6 +12,7 @@ from pal.minion.v2.contracts import (
     TransitionSpec,
     UnknownTransitionError,
 )
+from pal.minion.v2.machine_dsl import transition_target_states
 
 
 class TransitionEngine:
@@ -58,6 +59,13 @@ class TransitionEngine:
             if callable(spec.target_state)
             else str(spec.target_state)
         )
+        declared_targets = transition_target_states(spec)
+        if declared_targets and target_state not in declared_targets:
+            raise UnknownTransitionError(
+                "dynamic target escaped its MachineSpec declaration: "
+                f"{action.aggregate_type.value}:{current_state} + {action.action_type} "
+                f"resolved {target_state}"
+            )
         next_version = current_version + 1
         next_snapshot = AggregateSnapshot(
             aggregate_type=action.aggregate_type,

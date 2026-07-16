@@ -39,6 +39,7 @@ from pal.minion.v2.verification_builder import (
 )
 from pal.minion.v2.candidate_builder import candidate_builder_tool_result
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
+from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
 from pal.shared import RuntimeStatus
 from pal.minion.v2.workers import (
     _compile_standalone_review_markdown,
@@ -1498,6 +1499,95 @@ class MinionV2VerificationTests(unittest.TestCase):
             invocation_id=str(binding["invocation_id"]),
             lease_resource_key=str(binding["lease_resource_key"]),
             fencing_token=int(binding["fencing_token"]),
+            role="verifier",
+            draft_kind="verification",
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status, VerificationStatus.PASS)
+
+    def test_manager_resolves_fenced_attempt_to_logical_worker_session(self) -> None:
+        logical_session_id = "inv_logical_verifier"
+        input_fingerprint = "logical-verifier-input"
+        self.repository.ensure_worker_session(
+            session_id=logical_session_id,
+            workflow_id="wf_verify",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node_drawing",
+            role="verifier",
+        )
+        assignment = self.repository.create_worker_assignment(
+            WorkerAssignmentRequest(
+                assignment_key="logical-verifier-assignment",
+                session_id=logical_session_id,
+                workflow_id="wf_verify",
+                aggregate_type=AggregateType.DAG_NODE_RUN.value,
+                aggregate_id="node_drawing",
+                role="verifier",
+                input_fingerprint=input_fingerprint,
+                required_inputs=(),
+                input_refs={},
+                execution_spec={"effect_type": "spawn_verifier_worker"},
+                submission_kind="verification",
+            )
+        )
+        attempt = self.repository.claim_worker_assignment(assignment["assignment_id"])
+        lease_resource_key = f"assignment:{assignment['assignment_id']}"
+        lease = self.repository.claim_lease(
+            lease_resource_key,
+            str(attempt["attempt_id"]),
+            ttl_seconds=60,
+        )
+        prompt_ref = self.store.put_json(
+            {"role": "verifier"},
+            artifact_type="WorkerPromptPackArtifact",
+        )
+        self.repository.start_worker_attempt(
+            assignment_id=str(assignment["assignment_id"]),
+            attempt_id_value=str(attempt["attempt_id"]),
+            lease_resource_key=lease_resource_key,
+            fencing_token=lease.fencing_token,
+            prompt_pack_ref=prompt_ref.to_dict(),
+        )
+        stage_dir = self.runtime_root / "artifact-stage-attempt-receipt"
+        workspace = {
+            "runtime_root": str(self.runtime_root),
+            "repo_path": str(self.runtime_root),
+            "review_scratch_dir": str(self.runtime_root / "scratch-attempt-receipt"),
+            "artifact_dir": str(self.runtime_root / "artifacts-attempt-receipt"),
+            "artifact_stage_dir": str(stage_dir),
+            "minion_v2": {
+                "workflow_id": "wf_verify",
+                "invocation_id": str(attempt["attempt_id"]),
+                "lease_resource_key": lease_resource_key,
+                "fencing_token": lease.fencing_token,
+                "role": "verifier",
+                "authoring_input_fingerprint": input_fingerprint,
+                "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
+            },
+        }
+        Path(str(workspace["review_scratch_dir"])).mkdir(parents=True, exist_ok=True)
+        recorded = self._record_lifecycle_case(workspace)
+        self.assertTrue(recorded.ok, recorded.text)
+        submitted = self._verification_call(
+            workspace,
+            "op_minion_verification_submit",
+            produced=[],
+        )
+        self.assertTrue(submitted.ok, submitted.text)
+        plan = json.loads(
+            (stage_dir / "verification_plan.json").read_text(encoding="utf-8")
+        )
+
+        results = _recorded_verification_case_results(
+            plan,
+            cases=_verification_case_specs(plan["cases"]),
+            artifacts=self.store,
+            runtime_root=self.runtime_root,
+            workflow_id="wf_verify",
+            invocation_id=logical_session_id,
+            lease_resource_key="node:node_drawing:verifier",
+            fencing_token=999,
             role="verifier",
             draft_kind="verification",
         )

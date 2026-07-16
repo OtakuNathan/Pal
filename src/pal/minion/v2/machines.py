@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from functools import lru_cache
 from typing import Any
 
 from pal.minion.v2.contracts import (
@@ -18,52 +19,13 @@ from pal.minion.v2.contracts import (
     WorkflowState,
 )
 from pal.minion.v2.engine import TransitionEngine
-
-
-# These states are not allowed to sit durably without an outbox effect, a
-# worker assignment, or a live fenced lease.  Recovery uses the same table as
-# the transition layer so worker liveness does not become a second, hidden
-# state machine.
-LIVENESS_REQUIRED_STATES: Mapping[AggregateType, frozenset[str]] = {
-    AggregateType.ARCHITECTURE_REVISION: frozenset(
-        {
-            ArchitectureRevisionState.ARCHITECT_QUEUED.value,
-            ArchitectureRevisionState.ARCHITECT_RUNNING.value,
-            ArchitectureRevisionState.ARCHITECT_QUIESCING.value,
-            ArchitectureRevisionState.ARCHITECT_SNAPSHOTTING.value,
-            ArchitectureRevisionState.REVIEW_QUEUED.value,
-            ArchitectureRevisionState.REVIEWING.value,
-            ArchitectureRevisionState.PAUSE_REQUESTED.value,
-            ArchitectureRevisionState.CANCEL_REQUESTED.value,
-        }
-    ),
-    AggregateType.DAG_NODE_RUN: frozenset(
-        {
-            DagNodeRunState.QUEUED.value,
-            DagNodeRunState.PRODUCING.value,
-            DagNodeRunState.QUIESCING.value,
-            DagNodeRunState.SNAPSHOTTING.value,
-            DagNodeRunState.REVIEW_QUEUED.value,
-            DagNodeRunState.REVIEWING.value,
-            DagNodeRunState.REPAIR_QUEUED.value,
-            DagNodeRunState.REPAIRING.value,
-            DagNodeRunState.VERIFY_PREPARING.value,
-            DagNodeRunState.VERIFYING.value,
-            DagNodeRunState.PAUSE_REQUESTED.value,
-            DagNodeRunState.CANCEL_REQUESTED.value,
-        }
-    ),
-    AggregateType.STANDALONE_REVIEW: frozenset(
-        {
-            StandaloneReviewState.RECEIVED.value,
-            StandaloneReviewState.REVIEW_QUEUED.value,
-            StandaloneReviewState.REVIEWING.value,
-            StandaloneReviewState.REPORT_READY.value,
-            StandaloneReviewState.PAUSE_REQUESTED.value,
-            StandaloneReviewState.CANCEL_REQUESTED.value,
-        }
-    ),
-}
+from pal.minion.v2.machine_dsl import (
+    ControlIntent,
+    ControlPolicy,
+    MachineSpec,
+    StateClass,
+    target_resolver,
+)
 
 
 def _no_guard(_payload: Mapping[str, Any], _action: ActionEnvelope) -> None:
@@ -402,6 +364,7 @@ def _cancel_reducer(cancel_target: str):
 
 
 def _resume_target(allowed_states: frozenset[str], field: str = "resume_state"):
+    @target_resolver(*allowed_states, name=f"{field}_target")
     def resolve(payload: Mapping[str, Any], _action: ActionEnvelope) -> str:
         target = str(payload.get(field) or "")
         if target not in allowed_states:
@@ -412,6 +375,7 @@ def _resume_target(allowed_states: frozenset[str], field: str = "resume_state"):
 
 
 def _mapped_resume_target(mapping: Mapping[str, str], field: str = "resume_state"):
+    @target_resolver(*mapping.values(), name=f"mapped_{field}_target")
     def resolve(payload: Mapping[str, Any], _action: ActionEnvelope) -> str:
         source = str(payload.get(field) or "")
         target = mapping.get(source)
@@ -423,6 +387,7 @@ def _mapped_resume_target(mapping: Mapping[str, str], field: str = "resume_state
 
 
 def _mapped_triage_resume_target(mapping: Mapping[str, str]):
+    @target_resolver(*mapping.values(), name="triage_resume_target")
     def resolve(payload: Mapping[str, Any], _action: ActionEnvelope) -> str:
         source = str(payload.get("triage_resume_state") or "")
         target = mapping.get(source)
@@ -1171,11 +1136,22 @@ def _node_transitions() -> list[TransitionSpec]:
         ),
         _spec(kind, S.ACCEPTED, "MEMORY_CANDIDATE_PUBLISHED", S.ACCEPTED, guard=_required("memory_candidate_ref")),
     ]
-    pausable = {S.QUEUED, S.PRODUCING, S.REVIEW_QUEUED, S.REVIEWING, S.REPAIR_QUEUED, S.REPAIRING, S.VERIFY_PREPARING, S.VERIFYING}
+    pausable = {
+        S.BLOCKED_BY_DEPS,
+        S.QUEUED,
+        S.PRODUCING,
+        S.REVIEW_QUEUED,
+        S.REVIEWING,
+        S.REPAIR_QUEUED,
+        S.REPAIRING,
+        S.VERIFY_PREPARING,
+        S.VERIFYING,
+    }
     resumable = frozenset(str(state) for state in pausable)
     for state in pausable:
         transitions.append(_spec(kind, state, "REQUEST_PAUSE", S.PAUSE_REQUESTED, reducer=_pause_reducer(str(state)), effects=_effect("pause_node_worker")))
     node_resume = {
+        str(S.BLOCKED_BY_DEPS): str(S.BLOCKED_BY_DEPS),
         str(S.QUEUED): str(S.QUEUED),
         str(S.PRODUCING): str(S.QUEUED),
         str(S.REVIEW_QUEUED): str(S.REVIEW_QUEUED),
@@ -1369,16 +1345,328 @@ def _standalone_review_transitions() -> list[TransitionSpec]:
     return transitions
 
 
-def all_transition_specs() -> tuple[TransitionSpec, ...]:
-    groups: Iterable[list[TransitionSpec]] = (
-        _task_transitions(),
-        _workflow_transitions(),
-        _architecture_transitions(),
-        _execution_transitions(),
-        _node_transitions(),
-        _standalone_review_transitions(),
+def _state_class_map(
+    state_enum: type,
+    groups: Mapping[StateClass, Iterable[Any]],
+) -> Mapping[str, StateClass]:
+    result = {
+        str(state): state_class
+        for state_class, states in groups.items()
+        for state in states
+    }
+    expected = {str(state) for state in state_enum}
+    if set(result) != expected:
+        missing = sorted(expected - set(result))
+        extra = sorted(set(result) - expected)
+        raise ValueError(
+            f"state classification mismatch for {state_enum.__name__}: "
+            f"missing={missing}, extra={extra}"
+        )
+    return result
+
+
+@lru_cache(maxsize=1)
+def all_machine_specs() -> tuple[MachineSpec, ...]:
+    task_classes = _state_class_map(
+        TaskState,
+        {
+            StateClass.CATALOG: {TaskState.ACTIVE},
+            StateClass.TERMINAL: {TaskState.ARCHIVED},
+        },
     )
-    return tuple(item for group in groups for item in group)
+    workflow_classes = _state_class_map(
+        WorkflowState,
+        {
+            StateClass.OUTBOX_WAIT: {WorkflowState.CREATED},
+            StateClass.CHILD_WAIT: {
+                WorkflowState.ACTIVE,
+                WorkflowState.PAUSE_REQUESTED,
+                WorkflowState.CANCEL_REQUESTED,
+            },
+            StateClass.PAUSED: {WorkflowState.PAUSED},
+            StateClass.TERMINAL: {
+                WorkflowState.COMPLETED,
+                WorkflowState.REJECTED,
+                WorkflowState.CANCELLED,
+            },
+            StateClass.OPERATOR_WAIT: {WorkflowState.TRIAGE_REQUIRED},
+        },
+    )
+    architecture_classes = _state_class_map(
+        ArchitectureRevisionState,
+        {
+            StateClass.WORKER_LIVENESS: {
+                ArchitectureRevisionState.ARCHITECT_QUEUED,
+                ArchitectureRevisionState.ARCHITECT_RUNNING,
+                ArchitectureRevisionState.ARCHITECT_QUIESCING,
+                ArchitectureRevisionState.ARCHITECT_SNAPSHOTTING,
+                ArchitectureRevisionState.REVIEW_QUEUED,
+                ArchitectureRevisionState.REVIEWING,
+                ArchitectureRevisionState.PAUSE_REQUESTED,
+                ArchitectureRevisionState.CANCEL_REQUESTED,
+            },
+            StateClass.HUMAN_WAIT: {
+                ArchitectureRevisionState.HUMAN_REVIEW,
+                ArchitectureRevisionState.CLARIFICATION_PENDING,
+            },
+            StateClass.PAUSED: {ArchitectureRevisionState.PAUSED},
+            StateClass.TERMINAL: {
+                ArchitectureRevisionState.SUPERSEDED,
+                ArchitectureRevisionState.ACCEPTED,
+                ArchitectureRevisionState.REJECTED,
+                ArchitectureRevisionState.CANCELLED,
+            },
+            StateClass.OPERATOR_WAIT: {ArchitectureRevisionState.TRIAGE_REQUIRED},
+        },
+    )
+    execution_classes = _state_class_map(
+        ExecutionEpochState,
+        {
+            StateClass.OUTBOX_WAIT: {
+                ExecutionEpochState.NOT_STARTED,
+                ExecutionEpochState.STARTING,
+                ExecutionEpochState.FINALIZING,
+            },
+            StateClass.CHILD_WAIT: {
+                ExecutionEpochState.RUNNING,
+                ExecutionEpochState.REPLAN_COLLECTING,
+                ExecutionEpochState.PAUSE_REQUESTED,
+                ExecutionEpochState.REPLAN_REQUIRED,
+                ExecutionEpochState.CANCEL_REQUESTED,
+            },
+            StateClass.PAUSED: {ExecutionEpochState.PAUSED},
+            StateClass.TERMINAL: {
+                ExecutionEpochState.SUPERSEDED,
+                ExecutionEpochState.COMPLETED,
+                ExecutionEpochState.CANCELLED,
+            },
+            StateClass.OPERATOR_WAIT: {ExecutionEpochState.TRIAGE_REQUIRED},
+        },
+    )
+    node_classes = _state_class_map(
+        DagNodeRunState,
+        {
+            StateClass.DEPENDENCY_WAIT: {
+                DagNodeRunState.BLOCKED_BY_DEPS,
+                DagNodeRunState.STALE,
+            },
+            StateClass.WORKER_LIVENESS: {
+                DagNodeRunState.QUEUED,
+                DagNodeRunState.PRODUCING,
+                DagNodeRunState.QUIESCING,
+                DagNodeRunState.SNAPSHOTTING,
+                DagNodeRunState.REVIEW_QUEUED,
+                DagNodeRunState.REVIEWING,
+                DagNodeRunState.REPAIR_QUEUED,
+                DagNodeRunState.REPAIRING,
+                DagNodeRunState.VERIFY_PREPARING,
+                DagNodeRunState.VERIFYING,
+                DagNodeRunState.PAUSE_REQUESTED,
+                DagNodeRunState.CANCEL_REQUESTED,
+            },
+            StateClass.PAUSED: {DagNodeRunState.PAUSED},
+            StateClass.TERMINAL: {
+                DagNodeRunState.ACCEPTED,
+                DagNodeRunState.CANCELLED,
+            },
+            StateClass.OPERATOR_WAIT: {DagNodeRunState.TRIAGE_REQUIRED},
+        },
+    )
+    standalone_classes = _state_class_map(
+        StandaloneReviewState,
+        {
+            StateClass.WORKER_LIVENESS: {
+                StandaloneReviewState.RECEIVED,
+                StandaloneReviewState.REVIEW_QUEUED,
+                StandaloneReviewState.REVIEWING,
+                StandaloneReviewState.REPORT_READY,
+                StandaloneReviewState.PAUSE_REQUESTED,
+                StandaloneReviewState.CANCEL_REQUESTED,
+            },
+            StateClass.PAUSED: {StandaloneReviewState.PAUSED},
+            StateClass.TERMINAL: {
+                StandaloneReviewState.CANCELLED,
+                StandaloneReviewState.COMPLETED,
+            },
+            StateClass.OPERATOR_WAIT: {StandaloneReviewState.TRIAGE_REQUIRED},
+        },
+    )
+
+    return (
+        MachineSpec(AggregateType.TASK, task_classes, tuple(_task_transitions())),
+        MachineSpec(
+            AggregateType.WORKFLOW,
+            workflow_classes,
+            tuple(_workflow_transitions()),
+            {
+                ControlIntent.PAUSE: ControlPolicy(
+                    "REQUEST_PAUSE",
+                    frozenset(
+                        {
+                            WorkflowState.PAUSED,
+                            WorkflowState.COMPLETED,
+                            WorkflowState.REJECTED,
+                            WorkflowState.CANCELLED,
+                            WorkflowState.TRIAGE_REQUIRED,
+                        }
+                    ),
+                ),
+                ControlIntent.CANCEL: ControlPolicy(
+                    "REQUEST_CANCEL",
+                    frozenset(
+                        {
+                            WorkflowState.COMPLETED,
+                            WorkflowState.REJECTED,
+                            WorkflowState.CANCELLED,
+                        }
+                    ),
+                ),
+            },
+        ),
+        MachineSpec(
+            AggregateType.ARCHITECTURE_REVISION,
+            architecture_classes,
+            tuple(_architecture_transitions()),
+            {
+                ControlIntent.PAUSE: ControlPolicy(
+                    "REQUEST_PAUSE",
+                    frozenset(
+                        {
+                            ArchitectureRevisionState.PAUSED,
+                            ArchitectureRevisionState.ACCEPTED,
+                            ArchitectureRevisionState.REJECTED,
+                            ArchitectureRevisionState.SUPERSEDED,
+                            ArchitectureRevisionState.CANCELLED,
+                            ArchitectureRevisionState.TRIAGE_REQUIRED,
+                        }
+                    ),
+                ),
+                ControlIntent.CANCEL: ControlPolicy(
+                    "REQUEST_CANCEL",
+                    frozenset(
+                        {
+                            ArchitectureRevisionState.ACCEPTED,
+                            ArchitectureRevisionState.REJECTED,
+                            ArchitectureRevisionState.SUPERSEDED,
+                            ArchitectureRevisionState.CANCELLED,
+                        }
+                    ),
+                ),
+            },
+        ),
+        MachineSpec(
+            AggregateType.EXECUTION_EPOCH,
+            execution_classes,
+            tuple(_execution_transitions()),
+            {
+                ControlIntent.PAUSE: ControlPolicy(
+                    "REQUEST_PAUSE",
+                    frozenset(
+                        {
+                            ExecutionEpochState.PAUSED,
+                            ExecutionEpochState.SUPERSEDED,
+                            ExecutionEpochState.COMPLETED,
+                            ExecutionEpochState.CANCELLED,
+                            ExecutionEpochState.TRIAGE_REQUIRED,
+                        }
+                    ),
+                ),
+                ControlIntent.CANCEL: ControlPolicy(
+                    "REQUEST_CANCEL",
+                    frozenset(
+                        {
+                            ExecutionEpochState.SUPERSEDED,
+                            ExecutionEpochState.COMPLETED,
+                            ExecutionEpochState.CANCELLED,
+                        }
+                    ),
+                ),
+            },
+        ),
+        MachineSpec(
+            AggregateType.DAG_NODE_RUN,
+            node_classes,
+            tuple(_node_transitions()),
+            {
+                ControlIntent.PAUSE: ControlPolicy(
+                    "REQUEST_PAUSE",
+                    frozenset(
+                        {
+                            DagNodeRunState.PAUSED,
+                            DagNodeRunState.ACCEPTED,
+                            DagNodeRunState.STALE,
+                            DagNodeRunState.CANCELLED,
+                            DagNodeRunState.TRIAGE_REQUIRED,
+                        }
+                    ),
+                ),
+                ControlIntent.CANCEL: ControlPolicy(
+                    "REQUEST_CANCEL",
+                    frozenset(
+                        {
+                            DagNodeRunState.ACCEPTED,
+                            DagNodeRunState.CANCELLED,
+                        }
+                    ),
+                ),
+            },
+        ),
+        MachineSpec(
+            AggregateType.STANDALONE_REVIEW,
+            standalone_classes,
+            tuple(_standalone_review_transitions()),
+            {
+                ControlIntent.PAUSE: ControlPolicy(
+                    "REQUEST_PAUSE",
+                    frozenset(
+                        {
+                            StandaloneReviewState.PAUSED,
+                            StandaloneReviewState.CANCELLED,
+                            StandaloneReviewState.COMPLETED,
+                            StandaloneReviewState.TRIAGE_REQUIRED,
+                        }
+                    ),
+                ),
+                ControlIntent.CANCEL: ControlPolicy(
+                    "REQUEST_CANCEL",
+                    frozenset(
+                        {
+                            StandaloneReviewState.CANCELLED,
+                            StandaloneReviewState.COMPLETED,
+                        }
+                    ),
+                ),
+            },
+        ),
+    )
+
+
+def machine_spec_for(aggregate_type: AggregateType) -> MachineSpec:
+    return next(
+        spec for spec in all_machine_specs() if spec.aggregate_type == aggregate_type
+    )
+
+
+def all_transition_specs() -> tuple[TransitionSpec, ...]:
+    return tuple(
+        transition
+        for machine in all_machine_specs()
+        for transition in machine.transitions
+    )
+
+
+# Recovery and formal verification consume the same classification as the
+# runtime transition engine. This is deliberately derived after every machine
+# has been constructed so a new state cannot be added to only one surface.
+LIVENESS_REQUIRED_STATES: Mapping[AggregateType, frozenset[str]] = {
+    machine.aggregate_type: frozenset(
+        state
+        for state, state_class in machine.state_classes.items()
+        if state_class == StateClass.WORKER_LIVENESS
+    )
+    for machine in all_machine_specs()
+    if StateClass.WORKER_LIVENESS in set(machine.state_classes.values())
+}
 
 
 def build_default_transition_engine() -> TransitionEngine:

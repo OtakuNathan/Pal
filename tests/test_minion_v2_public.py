@@ -20,7 +20,7 @@ from pal.minion.capabilities import MinionManagerProvider, inspect_minion
 from pal.minion.ipc import minion_port_path, minion_socket_path
 from pal.minion.v2.capabilities import MinionV2PublicProvider
 from pal.minion.v2.contract_builder import ARCHITECT_BUILDER_CAPABILITIES
-from pal.minion.v2.orchestration import MinionV2OutboxProcessor
+from pal.minion.v2.orchestration import MinionV2OutboxProcessor, reconcile_control_requests
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.sessions import architect_session_id, coder_session_id, verifier_session_id
 from pal.minion.v2.workers import (
@@ -2449,6 +2449,168 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(status["workflow_state"], "PAUSED")
         self.assertEqual(status["liveness"], "paused")
 
+    def test_reconciler_pauses_and_resumes_dependency_blocked_node(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        repository = service.repository
+        workflow_id = "wf_blocked_pause"
+        epoch_id = "epoch_blocked_pause"
+        node_id = f"{epoch_id}:node:downstream"
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="test",
+                expected_version=0,
+                idempotency_key="blocked-pause:create-workflow",
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="test",
+                expected_version=1,
+                idempotency_key="blocked-pause:start-workflow",
+            )
+        )
+        manifest_ref = service.artifacts.put_json(
+            {"architecture": "blocked pause"},
+            artifact_type="ArchitectureSkeletonArtifact",
+        ).to_dict()
+        topology_ref = service.artifacts.put_json(
+            {"modules": {"downstream": {"depends_on": ["upstream"]}}},
+            artifact_type="ConstructionTopologyArtifact",
+        ).to_dict()
+        contract_ref = service.artifacts.put_json(
+            {"module_name": "downstream"},
+            artifact_type="ModuleContractArtifact",
+        ).to_dict()
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_EXECUTION_EPOCH",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.EXECUTION_EPOCH,
+                aggregate_id=epoch_id,
+                actor="test",
+                expected_version=0,
+                idempotency_key="blocked-pause:create-epoch",
+                payload={
+                    "architecture_manifest_ref": manifest_ref,
+                    "topology_ref": topology_ref,
+                },
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="START_EXECUTION",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.EXECUTION_EPOCH,
+                aggregate_id=epoch_id,
+                actor="test",
+                expected_version=1,
+                idempotency_key="blocked-pause:start-epoch",
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=node_id,
+                actor="test",
+                expected_version=0,
+                idempotency_key="blocked-pause:create-node",
+                payload={
+                    "unit_contract_ref": contract_ref,
+                    "epoch_id": epoch_id,
+                    "unit_id": "downstream",
+                    "node_kind": "unit",
+                    "dependency_node_ids": [f"{epoch_id}:node:upstream"],
+                },
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="NODES_COMPILED",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.EXECUTION_EPOCH,
+                aggregate_id=epoch_id,
+                actor="test",
+                expected_version=2,
+                idempotency_key="blocked-pause:nodes-compiled",
+                payload={"node_ids": [node_id]},
+            )
+        )
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="LINK_EXECUTION_EPOCH",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="test",
+                expected_version=2,
+                idempotency_key="blocked-pause:link-epoch",
+                payload={"execution_epoch_id": epoch_id},
+            )
+        )
+        with sqlite3.connect(str(repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+        service.control_workflow(
+            workflow_id=workflow_id,
+            command="pause",
+            actor="nathan",
+            source_channel="socket:test",
+        )
+
+        reconcile_control_requests(repository, workflow_id)
+
+        epoch = repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+        node = repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+        self.assertEqual(epoch.state, "PAUSE_REQUESTED")
+        self.assertEqual(node.state, "PAUSE_REQUESTED")
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="PAUSE_CONFIRMED",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=node_id,
+                actor="test",
+                expected_version=node.version,
+                idempotency_key="blocked-pause:node-paused",
+            )
+        )
+        reconcile_control_requests(repository, workflow_id)
+        self.assertEqual(
+            repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id).state,
+            "PAUSED",
+        )
+        self.assertEqual(
+            repository.read_snapshot(AggregateType.WORKFLOW, workflow_id).state,
+            "PAUSED",
+        )
+
+        service.resume_workflow(
+            workflow_id=workflow_id,
+            actor="nathan",
+            source_channel="socket:test",
+        )
+        reconcile_control_requests(repository, workflow_id)
+        self.assertEqual(
+            repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id).state,
+            "BLOCKED_BY_DEPS",
+        )
+        self.assertEqual(
+            repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id).state,
+            "RUNNING",
+        )
+
     def test_failed_cancel_effect_enters_triage_and_replays_cancel_after_resolution(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         service.repository.dispatch(
@@ -2704,7 +2866,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             "node_triage_hierarchy",
         )
         self.assertEqual(epoch.state, "PAUSE_REQUESTED")
-        self.assertEqual(node.state, "QUEUED")
+        self.assertEqual(node.state, "PAUSE_REQUESTED")
         with sqlite3.connect(str(repository.db_path)) as connection:
             pending_effect_types = {
                 str(row[0])
@@ -2714,6 +2876,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 )
             }
         self.assertIn("pause_epoch_nodes", pending_effect_types)
+        self.assertIn("pause_node_worker", pending_effect_types)
 
     def test_terminal_child_effect_failure_escalates_to_active_workflow(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)

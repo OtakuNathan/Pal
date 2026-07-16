@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -16,19 +15,8 @@ from pal.minion.v2.contracts import (
     TaskState,
     WorkflowState,
 )
-from pal.minion.v2.machines import all_transition_specs
-
-
-class StateClass(StrEnum):
-    CATALOG = "catalog"
-    TERMINAL = "terminal"
-    WORKER_LIVENESS = "worker_liveness"
-    HUMAN_WAIT = "human_wait"
-    OPERATOR_WAIT = "operator_wait"
-    PAUSED = "paused"
-    DEPENDENCY_WAIT = "dependency_wait"
-    CHILD_WAIT = "child_wait"
-    OUTBOX_WAIT = "outbox_wait"
+from pal.minion.v2.machine_dsl import ControlDisposition, ControlIntent, StateClass
+from pal.minion.v2.machines import all_machine_specs
 
 
 STATE_ENUMS = {
@@ -42,86 +30,8 @@ STATE_ENUMS = {
 
 
 STATE_CLASSIFICATIONS: Mapping[AggregateType, Mapping[str, StateClass]] = {
-    AggregateType.TASK: {
-        TaskState.ACTIVE.value: StateClass.CATALOG,
-        TaskState.ARCHIVED.value: StateClass.TERMINAL,
-    },
-    AggregateType.WORKFLOW: {
-        WorkflowState.CREATED.value: StateClass.OUTBOX_WAIT,
-        WorkflowState.ACTIVE.value: StateClass.CHILD_WAIT,
-        WorkflowState.PAUSE_REQUESTED.value: StateClass.CHILD_WAIT,
-        WorkflowState.PAUSED.value: StateClass.PAUSED,
-        WorkflowState.CANCEL_REQUESTED.value: StateClass.CHILD_WAIT,
-        WorkflowState.COMPLETED.value: StateClass.TERMINAL,
-        WorkflowState.REJECTED.value: StateClass.TERMINAL,
-        WorkflowState.CANCELLED.value: StateClass.TERMINAL,
-        WorkflowState.TRIAGE_REQUIRED.value: StateClass.OPERATOR_WAIT,
-    },
-    AggregateType.ARCHITECTURE_REVISION: {
-        ArchitectureRevisionState.ARCHITECT_QUEUED.value: StateClass.WORKER_LIVENESS,
-        ArchitectureRevisionState.ARCHITECT_RUNNING.value: StateClass.WORKER_LIVENESS,
-        ArchitectureRevisionState.ARCHITECT_QUIESCING.value: StateClass.WORKER_LIVENESS,
-        ArchitectureRevisionState.ARCHITECT_SNAPSHOTTING.value: StateClass.WORKER_LIVENESS,
-        ArchitectureRevisionState.REVIEW_QUEUED.value: StateClass.WORKER_LIVENESS,
-        ArchitectureRevisionState.REVIEWING.value: StateClass.WORKER_LIVENESS,
-        ArchitectureRevisionState.HUMAN_REVIEW.value: StateClass.HUMAN_WAIT,
-        ArchitectureRevisionState.CLARIFICATION_PENDING.value: StateClass.HUMAN_WAIT,
-        ArchitectureRevisionState.SUPERSEDED.value: StateClass.TERMINAL,
-        ArchitectureRevisionState.ACCEPTED.value: StateClass.TERMINAL,
-        ArchitectureRevisionState.REJECTED.value: StateClass.TERMINAL,
-        ArchitectureRevisionState.PAUSE_REQUESTED.value: StateClass.WORKER_LIVENESS,
-        ArchitectureRevisionState.PAUSED.value: StateClass.PAUSED,
-        ArchitectureRevisionState.CANCEL_REQUESTED.value: StateClass.WORKER_LIVENESS,
-        ArchitectureRevisionState.CANCELLED.value: StateClass.TERMINAL,
-        ArchitectureRevisionState.TRIAGE_REQUIRED.value: StateClass.OPERATOR_WAIT,
-    },
-    AggregateType.EXECUTION_EPOCH: {
-        ExecutionEpochState.NOT_STARTED.value: StateClass.OUTBOX_WAIT,
-        ExecutionEpochState.STARTING.value: StateClass.OUTBOX_WAIT,
-        ExecutionEpochState.RUNNING.value: StateClass.CHILD_WAIT,
-        ExecutionEpochState.REPLAN_COLLECTING.value: StateClass.CHILD_WAIT,
-        ExecutionEpochState.PAUSE_REQUESTED.value: StateClass.CHILD_WAIT,
-        ExecutionEpochState.PAUSED.value: StateClass.PAUSED,
-        ExecutionEpochState.REPLAN_REQUIRED.value: StateClass.CHILD_WAIT,
-        ExecutionEpochState.SUPERSEDED.value: StateClass.TERMINAL,
-        ExecutionEpochState.FINALIZING.value: StateClass.OUTBOX_WAIT,
-        ExecutionEpochState.COMPLETED.value: StateClass.TERMINAL,
-        ExecutionEpochState.CANCEL_REQUESTED.value: StateClass.CHILD_WAIT,
-        ExecutionEpochState.CANCELLED.value: StateClass.TERMINAL,
-        ExecutionEpochState.TRIAGE_REQUIRED.value: StateClass.OPERATOR_WAIT,
-    },
-    AggregateType.DAG_NODE_RUN: {
-        DagNodeRunState.BLOCKED_BY_DEPS.value: StateClass.DEPENDENCY_WAIT,
-        DagNodeRunState.QUEUED.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.PRODUCING.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.QUIESCING.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.SNAPSHOTTING.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.REVIEW_QUEUED.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.REVIEWING.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.REPAIR_QUEUED.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.REPAIRING.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.VERIFY_PREPARING.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.VERIFYING.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.ACCEPTED.value: StateClass.TERMINAL,
-        DagNodeRunState.STALE.value: StateClass.DEPENDENCY_WAIT,
-        DagNodeRunState.PAUSE_REQUESTED.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.PAUSED.value: StateClass.PAUSED,
-        DagNodeRunState.CANCEL_REQUESTED.value: StateClass.WORKER_LIVENESS,
-        DagNodeRunState.CANCELLED.value: StateClass.TERMINAL,
-        DagNodeRunState.TRIAGE_REQUIRED.value: StateClass.OPERATOR_WAIT,
-    },
-    AggregateType.STANDALONE_REVIEW: {
-        StandaloneReviewState.RECEIVED.value: StateClass.WORKER_LIVENESS,
-        StandaloneReviewState.REVIEW_QUEUED.value: StateClass.WORKER_LIVENESS,
-        StandaloneReviewState.REVIEWING.value: StateClass.WORKER_LIVENESS,
-        StandaloneReviewState.REPORT_READY.value: StateClass.WORKER_LIVENESS,
-        StandaloneReviewState.PAUSE_REQUESTED.value: StateClass.WORKER_LIVENESS,
-        StandaloneReviewState.PAUSED.value: StateClass.PAUSED,
-        StandaloneReviewState.CANCEL_REQUESTED.value: StateClass.WORKER_LIVENESS,
-        StandaloneReviewState.CANCELLED.value: StateClass.TERMINAL,
-        StandaloneReviewState.COMPLETED.value: StateClass.TERMINAL,
-        StandaloneReviewState.TRIAGE_REQUIRED.value: StateClass.OPERATOR_WAIT,
-    },
+    machine.aggregate_type: dict(machine.state_classes)
+    for machine in all_machine_specs()
 }
 
 
@@ -139,21 +49,52 @@ def state_pairs(state_class: StateClass | None = None) -> tuple[tuple[str, str],
 def transition_topology() -> dict[str, Any]:
     static: list[tuple[str, str, str, str]] = []
     dynamic: list[tuple[str, str, str]] = []
-    for spec in all_transition_specs():
-        aggregate = spec.aggregate_type.value
-        source = str(spec.source_state) if spec.source_state is not None else "<create>"
-        if callable(spec.target_state):
-            dynamic.append((aggregate, source, spec.action_type))
-        else:
-            static.append((aggregate, source, spec.action_type, str(spec.target_state)))
+    resolved: list[tuple[str, str, str, str]] = []
+    control: dict[str, dict[str, tuple[tuple[str, str], ...]]] = {}
+    for machine in all_machine_specs():
+        aggregate = machine.aggregate_type.value
+        for spec in machine.transitions:
+            source = str(spec.source_state) if spec.source_state is not None else "<create>"
+            if callable(spec.target_state):
+                dynamic.append((aggregate, source, spec.action_type))
+            else:
+                static.append((aggregate, source, spec.action_type, str(spec.target_state)))
+            resolved.extend(
+                (aggregate, source, spec.action_type, target)
+                for target in machine.transition_targets(spec)
+            )
+        for intent in machine.control_policies:
+            intent_control = control.setdefault(
+                intent.value,
+                {
+                    disposition.value: tuple()
+                    for disposition in ControlDisposition
+                },
+            )
+            for disposition in ControlDisposition:
+                existing = set(intent_control[disposition.value])
+                existing.update(
+                    (aggregate, state)
+                    for state in machine.control_states(intent, disposition)
+                )
+                intent_control[disposition.value] = tuple(sorted(existing))
     return {
         "states": state_pairs(),
+        "initial_states": tuple(
+            sorted(
+                (machine.aggregate_type.value, state)
+                for machine in all_machine_specs()
+                for state in machine.initial_states
+            )
+        ),
         "classes": {
             state_class.value: state_pairs(state_class)
             for state_class in StateClass
         },
         "static_transitions": tuple(sorted(static)),
         "dynamic_transitions": tuple(sorted(dynamic)),
+        "resolved_transitions": tuple(sorted(resolved)),
+        "control": control,
     }
 
 
@@ -200,6 +141,8 @@ def render_implementation_topology() -> str:
         f"TransitionTopologyDigest == {_tla_string(transition_topology_digest())}",
         "",
         f"ConcreteStates == {_tla_set(topology['states'])}",
+        "",
+        f"InitialStates == {_tla_set(topology['initial_states'])}",
     ]
     for state_class in StateClass:
         sections.extend(
@@ -208,12 +151,40 @@ def render_implementation_topology() -> str:
                 f"{class_names[state_class]} == {_tla_set(topology['classes'][state_class.value])}",
             ]
         )
+    for intent in ControlIntent:
+        control = dict(topology["control"].get(intent.value) or {})
+        prefix = intent.value.title()
+        controlled = tuple(
+            sorted(
+                {
+                    item
+                    for disposition in ControlDisposition
+                    for item in tuple(control.get(disposition.value) or ())
+                }
+            )
+        )
+        sections.extend(
+            [
+                "",
+                f"{prefix}ControlledStates == {_tla_set(controlled)}",
+            ]
+        )
+        for disposition in ControlDisposition:
+            sections.extend(
+                [
+                    "",
+                    f"{prefix}{disposition.value.title()}States == "
+                    f"{_tla_set(tuple(control.get(disposition.value) or ()))}",
+                ]
+            )
     sections.extend(
         [
             "",
             f"StaticTransitions == {_tla_set(topology['static_transitions'])}",
             "",
             f"DynamicTransitions == {_tla_set(topology['dynamic_transitions'])}",
+            "",
+            f"ResolvedTransitions == {_tla_set(topology['resolved_transitions'])}",
             "",
             "StateClasses == {",
             "    " + ", ".join(class_names.values()),
@@ -225,18 +196,26 @@ def render_implementation_topology() -> str:
             "    WorkerLivenessStates \\cup HumanWaitStates \\cup",
             "    ChildWaitStates \\cup OutboxWaitStates",
             "",
-            "VARIABLE checked",
+            "VARIABLE currentState",
             "",
-            "Init == checked = TRUE",
-            "Next == UNCHANGED checked",
-            "Spec == Init /\\ [][Next]_<<checked>>",
+            "Init == currentState \\in InitialStates",
+            "Next ==",
+            "    \\/ \\E transition \\in ResolvedTransitions :",
+            "        /\\ transition[2] # \"<create>\"",
+            "        /\\ currentState = <<transition[1], transition[2]>>",
+            "        /\\ currentState' = <<transition[1], transition[4]>>",
+            "    \\/ /\\ currentState \\in TerminalStates",
+            "       /\\ UNCHANGED currentState",
+            "Spec == Init /\\ [][Next]_<<currentState>>",
             "",
-            "TypeOK == checked \\in BOOLEAN",
+            "TypeOK == currentState \\in ConcreteStates",
             "",
             "ClassificationComplete == ClassifiedStates = ConcreteStates",
             "",
             "ClassificationDisjoint ==",
             "    \\A left, right \\in StateClasses : left # right => left \\cap right = {}",
+            "",
+            "InitialStatesWellFormed == InitialStates \\subseteq ConcreteStates",
             "",
             "StaticTransitionsWellFormed ==",
             "    \\A transition \\in StaticTransitions :",
@@ -247,24 +226,35 @@ def render_implementation_topology() -> str:
             "    \\A transition \\in DynamicTransitions :",
             "        transition[2] # \"<create>\" /\\ <<transition[1], transition[2]>> \\in ConcreteStates",
             "",
+            "ResolvedTransitionsWellFormed ==",
+            "    \\A transition \\in ResolvedTransitions :",
+            "        /\\ (transition[2] = \"<create>\" \\/ <<transition[1], transition[2]>> \\in ConcreteStates)",
+            "        /\\ <<transition[1], transition[4]>> \\in ConcreteStates",
+            "",
+            "DynamicTransitionsResolved ==",
+            "    \\A dynamic \\in DynamicTransitions :",
+            "        \\E transition \\in ResolvedTransitions :",
+            "            /\\ transition[1] = dynamic[1]",
+            "            /\\ transition[2] = dynamic[2]",
+            "            /\\ transition[3] = dynamic[3]",
+            "",
             "RecoverableStatesHaveTriage ==",
             "    \\A state \\in RecoverableStates :",
-            "        \\E transition \\in StaticTransitions :",
+            "        \\E transition \\in ResolvedTransitions :",
             "            /\\ transition[1] = state[1]",
             "            /\\ transition[2] = state[2]",
             "            /\\ transition[3] = \"ENTER_TRIAGE\"",
             "",
             "TriageHasResolution ==",
             "    \\A state \\in OperatorWaitStates :",
-            "        \\E transition \\in DynamicTransitions \\cup",
-            "                {<<item[1], item[2], item[3]>> : item \\in StaticTransitions} :",
+            "        \\E transition \\in ResolvedTransitions :",
             "            /\\ transition[1] = state[1]",
             "            /\\ transition[2] = state[2]",
             "            /\\ transition[3] = \"RESOLVE_TRIAGE\"",
             "",
             "TriageCanRecordLaterFailure ==",
             "    \\A state \\in OperatorWaitStates :",
-            "        \\E transition \\in StaticTransitions :",
+            "        \\E transition \\in ResolvedTransitions :",
             "            /\\ transition[1] = state[1]",
             "            /\\ transition[2] = state[2]",
             "            /\\ transition[3] = \"ENTER_TRIAGE\"",
@@ -272,11 +262,38 @@ def render_implementation_topology() -> str:
             "",
             "PausedStatesHaveResume ==",
             "    \\A state \\in PausedStates :",
-            "        \\E transition \\in DynamicTransitions \\cup",
-            "                {<<item[1], item[2], item[3]>> : item \\in StaticTransitions} :",
+            "        \\E transition \\in ResolvedTransitions :",
             "            /\\ transition[1] = state[1]",
             "            /\\ transition[2] = state[2]",
             "            /\\ transition[3] = \"RESUME\"",
+            "",
+            "PauseControlPartition ==",
+            "    /\\ PauseControlledStates =",
+            "        PauseRequestStates \\cup PauseWaitStates \\cup PauseSettledStates",
+            "    /\\ PauseRequestStates \\cap PauseWaitStates = {}",
+            "    /\\ PauseRequestStates \\cap PauseSettledStates = {}",
+            "    /\\ PauseWaitStates \\cap PauseSettledStates = {}",
+            "",
+            "CancelControlPartition ==",
+            "    /\\ CancelControlledStates =",
+            "        CancelRequestStates \\cup CancelWaitStates \\cup CancelSettledStates",
+            "    /\\ CancelRequestStates \\cap CancelWaitStates = {}",
+            "    /\\ CancelRequestStates \\cap CancelSettledStates = {}",
+            "    /\\ CancelWaitStates \\cap CancelSettledStates = {}",
+            "",
+            "PauseRequestStatesHaveTransition ==",
+            "    \\A state \\in PauseRequestStates :",
+            "        \\E transition \\in ResolvedTransitions :",
+            "            /\\ transition[1] = state[1]",
+            "            /\\ transition[2] = state[2]",
+            "            /\\ transition[3] = \"REQUEST_PAUSE\"",
+            "",
+            "CancelRequestStatesHaveTransition ==",
+            "    \\A state \\in CancelRequestStates :",
+            "        \\E transition \\in ResolvedTransitions :",
+            "            /\\ transition[1] = state[1]",
+            "            /\\ transition[2] = state[2]",
+            "            /\\ transition[3] = \"REQUEST_CANCEL\"",
             "",
             "=============================================================================",
             "",

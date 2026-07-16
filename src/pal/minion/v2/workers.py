@@ -110,6 +110,7 @@ from pal.minion.v2.paths import (
     verification_scratch_root,
 )
 from pal.minion.v2.projections import PlanRevisionProjectionStore
+from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.replan import (
     ARCHITECTURE_FINDING_BATCH_VIEW_ARTIFACT,
     architecture_finding_semantic_view,
@@ -6062,8 +6063,9 @@ def _recorded_verification_case_results(
     draft_kind: str,
 ) -> list[VerificationCaseResult]:
     internal = dict(plan.get("internal_context") or {})
-    if str(internal.get("invocation_id") or "") != invocation_id:
-        raise ValueError("recorded verification evidence belongs to another invocation")
+    evidence_invocation_id = str(internal.get("invocation_id") or "").strip()
+    if not evidence_invocation_id:
+        raise ValueError("recorded verification evidence has no fenced invocation")
     input_fingerprint = str(internal.get("input_fingerprint") or "").strip()
     if not input_fingerprint:
         raise ValueError("recorded verification evidence has no bound input fingerprint")
@@ -6073,13 +6075,35 @@ def _recorded_verification_case_results(
     durable = SubmissionDraftStore(runtime_root).read_submitted(draft_key)
     if (
         durable.workflow_id != workflow_id
-        or durable.invocation_id != invocation_id
+        or durable.invocation_id != evidence_invocation_id
         or durable.role != role
         or durable.draft_kind != draft_kind
         or durable.input_fingerprint != input_fingerprint
         or durable.fencing_token != int(internal.get("fencing_token") or 0)
     ):
         raise ValueError("recorded verification evidence Draft binding is invalid")
+    if evidence_invocation_id != invocation_id:
+        repository = MinionV2Repository(runtime_root)
+        attempt = repository.read_worker_attempt(evidence_invocation_id)
+        assignment = (
+            repository.read_worker_assignment(str(attempt.get("assignment_id") or ""))
+            if attempt is not None
+            else None
+        )
+        if (
+            attempt is None
+            or assignment is None
+            or str(assignment.get("session_id") or "") != invocation_id
+            or str(assignment.get("workflow_id") or "") != workflow_id
+            or str(assignment.get("role") or "") != role
+            or str(assignment.get("input_fingerprint") or "") != input_fingerprint
+            or str(attempt.get("lease_resource_key") or "")
+            != durable.lease_resource_key
+            or int(attempt.get("fencing_token") or 0) != durable.fencing_token
+        ):
+            raise ValueError(
+                "recorded verification evidence is not owned by the current logical worker session"
+            )
     durable_plan = artifacts.read_json(durable.submission_artifact_ref)
     if json.dumps(durable_plan, ensure_ascii=False, sort_keys=True) != json.dumps(
         dict(plan), ensure_ascii=False, sort_keys=True
