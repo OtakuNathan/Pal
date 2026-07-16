@@ -196,6 +196,18 @@ class WorkerAssignmentGateway:
         artifact_type = _SUBMISSION_ARTIFACT_TYPES.get(context.draft_kind)
         if artifact_type is None:
             raise ValueError(f"unsupported worker submission kind: {context.draft_kind}")
+        store = SubmissionDraftStore(self.service.runtime_root)
+        snapshot = store.read(context, seed={})
+        if (
+            context.draft_kind == "candidate"
+            and str(assignment.get("role") or "") == "repair"
+            and str(payload.get("status") or "") == "candidate_ready"
+        ):
+            self._validate_repair_candidate(
+                assignment=assignment,
+                draft=snapshot,
+                submission=payload,
+            )
         artifact_ref = self.service.artifacts.put_json(
             payload,
             artifact_type=artifact_type,
@@ -223,7 +235,6 @@ class WorkerAssignmentGateway:
         # The assignment receipt is the canonical completion boundary. Freeze
         # the authoring draft only after Manager validation has accepted it so
         # a rejected submit remains editable and retryable in the same process.
-        store = SubmissionDraftStore(self.service.runtime_root)
         store.mark_submitted(
             context,
             expected_version=int(params.get("expected_version") or 0),
@@ -231,6 +242,40 @@ class WorkerAssignmentGateway:
             submission_payload_hash=payload_hash,
         )
         return {"submitted": True}
+
+    def _validate_repair_candidate(
+        self,
+        *,
+        assignment: Mapping[str, Any],
+        draft: SubmissionDraftSnapshot,
+        submission: Mapping[str, Any],
+    ) -> None:
+        from pal.minion.v2.semantic_evidence import recorded_cases
+        from pal.minion.v2.verification import repair_checklist_items
+
+        repair_ref = dict(dict(assignment.get("input_refs") or {}).get("repair_bill") or {})
+        if not repair_ref:
+            raise ValueError("repair assignment is missing its bound RepairBill")
+        bill = self.service.artifacts.read_json(repair_ref)
+        required = [str(item["case"]) for item in repair_checklist_items(bill)]
+        if not required:
+            raise ValueError("bound RepairBill contains no named regression cases")
+        cases = recorded_cases(draft.payload)
+        status_by_name = {
+            str(item.get("name") or ""): str(item.get("status") or "")
+            for item in cases
+        }
+        incomplete = [name for name in required if status_by_name.get(name) != "PASS"]
+        if incomplete:
+            raise ValueError(
+                "repair checklist still requires Manager-recorded PASS regressions: "
+                + ", ".join(incomplete)
+            )
+        expected_tests = [
+            f"{item.get('name')}: {item.get('status')}" for item in cases
+        ]
+        if list(submission.get("tests_run") or []) != expected_tests:
+            raise ValueError("repair Candidate tests_run does not match its durable evidence Draft")
 
     def _artifact_put(
         self,

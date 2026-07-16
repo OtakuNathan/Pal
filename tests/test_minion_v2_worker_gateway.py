@@ -163,6 +163,148 @@ class MinionV2WorkerGatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not allowed"):
             self.call("v2_workflow_status")
 
+    def test_gateway_validates_repair_checklist_against_durable_case_evidence(self) -> None:
+        repair_ref = self.service.artifacts.put_json(
+            {
+                "module_name": "router",
+                "findings": [
+                    {"case": "empty_input_is_stable", "summary": "Empty input regressed."},
+                    {"case": "whitespace_is_stable", "summary": "Whitespace regressed."},
+                ],
+            },
+            artifact_type="RepairBillSemanticViewArtifact",
+        )
+        self.service.repository.ensure_worker_session(
+            session_id="session-router-repair",
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-router",
+            role="repair",
+        )
+        assignment = self.service.repository.create_worker_assignment(
+            WorkerAssignmentRequest(
+                assignment_key="router-repair-1",
+                session_id="session-router-repair",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN.value,
+                aggregate_id="node-router",
+                role="repair",
+                input_fingerprint="router-repair-input",
+                required_inputs=("module_work_view", "repair_bill"),
+                input_refs={
+                    "module_work_view": self.input_ref.to_dict(),
+                    "repair_bill": repair_ref.to_dict(),
+                },
+                execution_spec={"effect_type": "spawn_repair_worker"},
+                submission_kind="candidate",
+            )
+        )
+        assignment_id = str(assignment["assignment_id"])
+        attempt = self.service.repository.claim_worker_assignment(assignment_id)
+        attempt_id = str(attempt["attempt_id"])
+        lease_resource = f"assignment:{assignment_id}"
+        lease = self.service.repository.claim_lease(
+            lease_resource,
+            attempt_id,
+            ttl_seconds=120,
+        )
+        self.service.repository.start_worker_attempt(
+            assignment_id=assignment_id,
+            attempt_id_value=attempt_id,
+            lease_resource_key=lease_resource,
+            fencing_token=lease.fencing_token,
+            prompt_pack_ref=self.prompt_ref.to_dict(),
+        )
+        token = self.service.repository.issue_worker_attempt_access_token(
+            assignment_id=assignment_id,
+            attempt_id_value=attempt_id,
+            fencing_token=lease.fencing_token,
+        )
+        context = {
+            "workflow_id": "workflow-router",
+            "invocation_id": attempt_id,
+            "lease_resource_key": lease_resource,
+            "fencing_token": lease.fencing_token,
+            "role": "repair",
+            "draft_kind": "candidate",
+            "input_fingerprint": "router-repair-input",
+            "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
+        }
+
+        def repair_call(method: str, **params):
+            return self.gateway.call(
+                method,
+                {"access_token": token, **params},
+            )
+
+        repair_call("bound_input_read", name="module_work_view")
+        repair_call("bound_input_json", name="repair_bill")
+        repair_call(
+            "draft_mutate",
+            context=context,
+            operation_key="one-regression",
+            request={},
+            expected_version=0,
+            next_payload={
+                "evidence": {
+                    "cases": {
+                        "empty_input_is_stable": {
+                            "name": "empty_input_is_stable",
+                            "status": "PASS",
+                        }
+                    }
+                }
+            },
+            result={"recorded": True},
+            seed={},
+        )
+        with self.assertRaisesRegex(ValueError, "whitespace_is_stable"):
+            repair_call(
+                "draft_submit",
+                context=context,
+                expected_version=1,
+                submission={
+                    "status": "candidate_ready",
+                    "tests_run": ["empty_input_is_stable: PASS"],
+                },
+            )
+        repair_call(
+            "draft_mutate",
+            context=context,
+            operation_key="all-regressions",
+            request={},
+            expected_version=1,
+            next_payload={
+                "evidence": {
+                    "cases": {
+                        "empty_input_is_stable": {
+                            "name": "empty_input_is_stable",
+                            "status": "PASS",
+                        },
+                        "whitespace_is_stable": {
+                            "name": "whitespace_is_stable",
+                            "status": "PASS",
+                        },
+                    }
+                }
+            },
+            result={"recorded": True},
+            seed={},
+        )
+        accepted = repair_call(
+            "draft_submit",
+            context=context,
+            expected_version=2,
+            submission={
+                "status": "candidate_ready",
+                "tests_run": [
+                    "empty_input_is_stable: PASS",
+                    "whitespace_is_stable: PASS",
+                ],
+            },
+        )
+        self.assertTrue(accepted["submitted"])
+
 
 if __name__ == "__main__":
     unittest.main()

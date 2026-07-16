@@ -101,17 +101,25 @@ def render_minion_task_prompt(pack: MinionInvocationPack) -> str:
     references = [dict(item) for item in list(pack.workspace.get("reference_paths") or []) if isinstance(item, dict)]
     if references:
         lines.extend(["", "## Immutable Inputs"])
-        if any(bool(item.get("bound_input")) and bool(item.get("required")) for item in references):
+        mandatory = [
+            item
+            for item in references
+            if bool(item.get("bound_input")) and bool(item.get("required"))
+        ]
+        if mandatory:
             lines.append(
-                "- Every mandatory bound input must be read with op_minion_input_read before submission; ordinary filesystem reads do not record this receipt."
+                "- Every mandatory bound input must be read with its dedicated reader before submission; ordinary filesystem reads do not record this receipt."
             )
         for item in references:
             name = str(item.get("name") or "")
             if bool(item.get("bound_input")):
                 requirement = "mandatory" if bool(item.get("required")) else "optional"
-                lines.append(
-                    f"- {name}: {requirement} bound immutable artifact; read with op_minion_input_read(name=\"{name}\")"
+                reader = (
+                    "repair_checklist()"
+                    if name == "repair_bill"
+                    else f'input_read(name="{name}")'
                 )
+                lines.append(f"- {name}: {requirement} bound immutable artifact; read with {reader}")
             else:
                 lines.append(f"- {name}: declared read-only reference (truth_source={bool(item.get('truth_source'))})")
     lines.extend(

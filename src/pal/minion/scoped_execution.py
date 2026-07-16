@@ -28,6 +28,7 @@ from pal.minion.v2.contract_builder import (
 from pal.minion.v2.candidate_builder import (
     CANDIDATE_BUILDER_CAPABILITIES,
     CANDIDATE_BUILDER_TOOL_SPECS,
+    REPAIR_CHECKLIST_CAPABILITY,
     candidate_builder_tool_result,
     is_candidate_builder_capability,
 )
@@ -84,6 +85,7 @@ MINION_CODE_INTEL_TOOL_SURFACE = (
 MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_file_read",
     "op_minion_input_read",
+    REPAIR_CHECKLIST_CAPABILITY,
     "op_file_edit",
     "op_file_write",
     "op_path_delete",

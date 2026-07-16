@@ -19,7 +19,11 @@ from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.execution import ExecutionCompiler
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.service import MinionV2WorkflowService
-from pal.minion.v2.workers import apply_v2_research_capability_policy, apply_v2_role_capability_policy
+from pal.minion.v2.workers import (
+    apply_v2_bound_input_capability_policy,
+    apply_v2_research_capability_policy,
+    apply_v2_role_capability_policy,
+)
 from pal.shared import MinionInvocationPack, RuntimeStatus
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 
@@ -251,6 +255,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             ExecutionRuntime(),
             [
                 "op_minion_input_read",
+                "op_minion_repair_checklist",
                 "op_minion_contract_submit",
                 "op_minion_candidate_submit",
             ],
@@ -262,6 +267,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         expected = {
             "op_minion_input_read": "input_read",
+            "op_minion_repair_checklist": "repair_checklist",
             "op_minion_contract_submit": "contract_submit",
             "op_minion_candidate_submit": "candidate_submit",
         }
@@ -273,6 +279,38 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 self.assertEqual(spec["name"], public_name)
                 self.assertEqual(scoped.resolve_llm_tool_name(public_name), canonical)
                 self.assertNotIn("minion_", spec["description"])
+
+    def test_manager_injects_bound_input_protocol_independently_from_profile(self) -> None:
+        coder = self._pack("software_engineering.v2_coder")
+        self.assertNotIn("op_minion_input_read", coder.allowed_capabilities)
+        injected = apply_v2_bound_input_capability_policy(
+            coder,
+            mandatory_inputs=["repair_bill", "unit_work_view"],
+            repair_checklist={
+                "module_name": "font_backend",
+                "findings": [
+                    {
+                        "case": "released_font_rejected",
+                        "summary": "Released fonts remain usable.",
+                        "locations": [{"path": "src/font.cpp", "symbol": "measure"}],
+                    }
+                ],
+            },
+        )
+
+        self.assertIn("op_minion_input_read", injected.allowed_capabilities)
+        self.assertIn("op_minion_repair_checklist", injected.allowed_capabilities)
+        overrides = dict(injected.resolved_profile["capability_description_overrides"])
+        self.assertIn("repair_bill, unit_work_view", overrides["op_minion_input_read"])
+        self.assertIn("released_font_rejected", overrides["op_minion_repair_checklist"])
+
+    def test_manager_does_not_inject_input_tools_without_bound_inputs(self) -> None:
+        coder = self._pack("software_engineering.v2_coder")
+        unchanged = apply_v2_bound_input_capability_policy(
+            coder,
+            mandatory_inputs=[],
+        )
+        self.assertEqual(unchanged.allowed_capabilities, coder.allowed_capabilities)
 
     def test_architect_has_no_external_research_surface(self) -> None:
         architect = self._pack("lifestyle.architect")
@@ -300,7 +338,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 self.assertNotIn("op_minion_requirements_replace_batch", requirements.allowed_capabilities)
                 self.assertNotIn("op_minion_requirements_submit", requirements.allowed_capabilities)
                 self.assertIn("op_file_read", requirements.allowed_capabilities)
-                self.assertIn("op_minion_input_read", requirements.allowed_capabilities)
+                self.assertNotIn("op_minion_input_read", requirements.allowed_capabilities)
                 self.assertNotIn("op_minion_evidence_submit", requirements.allowed_capabilities)
                 self.assertIn("op_minion_contract_submit", requirements.allowed_capabilities)
                 self.assertNotIn("op_file_write", requirements.allowed_capabilities)

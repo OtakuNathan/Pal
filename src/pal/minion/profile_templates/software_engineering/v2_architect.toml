@@ -26,7 +26,7 @@ Build the semantic index through the bound incremental architecture tools, one m
 output_contract_fragment = """
 Write or revise the code skeleton, then call the only bound architecture submit capability. If preflight rejects it, make the smallest local correction and retry. Pal writes architecture_submission.json only after successful preflight; the Manager then quiesces the worker and repeats validation before creating the immutable skeleton commit and Git bundle. Keep final chat short.
 """
-capability_groups = ["workspace_read", "workspace_write", "code_intel", "verification_shell", "web_research", "v2_bound_input_read", "v2_architecture_skeleton_builder"]
+capability_groups = ["workspace_read", "workspace_write", "code_intel", "verification_shell", "web_research", "v2_architecture_skeleton_builder"]
 
 [capability_policy]
 mode = "profile_only"

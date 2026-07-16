@@ -634,6 +634,99 @@ def semantic_finding_payload(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def repair_checklist_items(value: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Compile semantic, model-facing repair work without exposing internal IDs."""
+
+    bill = dict(value or {})
+    raw_findings = [
+        dict(item)
+        for item in list(bill.get("findings") or [])
+        if isinstance(item, Mapping)
+    ]
+    if not raw_findings:
+        raw_findings = [bill]
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for finding in raw_findings:
+        case_name = str(
+            finding.get("case")
+            or finding.get("case_name")
+            or bill.get("case_name")
+            or ""
+        ).strip()
+        if not case_name or case_name in seen:
+            continue
+        seen.add(case_name)
+        items.append(
+            {
+                "case": case_name,
+                "summary": str(
+                    finding.get("summary")
+                    or finding.get("finding_summary")
+                    or bill.get("summary")
+                    or bill.get("finding_summary")
+                    or ""
+                ).strip(),
+                "failure_reason": str(
+                    finding.get("failure_reason")
+                    or bill.get("failure_reason")
+                    or ""
+                ).strip(),
+                "severity": str(
+                    finding.get("severity") or bill.get("severity") or "major"
+                ).strip(),
+                "requirements": [
+                    dict(item)
+                    for item in list(
+                        finding.get("requirements") or bill.get("requirements") or []
+                    )
+                    if isinstance(item, Mapping)
+                ],
+                "locations": [
+                    dict(item)
+                    for item in list(
+                        finding.get("locations") or bill.get("locations") or []
+                    )
+                    if isinstance(item, Mapping)
+                ],
+                "invariants": [
+                    str(item)
+                    for item in list(
+                        finding.get("invariants") or bill.get("invariants") or []
+                    )
+                    if str(item).strip()
+                ],
+                "suggested_repair_boundary": [
+                    str(item)
+                    for item in list(
+                        finding.get("suggested_repair_boundary")
+                        or bill.get("suggested_repair_boundary")
+                        or []
+                    )
+                    if str(item).strip()
+                ],
+            }
+        )
+    return items
+
+
+def historical_repair_checklist_items(work_view: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return every named historical regression obligation in stable order."""
+
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_bill in list(work_view.get("historical_repair_bills") or []):
+        if not isinstance(raw_bill, Mapping):
+            continue
+        for item in repair_checklist_items(raw_bill):
+            case_name = str(item.get("case") or "").strip()
+            if not case_name or case_name in seen:
+                continue
+            seen.add(case_name)
+            items.append(item)
+    return items
+
+
 def aggregate_verification_status(statuses: Sequence[VerificationStatus] | Any) -> VerificationStatus:
     values = tuple(statuses)
     if any(item == VerificationStatus.FAIL for item in values):

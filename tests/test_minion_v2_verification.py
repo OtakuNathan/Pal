@@ -462,6 +462,139 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(submitted.ok, submitted.text)
         self.assertTrue((stage_dir / "verification_plan.json").is_file())
 
+    def test_verifier_replays_every_named_repair_finding_before_new_cases(self) -> None:
+        stage_dir = self.runtime_root / "artifact-stage-named-regressions"
+        work_view = self.runtime_root / "module-work-view-named-regressions.json"
+        work_view.write_text(
+            json.dumps(
+                {
+                    "historical_repair_bills": [
+                        {
+                            "findings": [
+                                {
+                                    "case": "gradient_underflow_probe",
+                                    "summary": "Gradient channels underflow.",
+                                },
+                                {
+                                    "case": "dashed_line_clip_bypass",
+                                    "summary": "Dashed lines bypass clipping.",
+                                },
+                            ]
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(self.runtime_root),
+                "artifact_dir": str(self.runtime_root / "artifacts-named-regressions"),
+                "artifact_stage_dir": str(stage_dir),
+                "reference_paths": [
+                    {"name": "module_work_view", "path": str(work_view)}
+                ],
+            },
+            role="verifier",
+        )
+        first = self._verification_call(
+            workspace,
+            "op_minion_verification_run_historical_regression",
+            {
+                "name": "gradient_underflow_probe",
+                "command": "exit 0",
+                "path": "src/router.py",
+            },
+        )
+        self.assertTrue(first.ok, first.text)
+        premature = self._verification_call(
+            workspace,
+            "op_minion_verification_run_adversarial_case",
+            {"name": "new risk", "command": "exit 0", "path": "src/router.py"},
+        )
+        self.assertFalse(premature.ok)
+        self.assertIn("dashed_line_clip_bypass", premature.llm_text)
+        second = self._verification_call(
+            workspace,
+            "op_minion_verification_run_historical_regression",
+            {
+                "name": "dashed_line_clip_bypass",
+                "command": "exit 0",
+                "path": "src/router.py",
+            },
+        )
+        self.assertTrue(second.ok, second.text)
+        adversarial = self._verification_call(
+            workspace,
+            "op_minion_verification_run_adversarial_case",
+            {"name": "new risk", "command": "exit 0", "path": "src/router.py"},
+        )
+        self.assertTrue(adversarial.ok, adversarial.text)
+        submitted = self._verification_call(
+            workspace, "op_minion_verification_submit", produced=[]
+        )
+        self.assertTrue(submitted.ok, submitted.text)
+
+    def test_repeated_historical_failure_can_submit_without_new_exploration(self) -> None:
+        stage_dir = self.runtime_root / "artifact-stage-failed-regression"
+        work_view = self.runtime_root / "module-work-view-failed-regression.json"
+        work_view.write_text(
+            json.dumps(
+                {
+                    "module_name": "router",
+                    "historical_repair_bills": [
+                        {
+                            "findings": [
+                                {
+                                    "case": "empty_input_is_stable",
+                                    "summary": "Empty input regressed.",
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(self.runtime_root),
+                "artifact_dir": str(self.runtime_root / "artifacts-failed-regression"),
+                "artifact_stage_dir": str(stage_dir),
+                "reference_paths": [
+                    {"name": "module_work_view", "path": str(work_view)}
+                ],
+            },
+            role="verifier",
+        )
+        failed = self._verification_call(
+            workspace,
+            "op_minion_verification_run_historical_regression",
+            {
+                "name": "empty_input_is_stable",
+                "command": "exit 1",
+                "path": "src/router.py",
+            },
+        )
+        self.assertTrue(failed.ok, failed.text)
+        finding = self._verification_call(
+            workspace,
+            "op_minion_verification_report_module_defect",
+            {
+                "case": "empty_input_is_stable",
+                "finding_section": "implementation",
+                "summary": "The historical failure remains reproducible.",
+                "failure_reason": "The preserved regression still exits non-zero.",
+                "severity": "major",
+                "target_module": "router",
+            },
+        )
+        self.assertTrue(finding.ok, finding.text)
+        submitted = self._verification_call(
+            workspace, "op_minion_verification_submit", produced=[]
+        )
+        self.assertTrue(submitted.ok, submitted.text)
+
     def test_candidate_defect_tool_binds_module_and_derives_report_fields(self) -> None:
         artifact_dir = self.runtime_root / "artifacts"
         stage_dir = self.runtime_root / "artifact-stage"
@@ -541,6 +674,99 @@ class MinionV2VerificationTests(unittest.TestCase):
         report = json.loads((stage_dir / "coder_report.json").read_text(encoding="utf-8"))
         self.assertEqual(report["files_changed"], ["src/font/backend.cpp"])
         self.assertEqual(report["tests_run"], ["focused render check: PASS"])
+
+    def test_repair_checklist_requires_every_named_regression_before_submit(self) -> None:
+        repo = self.runtime_root / "repair-checklist-repo"
+        (repo / "src").mkdir(parents=True)
+        source = repo / "src/router.py"
+        source.write_text("def route(value):\n    return value\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Pal Test"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "pal@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+        source.write_text("def route(value):\n    return value.strip()\n", encoding="utf-8")
+        work_view = self.runtime_root / "repair-checklist-work-view.json"
+        work_view.write_text(
+            json.dumps(
+                {
+                    "module_name": "router",
+                    "requirements": {"sections": {}},
+                    "implementation_scopes": [{"kind": "directory", "path": "src"}],
+                    "test_scopes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        repair_bill = self.runtime_root / "repair-checklist.json"
+        repair_bill.write_text(
+            json.dumps(
+                {
+                    "module_name": "router",
+                    "regression_test_obligation": "Preserve every reproduced failure.",
+                    "findings": [
+                        {
+                            "case": "empty_input_is_stable",
+                            "summary": "Empty input is not stable.",
+                            "failure_reason": "The route changes empty input.",
+                            "locations": [{"path": "src/router.py", "symbol": "route"}],
+                        },
+                        {
+                            "case": "whitespace_policy_is_stable",
+                            "summary": "Whitespace behavior regressed.",
+                            "failure_reason": "The route violates its whitespace contract.",
+                            "locations": [{"path": "src/router.py", "symbol": "route"}],
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = self.runtime_root / "repair-checklist-stage"
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "repair-checklist-artifacts"),
+                "artifact_stage_dir": str(stage_dir),
+                "reference_paths": [
+                    {"name": "unit_work_view", "path": str(work_view)},
+                    {"name": "repair_bill", "path": str(repair_bill)},
+                ],
+            },
+            role="repair",
+        )
+
+        checklist = self._candidate_call(
+            workspace, "op_minion_repair_checklist"
+        )
+        self.assertTrue(checklist.ok, checklist.text)
+        self.assertIn("empty_input_is_stable", checklist.llm_text)
+        self.assertIn("whitespace_policy_is_stable", checklist.llm_text)
+        first = self._candidate_call(
+            workspace,
+            "op_minion_developer_test",
+            {"name": "empty_input_is_stable", "command": "exit 0"},
+        )
+        self.assertTrue(first.ok, first.text)
+        premature = self._candidate_call(workspace, "op_minion_candidate_submit")
+        self.assertFalse(premature.ok)
+        self.assertIn("whitespace_policy_is_stable", premature.llm_text)
+        second = self._candidate_call(
+            workspace,
+            "op_minion_developer_test",
+            {"name": "whitespace_policy_is_stable", "command": "exit 0"},
+        )
+        self.assertTrue(second.ok, second.text)
+        submitted = self._candidate_call(workspace, "op_minion_candidate_submit")
+        self.assertTrue(submitted.ok, submitted.text)
+        report = json.loads((stage_dir / "coder_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            report["tests_run"],
+            [
+                "empty_input_is_stable: PASS",
+                "whitespace_policy_is_stable: PASS",
+            ],
+        )
 
     def test_rejected_candidate_submit_does_not_publish_primary_report(self) -> None:
         repo = self.runtime_root / "rejected-candidate-repo"

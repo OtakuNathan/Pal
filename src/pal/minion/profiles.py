@@ -18,7 +18,10 @@ from pal.minion.v2.contract_builder import (
     REQUIREMENTS_BUILDER_CAPABILITIES,
     is_contract_builder_capability,
 )
-from pal.minion.v2.candidate_builder import CANDIDATE_BUILDER_CAPABILITIES
+from pal.minion.v2.candidate_builder import (
+    CANDIDATE_BUILDER_CAPABILITIES,
+    REPAIR_CHECKLIST_CAPABILITY,
+)
 from pal.minion.v2.skeleton_builder import (
     ARCHITECTURE_SKELETON_CAPABILITIES,
     SKELETON_BUILDER_CAPABILITIES,
@@ -379,7 +382,6 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "capability_call": ("op_tool_call",),
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
     "v2_requirements_builder": REQUIREMENTS_BUILDER_CAPABILITIES,
-    "v2_bound_input_read": ("op_minion_input_read",),
     "v2_contract_sketch_builder": CONTRACT_SKETCH_BUILDER_CAPABILITIES,
     "v2_architecture_review_builder": ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
     "v2_architecture_skeleton_builder": ARCHITECTURE_SKELETON_CAPABILITIES,
@@ -468,6 +470,7 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         "op_minion_artifact_write",
         "op_minion_artifact_edit",
         "op_minion_input_read",
+        REPAIR_CHECKLIST_CAPABILITY,
         "op_minion_memory_candidate_write",
         *CONTRACT_BUILDER_CAPABILITIES,
         *CANDIDATE_BUILDER_CAPABILITIES,

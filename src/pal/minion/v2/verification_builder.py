@@ -25,7 +25,10 @@ from pal.minion.v2.submission_preflight import (
     requirement_refs_from_view,
     validate_submission_requirement_refs,
 )
-from pal.minion.v2.verification import validate_verification_case_order
+from pal.minion.v2.verification import (
+    historical_repair_checklist_items,
+    validate_verification_case_order,
+)
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
@@ -466,6 +469,7 @@ def compile_verification_invocation_tool_contract(
         verification_policy=verification_policy,
         standalone=standalone,
     )
+    historical_regressions = historical_repair_checklist_items(work_view)
     allowed_capabilities = set(
         STANDALONE_REVIEW_BUILDER_CAPABILITIES
         if standalone
@@ -490,6 +494,7 @@ def compile_verification_invocation_tool_contract(
         "allowed_capabilities": sorted(allowed_capabilities),
         "allowed_obligations": list(policy["allowed_obligations"]),
         "allowed_defect_targets": allowed_targets,
+        "required_historical_regressions": historical_regressions,
     }
     requirement_text = json.dumps(requirements, ensure_ascii=False, sort_keys=True)
     boundary_text = json.dumps(
@@ -511,6 +516,14 @@ def compile_verification_invocation_tool_contract(
             "Reusing a case name updates that case. description may use any language. Set probe_path whenever the command "
             "consumes a verifier scratch file so exact evidence reuse is invalidated only by that file. "
             f"Bound Requirements: {requirement_text}. Bound verification context: {boundary_text}."
+        )
+    if historical_regressions:
+        overrides["op_minion_verification_run_historical_regression"] = (
+            "Replay one Manager-bound historical RepairBill case before new adversarial or diff-risk exploration. "
+            "Use an exact case name from the checklist and a command that executes its preserved reproducer or promoted project regression. "
+            "Every listed case must be recorded before verification_submit; all must PASS before new risk exploration or acceptance. "
+            "A repeated FAIL may be submitted immediately with a structured finding. Required historical regressions: "
+            + json.dumps(historical_regressions, ensure_ascii=False, sort_keys=True)
         )
     for capability in (
         "op_minion_verification_report_module_defect",
@@ -1139,10 +1152,28 @@ def _preflight_verification_submission(value: Mapping[str, Any], workspace: Mapp
     historical = list(work_view.get("historical_repair_bills") or []) or list(
         work_view.get("historical_repair_bill_refs") or []
     )
+    required_historical = historical_repair_checklist_items(work_view)
+    recorded_results = [dict(item) for item in list(value.get("recorded_results") or [])]
     validate_verification_case_order(
-        [str(dict(item).get("case_kind") or "") for item in list(value.get("recorded_results") or [])],
+        [str(item.get("case_kind") or "") for item in recorded_results],
         historical_required=bool(historical),
     )
+    if required_historical:
+        historical_status = {
+            str(item.get("name") or ""): str(item.get("status") or "")
+            for item in recorded_results
+            if str(item.get("case_kind") or "") == "historical_regression"
+        }
+        missing = [
+            str(item["case"])
+            for item in required_historical
+            if str(item["case"]) not in historical_status
+        ]
+        if missing:
+            raise ValueError(
+                "verification must replay every historical RepairBill case before submit: "
+                + ", ".join(missing)
+            )
     policy = bound_reference_payload(workspace, "verification_policy", required=False)
     if not policy:
         return
@@ -1208,7 +1239,28 @@ def _preflight_verification_case_execution(
         return
     context, store = _store_context(workspace, draft_kind=draft_kind)
     cases = recorded_cases(store.read(context, seed=_empty_payload()).payload)
-    if any(str(item.get("case_kind") or "") == "historical_regression" for item in cases):
+    required_historical = historical_repair_checklist_items(work_view)
+    if required_historical:
+        historical_status = {
+            str(item.get("name") or ""): str(item.get("status") or "")
+            for item in cases
+            if str(item.get("case_kind") or "") == "historical_regression"
+        }
+        incomplete = [
+            str(item["case"])
+            for item in required_historical
+            if historical_status.get(str(item["case"])) != "PASS"
+        ]
+        if not incomplete:
+            return
+        raise ValueError(
+            "run every historical RepairBill regression as PASS before adversarial or diff-risk cases: "
+            + ", ".join(incomplete)
+        )
+    if any(
+        str(item.get("case_kind") or "") == "historical_regression"
+        for item in cases
+    ):
         return
     raise ValueError(
         "run the historical RepairBill regression before adversarial or diff-risk cases"

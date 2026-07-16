@@ -1494,10 +1494,38 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             },
         )
         prompt = render_minion_task_prompt(pack)
-        self.assertIn('op_minion_input_read(name="revision_finding")', prompt)
+        self.assertIn('input_read(name="revision_finding")', prompt)
         self.assertIn("Every mandatory bound input must be read", prompt)
         self.assertIn("ordinary filesystem reads do not record this receipt", prompt)
         self.assertNotIn("/host-only/artifacts/secret.json", prompt)
+
+    def test_repair_bill_prompt_uses_the_dedicated_checklist_reader(self) -> None:
+        pack = MinionInvocationPack(
+            invocation_id="inv_repair_prompt",
+            goal="repair",
+            workspace={
+                "reference_paths": [
+                    {
+                        "name": "repair_bill",
+                        "path": "/host-only/artifacts/repair.json",
+                        "bound_input": True,
+                        "required": True,
+                    },
+                    {
+                        "name": "unit_work_view",
+                        "path": "/host-only/artifacts/view.json",
+                        "bound_input": True,
+                        "required": True,
+                    },
+                ]
+            },
+        )
+
+        prompt = render_minion_task_prompt(pack)
+
+        self.assertIn("repair_checklist()", prompt)
+        self.assertIn('input_read(name="unit_work_view")', prompt)
+        self.assertNotIn('input_read(name="repair_bill")', prompt)
 
     def test_architect_revision_seeds_the_contract_builder_draft(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))

@@ -59,6 +59,7 @@ from pal.minion.v2.contract_builder import (
 )
 from pal.minion.v2.candidate_builder import (
     CANDIDATE_BUILDER_CAPABILITIES,
+    REPAIR_CHECKLIST_CAPABILITY,
     validate_candidate_submission,
 )
 from pal.minion.v2.execution import (
@@ -124,7 +125,9 @@ from pal.minion.v2.verification import (
     VerificationService,
     VerificationStatus,
     aggregate_verification_status,
+    historical_repair_checklist_items,
     repair_bill_semantic_view,
+    repair_checklist_items,
     semantic_finding_payload,
 )
 from pal.minion.v2.verification_builder import (
@@ -1547,7 +1550,13 @@ class MinionV2SemanticWorker:
                 cases=case_specs,
                 findings=findings,
             )
-            _validate_verification_policy(plan, case_specs, verification_policy, node)
+            _validate_verification_policy(
+                plan,
+                case_specs,
+                verification_policy,
+                node,
+                work_view=self.service.artifacts.read_json(view_ref),
+            )
         except Exception as exc:
             raise SubmissionInvariantError(
                 f"accepted verification_submit failed manager defense-in-depth validation: {exc}"
@@ -4364,17 +4373,22 @@ class MinionV2SemanticWorker:
             if ref.artifact_type != "LocalPathReference"
         ]
         if mandatory_inputs:
-            calls = ", ".join(
-                f'op_minion_input_read(name="{name}")' for name in mandatory_inputs
-            )
+            calls = [
+                (
+                    "repair_checklist()"
+                    if role == "repair" and name == "repair_bill"
+                    else f'input_read(name="{name}")'
+                )
+                for name in mandatory_inputs
+            ]
             mandatory_instruction = (
                 "Before editing, testing, or submitting, read every mandatory immutable input through its bound reader so the Manager records consumption: "
-                + calls
+                + ", ".join(calls)
                 + ". Filesystem inspection is not a substitute."
             )
             if role == "repair" and "repair_bill" in mandatory_inputs:
                 mandatory_instruction += (
-                    " Read repair_bill first and treat its current findings, reproducer, expected behavior, and repair boundary as the assignment; "
+                    " Read repair_checklist first and treat every listed finding, reproducer, expected behavior, and repair boundary as the assignment; "
                     "do not search the worktree for a RepairBill file."
                 )
             invocation_acceptance.insert(0, mandatory_instruction)
@@ -4462,6 +4476,16 @@ class MinionV2SemanticWorker:
             pack,
             profile_payload=pinned_profile,
             family_payload=dict(binding.get("manifest") or {}),
+        )
+        repair_checklist: Mapping[str, Any] | None = None
+        if role == "repair" and "repair_bill" in bound_reference_refs:
+            repair_checklist = self.service.artifacts.read_json(
+                bound_reference_refs["repair_bill"]
+            )
+        pack = apply_v2_bound_input_capability_policy(
+            pack,
+            mandatory_inputs=mandatory_inputs,
+            repair_checklist=repair_checklist,
         )
         pack = apply_v2_role_capability_policy(pack, role=role)
         if role == "architect" and revision_scope is not None:
@@ -5763,6 +5787,58 @@ def apply_v2_research_capability_policy(pack: MinionInvocationPack, *, research_
     )
 
 
+def apply_v2_bound_input_capability_policy(
+    pack: MinionInvocationPack,
+    *,
+    mandatory_inputs: list[str] | tuple[str, ...],
+    repair_checklist: Mapping[str, Any] | None = None,
+) -> MinionInvocationPack:
+    """Inject Manager protocol tools independently from role profile policy."""
+
+    names = [str(item).strip() for item in mandatory_inputs if str(item).strip()]
+    if not names:
+        return pack
+    value = pack.to_dict()
+    capabilities = list(value.get("allowed_capabilities") or [])
+    for capability in (
+        "op_minion_input_read",
+        *(
+            (REPAIR_CHECKLIST_CAPABILITY,)
+            if "repair_bill" in names and repair_checklist is not None
+            else ()
+        ),
+    ):
+        if capability not in capabilities:
+            capabilities.append(capability)
+    value["allowed_capabilities"] = capabilities
+    resolved_profile = dict(value.get("resolved_profile") or {})
+    overrides = dict(resolved_profile.get("capability_description_overrides") or {})
+    overrides["op_minion_input_read"] = (
+        "Read one Manager-bound immutable input and record its mandatory receipt. "
+        "Available input names: "
+        + ", ".join(names)
+        + ". Use repair_checklist instead for repair_bill. Ordinary file or shell reads do not satisfy this receipt."
+    )
+    if "repair_bill" in names and repair_checklist is not None:
+        checklist_summary = [
+            {
+                "case": str(item.get("case") or ""),
+                "summary": str(item.get("summary") or ""),
+                "locations": [dict(location) for location in list(item.get("locations") or [])],
+            }
+            for item in repair_checklist_items(repair_checklist)
+        ]
+        overrides[REPAIR_CHECKLIST_CAPABILITY] = (
+            "Read the complete Manager-bound repair checklist and record the RepairBill receipt. Takes no arguments. "
+            "Reproduce every listed item before editing, then record one PASS developer_test whose name exactly equals each case before submitting. "
+            "Current checklist: "
+            + json.dumps(checklist_summary, ensure_ascii=False, sort_keys=True)
+        )
+    resolved_profile["capability_description_overrides"] = overrides
+    value["resolved_profile"] = resolved_profile
+    return MinionInvocationPack.from_dict(value)
+
+
 def apply_v2_role_capability_policy(pack: MinionInvocationPack, *, role: str) -> MinionInvocationPack:
     current = set(pack.allowed_capabilities)
     if role == "reviewer" and not current.intersection(STANDALONE_REVIEW_BUILDER_CAPABILITIES):
@@ -6396,6 +6472,8 @@ def _validate_verification_policy(
     cases: list[VerificationCaseSpec],
     policy: Mapping[str, Any],
     node: AggregateSnapshot,
+    *,
+    work_view: Mapping[str, Any],
 ) -> None:
     tags = {
         str(tag)
@@ -6421,6 +6499,23 @@ def _validate_verification_policy(
         and "historical_regressions" not in tags
     ):
         raise ValueError("VerificationPolicy requires historical RepairBill regressions first")
+    required_historical = historical_repair_checklist_items(work_view)
+    if required_historical:
+        historical_status = {
+            str(item.get("name") or ""): str(item.get("status") or "")
+            for item in list(plan.get("recorded_results") or [])
+            if str(dict(item or {}).get("case_kind") or "") == "historical_regression"
+        }
+        missing = [
+            str(item["case"])
+            for item in required_historical
+            if str(item["case"]) not in historical_status
+        ]
+        if missing:
+            raise ValueError(
+                "verification must replay every historical RepairBill case before submit: "
+                + ", ".join(missing)
+            )
     if str(policy.get("lsp_policy") or "") == "when_available" and "lsp" not in tags:
         if not str(exceptions.get("lsp") or "").strip():
             raise ValueError("VerificationPolicy requires LSP evidence or policy_exceptions.lsp")

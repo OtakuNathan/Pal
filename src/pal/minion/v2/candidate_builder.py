@@ -18,6 +18,7 @@ from pal.minion.v2.submission_drafts import (
     assert_authoring_schema_budget,
 )
 from pal.minion.v2.submission_preflight import bound_reference_payload, validate_submission_requirement_refs
+from pal.minion.v2.verification import repair_checklist_items
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
@@ -32,6 +33,7 @@ CANDIDATE_BUILDER_CAPABILITIES = (
     "op_minion_candidate_report_architecture_defect",
     "op_minion_candidate_request_module_split",
 )
+REPAIR_CHECKLIST_CAPABILITY = "op_minion_repair_checklist"
 
 _NOTE_SCHEMA = {
     "type": "object",
@@ -99,6 +101,14 @@ _DEFECT_SCHEMA = {
 _NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 
 CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
+    REPAIR_CHECKLIST_CAPABILITY: {
+        "name": "op_repair_checklist",
+        "description": (
+            "Read the Manager-bound RepairBill as the current repair checklist. Takes no arguments, records the required input receipt, "
+            "and returns every regression case that must be reproduced and pass before Candidate submission."
+        ),
+        "parameters_schema": _NO_ARGS_SCHEMA,
+    },
     "op_minion_developer_note": {
         "name": "op_developer_note",
         "description": "Record one durable local progress item. kind is micro_plan, completed, file_inspected, open_question, or known_failure.",
@@ -158,6 +168,11 @@ async def candidate_builder_tool_result(
     turn_id: str | None = None,
 ) -> CanonicalToolResult:
     name = str(call.name or "")
+    if name == REPAIR_CHECKLIST_CAPABILITY:
+        try:
+            return _read_repair_checklist(call, workspace)
+        except Exception as exc:
+            return _error(call, exc)
     if name == "op_minion_developer_test":
         return await run_shell_evidence(
             call,
@@ -200,6 +215,75 @@ async def candidate_builder_tool_result(
         raise ValueError(f"unknown candidate authoring capability: {name}")
     except Exception as exc:
         return _error(call, exc)
+
+
+def _read_repair_checklist(
+    call: CanonicalToolCall,
+    workspace: Mapping[str, Any],
+) -> CanonicalToolResult:
+    if dict(call.args or {}):
+        raise ValueError("repair_checklist takes no arguments")
+    bill = bound_reference_payload(workspace, "repair_bill")
+    items = repair_checklist_items(bill)
+    if not items:
+        raise ValueError("bound RepairBill contains no named regression cases")
+    context = SubmissionDraftContext.from_workspace(workspace, draft_kind="candidate")
+    store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
+
+    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
+        definitions = dict(payload.get("definitions") or {})
+        definitions["repair_checklist"] = {
+            "module_name": str(bill.get("module_name") or ""),
+            "items": items,
+            "regression_test_obligation": str(
+                bill.get("regression_test_obligation") or ""
+            ),
+        }
+        payload["definitions"] = definitions
+        return payload, {
+            "recorded": True,
+            "required_cases": [str(item["case"]) for item in items],
+        }
+
+    mutation = store.mutate(
+        context,
+        operation_key=str(call.call_id or "repair-checklist-read"),
+        request={},
+        reducer=reducer,
+        seed=_empty_candidate_payload(),
+    )
+    lines = [
+        f"Repair checklist for {str(bill.get('module_name') or 'the bound module')}:"
+    ]
+    for index, item in enumerate(items, start=1):
+        lines.append(f"{index}. {item['case']}: {item.get('summary') or item.get('failure_reason') or 'regression required'}")
+        if item.get("failure_reason"):
+            lines.append(f"   Failure: {item['failure_reason']}")
+        locations = [
+            "::".join(
+                part
+                for part in (
+                    str(location.get("path") or ""),
+                    str(location.get("symbol") or ""),
+                )
+                if part
+            )
+            for location in list(item.get("locations") or [])
+        ]
+        if locations:
+            lines.append("   Locations: " + ", ".join(locations))
+    lines.append(
+        "For each item, reproduce it first and record a PASS developer_test using the exact checklist case name."
+    )
+    return _ok(
+        call,
+        "\n".join(lines),
+        {
+            **dict(mutation),
+            "module_name": str(bill.get("module_name") or ""),
+            "items": items,
+        },
+    )
 
 
 def _record_note(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> CanonicalToolResult:
@@ -252,6 +336,32 @@ def _submit_candidate(
             raise ValueError("developer checks still fail: " + ", ".join(str(item.get("name")) for item in failures))
         if not cases:
             raise ValueError("candidate_submit requires at least one recorded developer check")
+        if _has_bound_reference(workspace, "repair_bill"):
+            checklist = dict(
+                dict(snapshot.payload.get("definitions") or {}).get("repair_checklist")
+                or {}
+            )
+            required_cases = [
+                str(dict(item).get("case") or "").strip()
+                for item in list(checklist.get("items") or [])
+                if str(dict(item).get("case") or "").strip()
+            ]
+            if not required_cases:
+                raise ValueError(
+                    "repair Candidate must call repair_checklist before editing, testing, or submitting"
+                )
+            recorded_by_name = {
+                str(item.get("name") or ""): str(item.get("status") or "")
+                for item in cases
+            }
+            incomplete = [
+                name for name in required_cases if recorded_by_name.get(name) != "PASS"
+            ]
+            if incomplete:
+                raise ValueError(
+                    "repair checklist still requires PASS developer regressions named exactly: "
+                    + ", ".join(incomplete)
+                )
     else:
         _validate_defect_args(args, work_view=work_view)
     files_changed = _live_worktree_delta(workspace, work_view=work_view)
@@ -462,6 +572,13 @@ def _defect_locations(args: Mapping[str, Any]) -> list[dict[str, str]]:
 
 def _empty_candidate_payload() -> dict[str, Any]:
     return {"definitions": {}, "evidence": {"cases": {}}, "findings": [], "summary": {}}
+
+
+def _has_bound_reference(workspace: Mapping[str, Any], name: str) -> bool:
+    return any(
+        str(dict(item or {}).get("name") or "") == name
+        for item in list(workspace.get("reference_paths") or [])
+    )
 
 
 def _require_adapter(adapter: Any | None) -> Any:

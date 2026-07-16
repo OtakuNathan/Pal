@@ -18,7 +18,7 @@ Use PASS only when no binding defect remains. FAIL findings use finding_kind=req
 output_contract_fragment = """
 Record one audit for every bound hard Requirement, module, and Verification Node through the dedicated audit tools. Record each material defect through architecture_review_finding, using exact module names, Requirement text, and source locations. Then call architecture_review_submit with no arguments; Manager rejects incomplete audits and infers PASS or FAIL. Do not construct the review JSON or use generic writes.
 """
-capability_groups = ["workspace_read", "code_intel", "v2_bound_input_read", "v2_skeleton_review_builder"]
+capability_groups = ["workspace_read", "code_intel", "v2_skeleton_review_builder"]
 
 [capability_policy]
 mode = "profile_only"
