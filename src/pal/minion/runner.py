@@ -579,6 +579,7 @@ class MinionRunner:
     _restart_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _agent_session_checkpoint: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _observed_tool_call_count: int = field(default=0, init=False, repr=False)
+    _manager_submission_receipt_observed: bool = field(default=False, init=False, repr=False)
 
     async def run(self) -> int:
         bundle: MinionRuntimeBundle | None = None
@@ -1748,10 +1749,34 @@ class MinionRunner:
         return self.user_interaction
 
     def _completion_evidence_present(self) -> bool:
+        if self._manager_submission_receipt_required():
+            return self._manager_submission_receipt_present()
         return self._required_primary_artifact_present()
 
     def _artifact_completion_evidence_present(self) -> bool:
+        if self._manager_submission_receipt_required():
+            return self._manager_submission_receipt_present()
         return self._required_primary_artifact_present()
+
+    def _manager_submission_receipt_required(self) -> bool:
+        metadata = dict(self.pack.metadata or {})
+        minion_v2 = dict(metadata.get("minion_v2") or {})
+        return bool(minion_v2.get("submission_receipt_required"))
+
+    def _manager_submission_receipt_present(self) -> bool:
+        if self._manager_submission_receipt_observed:
+            return True
+        try:
+            from pal.minion.v2.worker_gateway import worker_gateway_client_from_env
+
+            client = worker_gateway_client_from_env(self.runtime_root)
+            if client is None:
+                return False
+            status = client.request_sync("submission_status", {})
+        except Exception:
+            return False
+        self._manager_submission_receipt_observed = bool(status.get("recorded"))
+        return self._manager_submission_receipt_observed
 
     def _required_primary_artifact_present(self) -> bool:
         required = self._required_primary_artifact_name()

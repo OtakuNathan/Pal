@@ -295,6 +295,15 @@ def _submit_candidate(
         "coder_report.json" if _is_software_module_view(work_view) else "producer_report.json"
     )
     manager_workspace = {**dict(workspace), "manager_submission_write": True}
+    # A report file is a presentation artifact, not the completion receipt.
+    # Let the Manager accept and durably record the submission before exposing
+    # a primary artifact to the runner completion gate.
+    if store.uses_worker_gateway:
+        store.mark_submitted(
+            context,
+            expected_version=snapshot.version,
+            submission_payload=report,
+        )
     artifact = _write_minion_artifact(
         manager_workspace,
         {
@@ -310,11 +319,12 @@ def _submit_candidate(
         if str(existing.get("role") or "") == "primary":
             existing["role"] = "deliverable"
     _append_unique_artifact(produced_artifacts, artifact)
-    store.mark_submitted(
-        context,
-        expected_version=snapshot.version,
-        submission_payload=report,
-    )
+    if not store.uses_worker_gateway:
+        store.mark_submitted(
+            context,
+            expected_version=snapshot.version,
+            submission_payload=report,
+        )
     return _ok(
         call,
         "Candidate intent recorded. Stop now; Manager will quiesce and snapshot the worktree.",

@@ -617,6 +617,13 @@ def _publish(
     draft_kind: str,
     filename: str,
 ) -> CanonicalToolResult:
+    context, store = _store(workspace, draft_kind)
+    if store.uses_worker_gateway:
+        store.mark_submitted(
+            context,
+            expected_version=version,
+            submission_payload=dict(output),
+        )
     artifact = _write_minion_artifact(
         dict(workspace),
         {
@@ -629,12 +636,12 @@ def _publish(
         },
     )
     _append_unique_artifact(produced_artifacts, artifact)
-    context, store = _store(workspace, draft_kind)
-    store.mark_submitted(
-        context,
-        expected_version=version,
-        submission_payload=dict(output),
-    )
+    if not store.uses_worker_gateway:
+        store.mark_submitted(
+            context,
+            expected_version=version,
+            submission_payload=dict(output),
+        )
     return _ok(call, f"{draft_kind} submitted. Stop now.", {"submitted": True, "artifact": artifact})
 
 

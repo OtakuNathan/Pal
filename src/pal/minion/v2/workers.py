@@ -4301,7 +4301,11 @@ class MinionV2SemanticWorker:
             )
             bound_reference_refs["verification_policy"] = verification_policy_ref
         references: list[dict[str, Any]] = []
-        for name, ref in bound_reference_refs.items():
+        reference_items = list(bound_reference_refs.items())
+        if role == "repair":
+            priority = {"repair_bill": 0, "unit_work_view": 1, "workspace_preparation": 2}
+            reference_items.sort(key=lambda item: (priority.get(item[0], 3), item[0]))
+        for name, ref in reference_items:
             if ref.artifact_type == "LocalPathReference":
                 path = str(ref.media_type)
             else:
@@ -4354,6 +4358,26 @@ class MinionV2SemanticWorker:
             ]
         else:
             invocation_acceptance = ["Write the exact primary JSON artifact required by the profile output contract."]
+        mandatory_inputs = [
+            name
+            for name, ref in reference_items
+            if ref.artifact_type != "LocalPathReference"
+        ]
+        if mandatory_inputs:
+            calls = ", ".join(
+                f'op_minion_input_read(name="{name}")' for name in mandatory_inputs
+            )
+            mandatory_instruction = (
+                "Before editing, testing, or submitting, read every mandatory immutable input through its bound reader so the Manager records consumption: "
+                + calls
+                + ". Filesystem inspection is not a substitute."
+            )
+            if role == "repair" and "repair_bill" in mandatory_inputs:
+                mandatory_instruction += (
+                    " Read repair_bill first and treat its current findings, reproducer, expected behavior, and repair boundary as the assignment; "
+                    "do not search the worktree for a RepairBill file."
+                )
+            invocation_acceptance.insert(0, mandatory_instruction)
         input_fingerprint = authoring_input_fingerprint(
             {
                 "role": role,
@@ -4389,6 +4413,7 @@ class MinionV2SemanticWorker:
                     "lease_resource_key": lease_resource,
                     "fencing_token": fencing_token,
                     "role": role,
+                    "submission_receipt_required": True,
                     "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
                     "authoring_input_fingerprint": input_fingerprint,
                 },
@@ -5006,6 +5031,23 @@ class MinionV2SemanticWorker:
                     assignment_lease_resource,
                     str(attempt["attempt_id"]),
                     assignment_lease.fencing_token,
+                )
+            continuation_ref = self._publish_agent_session_checkpoint(
+                invocation_id,
+                assignment_lease.fencing_token,
+            )
+            if continuation_ref is not None and role in {"architect", "producer", "repair", "verifier"}:
+                self.repository.suspend_worker_invocation(
+                    invocation_id=invocation_id,
+                    fencing_token=fencing_token,
+                    continuation_ref=continuation_ref.to_dict(),
+                    status="interrupted",
+                )
+            else:
+                self.repository.finish_worker_invocation(
+                    invocation_id=invocation_id,
+                    fencing_token=fencing_token,
+                    status="failed",
                 )
             raise SubmissionInvariantError(
                 "worker reported completion before its durable submission receipt"

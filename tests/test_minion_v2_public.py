@@ -22,7 +22,7 @@ from pal.minion.v2.capabilities import MinionV2PublicProvider
 from pal.minion.v2.contract_builder import ARCHITECT_BUILDER_CAPABILITIES
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.service import MinionV2WorkflowService
-from pal.minion.v2.sessions import architect_session_id, coder_session_id
+from pal.minion.v2.sessions import architect_session_id, coder_session_id, verifier_session_id
 from pal.minion.v2.workers import (
     MinionV2SemanticWorker,
     _architecture_submit_idempotency_key,
@@ -658,6 +658,42 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(result.payload.finish_reason, LLMFinishReason.STOP)
         self.assertEqual(state.llm_round_count, 0)
 
+    def test_manager_bound_runner_requires_receipt_not_primary_file(self) -> None:
+        pack = MinionInvocationPack(
+            invocation_id="inv-receipt-gate",
+            workspace={"output_policy": {"primary_artifact": "coder_report.json"}},
+            metadata={"minion_v2": {"submission_receipt_required": True}},
+        )
+        runner = MinionRunner(
+            runtime_root=self.runtime_root,
+            pack=pack,
+            minion_id=pack.invocation_id,
+            run_id="run-receipt-gate",
+            write_event=_noop_write_event,
+            read_decision=_noop_read_decision,
+        )
+        runner.produced_artifacts.append(
+            {
+                "role": "primary",
+                "relative_path": "coder_report.json",
+                "path": str(self.runtime_root / "coder_report.json"),
+            }
+        )
+        state = MinionAgentLoopState(
+            execution_runtime=SimpleNamespace(),
+            memory_service=SimpleNamespace(),
+            memory_l3=SimpleNamespace(),
+        )
+
+        with patch.object(runner, "_manager_submission_receipt_present", return_value=False):
+            self.assertIsNone(runner._preflight_minion_llm_round(state))
+        self.assertEqual(state.llm_round_count, 1)
+
+        with patch.object(runner, "_manager_submission_receipt_present", return_value=True):
+            result = runner._preflight_minion_llm_round(state)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.payload.finish_reason, LLMFinishReason.STOP)
+
     def test_completion_gate_stops_after_explicit_retry_makes_no_progress(self) -> None:
         pack = MinionInvocationPack(
             invocation_id="inv-completion-stalled",
@@ -847,6 +883,84 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         expected = coder_session_id("node-coder-session")
         self.assertEqual(claims, [expected, expected])
         self.assertEqual([item.payload["active_worker_id"] for item in actions], [expected, expected])
+
+    def test_repeated_review_cycles_reuse_one_verifier_session(self) -> None:
+        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        claims: list[str] = []
+        actions: list[ActionEnvelope] = []
+
+        def claim(_resource: str, owner_id: str, **_kwargs):
+            claims.append(owner_id)
+            return SimpleNamespace(fencing_token=len(claims))
+
+        worker.repository.claim_lease = claim
+        worker.repository.dispatch = lambda action: actions.append(action)
+        snapshots = iter(
+            (
+                SimpleNamespace(
+                    workflow_id="wf-verifier-session",
+                    aggregate_id="node-verifier-session",
+                    state="REVIEW_QUEUED",
+                    version=1,
+                    payload={"candidate_cycle": 1},
+                ),
+                SimpleNamespace(
+                    workflow_id="wf-verifier-session",
+                    aggregate_id="node-verifier-session",
+                    state="REVIEW_QUEUED",
+                    version=9,
+                    payload={"candidate_cycle": 2},
+                ),
+            )
+        )
+        worker._effect_snapshot = lambda _effect: next(snapshots)
+
+        worker._admit_node_worker(
+            {"effect_key": "review-first"},
+            action_type="START_REVIEW",
+            role="verifier",
+        )
+        worker._admit_node_worker(
+            {"effect_key": "review-after-repair"},
+            action_type="START_REVIEW",
+            role="verifier",
+        )
+
+        expected = verifier_session_id("node-verifier-session")
+        self.assertEqual(claims, [expected, expected])
+        self.assertEqual(
+            [item.payload["active_worker_id"] for item in actions],
+            [expected, expected],
+        )
+
+    def test_node_acceptance_closes_coder_and_verifier_sessions_together(self) -> None:
+        processor = MinionV2OutboxProcessor(MinionV2WorkflowService(self.runtime_root))
+        node = SimpleNamespace(
+            workflow_id="wf-module-pass",
+            aggregate_id="node-module-pass",
+            payload={
+                "node_kind": "unit",
+                "epoch_id": "epoch-module-pass",
+                "role_session_generation": 0,
+            },
+        )
+        processor._effect_snapshot = lambda _effect: node
+        completed: list[str] = []
+        processor.repository.complete_worker_session = lambda invocation_id, **_kwargs: completed.append(
+            invocation_id
+        ) or True
+        processor.repository.list_workflow_snapshots = lambda _workflow_id: []
+
+        with patch("pal.minion.v2.orchestration.DagScheduler.schedule_ready_nodes"):
+            processor._node_accepted({"effect_key": "node-pass"})
+
+        self.assertEqual(
+            completed,
+            [
+                coder_session_id("node-module-pass"),
+                verifier_session_id("node-module-pass"),
+            ],
+        )
 
     def test_snapshot_effect_rebinds_expired_lease_and_reacquires_workspace_lock(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
@@ -1373,6 +1487,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                         "name": "revision_finding",
                         "path": "/host-only/artifacts/secret.json",
                         "bound_input": True,
+                        "required": True,
                         "truth_source": True,
                     }
                 ]
@@ -1380,6 +1495,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         prompt = render_minion_task_prompt(pack)
         self.assertIn('op_minion_input_read(name="revision_finding")', prompt)
+        self.assertIn("Every mandatory bound input must be read", prompt)
+        self.assertIn("ordinary filesystem reads do not record this receipt", prompt)
         self.assertNotIn("/host-only/artifacts/secret.json", prompt)
 
     def test_architect_revision_seeds_the_contract_builder_draft(self) -> None:

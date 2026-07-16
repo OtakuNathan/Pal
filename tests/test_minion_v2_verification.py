@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import PropertyMock, patch
 
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2 import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, MinionV2Repository
@@ -540,6 +541,68 @@ class MinionV2VerificationTests(unittest.TestCase):
         report = json.loads((stage_dir / "coder_report.json").read_text(encoding="utf-8"))
         self.assertEqual(report["files_changed"], ["src/font/backend.cpp"])
         self.assertEqual(report["tests_run"], ["focused render check: PASS"])
+
+    def test_rejected_candidate_submit_does_not_publish_primary_report(self) -> None:
+        repo = self.runtime_root / "rejected-candidate-repo"
+        (repo / "src/font").mkdir(parents=True)
+        source = repo / "src/font/backend.cpp"
+        source.write_text("int render() { return 0; }\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Pal Test"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "pal@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+        source.write_text("int render() { return 1; }\n", encoding="utf-8")
+        work_view = self.runtime_root / "rejected-candidate-work-view.json"
+        work_view.write_text(
+            json.dumps(
+                {
+                    "module_name": "font_backend",
+                    "requirements": {"sections": {}},
+                    "implementation_scopes": [{"kind": "directory", "path": "src/font"}],
+                    "test_scopes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = self.runtime_root / "rejected-candidate-stage"
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "rejected-candidate-artifacts"),
+                "artifact_stage_dir": str(stage_dir),
+                "reference_paths": [{"name": "unit_work_view", "path": str(work_view)}],
+            },
+            role="producer",
+        )
+        checked = self._candidate_call(
+            workspace,
+            "op_minion_developer_test",
+            {"name": "focused render check", "command": "test -f src/font/backend.cpp"},
+        )
+        self.assertTrue(checked.ok, checked.text)
+        produced: list[dict[str, object]] = []
+        with (
+            patch(
+                "pal.minion.v2.candidate_builder.SubmissionDraftStore.uses_worker_gateway",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch(
+                "pal.minion.v2.candidate_builder.SubmissionDraftStore.mark_submitted",
+                side_effect=ValueError("worker submission is missing required input reads: repair_bill"),
+            ),
+        ):
+            rejected = self._candidate_call(
+                workspace,
+                "op_minion_candidate_submit",
+                produced=produced,
+            )
+
+        self.assertFalse(rejected.ok)
+        self.assertIn("missing required input reads", rejected.llm_text)
+        self.assertEqual(produced, [])
+        self.assertFalse((stage_dir / "coder_report.json").exists())
 
     def test_artifact_candidate_submit_generates_producer_report(self) -> None:
         workspace_root = self.runtime_root / "artifact-product"

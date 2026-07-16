@@ -14,7 +14,7 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftSnapshot,
     SubmissionDraftStore,
 )
-from pal.minion.v2.worker_protocol import stable_hash
+from pal.minion.v2.worker_protocol import WorkerAssignmentState, stable_hash
 
 
 WORKER_GATEWAY_TOKEN_ENV = "PAL_MINION_ASSIGNMENT_TOKEN"
@@ -57,6 +57,8 @@ class WorkerAssignmentGateway:
             return self._read_bound_input(authenticated, payload)
         if method == "bound_input_json":
             return self._read_bound_input_json(authenticated, payload)
+        if method == "submission_status":
+            return self._submission_status(authenticated)
         if method == "draft_read":
             return self._draft_read(authenticated, payload)
         if method == "draft_mutate":
@@ -66,6 +68,24 @@ class WorkerAssignmentGateway:
         if method == "artifact_put":
             return self._artifact_put(authenticated, payload)
         raise ValueError(f"worker gateway method is not allowed: {method}")
+
+    def _submission_status(
+        self,
+        authenticated: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        assignment = self.repository.read_worker_assignment(
+            str(dict(authenticated["assignment"])["assignment_id"])
+        )
+        if assignment is None:
+            raise ValueError("worker assignment is unavailable")
+        state = str(assignment.get("state") or "")
+        recorded = state in {
+            WorkerAssignmentState.RESULT_RECORDED.value,
+            WorkerAssignmentState.SETTLED.value,
+        } and bool(assignment.get("submission_artifact_ref")) and bool(
+            assignment.get("submission_payload_hash")
+        )
+        return {"recorded": recorded, "state": state}
 
     def _read_bound_input(
         self,
@@ -187,13 +207,6 @@ class WorkerAssignmentGateway:
             },
         )
         payload_hash = stable_hash(payload)
-        store = SubmissionDraftStore(self.service.runtime_root)
-        store.mark_submitted(
-            context,
-            expected_version=int(params.get("expected_version") or 0),
-            submission_artifact_ref=artifact_ref.to_dict(),
-            submission_payload_hash=payload_hash,
-        )
         self.repository.record_worker_submission(
             assignment_id=str(assignment["assignment_id"]),
             attempt_id_value=str(authenticated["attempt_id"]),
@@ -206,6 +219,16 @@ class WorkerAssignmentGateway:
                 "aggregate_id": assignment["aggregate_id"],
                 "submission_kind": assignment["submission_kind"],
             },
+        )
+        # The assignment receipt is the canonical completion boundary. Freeze
+        # the authoring draft only after Manager validation has accepted it so
+        # a rejected submit remains editable and retryable in the same process.
+        store = SubmissionDraftStore(self.service.runtime_root)
+        store.mark_submitted(
+            context,
+            expected_version=int(params.get("expected_version") or 0),
+            submission_artifact_ref=artifact_ref.to_dict(),
+            submission_payload_hash=payload_hash,
         )
         return {"submitted": True}
 

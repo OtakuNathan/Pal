@@ -408,6 +408,14 @@ def skeleton_builder_tool_result(
             filename, title, draft_kind = "architecture_review.json", "V2 architecture skeleton review", "architecture_review"
         else:
             return _mutate_architecture_draft(call, workspace)
+        context = SubmissionDraftContext.from_workspace(workspace, draft_kind=draft_kind)
+        store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
+        if store.uses_worker_gateway:
+            store.mark_submitted(
+                context,
+                expected_version=version,
+                submission_payload=output,
+            )
         artifact = _write_minion_artifact(
             workspace,
             {
@@ -420,12 +428,12 @@ def skeleton_builder_tool_result(
             },
         )
         _append_unique_artifact(produced_artifacts, artifact)
-        context = SubmissionDraftContext.from_workspace(workspace, draft_kind=draft_kind)
-        SubmissionDraftStore(Path(str(workspace["runtime_root"]))).mark_submitted(
-            context,
-            expected_version=version,
-            submission_payload=output,
-        )
+        if not store.uses_worker_gateway:
+            store.mark_submitted(
+                context,
+                expected_version=version,
+                submission_payload=output,
+            )
         return CanonicalToolResult(
             name=name,
             ok=True,

@@ -119,6 +119,37 @@ class MinionV2WorkerGatewayTests(unittest.TestCase):
         assignment = self.service.repository.read_worker_assignment(self.assignment_id)
         self.assertEqual(assignment["state"], "result_recorded")
         self.assertTrue(assignment["submission_artifact_ref"]["sha256"])
+        self.assertTrue(self.call("submission_status")["recorded"])
+
+    def test_rejected_submission_keeps_draft_editable_for_same_attempt_retry(self) -> None:
+        first = self.call("draft_read", context=self.context, seed={"checks": []})
+        self.assertEqual(first["snapshot"]["status"], "active")
+
+        with self.assertRaisesRegex(ValueError, "missing required input reads"):
+            self.call(
+                "draft_submit",
+                context=self.context,
+                expected_version=0,
+                submission={"status": "candidate_ready", "checks": []},
+            )
+
+        rejected = self.call("draft_read", context=self.context, seed={"checks": []})
+        self.assertEqual(rejected["snapshot"]["status"], "active")
+        self.assertFalse(self.call("submission_status")["recorded"])
+        self.assertEqual(
+            self.service.repository.read_worker_assignment(self.assignment_id)["state"],
+            "running",
+        )
+
+        self.call("bound_input_read", name="module_work_view")
+        accepted = self.call(
+            "draft_submit",
+            context=self.context,
+            expected_version=0,
+            submission={"status": "candidate_ready", "checks": []},
+        )
+        self.assertTrue(accepted["submitted"])
+        self.assertTrue(self.call("submission_status")["recorded"])
 
     def test_gateway_rejects_context_from_another_attempt(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not match"):

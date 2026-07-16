@@ -109,8 +109,10 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_input_read": {
         "name": "op_minion_input_read",
         "description": (
-            "Read one immutable input explicitly bound to this invocation by name. Use this before making claims from a bound artifact; "
-            "it cannot read the project repo or undeclared paths. For a bound directory, provide its root-relative path."
+            "Read one immutable input explicitly bound to this invocation by name. Mandatory bound inputs are submission prerequisites: "
+            "reading the same bytes with file or shell tools does not satisfy the Manager receipt. In a repair activation, read repair_bill "
+            "before inspecting or changing code, then read the remaining mandatory inputs. This cannot read the project repo or undeclared "
+            "paths. For a bound directory, provide its root-relative path."
         ),
         "parameters_schema": {
             "type": "object",
