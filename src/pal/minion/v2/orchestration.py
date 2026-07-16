@@ -23,7 +23,12 @@ from pal.minion.v2.replan import (
     collect_architecture_finding_batch,
 )
 from pal.minion.v2.service import MinionV2WorkflowService, workflow_request_from_snapshot
-from pal.minion.v2.sessions import architect_session_id_for_revision, coder_session_id
+from pal.minion.v2.sessions import (
+    architect_session_id_for_revision,
+    coder_session_id,
+    node_role_generation,
+    verifier_session_id,
+)
 from pal.minion.v2.verification import DefectPropagationService
 
 
@@ -53,6 +58,7 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "pause_epoch_nodes",
     "resume_epoch_nodes",
     "cancel_epoch_nodes",
+    "suspend_stale_node_assignments",
     "reopen_dependency_and_stale_descendants",
     "request_epoch_replan",
     "freeze_epoch_for_replan",
@@ -225,6 +231,15 @@ class MinionV2OutboxProcessor:
             return self._propagate_workflow_control(effect_type, effect)
         if effect_type in {"pause_epoch_nodes", "resume_epoch_nodes", "cancel_epoch_nodes"}:
             return self._control_epoch_nodes(effect_type, effect)
+        if effect_type == "suspend_stale_node_assignments":
+            node = self._effect_snapshot(effect)
+            self.repository.cancel_worker_assignments(
+                workflow_id=node.workflow_id,
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=node.aggregate_id,
+                reason="node became stale before its queued activation started",
+            )
+            return {}
         if effect_type == "reopen_dependency_and_stale_descendants":
             node = self._effect_snapshot(effect)
             repair_ref = ArtifactRef.from_mapping(dict(node.payload.get("repair_bill_ref") or {}))
@@ -511,8 +526,6 @@ class MinionV2OutboxProcessor:
         source = self._effect_snapshot(effect)
         if source.aggregate_type != AggregateType.DAG_NODE_RUN:
             raise ValueError("request_epoch_replan must originate from a DAG node")
-        if str(source.payload.get("node_kind") or "unit") == "unit":
-            self.repository.complete_worker_session(coder_session_id(source.aggregate_id))
         epoch_id = str(source.payload.get("epoch_id") or "")
         epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
         if epoch is None or epoch.state in {"SUPERSEDED", "COMPLETED", "CANCELLED"}:
@@ -836,7 +849,13 @@ class MinionV2OutboxProcessor:
     def _node_accepted(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
         if str(node.payload.get("node_kind") or "unit") == "unit":
-            self.repository.complete_worker_session(coder_session_id(node.aggregate_id))
+            generation = node_role_generation(node.payload)
+            self.repository.complete_worker_session(
+                coder_session_id(node.aggregate_id, generation)
+            )
+            self.repository.complete_worker_session(
+                verifier_session_id(node.aggregate_id, generation)
+            )
         epoch_id = str(node.payload.get("epoch_id") or "")
         if str(node.payload.get("node_kind") or "") == "integration":
             epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)

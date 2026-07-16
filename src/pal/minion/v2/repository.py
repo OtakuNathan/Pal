@@ -29,12 +29,15 @@ from pal.minion.v2.engine import TransitionEngine
 from pal.minion.v2.machines import build_default_transition_engine
 from pal.minion.v2.schema import ensure_minion_v2_schema
 from pal.minion.v2.worker_protocol import (
+    WorkerAssignmentAction,
     WorkerAssignmentRequest,
     WorkerAssignmentState,
     WorkerAttemptState,
     WorkerSessionState,
     WorkerSubmissionReceipt,
     attempt_id,
+    worker_assignment_target,
+    worker_session_role,
 )
 from pal.shared.text_search import compile_jieba_fts_queries, jieba_fts_text
 
@@ -1416,7 +1419,7 @@ class MinionV2Repository:
             "session_id": str(session_id or "").strip(),
             "workflow_id": str(workflow_id or "").strip(),
             "aggregate_id": str(aggregate_id or "").strip(),
-            "role": str(role or "").strip(),
+            "role": worker_session_role(role),
         }
         missing = [name for name, value in values.items() if not value]
         if missing:
@@ -1430,11 +1433,15 @@ class MinionV2Repository:
             ).fetchone()
             identity = (
                 values["workflow_id"],
+                aggregate_type.value,
+                values["aggregate_id"],
                 values["role"],
             )
             if existing is not None:
                 actual = (
                     str(existing["workflow_id"]),
+                    str(existing["aggregate_type"]),
+                    str(existing["aggregate_id"]),
                     str(existing["role"]),
                 )
                 if actual != identity:
@@ -1464,6 +1471,15 @@ class MinionV2Repository:
             ).fetchone()
             return _decode_worker_session(row)
 
+    def read_worker_session(self, session_id: str) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM minion_v2_worker_sessions WHERE session_id = ?",
+                (str(session_id),),
+            ).fetchone()
+        return _decode_worker_session(row) if row is not None else None
+
     def create_worker_assignment(self, request: WorkerAssignmentRequest) -> dict[str, Any]:
         self.ensure_schema()
         now = utc_now()
@@ -1481,11 +1497,15 @@ class MinionV2Repository:
                 raise ValueError("worker assignment cannot use a terminal worker session")
             session_identity = (
                 str(session["workflow_id"]),
+                str(session["aggregate_type"]),
+                str(session["aggregate_id"]),
                 str(session["role"]),
             )
             request_identity = (
                 request.workflow_id,
-                request.role,
+                request.aggregate_type,
+                request.aggregate_id,
+                worker_session_role(request.role),
             )
             if session_identity != request_identity:
                 raise ValueError("worker assignment does not match its session identity")
@@ -1543,9 +1563,13 @@ class MinionV2Repository:
                 raise KeyError(f"unknown worker assignment: {assignment_id}")
             if str(assignment["state"]) not in {
                 WorkerAssignmentState.QUEUED.value,
-                WorkerAssignmentState.RETRYABLE.value,
+                WorkerAssignmentState.RETRY_QUEUED.value,
             }:
                 raise ValueError("worker assignment is not claimable")
+            target_state = worker_assignment_target(
+                str(assignment["state"]),
+                WorkerAssignmentAction.CLAIM,
+            )
             attempt_index = int(
                 connection.execute(
                     """
@@ -1580,7 +1604,7 @@ class MinionV2Repository:
                 WHERE assignment_id = ?
                 """,
                 (
-                    WorkerAssignmentState.CLAIMED.value,
+                    target_state.value,
                     identifier,
                     now,
                     str(assignment_id),
@@ -1604,13 +1628,17 @@ class MinionV2Repository:
     ) -> dict[str, Any]:
         self.ensure_schema()
         with self._transaction() as connection:
-            assignment, attempt = self._worker_assignment_attempt_locked(
+            assignment, _attempt = self._worker_assignment_attempt_locked(
                 connection,
                 assignment_id=assignment_id,
                 attempt_id_value=attempt_id_value,
             )
             if str(assignment["state"]) != WorkerAssignmentState.CLAIMED.value:
                 raise ValueError("worker assignment is not claimed")
+            target_state = worker_assignment_target(
+                str(assignment["state"]),
+                WorkerAssignmentAction.START,
+            )
             self._assert_lease_locked(
                 connection,
                 str(lease_resource_key),
@@ -1641,7 +1669,7 @@ class MinionV2Repository:
                 SET state = ?, updated_at = ? WHERE assignment_id = ?
                 """,
                 (
-                    WorkerAssignmentState.RUNNING.value,
+                    target_state.value,
                     now,
                     str(assignment_id),
                 ),
@@ -1772,7 +1800,7 @@ class MinionV2Repository:
                 raise StaleFencingToken("worker assignment token belongs to a stale attempt")
             if str(row["state"]) not in {
                 WorkerAssignmentState.RUNNING.value,
-                WorkerAssignmentState.SUBMISSION_RECORDED.value,
+                WorkerAssignmentState.RESULT_RECORDED.value,
             }:
                 raise ValueError("worker assignment is not active")
             if str(row["authenticated_attempt_status"]) not in {
@@ -1883,6 +1911,10 @@ class MinionV2Repository:
                 return existing
             if str(assignment["state"]) != WorkerAssignmentState.RUNNING.value:
                 raise ValueError("worker assignment is not accepting a submission")
+            target_state = worker_assignment_target(
+                str(assignment["state"]),
+                WorkerAssignmentAction.RECORD_RESULT,
+            )
             self._assert_lease_locked(
                 connection,
                 str(attempt["lease_resource_key"]),
@@ -1917,7 +1949,7 @@ class MinionV2Repository:
                 WHERE assignment_id = ?
                 """,
                 (
-                    WorkerAssignmentState.SUBMISSION_RECORDED.value,
+                    target_state.value,
                     _json(dict(artifact_ref)),
                     str(payload_hash),
                     _json(dict(settlement_action)),
@@ -1993,29 +2025,54 @@ class MinionV2Repository:
             raise ValueError("worker assignment settlement targets a different aggregate")
         if str(assignment["state"]) == WorkerAssignmentState.SETTLED.value:
             return
-        if str(assignment["state"]) != WorkerAssignmentState.SUBMISSION_RECORDED.value:
+        if str(assignment["state"]) != WorkerAssignmentState.RESULT_RECORDED.value:
             raise ValueError("worker assignment has no recorded submission")
+        target_state = worker_assignment_target(
+            str(assignment["state"]),
+            WorkerAssignmentAction.SETTLE,
+        )
         now = utc_now()
         connection.execute(
             """
             UPDATE minion_v2_worker_assignments
             SET state = ?, updated_at = ? WHERE assignment_id = ?
             """,
-            (WorkerAssignmentState.SETTLED.value, now, str(assignment_id)),
+            (target_state.value, now, str(assignment_id)),
         )
         connection.execute(
             """
             UPDATE minion_v2_worker_attempts
-            SET status = ?, finished_at = ?, updated_at = ?
+            SET status = CASE WHEN status = ? THEN ? ELSE status END,
+                access_token_hash = '', finished_at = ?, updated_at = ?
             WHERE attempt_id = ?
             """,
             (
+                WorkerAttemptState.SUBMITTED.value,
                 WorkerAttemptState.COMPLETED.value,
                 now,
                 now,
                 str(assignment["active_attempt_id"]),
             ),
         )
+        attempt = connection.execute(
+            "SELECT * FROM minion_v2_worker_attempts WHERE attempt_id = ?",
+            (str(assignment["active_attempt_id"]),),
+        ).fetchone()
+        if attempt is not None:
+            lease_resource = str(attempt["lease_resource_key"] or "")
+            fencing_token = int(attempt["fencing_token"] or 0)
+            if lease_resource and fencing_token:
+                connection.execute(
+                    """
+                    DELETE FROM minion_v2_leases
+                    WHERE resource_key = ? AND owner_id = ? AND fencing_token = ?
+                    """,
+                    (
+                        lease_resource,
+                        str(assignment["active_attempt_id"]),
+                        fencing_token,
+                    ),
+                )
         connection.execute(
             """
             UPDATE minion_v2_worker_sessions
@@ -2028,18 +2085,17 @@ class MinionV2Repository:
             ),
         )
 
-    def fail_worker_attempt(
+    def queue_worker_attempt_retry(
         self,
         *,
         assignment_id: str,
         attempt_id_value: str,
         error_kind: str,
         error_text: str,
-        retryable: bool,
     ) -> dict[str, Any]:
         self.ensure_schema()
         with self._transaction() as connection:
-            assignment, _attempt = self._worker_assignment_attempt_locked(
+            assignment, attempt = self._worker_assignment_attempt_locked(
                 connection,
                 assignment_id=assignment_id,
                 attempt_id_value=attempt_id_value,
@@ -2047,17 +2103,13 @@ class MinionV2Repository:
             if str(assignment["state"]) in {
                 WorkerAssignmentState.SETTLED.value,
                 WorkerAssignmentState.CANCELLED.value,
-                WorkerAssignmentState.TRIAGE_REQUIRED.value,
+                WorkerAssignmentState.RESULT_RECORDED.value,
             }:
                 return _decode_worker_assignment(assignment)
             now = utc_now()
-            target = (
-                WorkerAssignmentState.RETRYABLE
-                if retryable
-                else WorkerAssignmentState.TRIAGE_REQUIRED
-            )
-            attempt_state = (
-                WorkerAttemptState.LOST if retryable else WorkerAttemptState.FAILED
+            target = worker_assignment_target(
+                str(assignment["state"]),
+                WorkerAssignmentAction.QUEUE_RETRY,
             )
             connection.execute(
                 """
@@ -2067,7 +2119,7 @@ class MinionV2Repository:
                 WHERE attempt_id = ?
                 """,
                 (
-                    attempt_state.value,
+                    WorkerAttemptState.LOST.value,
                     str(error_kind),
                     str(error_text),
                     now,
@@ -2088,6 +2140,128 @@ class MinionV2Repository:
                 (str(assignment_id),),
             ).fetchone()
             return _decode_worker_assignment(row)
+
+    def record_worker_failure_result(
+        self,
+        *,
+        assignment_id: str,
+        attempt_id_value: str,
+        error_kind: str,
+        error_text: str,
+        failure_artifact_ref: Mapping[str, Any],
+        payload_hash: str,
+        settlement_action: Mapping[str, Any],
+    ) -> WorkerSubmissionReceipt:
+        """Record an exhausted activation failure as a normal durable result.
+
+        The assignment owns only this receipt. The settlement action advances
+        the parent aggregate to its explicit failure state in a separate,
+        atomically acknowledged dispatch.
+        """
+
+        if not str(payload_hash or "").strip():
+            raise ValueError("worker failure result requires a payload hash")
+        if str(dict(settlement_action or {}).get("action_type") or "") != "WORKER_FAILED":
+            raise ValueError("worker failure result must settle through WORKER_FAILED")
+        self.ensure_schema()
+        with self._transaction() as connection:
+            assignment, attempt = self._worker_assignment_attempt_locked(
+                connection,
+                assignment_id=assignment_id,
+                attempt_id_value=attempt_id_value,
+            )
+            existing_ref = json.loads(
+                str(assignment["submission_artifact_ref_json"] or "{}")
+            )
+            if existing_ref:
+                receipt = WorkerSubmissionReceipt(
+                    assignment_id=str(assignment_id),
+                    artifact_ref=existing_ref,
+                    payload_hash=str(assignment["submission_payload_hash"]),
+                    settlement_action=json.loads(
+                        str(assignment["settlement_action_json"] or "{}")
+                    ),
+                )
+                requested = WorkerSubmissionReceipt(
+                    assignment_id=str(assignment_id),
+                    artifact_ref=dict(failure_artifact_ref),
+                    payload_hash=str(payload_hash),
+                    settlement_action=dict(settlement_action),
+                )
+                if receipt.to_dict() != requested.to_dict():
+                    raise ValueError(
+                        "worker assignment already has a different result receipt"
+                    )
+                return receipt
+            target_state = worker_assignment_target(
+                str(assignment["state"]),
+                WorkerAssignmentAction.RECORD_RESULT,
+            )
+            self._assert_artifact_refs_durable(connection, failure_artifact_ref)
+            now = utc_now()
+            connection.execute(
+                """
+                UPDATE minion_v2_worker_attempts
+                SET status = ?, error_kind = ?, error_text = ?,
+                    response_artifact_ref_json = ?, access_token_hash = '',
+                    finished_at = ?, updated_at = ?
+                WHERE attempt_id = ?
+                """,
+                (
+                    WorkerAttemptState.FAILED.value,
+                    str(error_kind),
+                    str(error_text),
+                    _json(dict(failure_artifact_ref)),
+                    now,
+                    now,
+                    str(attempt_id_value),
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE minion_v2_worker_assignments
+                SET state = ?, submission_artifact_ref_json = ?,
+                    submission_payload_hash = ?, settlement_action_json = ?,
+                    last_error = ?, updated_at = ?
+                WHERE assignment_id = ?
+                """,
+                (
+                    target_state.value,
+                    _json(dict(failure_artifact_ref)),
+                    str(payload_hash),
+                    _json(dict(settlement_action)),
+                    str(error_text),
+                    now,
+                    str(assignment_id),
+                ),
+            )
+            lease_resource = str(attempt["lease_resource_key"] or "")
+            fencing_token = int(attempt["fencing_token"] or 0)
+            if lease_resource and fencing_token:
+                connection.execute(
+                    """
+                    DELETE FROM minion_v2_leases
+                    WHERE resource_key = ? AND owner_id = ? AND fencing_token = ?
+                    """,
+                    (lease_resource, str(attempt_id_value), fencing_token),
+                )
+            connection.execute(
+                """
+                UPDATE minion_v2_worker_sessions
+                SET status = ?, updated_at = ? WHERE session_id = ?
+                """,
+                (
+                    WorkerSessionState.SUSPENDED.value,
+                    now,
+                    str(assignment["session_id"]),
+                ),
+            )
+            return WorkerSubmissionReceipt(
+                assignment_id=str(assignment_id),
+                artifact_ref=dict(failure_artifact_ref),
+                payload_hash=str(payload_hash),
+                settlement_action=dict(settlement_action),
+            )
 
     def cancel_worker_assignments(
         self,
@@ -2112,8 +2286,8 @@ class MinionV2Repository:
             WorkerAssignmentState.QUEUED.value,
             WorkerAssignmentState.CLAIMED.value,
             WorkerAssignmentState.RUNNING.value,
-            WorkerAssignmentState.RETRYABLE.value,
-            WorkerAssignmentState.SUBMISSION_RECORDED.value,
+            WorkerAssignmentState.RETRY_QUEUED.value,
+            WorkerAssignmentState.RESULT_RECORDED.value,
         )
         self.ensure_schema()
         with self._transaction() as connection:
@@ -2133,6 +2307,26 @@ class MinionV2Repository:
             ).fetchall()
             now = utc_now()
             for assignment in rows:
+                if str(assignment["state"]) == WorkerAssignmentState.RESULT_RECORDED.value:
+                    self._settle_worker_assignment_locked(
+                        connection,
+                        assignment_id=str(assignment["assignment_id"]),
+                        submission_payload_hash=str(
+                            assignment["submission_payload_hash"]
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE minion_v2_worker_assignments
+                        SET last_error = ?, updated_at = ? WHERE assignment_id = ?
+                        """,
+                        (str(reason), now, str(assignment["assignment_id"])),
+                    )
+                    continue
+                target_state = worker_assignment_target(
+                    str(assignment["state"]),
+                    WorkerAssignmentAction.CANCEL,
+                )
                 attempt_id_value = str(assignment["active_attempt_id"] or "")
                 if attempt_id_value:
                     attempt = connection.execute(
@@ -2173,7 +2367,7 @@ class MinionV2Repository:
                     WHERE assignment_id = ?
                     """,
                     (
-                        WorkerAssignmentState.CANCELLED.value,
+                        target_state.value,
                         str(reason),
                         now,
                         str(assignment["assignment_id"]),
@@ -2384,6 +2578,19 @@ class MinionV2Repository:
                 """,
                 (normalized, _json(dict(continuation_ref)), utc_now(), str(invocation_id)),
             )
+            connection.execute(
+                """
+                UPDATE minion_v2_worker_sessions
+                SET status = ?, continuation_ref_json = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    WorkerSessionState.SUSPENDED.value,
+                    _json(dict(continuation_ref)),
+                    utc_now(),
+                    str(invocation_id),
+                ),
+            )
             self._rebuild_workflow_projection_locked(connection, str(invocation["workflow_id"]), "")
 
     def complete_worker_session(self, invocation_id: str, *, status: str = "completed") -> bool:
@@ -2396,26 +2603,41 @@ class MinionV2Repository:
                 "SELECT * FROM minion_v2_worker_invocations WHERE invocation_id = ?",
                 (str(invocation_id),),
             ).fetchone()
-            if invocation is None:
+            session = connection.execute(
+                "SELECT * FROM minion_v2_worker_sessions WHERE session_id = ?",
+                (str(invocation_id),),
+            ).fetchone()
+            if invocation is None and session is None:
                 return False
-            if str(invocation["status"]) == normalized:
+            if (
+                (invocation is None or str(invocation["status"]) == normalized)
+                and (session is None or str(session["status"]) == normalized)
+            ):
                 return True
+            owner = session if session is not None else invocation
             snapshot = self._read_snapshot_locked(
                 connection,
-                AggregateType(str(invocation["aggregate_type"])),
-                str(invocation["aggregate_id"]),
+                AggregateType(str(owner["aggregate_type"])),
+                str(owner["aggregate_id"]),
             )
             allowed_terminal = {
                 AggregateType.ARCHITECTURE_REVISION: {"ACCEPTED", "REJECTED", "CANCELLED"},
-                AggregateType.DAG_NODE_RUN: {"ACCEPTED", "STALE", "CANCELLED"},
+                AggregateType.DAG_NODE_RUN: {"ACCEPTED", "CANCELLED"},
             }
             if snapshot is None or snapshot.state not in allowed_terminal.get(snapshot.aggregate_type, set()):
                 raise ValueError("worker session cannot complete before its owned aggregate reaches a terminal outcome")
-            connection.execute(
-                "UPDATE minion_v2_worker_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
-                (normalized, utc_now(), str(invocation_id)),
-            )
-            self._rebuild_workflow_projection_locked(connection, str(invocation["workflow_id"]), "")
+            now = utc_now()
+            if invocation is not None:
+                connection.execute(
+                    "UPDATE minion_v2_worker_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
+                    (normalized, now, str(invocation_id)),
+                )
+            if session is not None:
+                connection.execute(
+                    "UPDATE minion_v2_worker_sessions SET status = ?, updated_at = ? WHERE session_id = ?",
+                    (normalized, now, str(invocation_id)),
+                )
+            self._rebuild_workflow_projection_locked(connection, str(owner["workflow_id"]), "")
             return True
 
     def record_worker_event(self, event: Mapping[str, Any]) -> None:
@@ -2946,7 +3168,7 @@ class MinionV2Repository:
             """
             SELECT 1 FROM minion_v2_worker_assignments
             WHERE workflow_id = ?
-              AND state IN ('queued', 'claimed', 'running', 'retryable', 'submission_recorded')
+              AND state IN ('queued', 'claimed', 'running', 'retry_queued', 'result_recorded')
             LIMIT 1
             """,
             (workflow.workflow_id,),

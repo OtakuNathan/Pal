@@ -43,6 +43,7 @@ from pal.minion.v2.contracts import (
     ActionEnvelope,
     AggregateSnapshot,
     AggregateType,
+    AggregateVersionConflict,
     DeferredEffectError,
     LeaseConflict,
     PermanentEffectError,
@@ -71,7 +72,12 @@ from pal.minion.v2.execution import (
     workspace_process_holders,
 )
 from pal.minion.v2.service import MinionV2WorkflowService, workflow_request_from_snapshot
-from pal.minion.v2.sessions import architect_session_id_for_revision, coder_session_id
+from pal.minion.v2.sessions import (
+    architect_session_id_for_revision,
+    coder_session_id,
+    node_role_generation,
+    verifier_session_id,
+)
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_REPAIR_BASELINE_ARTIFACT,
     ARCHITECTURE_SKELETON_ARTIFACT,
@@ -267,7 +273,7 @@ class MinionV2SemanticWorker:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         for effect_key, _task in tracked:
-            self._mark_interrupted_assignment_retryable(effect_key)
+            self._queue_interrupted_assignment_retry(effect_key)
 
     async def _release_managed_lsp_workspace(self, workspace: Path) -> Mapping[str, Any]:
         try:
@@ -448,7 +454,7 @@ class MinionV2SemanticWorker:
                     if (
                         assignment is not None
                         and assignment["state"]
-                        == WorkerAssignmentState.SUBMISSION_RECORDED.value
+                        == WorkerAssignmentState.RESULT_RECORDED.value
                     ):
                         raise SubmissionInvariantError(
                             "worker business action returned without atomically settling "
@@ -486,15 +492,15 @@ class MinionV2SemanticWorker:
                         "provider_request_id": assignment_id,
                         "status": "settled",
                     }
+                permanent = isinstance(exc, PermanentEffectError)
                 if assignment["state"] in {
                     WorkerAssignmentState.CLAIMED.value,
                     WorkerAssignmentState.RUNNING.value,
-                }:
-                    assignment = self._fail_active_assignment(
+                } and not permanent:
+                    assignment = self._queue_active_assignment_retry(
                         assignment,
                         error_kind="worker_supervisor_failure",
                         error_text=f"{exc.__class__.__name__}: {exc}",
-                        retryable=True,
                     )
                 attempts = self.repository.list_worker_attempts(assignment_id)
                 if self._stopping:
@@ -506,10 +512,11 @@ class MinionV2SemanticWorker:
                 if (
                     assignment["state"] in {
                         WorkerAssignmentState.QUEUED.value,
-                        WorkerAssignmentState.RETRYABLE.value,
-                        WorkerAssignmentState.SUBMISSION_RECORDED.value,
+                        WorkerAssignmentState.RETRY_QUEUED.value,
+                        WorkerAssignmentState.RESULT_RECORDED.value,
                     }
                     and max(len(attempts), supervisor_failures) < 3
+                    and not permanent
                 ):
                     # A recorded submission is already the durable LLM result.
                     # Replay the role wrapper so it can reconcile the same
@@ -518,28 +525,20 @@ class MinionV2SemanticWorker:
                     self._release_background_business_lease(effect)
                     await asyncio.sleep(5.0)
                     continue
-                if assignment["state"] == WorkerAssignmentState.RETRYABLE.value and attempts:
-                    assignment = self.repository.fail_worker_attempt(
-                        assignment_id=assignment_id,
-                        attempt_id_value=str(attempts[-1]["attempt_id"]),
-                        error_kind="attempt_budget_exhausted",
-                        error_text=f"{exc.__class__.__name__}: {exc}",
-                        retryable=False,
-                    )
                 self._release_background_business_lease(effect)
-                self._triage_background_worker(effect, assignment, exc)
-                return {
-                    "provider_request_id": assignment_id,
-                    "status": "triage_required",
-                }
+                return self._settle_background_worker_failure(
+                    effect,
+                    assignment,
+                    exc,
+                    exhausted=not permanent,
+                )
 
-    def _fail_active_assignment(
+    def _queue_active_assignment_retry(
         self,
         assignment: Mapping[str, Any],
         *,
         error_kind: str,
         error_text: str,
-        retryable: bool,
     ) -> dict[str, Any]:
         attempt_id_value = str(assignment.get("active_attempt_id") or "")
         if not attempt_id_value:
@@ -549,12 +548,11 @@ class MinionV2SemanticWorker:
             return dict(assignment)
         lease_resource = str(attempt.get("lease_resource_key") or "")
         fencing_token = int(attempt.get("fencing_token") or 0)
-        updated = self.repository.fail_worker_attempt(
+        updated = self.repository.queue_worker_attempt_retry(
             assignment_id=str(assignment["assignment_id"]),
             attempt_id_value=attempt_id_value,
             error_kind=error_kind,
             error_text=error_text,
-            retryable=retryable,
         )
         if lease_resource and fencing_token:
             with contextlib.suppress(Exception):
@@ -565,7 +563,7 @@ class MinionV2SemanticWorker:
                 )
         return updated
 
-    def _mark_interrupted_assignment_retryable(self, effect_key: str) -> None:
+    def _queue_interrupted_assignment_retry(self, effect_key: str) -> None:
         assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
         if not assignment_id:
             return
@@ -575,11 +573,10 @@ class MinionV2SemanticWorker:
             WorkerAssignmentState.RUNNING.value,
         }:
             return
-        self._fail_active_assignment(
+        self._queue_active_assignment_retry(
             assignment,
             error_kind="manager_shutdown",
             error_text="manager stopped before the worker assignment settled",
-            retryable=True,
         )
 
     def _background_worker_done(
@@ -660,7 +657,7 @@ class MinionV2SemanticWorker:
         if assignment is None:
             raise SubmissionInvariantError("worker assignment disappeared before settlement")
         if assignment["state"] not in {
-            WorkerAssignmentState.SUBMISSION_RECORDED.value,
+            WorkerAssignmentState.RESULT_RECORDED.value,
             WorkerAssignmentState.SETTLED.value,
         }:
             if not required:
@@ -689,48 +686,124 @@ class MinionV2SemanticWorker:
         except Exception:
             return
 
-    def _triage_background_worker(
+    def _settle_background_worker_failure(
         self,
         effect: Mapping[str, Any],
         assignment: Mapping[str, Any],
         error: Exception,
-    ) -> None:
-        snapshot = self._effect_snapshot(effect)
-        if "ENTER_TRIAGE" not in self.repository.engine.legal_actions(
-            snapshot.aggregate_type,
-            snapshot.state,
-        ):
-            return
+        *,
+        exhausted: bool,
+    ) -> Mapping[str, Any]:
+        assignment_id = str(assignment["assignment_id"])
+        attempts = self.repository.list_worker_attempts(assignment_id)
+        error_text = f"{error.__class__.__name__}: {error}"
+        failure_payload = {
+            "kind": "worker_assignment_failed",
+            "role": str(assignment.get("role") or ""),
+            "attempt_count": len(attempts),
+            "exhausted": bool(exhausted),
+            "error_kind": (
+                "attempt_budget_exhausted"
+                if exhausted
+                else "permanent_worker_failure"
+            ),
+            "error": error_text,
+            "effect_type": str(effect.get("effect_type") or ""),
+        }
         failure_ref = self.service.artifacts.put_json(
-            {
-                "kind": "worker_assignment_failed",
-                "role": str(assignment.get("role") or ""),
-                "attempt_count": len(
-                    self.repository.list_worker_attempts(str(assignment["assignment_id"]))
-                ),
-                "error": f"{error.__class__.__name__}: {error}",
-            },
+            failure_payload,
             artifact_type="WorkerAssignmentFailureArtifact",
         )
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="ENTER_TRIAGE",
-                workflow_id=snapshot.workflow_id,
-                aggregate_type=snapshot.aggregate_type,
-                aggregate_id=snapshot.aggregate_id,
-                actor="minion-v2-worker-supervisor",
-                expected_version=snapshot.version,
-                idempotency_key=(
-                    f"worker-assignment-triage:{assignment['assignment_id']}:"
-                    f"{len(self.repository.list_worker_attempts(str(assignment['assignment_id'])))}"
-                ),
-                payload={
-                    "failure_artifact_ref": failure_ref.to_dict(),
-                    "blocker": str(error),
+        current_assignment = self.repository.read_worker_assignment(assignment_id)
+        if current_assignment is None:
+            raise SubmissionInvariantError("worker assignment disappeared before failure settlement")
+        if current_assignment["state"] not in {
+            WorkerAssignmentState.RESULT_RECORDED.value,
+            WorkerAssignmentState.SETTLED.value,
+        }:
+            if not attempts:
+                raise SubmissionInvariantError(
+                    "worker assignment failed before an attempt was durably claimed"
+                )
+            self.repository.record_worker_failure_result(
+                assignment_id=assignment_id,
+                attempt_id_value=str(attempts[-1]["attempt_id"]),
+                error_kind=str(failure_payload["error_kind"]),
+                error_text=error_text,
+                failure_artifact_ref=failure_ref.to_dict(),
+                payload_hash=stable_hash(failure_payload),
+                settlement_action={
+                    "action_type": "WORKER_FAILED",
+                    "aggregate_type": str(current_assignment["aggregate_type"]),
+                    "aggregate_id": str(current_assignment["aggregate_id"]),
                 },
-            ),
-            **self._worker_submission_settlement(effect, required=False),
-        )
+            )
+            current_assignment = self.repository.read_worker_assignment(assignment_id)
+        if current_assignment is None:
+            raise SubmissionInvariantError("worker failure receipt was not durable")
+        if current_assignment["state"] == WorkerAssignmentState.SETTLED.value:
+            return {"provider_request_id": assignment_id, "status": "settled"}
+
+        for _attempt in range(3):
+            snapshot = self._effect_snapshot(effect)
+            legal = self.repository.engine.legal_actions(
+                snapshot.aggregate_type,
+                snapshot.state,
+            )
+            if "WORKER_FAILED" not in legal:
+                if snapshot.state == "TRIAGE_REQUIRED":
+                    self.repository.settle_worker_assignment(
+                        assignment_id=assignment_id,
+                        submission_payload_hash=str(
+                            current_assignment["submission_payload_hash"]
+                        ),
+                    )
+                    return {
+                        "provider_request_id": assignment_id,
+                        "status": "triage_required",
+                    }
+                self.repository.cancel_worker_assignments(
+                    workflow_id=str(current_assignment["workflow_id"]),
+                    aggregate_type=str(current_assignment["aggregate_type"]),
+                    aggregate_id=str(current_assignment["aggregate_id"]),
+                    reason=f"worker failure superseded by parent state {snapshot.state}",
+                )
+                return {
+                    "provider_request_id": assignment_id,
+                    "status": "superseded",
+                }
+            try:
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="WORKER_FAILED",
+                        workflow_id=snapshot.workflow_id,
+                        aggregate_type=snapshot.aggregate_type,
+                        aggregate_id=snapshot.aggregate_id,
+                        actor="minion-v2-worker-supervisor",
+                        expected_version=snapshot.version,
+                        idempotency_key=f"worker-failed:{assignment_id}",
+                        payload={
+                            "failure_artifact_ref": failure_ref.to_dict(),
+                            "blocker": {
+                                "kind": "worker_failure",
+                                "summary": error_text,
+                                "role": str(current_assignment.get("role") or ""),
+                                "attempt_count": len(attempts),
+                            },
+                        },
+                    ),
+                    worker_assignment_id=assignment_id,
+                    worker_submission_payload_hash=str(
+                        current_assignment["submission_payload_hash"]
+                    ),
+                )
+                return {
+                    "provider_request_id": assignment_id,
+                    "status": "triage_required",
+                }
+            except AggregateVersionConflict:
+                continue
+        raise DeferredEffectError("worker failure receipt settlement lost repeated CAS races")
 
     async def recover_background_assignments(self) -> int:
         if self._stopping:
@@ -747,16 +820,16 @@ class MinionV2SemanticWorker:
                 WorkerAssignmentState.QUEUED.value,
                 WorkerAssignmentState.CLAIMED.value,
                 WorkerAssignmentState.RUNNING.value,
-                WorkerAssignmentState.RETRYABLE.value,
-                WorkerAssignmentState.SUBMISSION_RECORDED.value,
+                WorkerAssignmentState.RETRY_QUEUED.value,
+                WorkerAssignmentState.RESULT_RECORDED.value,
             )
             ),
             key=lambda item: (
                 {
-                    WorkerAssignmentState.SUBMISSION_RECORDED.value: 0,
+                    WorkerAssignmentState.RESULT_RECORDED.value: 0,
                     WorkerAssignmentState.RUNNING.value: 1,
                     WorkerAssignmentState.CLAIMED.value: 1,
-                    WorkerAssignmentState.RETRYABLE.value: 2,
+                    WorkerAssignmentState.RETRY_QUEUED.value: 2,
                     WorkerAssignmentState.QUEUED.value: 3,
                 }.get(str(item.get("state") or ""), 9),
                 str(item.get("created_at") or ""),
@@ -865,10 +938,11 @@ class MinionV2SemanticWorker:
         if node.state == target_state and node.payload.get("active_worker_id"):
             return {"provider_request_id": str(node.payload.get("active_worker_id"))}
         cycle = int(node.payload.get("candidate_cycle") or 0) + (1 if role in {"producer", "repair"} else 0)
+        generation = node_role_generation(node.payload)
         invocation_id = (
-            coder_session_id(node.aggregate_id)
+            coder_session_id(node.aggregate_id, generation)
             if role in {"producer", "repair"}
-            else f"inv_{hashlib.sha256(f'{node.aggregate_id}:{role}:{cycle}'.encode()).hexdigest()[:24]}"
+            else verifier_session_id(node.aggregate_id, generation)
         )
         lease_resource = f"node:{node.aggregate_id}:{'writer' if role in {'producer', 'repair'} else 'review'}"
         lease = self.repository.claim_lease(
@@ -919,12 +993,15 @@ class MinionV2SemanticWorker:
                 return node
 
         writer_role = role in {"producer", "repair"}
+        generation = node_role_generation(node.payload)
         if writer_role:
-            invocation_id = coder_session_id(node.aggregate_id)
+            invocation_id = coder_session_id(node.aggregate_id, generation)
             lease_resource = f"node:{node.aggregate_id}:writer"
         else:
-            cycle = int(node.payload.get("candidate_cycle") or 0)
-            invocation_id = invocation_id or f"inv_{hashlib.sha256(f'{node.aggregate_id}:reviewer:{cycle}'.encode()).hexdigest()[:24]}"
+            invocation_id = invocation_id or verifier_session_id(
+                node.aggregate_id,
+                generation,
+            )
             lease_resource = f"node:{node.aggregate_id}:review"
 
         previous = self.repository.read_lease(lease_resource)
@@ -1143,7 +1220,6 @@ class MinionV2SemanticWorker:
                 ),
                 **self._worker_submission_settlement(effect),
             )
-            self.repository.complete_worker_session(coder_session_id(node.aggregate_id))
             self.repository.release_lease(lease_resource, invocation_id, fencing_token)
             return {"provider_request_id": invocation_id, "result_artifact_ref": report_ref.to_dict()}
         if status != "candidate_ready":
@@ -1808,13 +1884,24 @@ class MinionV2SemanticWorker:
             workspace = Path(worktree_text)
             await self._release_managed_lsp_workspace(workspace)
             _raise_if_workspace_held(workspace, "node worker still holds its worktree")
+        current = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            node.aggregate_id,
+        )
+        cancel_target = str(current.payload.get("cancel_target") or "CANCELLED")
+        terminal_cancel = bool(cancel and cancel_target == "CANCELLED")
         self.repository.cancel_worker_assignments(
             workflow_id=node.workflow_id,
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id=node.aggregate_id,
-            reason="node cancelled" if cancel else "node paused",
+            reason=(
+                "node cancelled"
+                if terminal_cancel
+                else "node frozen for stale dependency"
+                if cancel
+                else "node paused"
+            ),
         )
-        current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
         action_type = "CANCEL_CONFIRMED" if cancel or current.state == "CANCEL_REQUESTED" else "PAUSE_CONFIRMED"
         self.repository.dispatch(
             ActionEnvelope(
@@ -1833,9 +1920,19 @@ class MinionV2SemanticWorker:
                 self.repository.release_lease(lease_resource, invocation_id, fencing_token)
             except Exception:
                 pass
-        if cancel:
+        if terminal_cancel:
             self.repository.complete_worker_session(
-                coder_session_id(node.aggregate_id),
+                coder_session_id(
+                    node.aggregate_id,
+                    node_role_generation(node.payload),
+                ),
+                status="cancelled",
+            )
+            self.repository.complete_worker_session(
+                verifier_session_id(
+                    node.aggregate_id,
+                    node_role_generation(node.payload),
+                ),
                 status="cancelled",
             )
         return {}
@@ -4456,16 +4553,15 @@ class MinionV2SemanticWorker:
             if active_lease is not None and _lease_is_live(active_lease):
                 raise DeferredEffectError("worker assignment already has a live process attempt")
             if active_attempt is not None:
-                assignment = self.repository.fail_worker_attempt(
+                assignment = self.repository.queue_worker_attempt_retry(
                     assignment_id=str(assignment["assignment_id"]),
                     attempt_id_value=str(active_attempt["attempt_id"]),
                     error_kind="attempt_lease_expired",
                     error_text="worker attempt lease expired before submission settlement",
-                    retryable=True,
                 )
 
         if assignment["state"] in {
-            WorkerAssignmentState.SUBMISSION_RECORDED.value,
+            WorkerAssignmentState.RESULT_RECORDED.value,
             WorkerAssignmentState.SETTLED.value,
         }:
             pack = sanitize_runner_session_pack(pack)
@@ -4498,7 +4594,7 @@ class MinionV2SemanticWorker:
 
         if assignment["state"] not in {
             WorkerAssignmentState.QUEUED.value,
-            WorkerAssignmentState.RETRYABLE.value,
+            WorkerAssignmentState.RETRY_QUEUED.value,
         }:
             raise SubmissionInvariantError(
                 f"worker assignment cannot start from {assignment['state']}"
@@ -4700,12 +4796,11 @@ class MinionV2SemanticWorker:
         )
         if process.returncode != 0 and not has_submission_receipt:
             error_tail = _meaningful_stderr_tail(stderr.decode("utf-8", errors="replace"))
-            self.repository.fail_worker_attempt(
+            self.repository.queue_worker_attempt_retry(
                 assignment_id=str(assignment["assignment_id"]),
                 attempt_id_value=str(attempt["attempt_id"]),
                 error_kind="worker_process_failed",
                 error_text=worker_error or error_tail or "worker emitted no structured error",
-                retryable=True,
             )
             with contextlib.suppress(Exception):
                 self.repository.release_lease(
@@ -4717,7 +4812,7 @@ class MinionV2SemanticWorker:
                 invocation_id,
                 assignment_lease.fencing_token,
             )
-            if continuation_ref is not None and role in {"architect", "producer", "repair"}:
+            if continuation_ref is not None and role in {"architect", "producer", "repair", "verifier"}:
                 self.repository.suspend_worker_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
@@ -4740,12 +4835,11 @@ class MinionV2SemanticWorker:
                 summary="Recovered a durable submission after the worker process ended.",
             )
         if terminal is None:
-            self.repository.fail_worker_attempt(
+            self.repository.queue_worker_attempt_retry(
                 assignment_id=str(assignment["assignment_id"]),
                 attempt_id_value=str(attempt["attempt_id"]),
                 error_kind="missing_terminal_and_receipt",
                 error_text="worker ended without terminal event or durable submission receipt",
-                retryable=True,
             )
             with contextlib.suppress(Exception):
                 self.repository.release_lease(
@@ -4757,7 +4851,7 @@ class MinionV2SemanticWorker:
                 invocation_id,
                 assignment_lease.fencing_token,
             )
-            if continuation_ref is not None and role in {"architect", "producer", "repair"}:
+            if continuation_ref is not None and role in {"architect", "producer", "repair", "verifier"}:
                 self.repository.suspend_worker_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
@@ -4776,7 +4870,7 @@ class MinionV2SemanticWorker:
             str(terminal_payload.get("status") or "") == "suspended"
             and bool(terminal_payload.get("manager_restart"))
         ):
-            self.repository.fail_worker_attempt(
+            self.repository.queue_worker_attempt_retry(
                 assignment_id=str(assignment["assignment_id"]),
                 attempt_id_value=str(attempt["attempt_id"]),
                 error_kind="manager_restart",
@@ -4784,7 +4878,6 @@ class MinionV2SemanticWorker:
                     terminal_payload.get("summary")
                     or "worker deferred for manager restart"
                 ),
-                retryable=True,
             )
             with contextlib.suppress(Exception):
                 self.repository.release_lease(
@@ -4815,15 +4908,13 @@ class MinionV2SemanticWorker:
                 str(terminal_payload.get("blocker_kind") or "")
                 == "completion_gate_stalled"
             )
-            self.repository.fail_worker_attempt(
-                assignment_id=str(assignment["assignment_id"]),
-                attempt_id_value=str(attempt["attempt_id"]),
-                error_kind=(
-                    "completion_gate_stalled" if completion_stalled else "worker_terminal_failed"
-                ),
-                error_text=summary,
-                retryable=not completion_stalled,
-            )
+            if not completion_stalled:
+                self.repository.queue_worker_attempt_retry(
+                    assignment_id=str(assignment["assignment_id"]),
+                    attempt_id_value=str(attempt["attempt_id"]),
+                    error_kind="worker_terminal_failed",
+                    error_text=summary,
+                )
             with contextlib.suppress(Exception):
                 self.repository.release_lease(
                     assignment_lease_resource,
@@ -4834,7 +4925,7 @@ class MinionV2SemanticWorker:
                 invocation_id,
                 assignment_lease.fencing_token,
             )
-            if continuation_ref is not None and role in {"architect", "producer", "repair"}:
+            if continuation_ref is not None and role in {"architect", "producer", "repair", "verifier"}:
                 self.repository.suspend_worker_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
@@ -4854,16 +4945,9 @@ class MinionV2SemanticWorker:
             str(assignment["assignment_id"])
         )
         if assignment_after_process is None or assignment_after_process["state"] not in {
-            WorkerAssignmentState.SUBMISSION_RECORDED.value,
+            WorkerAssignmentState.RESULT_RECORDED.value,
             WorkerAssignmentState.SETTLED.value,
         }:
-            self.repository.fail_worker_attempt(
-                assignment_id=str(assignment["assignment_id"]),
-                attempt_id_value=str(attempt["attempt_id"]),
-                error_kind="completion_without_receipt",
-                error_text="worker reported completion before its durable submission receipt",
-                retryable=False,
-            )
             with contextlib.suppress(Exception):
                 self.repository.release_lease(
                     assignment_lease_resource,
@@ -4911,7 +4995,7 @@ class MinionV2SemanticWorker:
                 ),
             ),
         )
-        if role in {"architect", "producer", "repair"}:
+        if role in {"architect", "producer", "repair", "verifier"}:
             if continuation_ref is None:
                 raise RuntimeError("resumable worker completed without a durable agent-session checkpoint")
             self.repository.suspend_worker_invocation(

@@ -35,6 +35,8 @@ from pal.minion.v2.sessions import (
     architect_session_id,
     architect_session_id_for_revision,
     coder_session_id,
+    node_role_generation,
+    verifier_session_id,
 )
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
@@ -267,6 +269,149 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         )
         self.assertEqual(coder_session_id("node-1"), coder_session_id("node-1"))
         self.assertNotEqual(coder_session_id("node-1"), coder_session_id("node-2"))
+        self.assertEqual(
+            verifier_session_id("node-1"),
+            verifier_session_id("node-1"),
+        )
+        self.assertNotEqual(
+            verifier_session_id("node-1"),
+            verifier_session_id("node-1", 1),
+        )
+        self.assertEqual(node_role_generation({}), 0)
+        self.assertEqual(node_role_generation({"role_session_generation": 2}), 2)
+
+    def test_worker_failure_is_owned_by_parent_aggregate_state_machine(self) -> None:
+        cases = (
+            (AggregateType.DAG_NODE_RUN, DagNodeRunState.PRODUCING),
+            (AggregateType.DAG_NODE_RUN, DagNodeRunState.REVIEWING),
+            (AggregateType.DAG_NODE_RUN, DagNodeRunState.REPAIRING),
+            (AggregateType.DAG_NODE_RUN, DagNodeRunState.VERIFYING),
+            (
+                AggregateType.ARCHITECTURE_REVISION,
+                ArchitectureRevisionState.ARCHITECT_RUNNING,
+            ),
+            (
+                AggregateType.ARCHITECTURE_REVISION,
+                ArchitectureRevisionState.REVIEWING,
+            ),
+            (AggregateType.STANDALONE_REVIEW, StandaloneReviewState.REVIEWING),
+        )
+        for aggregate_type, source_state in cases:
+            with self.subTest(aggregate_type=aggregate_type, source_state=source_state):
+                snapshot = AggregateSnapshot(
+                    aggregate_type=aggregate_type,
+                    aggregate_id=f"failed-{aggregate_type.value}",
+                    workflow_id="wf_test",
+                    state=source_state,
+                    version=4,
+                    payload={"active_worker_id": "worker"},
+                    created_at="2026-01-01T00:00:00+00:00",
+                    updated_at="2026-01-01T00:00:00+00:00",
+                )
+                result = self.engine.transition(
+                    snapshot,
+                    self.action(
+                        "WORKER_FAILED",
+                        aggregate_type,
+                        snapshot.aggregate_id,
+                        expected_version=4,
+                        payload={
+                            "failure_artifact_ref": {"sha256": "failure"},
+                            "blocker": {
+                                "kind": "worker_failure",
+                                "summary": "worker exited",
+                            },
+                        },
+                    ),
+                )
+                self.assertEqual(result.snapshot.state, "TRIAGE_REQUIRED")
+                self.assertEqual(
+                    result.snapshot.payload["triage_resume_state"],
+                    str(source_state),
+                )
+                self.assertIsInstance(result.snapshot.payload["blocker"], dict)
+
+        malformed = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="malformed-worker-failure",
+            workflow_id="wf_test",
+            state=DagNodeRunState.PRODUCING,
+            version=1,
+            payload={},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        with self.assertRaisesRegex(TransitionGuardError, "structured mapping"):
+            self.engine.transition(
+                malformed,
+                self.action(
+                    "WORKER_FAILED",
+                    AggregateType.DAG_NODE_RUN,
+                    malformed.aggregate_id,
+                    expected_version=1,
+                    payload={
+                        "failure_artifact_ref": {"sha256": "failure"},
+                        "blocker": "worker exited",
+                    },
+                ),
+            )
+
+    def test_reopened_terminal_node_gets_a_new_role_session_generation(self) -> None:
+        accepted = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-reopened",
+            workflow_id="wf_test",
+            state=DagNodeRunState.ACCEPTED,
+            version=9,
+            payload={"role_session_generation": 2},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        reopened = self.engine.transition(
+            accepted,
+            self.action(
+                "REOPEN_DEPENDENCY",
+                AggregateType.DAG_NODE_RUN,
+                accepted.aggregate_id,
+                expected_version=9,
+                payload={"repair_bill_ref": {"sha256": "repair"}},
+            ),
+        ).snapshot
+        self.assertEqual(reopened.state, DagNodeRunState.REPAIR_QUEUED)
+        self.assertEqual(reopened.payload["role_session_generation"], 3)
+        self.assertNotEqual(
+            coder_session_id(accepted.aggregate_id, 2),
+            coder_session_id(reopened.aggregate_id, 3),
+        )
+
+    def test_direct_stale_transition_durably_suspends_queued_assignments(self) -> None:
+        queued = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-queued-stale",
+            workflow_id="wf_test",
+            state=DagNodeRunState.QUEUED,
+            version=3,
+            payload={"role_session_generation": 0},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        result = self.engine.transition(
+            queued,
+            self.action(
+                "MARK_STALE",
+                AggregateType.DAG_NODE_RUN,
+                queued.aggregate_id,
+                expected_version=3,
+                payload={"stale_reason_ref": {"sha256": "dependency-change"}},
+            ),
+        )
+
+        self.assertEqual(result.snapshot.state, DagNodeRunState.STALE)
+        self.assertEqual(
+            [effect.effect_type for effect in result.effects],
+            ["suspend_stale_node_assignments"],
+        )
+        self.assertEqual(node_role_generation(result.snapshot.payload), 0)
 
     def test_running_worker_states_have_fenced_rebind_self_transitions(self) -> None:
         node_cases = {

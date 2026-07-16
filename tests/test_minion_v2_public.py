@@ -271,7 +271,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             worker._assignment_ids_by_effect["effect-key-reconcile"] = (
                 "assignment-reconcile"
             )
-            assignment_state = {"value": "submission_recorded"}
+            assignment_state = {"value": "result_recorded"}
             calls = 0
 
             worker.repository.read_worker_assignment = lambda _assignment_id: {

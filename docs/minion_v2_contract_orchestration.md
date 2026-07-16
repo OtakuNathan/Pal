@@ -26,19 +26,46 @@ and action idempotency make crash replay safe.
 
 Long LLM work is not an in-flight Outbox attempt. The Outbox effect durably
 creates or locates a `WorkerAssignment`, starts it in a bounded supervisor, and
-ACKs once that assignment exists. A worker session preserves cognitive
-continuation, an assignment binds one immutable role/input/effect contract, and
-an attempt binds one process, lease, fencing token, and access token. Manager
-restart recovers queued, retryable, running, or submission-recorded assignments
-without recreating the causative Outbox effect.
+ACKs once that assignment exists. The DAG Node Run is the sole owner of module
+business lifecycle: coding, verification, repair, acceptance, stale propagation,
+pause, cancellation, and triage are Node transitions, never assignment states.
 
-Worker submit first records an immutable submission receipt. The corresponding
-business Action and assignment settlement then commit in the same SQLite
-transaction. If a crash occurs between an older/replayed business Action and
-settlement, action dedup reconciles the same receipt without another LLM call.
-Pause and cancel terminate the current assignment and revoke its token; Resume
-creates a new assignment in the preserved session. A cancelled assignment can
-never be changed back to retryable by a late process callback.
+Each Node generation owns one canonical Coder session and one canonical
+Verifier session. `producer` and `repair` are activations of the same Coder
+session; repeated review cycles are activations of the same Verifier session.
+The session preserves cognitive continuation and behaves as a durable logical
+coroutine even when its replaceable subprocess exits between activations. Pause
+and `STALE` suspend these sessions. Only Node `ACCEPTED` or `CANCELLED` closes
+them. Reopening an already accepted Node creates a new role-session generation.
+
+A `WorkerAssignment` binds one immutable role/input/effect activation and uses
+one explicit receipt protocol:
+
+```text
+QUEUED -> CLAIMED -> RUNNING -> RESULT_RECORDED -> SETTLED
+                    +---> RETRY_QUEUED -> CLAIMED
+```
+
+An attempt binds one subprocess, lease, fencing token, and access token. The
+assignment has no pause, repair, acceptance, or triage state. Before a result is
+recorded, aggregate control may cancel the activation. After a result is
+recorded, even a superseding cancel must settle the receipt rather than discard
+it.
+
+Success and failure are symmetric. Worker submit first records an immutable
+result receipt. Exhausted or permanent worker failure records a
+`WorkerAssignmentFailureArtifact` and a `WORKER_FAILED` settlement action. The
+corresponding parent Action and assignment settlement then commit in the same
+SQLite transaction. Action dedup reconciles a replayed receipt without another
+LLM call. Settlement revokes the activation token and lease; a failed attempt
+remains `FAILED` even though its assignment receipt is acknowledged.
+
+Manager restart recovers queued, retry-queued, running, or result-recorded
+assignments without recreating the causative Outbox effect. Direct stale
+transitions also emit an Outbox effect that cancels any not-yet-started
+activation, so dependency invalidation does not wait for a later recovery tick.
+`worker_invocations` is an observability and durable-turn journal; its status is
+not consulted as a second business state machine.
 
 The foreground Pal channel loop never waits for a semantic worker. Global
 worker slots, rather than completed Outbox attempts, enforce LLM concurrency.

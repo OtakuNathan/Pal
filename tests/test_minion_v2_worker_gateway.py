@@ -117,7 +117,7 @@ class MinionV2WorkerGatewayTests(unittest.TestCase):
             )["submitted"]
         )
         assignment = self.service.repository.read_worker_assignment(self.assignment_id)
-        self.assertEqual(assignment["state"], "submission_recorded")
+        self.assertEqual(assignment["state"], "result_recorded")
         self.assertTrue(assignment["submission_artifact_ref"]["sha256"])
 
     def test_gateway_rejects_context_from_another_attempt(self) -> None:

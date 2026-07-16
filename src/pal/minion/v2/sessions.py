@@ -47,8 +47,23 @@ def architect_session_id_for_revision(
     return architect_session_id(workflow_id, architecture_revision_id, cycle_key)
 
 
-def coder_session_id(node_run_id: str) -> str:
-    return _session_id("coder", node_run_id)
+def coder_session_id(node_run_id: str, generation: int = 0) -> str:
+    return _node_role_session_id("coder", node_run_id, generation)
+
+
+def verifier_session_id(node_run_id: str, generation: int = 0) -> str:
+    return _node_role_session_id("verifier", node_run_id, generation)
+
+
+def node_role_generation(payload: Mapping[str, Any]) -> int:
+    return max(0, int(payload.get("role_session_generation") or 0))
+
+
+def _node_role_session_id(role: str, node_run_id: str, generation: int) -> str:
+    owner = str(node_run_id)
+    if int(generation) > 0:
+        owner = f"{owner}:generation:{int(generation)}"
+    return _session_id(role, owner)
 
 
 def _artifact_sha(value: Any) -> str:

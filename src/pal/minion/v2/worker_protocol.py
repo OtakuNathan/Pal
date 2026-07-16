@@ -18,11 +18,19 @@ class WorkerAssignmentState(StrEnum):
     QUEUED = "queued"
     CLAIMED = "claimed"
     RUNNING = "running"
-    RETRYABLE = "retryable"
-    SUBMISSION_RECORDED = "submission_recorded"
+    RETRY_QUEUED = "retry_queued"
+    RESULT_RECORDED = "result_recorded"
     SETTLED = "settled"
     CANCELLED = "cancelled"
-    TRIAGE_REQUIRED = "triage_required"
+
+
+class WorkerAssignmentAction(StrEnum):
+    CLAIM = "claim"
+    START = "start"
+    QUEUE_RETRY = "queue_retry"
+    RECORD_RESULT = "record_result"
+    SETTLE = "settle"
+    CANCEL = "cancel"
 
 
 class WorkerAttemptState(StrEnum):
@@ -39,9 +47,67 @@ ACTIVE_ASSIGNMENT_STATES = frozenset(
     {
         WorkerAssignmentState.CLAIMED,
         WorkerAssignmentState.RUNNING,
-        WorkerAssignmentState.SUBMISSION_RECORDED,
+        WorkerAssignmentState.RESULT_RECORDED,
     }
 )
+
+
+_ASSIGNMENT_TRANSITIONS = {
+    (WorkerAssignmentState.QUEUED, WorkerAssignmentAction.CLAIM): WorkerAssignmentState.CLAIMED,
+    (WorkerAssignmentState.RETRY_QUEUED, WorkerAssignmentAction.CLAIM): WorkerAssignmentState.CLAIMED,
+    (WorkerAssignmentState.CLAIMED, WorkerAssignmentAction.START): WorkerAssignmentState.RUNNING,
+    (WorkerAssignmentState.CLAIMED, WorkerAssignmentAction.QUEUE_RETRY): WorkerAssignmentState.RETRY_QUEUED,
+    (WorkerAssignmentState.RUNNING, WorkerAssignmentAction.QUEUE_RETRY): WorkerAssignmentState.RETRY_QUEUED,
+    (WorkerAssignmentState.CLAIMED, WorkerAssignmentAction.RECORD_RESULT): WorkerAssignmentState.RESULT_RECORDED,
+    (WorkerAssignmentState.RUNNING, WorkerAssignmentAction.RECORD_RESULT): WorkerAssignmentState.RESULT_RECORDED,
+    (WorkerAssignmentState.RETRY_QUEUED, WorkerAssignmentAction.RECORD_RESULT): WorkerAssignmentState.RESULT_RECORDED,
+    (WorkerAssignmentState.RESULT_RECORDED, WorkerAssignmentAction.RECORD_RESULT): WorkerAssignmentState.RESULT_RECORDED,
+    (WorkerAssignmentState.RESULT_RECORDED, WorkerAssignmentAction.SETTLE): WorkerAssignmentState.SETTLED,
+    (WorkerAssignmentState.SETTLED, WorkerAssignmentAction.SETTLE): WorkerAssignmentState.SETTLED,
+}
+
+for _state in WorkerAssignmentState:
+    if _state not in {
+        WorkerAssignmentState.RESULT_RECORDED,
+        WorkerAssignmentState.SETTLED,
+        WorkerAssignmentState.CANCELLED,
+    }:
+        _ASSIGNMENT_TRANSITIONS[(_state, WorkerAssignmentAction.CANCEL)] = (
+            WorkerAssignmentState.CANCELLED
+        )
+_ASSIGNMENT_TRANSITIONS[
+    (WorkerAssignmentState.CANCELLED, WorkerAssignmentAction.CANCEL)
+] = WorkerAssignmentState.CANCELLED
+
+
+def worker_assignment_target(
+    state: WorkerAssignmentState | str,
+    action: WorkerAssignmentAction | str,
+) -> WorkerAssignmentState:
+    """Resolve the only legal durable assignment transition.
+
+    Worker assignments model one role activation and its Manager receipt. They
+    never own module triage, pause, repair, or acceptance; those remain actions
+    on the parent aggregate.
+    """
+
+    source = WorkerAssignmentState(str(state))
+    operation = WorkerAssignmentAction(str(action))
+    try:
+        return _ASSIGNMENT_TRANSITIONS[(source, operation)]
+    except KeyError as exc:
+        raise ValueError(
+            f"illegal worker assignment transition: {source.value} + {operation.value}"
+        ) from exc
+
+
+def worker_session_role(activation_role: str) -> str:
+    role = str(activation_role or "").strip()
+    if role in {"producer", "repair"}:
+        return "coder"
+    if role in {"verifier", "scenario_verifier"}:
+        return "verifier"
+    return role
 
 
 @dataclass(frozen=True)

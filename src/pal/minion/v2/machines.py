@@ -174,6 +174,17 @@ def _worker_finished_reducer(payload: Mapping[str, Any], action: ActionEnvelope)
     return updated
 
 
+def _new_node_role_generation_reducer(
+    payload: Mapping[str, Any],
+    action: ActionEnvelope,
+) -> Mapping[str, Any]:
+    updated = dict(_worker_finished_reducer(payload, action))
+    updated["role_session_generation"] = int(
+        payload.get("role_session_generation") or 0
+    ) + 1
+    return updated
+
+
 def _replan_finding_reducer(
     payload: Mapping[str, Any],
     action: ActionEnvelope,
@@ -412,6 +423,17 @@ def _lease_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
     token = action.payload.get("fencing_token")
     if not isinstance(token, int) or token <= 0:
         raise TransitionGuardError(f"{action.action_type} requires a positive fencing_token")
+
+
+def _worker_failure_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
+    _required("failure_artifact_ref", "blocker")(_payload, action)
+    blocker = action.payload.get("blocker")
+    if not isinstance(blocker, Mapping):
+        raise TransitionGuardError("WORKER_FAILED blocker must be a structured mapping")
+    if not str(blocker.get("kind") or "").strip() or not str(
+        blocker.get("summary") or ""
+    ).strip():
+        raise TransitionGuardError("WORKER_FAILED blocker requires kind and summary")
 
 
 def _quiesce_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
@@ -709,6 +731,17 @@ def _architecture_transitions() -> list[TransitionSpec]:
     triageable = pausable | {S.PAUSE_REQUESTED}
     for state in triageable:
         transitions.append(_spec(kind, state, "ENTER_TRIAGE", S.TRIAGE_REQUIRED, reducer=_triage_reducer(str(state))))
+    for state in {S.ARCHITECT_RUNNING, S.REVIEWING}:
+        transitions.append(
+            _spec(
+                kind,
+                state,
+                "WORKER_FAILED",
+                S.TRIAGE_REQUIRED,
+                guard=_worker_failure_guard,
+                reducer=_triage_reducer(str(state)),
+            )
+        )
     transitions.append(
         _spec(
             kind,
@@ -989,7 +1022,15 @@ def _node_transitions() -> list[TransitionSpec]:
             "CANCEL_CONFIRMED",
             _resume_target(frozenset({str(S.CANCELLED), str(S.STALE)}), "cancel_target"),
         ),
-        _spec(kind, S.ACCEPTED, "REOPEN_DEPENDENCY", S.REPAIR_QUEUED, guard=_required("repair_bill_ref"), effects=_effect("enqueue_repair")),
+        _spec(
+            kind,
+            S.ACCEPTED,
+            "REOPEN_DEPENDENCY",
+            S.REPAIR_QUEUED,
+            guard=_required("repair_bill_ref"),
+            effects=_effect("enqueue_repair"),
+            reducer=_new_node_role_generation_reducer,
+        ),
         _spec(kind, S.ACCEPTED, "MEMORY_CANDIDATE_PUBLISHED", S.ACCEPTED, guard=_required("memory_candidate_ref")),
     ]
     pausable = {S.QUEUED, S.PRODUCING, S.REVIEW_QUEUED, S.REVIEWING, S.REPAIR_QUEUED, S.REPAIRING, S.VERIFY_PREPARING, S.VERIFYING}
@@ -1032,7 +1073,21 @@ def _node_transitions() -> list[TransitionSpec]:
         )
     directly_staleable = {S.BLOCKED_BY_DEPS, S.QUEUED, S.REVIEW_QUEUED, S.REPAIR_QUEUED, S.ACCEPTED, S.CANCELLED}
     for state in directly_staleable:
-        transitions.append(_spec(kind, state, "MARK_STALE", S.STALE, guard=_required("stale_reason_ref")))
+        transitions.append(
+            _spec(
+                kind,
+                state,
+                "MARK_STALE",
+                S.STALE,
+                guard=_required("stale_reason_ref"),
+                effects=_effect("suspend_stale_node_assignments"),
+                reducer=(
+                    _new_node_role_generation_reducer
+                    if state in {S.ACCEPTED, S.CANCELLED}
+                    else _merge_payload
+                ),
+            )
+        )
     for state in {S.PRODUCING, S.QUIESCING, S.SNAPSHOTTING, S.REVIEWING, S.REPAIRING, S.VERIFY_PREPARING, S.VERIFYING, S.PAUSE_REQUESTED, S.PAUSED}:
         transitions.append(
             _spec(
@@ -1048,6 +1103,17 @@ def _node_transitions() -> list[TransitionSpec]:
     triageable = pausable | {S.QUIESCING, S.SNAPSHOTTING, S.PAUSE_REQUESTED}
     for state in triageable:
         transitions.append(_spec(kind, state, "ENTER_TRIAGE", S.TRIAGE_REQUIRED, reducer=_triage_reducer(str(state))))
+    for state in {S.PRODUCING, S.REVIEWING, S.REPAIRING, S.VERIFYING}:
+        transitions.append(
+            _spec(
+                kind,
+                state,
+                "WORKER_FAILED",
+                S.TRIAGE_REQUIRED,
+                guard=_worker_failure_guard,
+                reducer=_triage_reducer(str(state)),
+            )
+        )
     transitions.append(
         _spec(
             kind,
@@ -1093,6 +1159,16 @@ def _standalone_review_transitions() -> list[TransitionSpec]:
         transitions.append(_spec(kind, state, "REQUEST_CANCEL", S.CANCEL_REQUESTED, effects=_effect("cancel_aggregate_work")))
     for state in pausable | {S.PAUSE_REQUESTED}:
         transitions.append(_spec(kind, state, "ENTER_TRIAGE", S.TRIAGE_REQUIRED, reducer=_triage_reducer(str(state))))
+    transitions.append(
+        _spec(
+            kind,
+            S.REVIEWING,
+            "WORKER_FAILED",
+            S.TRIAGE_REQUIRED,
+            guard=_worker_failure_guard,
+            reducer=_triage_reducer(str(S.REVIEWING)),
+        )
+    )
     standalone_resume = {
         str(S.RECEIVED): str(S.RECEIVED),
         str(S.REVIEW_QUEUED): str(S.REVIEW_QUEUED),
