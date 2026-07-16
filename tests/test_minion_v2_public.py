@@ -1779,6 +1779,34 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         self.assertTrue(resolved["sha256"])
 
+    def test_one_click_start_validates_before_creating_its_task(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        base = {
+            "title": "Invalid one-click request",
+            "family_id": "software_engineering",
+            "goal": "This request must not leave an orphan Task.",
+            "workspace": {"kind": "new_project", "project_name": "invalid-start"},
+            "actor": "nathan",
+        }
+
+        with self.assertRaisesRegex(ValueError, "requires artifact_ref"):
+            service.start_workflow(
+                {**base, "operation": "review_then_execute"}
+            )
+        with self.assertRaisesRegex(ValueError, "sections must be an object"):
+            service.start_workflow(
+                {
+                    **base,
+                    "operation": "new_requirement",
+                    "sections": ["not-a-section-map"],
+                }
+            )
+
+        self.assertEqual(
+            service.repository.search_tasks(include_archived=True, limit=10),
+            (),
+        )
+
     def test_task_ledger_uses_fts_and_status_can_rebind_across_channels(self) -> None:
         provider = MinionV2PublicProvider(runtime_root=self.runtime_root, wake_manager=lambda: None)
         old_meta = {"actor_id": "nathan", "channel_id": "socket:old"}

@@ -255,6 +255,18 @@ class MinionV2WorkflowService:
 
     def start_workflow(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
+        _validate_start_workflow_shape(data)
+        operation = str(data.get("operation") or "new_requirement").strip().lower()
+        if operation not in ROUTER_OPERATIONS:
+            raise ValueError(f"unsupported artifact router operation: {operation}")
+        goal = str(data.get("goal") or "").strip()
+        artifact_ref = _artifact_ref_mapping(data.get("artifact_ref"))
+        requirements_ref = _artifact_ref_mapping(data.get("requirements_ref"))
+        if operation == "new_requirement" and not goal:
+            raise ValueError("new_requirement workflow requires goal")
+        if operation != "new_requirement" and not artifact_ref:
+            raise ValueError(f"{operation} requires artifact_ref")
+
         task_id = str(data.get("task_id") or "").strip()
         task_was_selected = bool(task_id)
         if not task_id:
@@ -267,18 +279,10 @@ class MinionV2WorkflowService:
         task_revision_ref = dict(task.payload.get("task_revision_ref") or {})
         task_revision = dict(self.artifacts.read_json(task_revision_ref))
         family_binding_ref = self.catalog.publish_family_binding(str(task.payload.get("family_id") or ""))
-        operation = str(data.get("operation") or "new_requirement").strip().lower()
-        if operation not in ROUTER_OPERATIONS:
-            raise ValueError(f"unsupported artifact router operation: {operation}")
         workflow_id = str(data.get("workflow_id") or f"wf_{uuid4().hex}").strip()
         actor = str(data.get("actor") or "pal").strip()
         source_channel = str(data.get("source_channel") or "local").strip()
         research_mode = ResearchMode(str(data.get("research_mode") or ResearchMode.LOCAL_ONLY))
-        goal = str(data.get("goal") or "").strip()
-        artifact_ref = _artifact_ref_mapping(data.get("artifact_ref"))
-        requirements_ref = _artifact_ref_mapping(data.get("requirements_ref"))
-        if operation == "new_requirement" and not goal:
-            raise ValueError("new_requirement workflow requires goal")
         if operation == "new_requirement" and not requirements_ref:
             requirements_payload: dict[str, Any]
             if data.get("sections"):
@@ -310,8 +314,6 @@ class MinionV2WorkflowService:
             record = self.repository.read_artifact_record(str(requirements_ref.get("sha256") or ""))
             if record is None or str(record.get("artifact_type") or "") != "RequirementsArtifact":
                 raise ValueError("requirements_ref must reference a durable RequirementsArtifact")
-        if operation != "new_requirement" and not artifact_ref:
-            raise ValueError(f"{operation} requires artifact_ref")
         if operation in {"execute_trusted", "review_then_execute"}:
             self._validate_external_architecture_ref(
                 artifact_ref,
@@ -1046,6 +1048,38 @@ def workflow_request_from_snapshot(
     return request
 
 
+def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
+    workspace = data.get("workspace")
+    if workspace is not None and not isinstance(workspace, Mapping):
+        raise ValueError("workflow workspace must be an object")
+    for field_name in (
+        "requirements",
+        "constraints",
+        "approved_evidence",
+        "references",
+    ):
+        value = data.get(field_name)
+        if value is not None and not isinstance(value, (list, tuple)):
+            raise ValueError(f"workflow {field_name} must be an array")
+    for field_name in ("sections", "strengths", "control_route"):
+        value = data.get(field_name)
+        if value is not None and not isinstance(value, Mapping):
+            raise ValueError(f"workflow {field_name} must be an object")
+    sections = data.get("sections")
+    if isinstance(sections, Mapping):
+        for section, statements in sections.items():
+            if not str(section or "").strip():
+                raise ValueError("workflow Requirement section names cannot be empty")
+            if not isinstance(statements, (list, tuple)):
+                raise ValueError(
+                    f"workflow Requirement section {section!r} must contain an array of strings"
+                )
+            if any(not isinstance(statement, str) for statement in statements):
+                raise ValueError(
+                    f"workflow Requirement section {section!r} must contain only strings"
+                )
+
+
 def _normalize_workspace(value: Any) -> dict[str, Any]:
     workspace = dict(value or {}) if isinstance(value, Mapping) else {}
     if not str(workspace.get("repo_path") or "").strip():
@@ -1062,9 +1096,13 @@ def _normalize_workspace(value: Any) -> dict[str, Any]:
 
 
 def _normalize_references(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("workflow references must be an array")
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for index, raw in enumerate(list(value or []), start=1):
+    for index, raw in enumerate(value, start=1):
         item = dict(raw) if isinstance(raw, Mapping) else {"path": str(raw)}
         path = str(item.get("path") or item.get("root") or item.get("uri") or "").strip()
         if not path:
