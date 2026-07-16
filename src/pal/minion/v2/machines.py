@@ -715,7 +715,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             kind,
             S.HUMAN_REVIEW,
             "HUMAN_EDIT",
-            S.REVISION_PENDING,
+            S.SUPERSEDED,
             guard=_required("decision_token", "edit_instruction_ref"),
             effects=_combined_effects(
                 _effect("materialize_plan_revision", status="revision_requested"),
@@ -768,7 +768,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             effects=_effect("resume_aggregate_work"),
         )
     )
-    cancellable = pausable | {S.PAUSE_REQUESTED, S.PAUSED, S.REVISION_PENDING, S.TRIAGE_REQUIRED}
+    cancellable = pausable | {S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED}
     for state in cancellable:
         transitions.append(_spec(kind, state, "REQUEST_CANCEL", S.CANCEL_REQUESTED, effects=_effect("cancel_aggregate_work")))
     triageable = pausable | {S.PAUSE_REQUESTED}

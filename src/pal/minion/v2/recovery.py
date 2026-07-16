@@ -137,7 +137,7 @@ class MinionV2Recovery:
 
     def _recover_duplicate_replans(self) -> list[str]:
         reconciled: list[str] = []
-        terminal_revision_states = {"ACCEPTED", "REJECTED", "CANCELLED"}
+        terminal_revision_states = {"ACCEPTED", "REJECTED", "SUPERSEDED", "CANCELLED"}
         for workflow_id in self.repository.workflow_ids():
             snapshots = list(self.repository.list_workflow_snapshots(workflow_id))
             revisions = [

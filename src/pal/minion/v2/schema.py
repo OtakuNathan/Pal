@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 15
+MINION_V2_SCHEMA_VERSION = 16
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -420,6 +420,8 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
     previous_version = _schema_version(connection)
     if previous_version < 15:
         _migrate_worker_state_ownership_v15(connection)
+    if previous_version < 16:
+        _migrate_superseded_architecture_revisions_v16(connection)
     connection.execute(
         """
         INSERT INTO minion_v2_schema_meta(schema_key, schema_value)
@@ -527,5 +529,18 @@ def _migrate_worker_state_ownership_v15(connection: sqlite3.Connection) -> None:
             END,
             updated_at = {now}
         WHERE assignment_id IN ({invalid_assignments})
+        """
+    )
+
+
+def _migrate_superseded_architecture_revisions_v16(connection: sqlite3.Connection) -> None:
+    """Close edited architecture revisions that were left in a dead wait state."""
+
+    connection.execute(
+        """
+        UPDATE minion_v2_aggregate_snapshots
+        SET state = 'SUPERSEDED'
+        WHERE aggregate_type = 'architecture_revision'
+          AND state = 'REVISION_PENDING'
         """
     )

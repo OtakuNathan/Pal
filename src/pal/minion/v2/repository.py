@@ -2679,7 +2679,12 @@ class MinionV2Repository:
                 str(owner["aggregate_id"]),
             )
             allowed_terminal = {
-                AggregateType.ARCHITECTURE_REVISION: {"ACCEPTED", "REJECTED", "CANCELLED"},
+                AggregateType.ARCHITECTURE_REVISION: {
+                    "ACCEPTED",
+                    "REJECTED",
+                    "SUPERSEDED",
+                    "CANCELLED",
+                },
                 AggregateType.DAG_NODE_RUN: {"ACCEPTED", "CANCELLED"},
             }
             if snapshot is None or snapshot.state not in allowed_terminal.get(snapshot.aggregate_type, set()):
@@ -3549,7 +3554,7 @@ def _current_phase(workflow: AggregateSnapshot, active: AggregateSnapshot | None
             return "architecture"
         if state in {"REVIEW_QUEUED", "REVIEWING"}:
             return "architecture_review"
-        if state in {"HUMAN_REVIEW", "REVISION_PENDING"}:
+        if state == "HUMAN_REVIEW":
             return "human_review"
         return f"architecture_{state.lower()}"
     if active.aggregate_type == AggregateType.EXECUTION_EPOCH:

@@ -1097,6 +1097,38 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertNotIn("human_review_card_ref", reopened.snapshot.payload)
         self.assertEqual([effect.effect_type for effect in reopened.effects], ["enqueue_architecture_review"])
 
+    def test_human_edit_supersedes_the_old_revision_before_creating_the_next(self) -> None:
+        waiting = AggregateSnapshot(
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch_edit",
+            workflow_id="wf_test",
+            state=ArchitectureRevisionState.HUMAN_REVIEW,
+            version=3,
+            payload={"architecture_manifest_ref": {"sha256": "manifest"}},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        edited = self.engine.transition(
+            waiting,
+            self.action(
+                "HUMAN_EDIT",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_edit",
+                expected_version=3,
+                payload={
+                    "decision_token": "decision-edit",
+                    "edit_instruction_ref": {"sha256": "edit"},
+                },
+            ),
+        )
+
+        self.assertEqual(edited.snapshot.state, ArchitectureRevisionState.SUPERSEDED)
+        self.assertEqual(
+            [effect.effect_type for effect in edited.effects],
+            ["materialize_plan_revision", "create_architecture_revision"],
+        )
+
     def test_transition_table_uses_only_declared_aggregate_states(self) -> None:
         declared = {
             AggregateType.TASK: {str(item) for item in TaskState},
@@ -1115,6 +1147,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             (AggregateType.WORKFLOW, str(WorkflowState.REJECTED)): ("ARCHIVE",),
             (AggregateType.WORKFLOW, str(WorkflowState.CANCELLED)): ("ARCHIVE",),
             (AggregateType.ARCHITECTURE_REVISION, str(ArchitectureRevisionState.ACCEPTED)): (),
+            (AggregateType.ARCHITECTURE_REVISION, str(ArchitectureRevisionState.SUPERSEDED)): (),
             (AggregateType.EXECUTION_EPOCH, str(ExecutionEpochState.COMPLETED)): (),
             (AggregateType.DAG_NODE_RUN, str(DagNodeRunState.ACCEPTED)): (
                 "MARK_STALE",

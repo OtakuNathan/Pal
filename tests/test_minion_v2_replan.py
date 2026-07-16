@@ -198,7 +198,7 @@ class MinionV2ReplanTests(unittest.TestCase):
             "PAUSED",
         )
 
-    def test_control_scope_ignores_superseded_nonterminal_revision(self) -> None:
+    def test_control_scope_ignores_superseded_revision(self) -> None:
         def snapshot(
             aggregate_type: AggregateType,
             aggregate_id: str,
@@ -230,7 +230,7 @@ class MinionV2ReplanTests(unittest.TestCase):
             snapshot(
                 AggregateType.ARCHITECTURE_REVISION,
                 "arch_historical",
-                "REVISION_PENDING",
+                "SUPERSEDED",
             ),
             snapshot(
                 AggregateType.ARCHITECTURE_REVISION,

@@ -213,6 +213,37 @@ class MinionV2WorkerProtocolTests(unittest.TestCase):
             role="repair",
         )
 
+    def test_v16_closes_legacy_revision_pending_snapshots(self) -> None:
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_ARCHITECTURE_REVISION",
+                workflow_id="workflow-edit",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="arch-edit",
+                actor="test",
+                expected_version=0,
+                idempotency_key="create-edit-revision",
+            )
+        )
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_schema_meta SET schema_value = '15' "
+                "WHERE schema_key = 'schema_version'"
+            )
+            connection.execute(
+                "UPDATE minion_v2_aggregate_snapshots SET state = 'REVISION_PENDING' "
+                "WHERE aggregate_type = 'architecture_revision' AND aggregate_id = 'arch-edit'"
+            )
+
+        self.repository.ensure_schema()
+
+        snapshot = self.repository.read_snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            "arch-edit",
+        )
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.state, "SUPERSEDED")
+
     def test_failure_result_and_parent_triage_settle_atomically(self) -> None:
         self.repository.dispatch(
             ActionEnvelope(
