@@ -5,10 +5,12 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.minion.catalog import MinionCatalogService
 from pal.minion.profiles import MinionProfileRegistry, resolve_pinned_minion_pack
 from pal.minion.scoped_execution import MinionScopedExecutionRuntime
+from pal.minion.workspace_tools import _normalized_reference_paths
 from pal.execution.contracts import CapabilityDescriptor, CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
@@ -397,6 +399,53 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertNotIn("not-bound", missing.llm_text)
         self.assertFalse(sibling_attempt.ok)
         self.assertIn("outside the declared immutable input", sibling_attempt.llm_text)
+
+    def test_reference_normalization_preserves_manager_bound_input_routing(self) -> None:
+        bound = self.root / "bound-input.json"
+        bound.write_text('{"value":true}\n', encoding="utf-8")
+
+        references = _normalized_reference_paths(
+            {
+                "reference_paths": [
+                    {
+                        "name": "module_work_view",
+                        "path": str(bound),
+                        "bound_input": True,
+                        "required": True,
+                    }
+                ]
+            }
+        )
+
+        self.assertTrue(references[0]["bound_input"])
+        self.assertTrue(references[0]["required"])
+
+        class FakeGateway:
+            def request_sync(self, operation, payload):
+                self.operation = operation
+                self.payload = dict(payload)
+                return {
+                    "content": '1 {"value":true}',
+                    "start_line": 1,
+                    "returned_lines": 1,
+                    "total_lines": 1,
+                    "has_more": False,
+                }
+
+        gateway = FakeGateway()
+        workspace = {"runtime_root": str(self.root), "reference_paths": references}
+        scoped = MinionScopedExecutionRuntime(object(), ["op_minion_input_read"], workspace=workspace)
+        with patch("pal.minion.v2.worker_gateway.worker_gateway_client_from_env", return_value=gateway):
+            result = asyncio.run(
+                scoped.execute_tool_async(
+                    CanonicalToolCall(name="op_minion_input_read", args={"name": "module_work_view"})
+                )
+            )
+
+        self.assertTrue(result.ok, result.text)
+        self.assertEqual(gateway.operation, "bound_input_read")
+        self.assertEqual(gateway.payload["name"], "module_work_view")
+        self.assertIn('"value":true', result.llm_text)
 
     def test_software_profiles_preserve_engineering_rules_and_lsp_surface(self) -> None:
         coder = self._pack("software_engineering.v2_coder")

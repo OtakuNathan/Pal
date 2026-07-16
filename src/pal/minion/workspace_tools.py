@@ -161,6 +161,7 @@ def _normalize_reference_path_item(raw: Any, *, index: int) -> dict[str, Any]:
         "path": str(root),
         "mode": "read_only",
         "truth_source": _coerce_bool(payload.get("truth_source"), default=True),
+        "bound_input": _coerce_bool(payload.get("bound_input"), default=False),
     }
     if include:
         item["include"] = include
