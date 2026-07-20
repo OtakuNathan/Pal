@@ -496,7 +496,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         ref = self._register_text("refund-policy.txt", "refund terms are on page one")
 
         contracts = {
-            contract["function"]["name"]: contract["function"]["parameters"]
+            contract["function"]["name"]: contract["function"]["input_schema"]
             for contract in core.tool_surface.build_llm_tool_contracts()
         }
 

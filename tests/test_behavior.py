@@ -880,7 +880,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("write_memory", exposed_names)
         self.assertNotIn("delete_memory", exposed_names)
         learn_tool = next(item for item in core.tool_surface.build_llm_tool_contracts() if item["function"]["name"] == "learn_behavior")
-        learn_properties = learn_tool["function"]["parameters"]["properties"]
+        learn_properties = learn_tool["function"]["input_schema"]["properties"]
         self.assertIn("resident", learn_properties)
         self.assertNotIn("visibility_mode", learn_properties)
         self.assertNotIn("activation_kind", learn_properties)

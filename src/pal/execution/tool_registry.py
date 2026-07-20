@@ -280,7 +280,7 @@ def compile_registry_generation(
                 "function": {
                     "name": alias,
                     "description": record.description,
-                    "parameters": record.input_schema,
+                    "input_schema": record.input_schema,
                 },
             }
 
@@ -313,7 +313,7 @@ def compile_registry_generation(
                 "function": {
                     "name": alias,
                     "description": record.description,
-                    "parameters": record.input_schema,
+                    "input_schema": record.input_schema,
                 },
             }
 

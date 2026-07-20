@@ -320,7 +320,6 @@ def compile_tool_description(
         sections.append(f"Valid example: {json.dumps(example, ensure_ascii=False, sort_keys=True)}")
     sections.extend(
         [
-            f"Input schema: {json.dumps(input_schema, ensure_ascii=False, sort_keys=True)}",
             f"Output shape: {json.dumps(output_schema, ensure_ascii=False, sort_keys=True)}",
             f"Invoke using the exact alias `{alias}`.",
         ]

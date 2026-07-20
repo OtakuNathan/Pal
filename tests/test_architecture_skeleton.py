@@ -1055,15 +1055,15 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("llm_set_active_endpoint", exposed_names)
             self.assertIn("echo", exposed_names)
             exec_tool = next(item for item in request.tools if item["function"]["name"] == "run_shell")
-            self.assertIn("cmd", exec_tool["function"]["parameters"]["properties"])
+            self.assertIn("cmd", exec_tool["function"]["input_schema"]["properties"])
             self.assertIn("Pal runtime, module, capability, minion", exec_tool["function"]["description"])
             self.assertIn("use search_tools/read_tool/call_tool", exec_tool["function"]["description"])
             self.assertNotIn("op_", exec_tool["function"]["description"])
             memory_update = next(item for item in request.tools if item["function"]["name"] == "update_memory")
-            self.assertIn("mem_ref", memory_update["function"]["parameters"]["properties"])
-            self.assertNotIn("target_id", memory_update["function"]["parameters"]["properties"])
+            self.assertIn("mem_ref", memory_update["function"]["input_schema"]["properties"])
+            self.assertNotIn("target_id", memory_update["function"]["input_schema"]["properties"])
             memory_recall = next(item for item in request.tools if item["function"]["name"] == "recall_memory")
-            memory_recall_properties = memory_recall["function"]["parameters"]["properties"]
+            memory_recall_properties = memory_recall["function"]["input_schema"]["properties"]
             self.assertIn("task_id", memory_recall_properties)
             self.assertIn("queries", memory_recall_properties)
             self.assertIn("topic_scope", memory_recall_properties)
@@ -1078,7 +1078,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("use update_memory with that", memory_write_description)
             self.assertIn("Do not write duplicate memories", memory_write_description)
             self.assertIn("fact: or case:", memory_write_description)
-            memory_write_properties = memory_write["function"]["parameters"]["properties"]
+            memory_write_properties = memory_write["function"]["input_schema"]["properties"]
             self.assertIn("star", memory_write_properties)
             self.assertIn("task_id", memory_write_properties)
             self.assertNotIn("scope", memory_write_properties)
@@ -1088,7 +1088,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("task_text", memory_write_properties)
             self.assertNotIn("action_text", memory_write_properties)
             self.assertNotIn("result_text", memory_write_properties)
-            memory_update_properties = memory_update["function"]["parameters"]["properties"]
+            memory_update_properties = memory_update["function"]["input_schema"]["properties"]
             self.assertIn("star", memory_update_properties)
             self.assertNotIn("payload_patch", memory_update_properties)
             self.assertNotIn("situation_text", memory_update_properties)
@@ -2055,7 +2055,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             if item.get("function", {}).get("name") == "read_tool_result"
         )
 
-        schema = page_tool["function"]["parameters"]
+        schema = page_tool["function"]["input_schema"]
         self.assertIn("result_ref", schema["properties"])
         self.assertIn("page", schema["properties"])
         self.assertIn("anchor", schema["properties"])

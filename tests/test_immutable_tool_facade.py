@@ -93,9 +93,15 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("effect_kind=none", record.description)
         self.assertIn('"short"', record.description)
         self.assertIn('"value": "hello"', record.description)
-        self.assertIn("Input schema:", record.description)
+        self.assertNotIn("Input schema:", record.description)
         self.assertIn("Output shape:", record.description)
         self.assertNotIn("op_test_echo", record.description)
+
+        provider_function = self.core.context.execution_runtime.registry_generation.provider_specs["echo"][
+            "function"
+        ]
+        self.assertIn("input_schema", provider_function)
+        self.assertNotIn("parameters", provider_function)
 
         search_record = self.core.context.execution_runtime.registry_generation.search_records["echo"]
         self.assertEqual(

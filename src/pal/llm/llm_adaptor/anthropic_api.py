@@ -111,7 +111,9 @@ def chat_tools_to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str,
                 {
                     "name": name,
                     "description": str(function.get("description") or name),
-                    "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
+                    "input_schema": function.get("input_schema")
+                    or function.get("parameters")
+                    or {"type": "object", "properties": {}},
                 }
             )
             continue
@@ -121,7 +123,9 @@ def chat_tools_to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str,
                 {
                     "name": name,
                     "description": str(tool.get("description") or name),
-                    "input_schema": tool.get("parameters") or {"type": "object", "properties": {}},
+                    "input_schema": tool.get("input_schema")
+                    or tool.get("parameters")
+                    or {"type": "object", "properties": {}},
                 }
             )
     return rendered

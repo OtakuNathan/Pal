@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import unittest
 
-from pal.llm.llm_adaptor.anthropic_api import chat_messages_to_anthropic_messages
+from pal.llm.llm_adaptor.anthropic_api import (
+    chat_messages_to_anthropic_messages,
+    chat_tools_to_anthropic_tools,
+)
 from pal.llm.llm_adaptor.base import chat_messages_to_openai_compatible_messages
-from pal.llm.llm_adaptor.openai_responses import chat_messages_to_responses_input
+from pal.llm.llm_adaptor.openai_responses import (
+    chat_messages_to_responses_input,
+    chat_tools_to_responses_tools,
+)
+from pal.llm.runtime import _coerce_tools_for_openai_chat
 
 
 def _tool_protocol_messages() -> list[dict[str, object]]:
@@ -27,7 +34,37 @@ def _tool_protocol_messages() -> list[dict[str, object]]:
     ]
 
 
+def _canonical_tools() -> list[dict[str, object]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "probe",
+                "description": "Probe Pal.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                },
+            },
+        }
+    ]
+
+
 class LLMProviderShapeTests(unittest.TestCase):
+    def test_canonical_input_schema_maps_to_each_provider_shape(self) -> None:
+        schema = _canonical_tools()[0]["function"]["input_schema"]
+
+        openai_chat = _coerce_tools_for_openai_chat(_canonical_tools())
+        self.assertEqual(openai_chat[0]["function"]["parameters"], schema)
+        self.assertNotIn("input_schema", openai_chat[0]["function"])
+
+        openai_responses = chat_tools_to_responses_tools(_canonical_tools())
+        self.assertEqual(openai_responses[0]["parameters"], schema)
+
+        anthropic = chat_tools_to_anthropic_tools(_canonical_tools())
+        self.assertEqual(anthropic[0]["input_schema"], schema)
+
     def test_openai_chat_preserves_standard_tool_protocol_shape(self) -> None:
         rendered = chat_messages_to_openai_compatible_messages(_tool_protocol_messages())
 

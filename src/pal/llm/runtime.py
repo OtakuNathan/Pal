@@ -2237,6 +2237,9 @@ def _coerce_tools_for_openai_chat(
             name = str(function.get("name") or "").strip()
             if name:
                 function["name"] = _external_tool_name(name, tool_name_aliases)
+            input_schema = function.pop("input_schema", None)
+            if input_schema is not None:
+                function["parameters"] = input_schema
             payload["function"] = function
             normalized.append(payload)
             continue
@@ -2248,8 +2251,10 @@ def _coerce_tools_for_openai_chat(
                 "type": "function",
                 "function": {
                     "name": _external_tool_name(name, tool_name_aliases),
-                    "description": f"Tool {name}",
-                    "parameters": {"type": "object", "properties": {}},
+                    "description": str(tool.get("description") or f"Tool {name}"),
+                    "parameters": tool.get("input_schema")
+                    or tool.get("parameters")
+                    or {"type": "object", "properties": {}},
                 },
             }
         )

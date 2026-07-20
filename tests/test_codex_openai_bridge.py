@@ -290,7 +290,7 @@ class OpenAICodexBridgeMappingTests(unittest.TestCase):
                     "function": {
                         "name": "pal_probe",
                         "description": "Probe Pal.",
-                        "parameters": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                        "input_schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
                     },
                 }
             ]

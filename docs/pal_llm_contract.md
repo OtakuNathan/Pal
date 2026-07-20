@@ -47,6 +47,12 @@ definitions and canonical tool-call records.
 This IR is not assumed to be a valid payload for every provider. It is rendered
 late, after endpoint selection, by the selected provider adapter.
 
+Canonical function tool definitions carry their argument JSON Schema in
+`function.input_schema`. Provider adapters render that field as
+`function.parameters` for OpenAI Chat, `parameters` for OpenAI Responses,
+`input_schema` for Anthropic, or `inputSchema` for the Codex bridge. Tool
+descriptions do not repeat the input schema.
+
 Important transcript rules:
 
 - An assistant message with empty text and non-empty `tool_calls` is valid.
