@@ -22,8 +22,7 @@ from pal.minion.v2.submission_drafts import (
 )
 from pal.minion.v2.submission_preflight import (
     bound_reference_payload,
-    requirement_refs_from_view,
-    validate_submission_requirement_refs,
+    raise_submission_errors,
 )
 from pal.minion.v2.verification import (
     historical_repair_checklist_items,
@@ -59,7 +58,6 @@ _COMMON_VERIFICATION_CAPABILITIES = frozenset(
         "op_minion_verification_report_contract_defect",
         "op_minion_verification_report_architecture_defect",
         "op_minion_verification_report_integration_defect",
-        "op_minion_verification_propose_requirement_patch",
         "op_minion_verification_set_summary",
         "op_minion_verification_draft_status",
         "op_minion_verification_remove_case",
@@ -80,7 +78,6 @@ _FINDING_CAPABILITIES = (
     "op_minion_verification_report_contract_defect",
     "op_minion_verification_report_architecture_defect",
     "op_minion_verification_report_integration_defect",
-    "op_minion_verification_propose_requirement_patch",
     "op_minion_verification_set_summary",
 )
 VERIFICATION_BUILDER_CAPABILITIES = (
@@ -111,8 +108,6 @@ _RUN_SCHEMA = {
         "description": {"type": "string"},
         "expected_exit_codes": {"type": "array", "items": {"type": "integer"}},
         "timeout_seconds": {"type": "integer", "minimum": 1},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
         "path": {"type": "string"},
         "symbol": {"type": "string"},
         "contract_section": {"type": "string"},
@@ -128,8 +123,6 @@ _LSP_SCHEMA = {
         "name": {"type": "string", "minLength": 1},
         "file": {"type": "string", "minLength": 1},
         "description": {"type": "string"},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
     },
     "required": ["name", "file"],
     "additionalProperties": False,
@@ -152,8 +145,6 @@ _UNAVAILABLE_SCHEMA = {
             "enum": ["focused_tests", "warning_clean", "consumer_probe", "public_surface_dogfood", "lsp", "historical_regressions", "platform_probe"],
         },
         "reason": {"type": "string", "minLength": 1},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
         "path": {"type": "string"},
     },
     "required": ["name", "obligation", "reason"],
@@ -178,21 +169,6 @@ _FINDING_SCHEMA = {
         "invariants": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["case", "finding_section", "summary", "failure_reason", "severity"],
-    "additionalProperties": False,
-}
-_PATCH_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "patch_kind": {"type": "string", "enum": ["clarification", "derived_constraint", "regression_obligation"]},
-        "section": {"type": "string", "minLength": 1},
-        "requirement": {"type": "string", "minLength": 1},
-        "strength": {"type": "string", "enum": ["hard", "soft"]},
-        "reason": {"type": "string", "minLength": 1},
-        "affected_modules": {"type": "array", "items": {"type": "string"}},
-        "contract_path": {"type": "string"},
-        "contract_symbol": {"type": "string"},
-    },
-    "required": ["patch_kind", "section", "requirement", "strength", "reason", "affected_modules"],
     "additionalProperties": False,
 }
 _SUMMARY_SCHEMA = {
@@ -259,7 +235,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         name: {
             "name": "op_" + name.removeprefix("op_minion_"),
             "description": (
-                "Run and durably register one semantic verification case. Cite an exact Requirement, source location, or invariant; "
+                "Run and durably register one semantic verification case. Use a readable case name and put any source citation in the description or path; "
                 "the Manager owns stdout/stderr Artifacts and does not ask you to construct a report object."
             ),
             "parameters_schema": _RUN_SCHEMA,
@@ -289,11 +265,6 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "op_minion_verification_report_architecture_defect",
             "op_minion_verification_report_integration_defect",
         )
-    },
-    "op_minion_verification_propose_requirement_patch": {
-        "name": "op_verification_propose_requirement_patch",
-        "description": "Propose one timestamped Requirement patch only after a reproduced contract or architecture defect reveals new product semantics. patch_kind is clarification, derived_constraint, or regression_obligation; strength is hard or soft.",
-        "parameters_schema": _PATCH_SCHEMA,
     },
     "op_minion_verification_set_summary": {
         "name": "op_verification_set_summary",
@@ -359,13 +330,16 @@ def effective_verification_policy(
         require_dogfood = bool(source.get("require_public_surface_dogfood", False))
         require_platform_probe = False
 
+    historical_regressions = historical_repair_checklist_items(work_view)
+
     allowed_obligations = {
         "compile",
         "focused_tests",
-        "historical_regressions",
         "lsp",
         "warning_clean",
     }
+    if historical_regressions:
+        allowed_obligations.add("historical_regressions")
     if mode == "module" or require_consumer_probe:
         allowed_obligations.add("consumer_probe")
     if require_dogfood:
@@ -384,9 +358,9 @@ def effective_verification_policy(
         "require_consumer_probe": require_consumer_probe,
         "require_public_surface_dogfood": require_dogfood,
         "require_platform_probe": require_platform_probe,
-        "require_historical_regressions": bool(
-            source.get("require_historical_regressions", False)
-        ),
+        # Historical regression is node-local. An empty RepairBill ledger has
+        # no case to replay and must not become an UNKNOWN obligation.
+        "require_historical_regressions": bool(historical_regressions),
         "lsp_policy": str(source.get("lsp_policy") or ""),
         "unknown_policy": str(source.get("unknown_policy") or "strict"),
         "case_timeout_seconds": int(source.get("case_timeout_seconds") or 300),
@@ -402,9 +376,6 @@ def compile_verification_invocation_tool_contract(
 ) -> dict[str, Any]:
     """Compile one stable, invocation-local description contract from bound inputs."""
 
-    requirements: dict[str, list[str]] = {}
-    for section, requirement in sorted(requirement_refs_from_view(work_view)):
-        requirements.setdefault(section, []).append(requirement)
     module_name = str(
         work_view.get("module_name")
         or work_view.get("verification_name")
@@ -481,11 +452,12 @@ def compile_verification_invocation_tool_contract(
         allowed_capabilities.add("op_minion_verification_run_dogfood")
     if "platform_probe" in set(policy["allowed_obligations"]):
         allowed_capabilities.add("op_minion_verification_run_platform_probe")
+    if not historical_regressions:
+        allowed_capabilities.discard("op_minion_verification_run_historical_regression")
     if not allowed_targets["integration_defect"]:
         allowed_capabilities.discard("op_minion_verification_report_integration_defect")
     contract: dict[str, Any] = {
         "contract_version": "1",
-        "requirements": requirements,
         "module_name": module_name,
         "contract_paths": contract_paths,
         "contract_consumption": consumption,
@@ -496,7 +468,6 @@ def compile_verification_invocation_tool_contract(
         "allowed_defect_targets": allowed_targets,
         "required_historical_regressions": historical_regressions,
     }
-    requirement_text = json.dumps(requirements, ensure_ascii=False, sort_keys=True)
     boundary_text = json.dumps(
         {
             "contract_paths": contract_paths,
@@ -510,13 +481,18 @@ def compile_verification_invocation_tool_contract(
     overrides: dict[str, str] = {}
     for capability in (*_RUN_TO_KIND_TAG, "op_minion_verification_run_lsp_check", "op_minion_verification_check_unavailable"):
         overrides[capability] = (
-            "Record one semantic verification case. requirement_section must name a section in the bound catalog below. "
-            "If that section has one Requirement, Manager binds it automatically and any requirement hint is ignored; "
-            "if it has several, requirement must exactly equal one candidate. Validation occurs before execution or Draft mutation. "
-            "Reusing a case name updates that case. description may use any language. Set probe_path whenever the command "
+            "Record one semantic verification case. Read the immutable task sources directly; do not copy them into structured fields. "
+            "Reusing a case name updates that case. The description may cite a source filename in any language. Set probe_path whenever the command "
             "consumes a verifier scratch file so exact evidence reuse is invalidated only by that file. "
-            f"Bound Requirements: {requirement_text}. Bound verification context: {boundary_text}."
+            f"Bound verification context: {boundary_text}."
         )
+    overrides["op_minion_verification_check_unavailable"] = (
+        "Record UNKNOWN only for an allowed obligation that is genuinely required but unavailable in this environment. "
+        "Do not create an UNKNOWN case for an absent or non-applicable obligation. In particular, an empty historical "
+        "RepairBill checklist means there is no historical-regression obligation. Allowed obligations: "
+        + json.dumps(policy["allowed_obligations"], ensure_ascii=False, sort_keys=True)
+        + f". Bound verification context: {boundary_text}."
+    )
     if historical_regressions:
         overrides["op_minion_verification_run_historical_regression"] = (
             "Replay one Manager-bound historical RepairBill case before new adversarial or diff-risk exploration. "
@@ -535,7 +511,7 @@ def compile_verification_invocation_tool_contract(
         defect_kind = capability.removeprefix("op_minion_verification_report_")
         overrides[capability] = (
             "Record one independently actionable finding for an existing case. A case may expose several findings; record each "
-            "material defect separately. The finding inherits the case's canonical Requirement, locations, and invariants unless "
+            "material defect separately. The finding inherits the case's locations and invariants unless "
             "you supply a narrower path/symbol/contract section. Exact semantic duplicates are ignored. Findings may cite only "
             "FAIL or UNKNOWN cases. "
             f"Defect kind: {defect_kind}. Allowed target_module values: "
@@ -612,8 +588,6 @@ async def verification_builder_tool_result(
             return _scratch_write(call, workspace, draft_kind=draft_kind)
         if name.startswith("op_minion_verification_report_"):
             return _record_finding(call, workspace, draft_kind=draft_kind)
-        if name == "op_minion_verification_propose_requirement_patch":
-            return _set_requirement_patch(call, workspace, draft_kind=draft_kind)
         if name == "op_minion_verification_set_summary":
             return _set_summary(call, workspace, draft_kind=draft_kind)
         if name == "op_minion_verification_draft_status":
@@ -890,49 +864,6 @@ def _remove_finding(
     return _ok(call, f"verification finding removed for case: {case_name}", result)
 
 
-def _set_requirement_patch(call: CanonicalToolCall, workspace: Mapping[str, Any], *, draft_kind: str) -> CanonicalToolResult:
-    args = dict(call.args or {})
-    affected_modules = [str(item).strip() for item in list(args.get("affected_modules") or []) if str(item).strip()]
-    if not affected_modules:
-        raise ValueError("Requirement patch requires at least one affected module")
-    contract_path = str(args.get("contract_path") or "").strip()
-    patch = {
-        "patch_kind": str(args.get("patch_kind") or ""),
-        "section": str(args.get("section") or "").strip(),
-        "requirement": str(args.get("requirement") or "").strip(),
-        "strength": str(args.get("strength") or ""),
-        "reason": str(args.get("reason") or "").strip(),
-        "affected_modules": affected_modules,
-        "affected_contracts": (
-            [{"module": affected_modules[0], "path": contract_path, **({"symbol": str(args.get("contract_symbol"))} if args.get("contract_symbol") else {})}]
-            if contract_path
-            else []
-        ),
-    }
-    context, store = _store_context(workspace, draft_kind=draft_kind)
-    snapshot = store.read(context, seed=_empty_payload())
-    cases = {str(item.get("name") or ""): dict(item) for item in recorded_cases(snapshot.payload)}
-    eligible = [
-        dict(item)
-        for item in list(snapshot.payload.get("findings") or [])
-        if str(dict(item).get("defect_kind") or "") in {"contract_defect", "architecture_defect"}
-        and str(cases.get(str(dict(item).get("case") or ""), {}).get("status") or "") == "FAIL"
-    ]
-    if not eligible:
-        raise ValueError(
-            "Requirement patch requires a reproduced FAIL already recorded as contract_defect or architecture_defect"
-        )
-
-    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-        summary = dict(payload.get("summary") or {})
-        summary["requirement_patch"] = patch
-        payload["summary"] = summary
-        return payload, {"recorded": True, "requirement_patch": patch}
-
-    result = store.mutate(context, operation_key=str(call.call_id or "requirement-patch"), request=args, reducer=reducer, seed=_empty_payload())
-    return _ok(call, "Requirement patch proposed", result)
-
-
 def _set_summary(call: CanonicalToolCall, workspace: Mapping[str, Any], *, draft_kind: str) -> CanonicalToolResult:
     args = dict(call.args or {})
     summary_text = str(args.get("summary") or "").strip()
@@ -1059,27 +990,29 @@ def _submit(
             first = dominant_findings[0]
             output["severity"] = str(first.get("severity") or "major")
             output["suggested_repair_boundary"] = list(first.get("suggested_repair_boundary") or [])
-        if summary.get("requirement_patch"):
-            output["requirement_patch"] = dict(summary["requirement_patch"])
         output["policy_exceptions"] = _policy_exceptions(cases)
         filename = "verification_plan.json"
         title = "V2 semantic verification plan"
     validate_semantic_verification_plan_shape(output, standalone=standalone, require_complete=True)
     if not standalone:
-        _preflight_verification_submission(output, workspace)
+        reference_warnings = _preflight_verification_submission(output, workspace)
+        if reference_warnings:
+            output["reference_warnings"] = list(reference_warnings)
+    submission_ref: dict[str, Any] = {}
     if store.uses_worker_gateway:
-        store.mark_submitted(
+        receipt = store.mark_submitted(
             context,
             expected_version=snapshot.version,
             submission_payload=output,
         )
+        submission_ref = dict(receipt.get("submission_artifact_ref") or {})
     else:
         runtime_root = Path(str(workspace["runtime_root"]))
         submission_store = ContentAddressedArtifactStore(
             runtime_root,
             MinionV2Repository(runtime_root),
         )
-        submission_ref = submission_store.put_json(
+        local_submission_ref = submission_store.put_json(
             output,
             artifact_type=(
                 "StandaloneReviewSubmissionArtifact"
@@ -1099,10 +1032,13 @@ def _submit(
         store.mark_submitted(
             context,
             expected_version=snapshot.version,
-            submission_artifact_ref=submission_ref.to_dict(),
+            submission_artifact_ref=local_submission_ref.to_dict(),
             submission_payload_hash=submission_payload_hash,
             submission_payload=output,
         )
+        submission_ref = local_submission_ref.to_dict()
+    if not submission_ref:
+        raise RuntimeError("Manager accepted verification submission without a durable receipt")
     artifact = _write_minion_artifact(
         dict(workspace),
         {
@@ -1120,8 +1056,6 @@ def _submit(
         f"{title} submitted. Stop now.",
         {
             "submitted": True,
-            "artifact": artifact,
-            "submission_receipt": submission_ref.to_dict(),
         },
     )
 
@@ -1145,19 +1079,26 @@ def validate_semantic_verification_plan_shape(value: Mapping[str, Any], *, stand
         raise ValueError("standalone verdict is invalid")
 
 
-def _preflight_verification_submission(value: Mapping[str, Any], workspace: Mapping[str, Any]) -> None:
+def _preflight_verification_submission(
+    value: Mapping[str, Any], workspace: Mapping[str, Any]
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    reference_warnings: tuple[str, ...] = ()
     work_view = bound_reference_payload(workspace, "module_work_view", required=False)
     if work_view:
-        validate_submission_requirement_refs(value, work_view=work_view, owner="Verifier submission")
+        reference_warnings = ()
     historical = list(work_view.get("historical_repair_bills") or []) or list(
         work_view.get("historical_repair_bill_refs") or []
     )
     required_historical = historical_repair_checklist_items(work_view)
     recorded_results = [dict(item) for item in list(value.get("recorded_results") or [])]
-    validate_verification_case_order(
-        [str(item.get("case_kind") or "") for item in recorded_results],
-        historical_required=bool(historical),
-    )
+    try:
+        validate_verification_case_order(
+            [str(item.get("case_kind") or "") for item in recorded_results],
+            historical_required=bool(historical),
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
     if required_historical:
         historical_status = {
             str(item.get("name") or ""): str(item.get("status") or "")
@@ -1170,13 +1111,14 @@ def _preflight_verification_submission(value: Mapping[str, Any], workspace: Mapp
             if str(item["case"]) not in historical_status
         ]
         if missing:
-            raise ValueError(
+            errors.append(
                 "verification must replay every historical RepairBill case before submit: "
                 + ", ".join(missing)
             )
     policy = bound_reference_payload(workspace, "verification_policy", required=False)
     if not policy:
-        return
+        raise_submission_errors(errors, owner="verification_submit")
+        return reference_warnings
     tags = {str(tag) for item in list(value.get("recorded_results") or []) for tag in list(dict(item).get("obligation_tags") or [])}
     exceptions = dict(value.get("policy_exceptions") or {})
     obligations = (
@@ -1188,17 +1130,17 @@ def _preflight_verification_submission(value: Mapping[str, Any], workspace: Mapp
     )
     for policy_key, tag in obligations:
         if bool(policy.get(policy_key, False)) and tag not in tags and not str(exceptions.get(tag) or "").strip():
-            raise ValueError(f"VerificationPolicy requires {tag} evidence or an explicit UNKNOWN reason")
+            errors.append(f"VerificationPolicy requires {tag} evidence or an explicit UNKNOWN reason")
     if bool(policy.get("require_historical_regressions", False)) and historical and "historical_regressions" not in tags:
-        raise ValueError("VerificationPolicy requires historical RepairBill regression evidence")
+        errors.append("VerificationPolicy requires historical RepairBill regression evidence")
     if str(policy.get("lsp_policy") or "") == "when_available" and "lsp" not in tags and not str(exceptions.get("lsp") or "").strip():
-        raise ValueError("VerificationPolicy requires LSP evidence or an explicit UNKNOWN reason")
+        errors.append("VerificationPolicy requires LSP evidence or an explicit UNKNOWN reason")
     allowed_obligations = {
         str(item) for item in list(policy.get("allowed_obligations") or []) if str(item)
     }
     unexpected = tags - allowed_obligations if allowed_obligations else set()
     if unexpected:
-        raise ValueError(
+        errors.append(
             "verification submission contains obligations outside this node's scope: "
             + ", ".join(sorted(unexpected))
         )
@@ -1214,10 +1156,12 @@ def _preflight_verification_submission(value: Mapping[str, Any], workspace: Mapp
         and str(item.get("name") or "") not in findings_by_case
     ]
     if failed_without_findings:
-        raise ValueError(
+        errors.append(
             "every FAIL case requires at least one structured finding: "
             + ", ".join(sorted(failed_without_findings))
         )
+    raise_submission_errors(errors, owner="verification_submit")
+    return reference_warnings
 
 
 def _preflight_verification_case_execution(
@@ -1268,13 +1212,10 @@ def _preflight_verification_case_execution(
 
 
 def _validate_case_references(cases: list[Mapping[str, Any]], *, workspace: Mapping[str, Any], standalone: bool) -> None:
+    del workspace, standalone
     for item in cases:
-        if not (list(item.get("requirements") or []) or list(item.get("locations") or []) or list(item.get("invariants") or [])):
-            raise ValueError(f"case {item.get('name')!r} requires Requirement text, a source location, or an invariant")
-    view_name = "review_request" if standalone else "module_work_view"
-    view = bound_reference_payload(workspace, view_name, required=False)
-    if view and requirement_refs_from_view(view):
-        validate_submission_requirement_refs({"cases": cases}, work_view=view, owner="Review evidence")
+        if not str(item.get("description") or "").strip() and not list(item.get("locations") or []) and not list(item.get("invariants") or []):
+            raise ValueError(f"case {item.get('name')!r} requires a semantic description, source location, or invariant")
 
 
 def _case_declaration(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -1367,14 +1308,6 @@ def _store_context(workspace: Mapping[str, Any], *, draft_kind: str) -> tuple[Su
 
 def _empty_payload() -> dict[str, Any]:
     return {"definitions": {"scratch_files": []}, "evidence": {"cases": {}}, "findings": [], "summary": {}}
-
-
-def _single_requirement(args: Mapping[str, Any]) -> list[dict[str, str]]:
-    section = str(args.get("requirement_section") or "").strip()
-    requirement = str(args.get("requirement") or "").strip()
-    if bool(section) != bool(requirement):
-        raise ValueError("requirement_section and requirement must be provided together")
-    return [{"section": section, "requirement": requirement}] if section else []
 
 
 def _single_location(args: Mapping[str, Any]) -> list[dict[str, str]]:

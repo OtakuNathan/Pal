@@ -19,34 +19,19 @@ from pal.minion.v2.paths import (
     project_git_layout_lock,
     resolve_project_git_layout,
 )
+from pal.minion.v2.task_sources import TaskSourceBundleService, validate_task_source_bundle
 
 
 ARCHITECTURE_SKELETON_ARTIFACT = "ArchitectureSkeletonArtifact"
 ARCHITECTURE_SKELETON_BUNDLE_ARTIFACT = "ArchitectureSkeletonGitBundleArtifact"
 ARCHITECTURE_SUBMISSION_ARTIFACT = "ArchitectureSkeletonSubmissionArtifact"
+ARCHITECTURE_VALIDATION_REPORT_ARTIFACT = "ArchitectureValidationReportArtifact"
 ARCHITECTURE_REPAIR_BASELINE_ARTIFACT = "ArchitectureSkeletonRepairBaselineArtifact"
 SKELETON_MODULE_CONTRACT_ARTIFACT = "SkeletonModuleContractArtifact"
 
 MODULE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,79}$")
-CONTRACT_COMMENT_SECTIONS = (
-    "Module",
-    "Responsibility",
-    "Requirements",
-    "Provides",
-    "Consumes",
-    "Ownership",
-    "Lifecycle",
-    "State",
-    "Invariants",
-    "Errors",
-    "Compatibility",
-)
 PATH_SCOPE_KINDS = frozenset({"file", "directory"})
 MODULE_KINDS = frozenset({"implementation", "contract_only"})
-VERIFICATION_KINDS = frozenset({"consumer_probe", "end_to_end", "dogfood", "platform"})
-VERIFICATION_ENTRYPOINT_KINDS = frozenset(
-    {"source_symbol", "build_target", "product_entrypoint", "platform_probe"}
-)
 _IGNORED_SNAPSHOT_PARTS = frozenset(
     {
         ".git",
@@ -97,16 +82,47 @@ class SemanticReferenceError(ValueError):
 
 
 @dataclass(frozen=True)
-class SemanticRequirement:
-    section: str
-    requirement: str
-    strength: str = "hard"
+class ValidationIssue:
+    severity: str
+    code: str
+    message: str
+    subject_kind: str = "architecture"
+    subject_name: str = ""
+    location: Mapping[str, str] | None = None
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "section": self.section,
-            "requirement": self.requirement,
-            "strength": self.strength,
+            "severity": self.severity,
+            "code": self.code,
+            "message": self.message,
+            "subject_kind": self.subject_kind,
+            **({"subject_name": self.subject_name} if self.subject_name else {}),
+            **({"location": dict(self.location)} if self.location else {}),
+        }
+
+
+@dataclass(frozen=True)
+class ArchitectureValidationResult:
+    normalized_submission: Mapping[str, Any]
+    issues: tuple[ValidationIssue, ...] = ()
+
+    @property
+    def errors(self) -> tuple[ValidationIssue, ...]:
+        return tuple(item for item in self.issues if item.severity == "error")
+
+    @property
+    def warnings(self) -> tuple[ValidationIssue, ...]:
+        return tuple(item for item in self.issues if item.severity == "warning")
+
+    def raise_for_errors(self) -> None:
+        _raise_architecture_errors(item.message for item in self.errors)
+
+    def report_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "1",
+            "status": "invalid" if self.errors else ("warnings" if self.warnings else "valid"),
+            "errors": [item.to_dict() for item in self.errors],
+            "warnings": [item.to_dict() for item in self.warnings],
         }
 
 
@@ -197,113 +213,18 @@ class SkeletonReviewFinding:
 class SkeletonReviewResult:
     verdict: str
     findings: tuple[SkeletonReviewFinding, ...] = ()
+    findings_markdown: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {"verdict": self.verdict, "findings": [item.to_dict() for item in self.findings]}
-
-
-def semantic_requirements(payload: Mapping[str, Any]) -> tuple[SemanticRequirement, ...]:
-    result: list[SemanticRequirement] = []
-    sections = payload.get("sections")
-    if isinstance(sections, Mapping):
-        strengths = dict(payload.get("strengths") or {})
-        for raw_section, values in sections.items():
-            section = str(raw_section or "").strip()
-            if not section:
-                raise ValueError("RequirementsArtifact section names must not be empty")
-            for value in list(values or []):
-                requirement = str(value or "").strip()
-                if not requirement:
-                    raise ValueError(f"RequirementsArtifact section {section!r} contains an empty requirement")
-                strength = str(strengths.get(requirement) or "hard").strip().lower()
-                result.append(SemanticRequirement(section, requirement, _requirement_strength(strength)))
-    else:
-        for value in list(payload.get("requirements") or []):
-            if not isinstance(value, Mapping):
-                raise ValueError("RequirementsArtifact requirements must be objects")
-            requirement = str(value.get("statement") or value.get("requirement") or value.get("text") or "").strip()
-            if not requirement:
-                raise ValueError("RequirementsArtifact contains an empty requirement")
-            section = str(value.get("section") or "Requirements").strip()
-            strength = _requirement_strength(str(value.get("strength") or "hard").strip().lower())
-            result.append(SemanticRequirement(section, requirement, strength))
-    if not result:
-        raise ValueError("RequirementsArtifact must contain at least one requirement")
-    return tuple(result)
-
-
-def requirements_semantic_view(payload: Mapping[str, Any]) -> dict[str, Any]:
-    requirements = semantic_requirements(payload)
-    sections: dict[str, list[str]] = {}
-    strengths: dict[str, str] = {}
-    for item in requirements:
-        sections.setdefault(item.section, []).append(item.requirement)
-        if item.strength != "hard":
-            strengths[item.requirement] = item.strength
-    result: dict[str, Any] = {
-        "title": str(payload.get("title") or "Requirements").strip(),
-        "sections": sections,
-    }
-    if strengths:
-        result["strengths"] = strengths
-    clarifications = list(payload.get("open_clarifications") or [])
-    if clarifications:
-        result["open_clarifications"] = clarifications
-    patches = [
-        {
-            key: item[key]
-            for key in (
-                "patch_kind",
-                "section",
-                "requirement",
-                "strength",
-                "reason",
-                "affected_modules",
-                "affected_contracts",
-                "source",
-                "observed_at",
-            )
-            if key in item
+        return {
+            "verdict": self.verdict,
+            "findings_markdown": self.findings_markdown,
+            **(
+                {"findings": [item.to_dict() for item in self.findings]}
+                if self.findings
+                else {}
+            ),
         }
-        for raw in list(payload.get("patch_ledger") or [])
-        if isinstance(raw, Mapping)
-        for item in (dict(raw),)
-    ]
-    if patches:
-        result["requirement_patches"] = patches
-    return result
-
-
-def resolve_requirement_reference(
-    reference: Mapping[str, Any],
-    requirements_payload: Mapping[str, Any],
-) -> SemanticRequirement:
-    text = str(reference.get("requirement") or reference.get("statement") or "").strip()
-    section = str(reference.get("section") or "").strip()
-    if not text:
-        raise SemanticReferenceError("Requirement reference must include the Requirement text.", reference=reference)
-    normalized = _normalized_semantic_text(text)
-    candidates = [
-        item
-        for item in semantic_requirements(requirements_payload)
-        if _normalized_semantic_text(item.requirement) == normalized
-        and (not section or _normalized_semantic_text(item.section) == _normalized_semantic_text(section))
-    ]
-    if len(candidates) == 1:
-        return candidates[0]
-    all_requirements = semantic_requirements(requirements_payload)
-    suggestions = _semantic_requirement_suggestions(text, section, all_requirements)
-    if not candidates:
-        raise SemanticReferenceError(
-            "Requirement reference cannot be resolved by normalized exact match.",
-            reference=reference,
-            possible_matches=[item.to_dict() for item in suggestions],
-        )
-    raise SemanticReferenceError(
-        "Requirement reference is ambiguous; include its natural-language section.",
-        reference=reference,
-        possible_matches=[item.to_dict() for item in candidates],
-    )
 
 
 def resolve_evidence_reference(
@@ -359,6 +280,174 @@ def resolve_evidence_reference(
     raise SemanticReferenceError("Evidence reference cannot be resolved.", reference=value)
 
 
+def _semantic_reference_warning(
+    error: SemanticReferenceError,
+    *,
+    code: str,
+    subject_kind: str,
+    subject_name: str,
+) -> ValidationIssue:
+    reference = dict(error.reference)
+    location = {
+        key: str(reference[key])
+        for key in ("path", "symbol", "section")
+        if str(reference.get(key) or "").strip()
+    }
+    candidates = list(error.possible_matches)
+    suffix = (
+        " Suggested matches: "
+        + "; ".join(
+            ": ".join(
+                str(item.get(key) or "")
+                for key in ("section", "requirement", "path", "symbol")
+                if str(item.get(key) or "").strip()
+            )
+            for item in candidates[:5]
+        )
+        if candidates
+        else ""
+    )
+    return ValidationIssue(
+        "warning",
+        code,
+        str(error) + suffix,
+        subject_kind=subject_kind,
+        subject_name=subject_name,
+        location=location or None,
+    )
+
+
+def analyze_architecture_submission(
+    submission: Mapping[str, Any],
+    *,
+    requirements_payload: Mapping[str, Any],
+    workspace_root: Path,
+    reference_roots: Mapping[str, Path] | None = None,
+    evidence_catalog: Mapping[str, Any] | None = None,
+) -> ArchitectureValidationResult:
+    del requirements_payload, reference_roots, evidence_catalog
+    errors: list[Any] = []
+    raw_modules = submission.get("modules")
+    if not isinstance(raw_modules, Mapping) or not raw_modules:
+        return ArchitectureValidationResult(
+            {},
+            (
+                ValidationIssue(
+                    "error",
+                    "modules_required",
+                    "Architecture submission requires a non-empty modules map",
+                ),
+            ),
+        )
+    modules: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_module in raw_modules.items():
+        name = str(raw_name or "").strip()
+        if MODULE_NAME_PATTERN.fullmatch(name) is None:
+            errors.append(f"invalid semantic module name: {name or '<empty>'}")
+            continue
+        if not isinstance(raw_module, Mapping):
+            errors.append(f"module {name} must be an object")
+            continue
+        try:
+            modules[name] = _normalize_architecture_module(
+                name,
+                dict(raw_module),
+            )
+        except ValueError as exc:
+            errors.append(exc)
+    declared_module_names = {
+        str(name or "").strip()
+        for name in raw_modules
+        if MODULE_NAME_PATTERN.fullmatch(str(name or "").strip()) is not None
+    }
+    unknown = sorted(
+        {
+            dependency
+            for module in modules.values()
+            for dependency in module["contract_dependencies"]
+            if dependency not in declared_module_names
+        }
+    )
+    if unknown:
+        errors.append("Architecture DAG references unknown modules: " + ", ".join(unknown))
+    else:
+        cycle = _cycle_nodes(
+            {name: module["contract_dependencies"] for name, module in modules.items()}
+        )
+        if cycle:
+            errors.append("Architecture DAG contains a cycle: " + ", ".join(cycle))
+    raw_scenarios = submission.get("scenarios")
+    if not isinstance(raw_scenarios, Mapping) or not raw_scenarios:
+        errors.append("Architecture submission requires at least one end-to-end scenario")
+        raw_scenarios = {}
+    scenarios: dict[str, dict[str, Any]] = {}
+    implementation_names = {
+        name
+        for name, module in modules.items()
+        if str(module.get("module_kind") or "") == "implementation"
+    }
+    for raw_name, raw_scenario in raw_scenarios.items():
+        name = str(raw_name or "").strip()
+        if MODULE_NAME_PATTERN.fullmatch(name) is None:
+            errors.append(f"invalid semantic scenario name: {name or '<empty>'}")
+            continue
+        if not isinstance(raw_scenario, Mapping):
+            errors.append(f"scenario {name} must be an object")
+            continue
+        if name in modules:
+            errors.append(
+                f"scenario {name} conflicts with a module name; semantic node names must be unique"
+            )
+            continue
+        try:
+            scenario = _normalize_architecture_scenario(name, raw_scenario)
+        except ValueError as exc:
+            errors.append(exc)
+            continue
+        unknown_modules = sorted(set(scenario["modules"]) - implementation_names)
+        if unknown_modules:
+            errors.append(
+                f"scenario {name} references unknown or non-implementation modules: "
+                + ", ".join(unknown_modules)
+            )
+        else:
+            selected = set(scenario["modules"])
+            required = set(selected)
+            pending = list(selected)
+            while pending:
+                module_name = pending.pop()
+                for dependency in modules[module_name]["contract_dependencies"]:
+                    if dependency not in implementation_names or dependency in required:
+                        continue
+                    required.add(dependency)
+                    pending.append(dependency)
+            missing = sorted(required - selected)
+            if missing:
+                errors.append(
+                    f"scenario {name} omits implementation contract dependencies: "
+                    + ", ".join(missing)
+                )
+        scenarios[name] = scenario
+    validators = (
+        lambda: _validate_construction_graph(modules),
+        lambda: _validate_path_policy(modules),
+        lambda: _validate_declared_paths(modules, Path(workspace_root)),
+    )
+    for validator in validators:
+        try:
+            validator()
+        except ValueError as exc:
+            errors.append(exc)
+    issues = tuple(
+        ValidationIssue("error", "architecture_structure", str(item))
+        for item in _unique_architecture_errors(errors)
+    )
+    return ArchitectureValidationResult(
+        {"modules": modules, "scenarios": scenarios},
+        issues,
+    )
+
+
 def validate_architecture_submission(
     submission: Mapping[str, Any],
     *,
@@ -367,71 +456,77 @@ def validate_architecture_submission(
     reference_roots: Mapping[str, Path] | None = None,
     evidence_catalog: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    raw_modules = submission.get("modules")
-    if not isinstance(raw_modules, Mapping) or not raw_modules:
-        raise ValueError("Architecture submission requires a non-empty modules map")
-    modules: dict[str, dict[str, Any]] = {}
-    for raw_name, raw_module in raw_modules.items():
-        name = str(raw_name or "").strip()
-        if MODULE_NAME_PATTERN.fullmatch(name) is None:
-            raise ValueError(f"invalid semantic module name: {name or '<empty>'}")
-        if not isinstance(raw_module, Mapping):
-            raise ValueError(f"module {name} must be an object")
-        module = dict(raw_module)
-        depends_on = _unique_text(module.get("depends_on"))
-        consumes = [_normalize_contract_reference(item) for item in list(module.get("consumes") or [])]
-        module_kind = str(module.get("module_kind") or "").strip()
-        if module_kind not in MODULE_KINDS:
-            raise ValueError(
-                f"module {name} module_kind must be implementation or contract_only"
-            )
-        paths = _normalize_module_paths(name, module.get("paths"), module_kind=module_kind)
-        covers = [
-            _architecture_requirement_reference(dict(item or {}), requirements_payload)
-            for item in list(module.get("covers") or [])
-        ]
-        if not covers:
-            raise ValueError(f"module {name} must cover at least one Requirement")
-        evidence = [
-            resolve_evidence_reference(
-                dict(item or {}),
-                workspace_root=workspace_root,
-                reference_roots=reference_roots,
-                evidence_catalog=evidence_catalog,
-            )
-            for item in list(module.get("evidence") or [])
-        ]
-        modules[name] = {
-            "module_kind": module_kind,
-            "depends_on": depends_on,
-            "consumes": consumes,
-            "paths": paths,
-            "covers": covers,
-            "evidence": evidence,
-        }
-    names = set(modules)
-    unknown = sorted({dependency for module in modules.values() for dependency in module["depends_on"] if dependency not in names})
-    if unknown:
-        raise ValueError("Architecture DAG references unknown modules: " + ", ".join(unknown))
-    cycle = _cycle_nodes({name: module["depends_on"] for name, module in modules.items()})
-    if cycle:
-        raise ValueError("Architecture DAG contains a cycle: " + ", ".join(cycle))
-    verification_nodes = _normalize_verification_nodes(
-        submission.get("verification_nodes"),
+    result = analyze_architecture_submission(
+        submission,
         requirements_payload=requirements_payload,
-        workspace_root=Path(workspace_root),
+        workspace_root=workspace_root,
+        reference_roots=reference_roots,
+        evidence_catalog=evidence_catalog,
     )
-    collisions = sorted(set(modules) & set(verification_nodes))
-    if collisions:
+    result.raise_for_errors()
+    return dict(result.normalized_submission)
+
+
+def _normalize_architecture_module(
+    name: str,
+    module: Mapping[str, Any],
+) -> dict[str, Any]:
+    contract_dependencies = _unique_text(module.get("contract_dependencies"))
+    module_kind = str(module.get("module_kind") or "").strip()
+    if module_kind not in MODULE_KINDS:
         raise ValueError(
-            "Implementation modules and Verification Nodes must have distinct semantic names: "
-            + ", ".join(collisions)
+            f"module {name} module_kind must be implementation or contract_only"
         )
-    _validate_contract_graph(modules, verification_nodes)
-    _validate_verification_coverage(verification_nodes, requirements_payload)
-    _validate_path_policy(modules)
-    _validate_declared_paths(modules, verification_nodes, Path(workspace_root))
-    return {"modules": modules, "verification_nodes": verification_nodes}
+    paths = _normalize_module_paths(name, module.get("paths"), module_kind=module_kind)
+    return {
+        "module_kind": module_kind,
+        "contract_dependencies": contract_dependencies,
+        "paths": paths,
+    }
+
+
+def _normalize_architecture_scenario(
+    name: str,
+    scenario: Mapping[str, Any],
+) -> dict[str, Any]:
+    modules = _unique_text(scenario.get("modules"))
+    if not modules:
+        raise ValueError(f"scenario {name} requires at least one implementation module")
+    result = {
+        "modules": modules,
+        "entrypoint": str(scenario.get("entrypoint") or "").strip(),
+        "observable_behavior": str(scenario.get("observable_behavior") or "").strip(),
+        "environment": str(scenario.get("environment") or "").strip(),
+    }
+    for field in ("entrypoint", "observable_behavior", "environment"):
+        if not result[field]:
+            raise ValueError(f"scenario {name} requires {field}")
+    return result
+
+
+def _unique_architecture_errors(errors: Iterable[Any]) -> tuple[Any, ...]:
+    unique_by_message: dict[str, Any] = {}
+    for item in errors:
+        message = str(item).strip()
+        if message:
+            unique_by_message.setdefault(message, item)
+    return tuple(unique_by_message.values())
+
+
+def _raise_architecture_errors(errors: Iterable[Any]) -> None:
+    unique_values = _unique_architecture_errors(errors)
+    unique = [(str(item).strip(), item) for item in unique_values]
+    if not unique:
+        return
+    if len(unique) == 1:
+        message, original = unique[0]
+        if isinstance(original, ValueError):
+            raise original
+        raise ValueError(message)
+    raise ValueError(
+        f"Architecture submission has {len(unique)} consistent errors:\n"
+        + "\n".join(f"- {message}" for message, _original in unique)
+    )
 
 
 def review_architecture_skeleton(
@@ -440,78 +535,25 @@ def review_architecture_skeleton(
     worktree: Path,
     requirements_payload: Mapping[str, Any],
 ) -> SkeletonReviewResult:
+    del requirements_payload
     submission = dict(artifact.get("submission") or {})
     findings: list[SkeletonReviewFinding] = []
-    requirements = semantic_requirements(requirements_payload)
-    covered = {
-        (_normalized_semantic_text(item["section"]), _normalized_semantic_text(item["requirement"]))
-        for module in dict(submission.get("modules") or {}).values()
-        for item in list(dict(module).get("covers") or [])
-    }
-    verification_nodes = dict(submission.get("verification_nodes") or {})
-    verified = {
-        (_normalized_semantic_text(item["section"]), _normalized_semantic_text(item["requirement"]))
-        for node in verification_nodes.values()
-        for item in list(dict(node).get("covers") or [])
-    }
-    missing = [
-        item
-        for item in requirements
-        if item.strength == "hard"
-        and (_normalized_semantic_text(item.section), _normalized_semantic_text(item.requirement)) not in verified
-    ]
-    for item in missing:
-        findings.append(
-            SkeletonReviewFinding(
-                "contract_defect",
-                "A hard Requirement has no real Verification Node landing.",
-                requirements=(item.to_dict(),),
-            )
-        )
     for name, raw_module in dict(submission.get("modules") or {}).items():
         module = dict(raw_module)
-        entrypoint = str((list(dict(module.get("paths") or {}).get("contract_paths") or []) or [""])[0])
-        path = Path(worktree) / entrypoint
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            findings.append(
-                SkeletonReviewFinding(
-                    "contract_defect",
-                    "The module contract entrypoint is not readable UTF-8 source.",
-                    affected_modules=(str(name),),
-                    locations=({"path": entrypoint, "section": "Contract"},),
+        for contract_path in list(dict(module.get("paths") or {}).get("contract_paths") or []):
+            path = Path(worktree) / str(contract_path)
+            try:
+                path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                findings.append(
+                    SkeletonReviewFinding(
+                        "contract_defect",
+                        "A frozen contract path is not readable UTF-8 source.",
+                        affected_modules=(str(name),),
+                        locations=({"path": str(contract_path), "section": "Contract"},),
+                    )
                 )
-            )
-            continue
-        missing_sections = contract_comment_missing_sections(content, module_name=str(name))
-        if missing_sections:
-            findings.append(
-                SkeletonReviewFinding(
-                    "contract_defect",
-                    "The code skeleton is missing required contract sections: " + ", ".join(missing_sections),
-                    affected_modules=(str(name),),
-                    locations=({"path": entrypoint, "section": "Contract"},),
-                )
-            )
     return SkeletonReviewResult("PASS" if not findings else "FAIL", tuple(findings))
-
-
-def contract_comment_missing_sections(content: str, *, module_name: str) -> tuple[str, ...]:
-    labels = {
-        match.group(1).strip(): match.group(2).strip()
-        for match in re.finditer(
-            rf"(?im)^\s*(?:/[*]+|[*#/\-]+)?\s*({'|'.join(map(re.escape, CONTRACT_COMMENT_SECTIONS))})\s*:\s*(.*?)\s*$",
-            content,
-        )
-    }
-    missing = [section for section in CONTRACT_COMMENT_SECTIONS if section not in labels]
-    if "Module" in labels and labels["Module"] != module_name:
-        missing.append(f"Module: {module_name}")
-    for section in ("Responsibility", "Ownership", "Lifecycle", "State", "Invariants", "Errors", "Compatibility"):
-        if section in labels and not labels[section]:
-            missing.append(f"{section} value")
-    return tuple(dict.fromkeys(missing))
 
 
 def compile_skeleton_markdown(
@@ -520,62 +562,58 @@ def compile_skeleton_markdown(
     requirements_payload: Mapping[str, Any],
 ) -> str:
     submission = dict(artifact.get("submission") or {})
-    lines = ["# Architecture Skeleton", "", "## Requirements", ""]
-    for item in semantic_requirements(requirements_payload):
-        strength = "" if item.strength == "hard" else f" [{item.strength}]"
-        lines.append(f"- **{item.section}**{strength}: {item.requirement}")
-    patches = [dict(item) for item in list(requirements_payload.get("patch_ledger") or [])]
-    if patches:
-        lines.extend(["", "## Requirement Amendments", ""])
-        for patch in patches:
-            source = dict(patch.get("source") or {})
-            origin = " / ".join(
-                item
-                for item in (
-                    str(source.get("role") or ""),
-                    str(source.get("stage") or ""),
-                    str(source.get("case") or ""),
-                )
-                if item
-            )
-            lines.extend(
-                [
-                    f"- **{patch.get('section', '')}**: {patch.get('requirement', '')}",
-                    f"  - Reason: {patch.get('reason', '')}",
-                    f"  - Source: {origin or 'human edit'} at {patch.get('observed_at', '')}",
-                ]
-            )
-    lines.extend(["", "## Construction DAG", ""])
+    task_sources = validate_task_source_bundle(requirements_payload)
+    lines = ["# Architecture Skeleton", "", "## Task Sources", ""]
+    for raw in [
+        *list(task_sources.get("documents") or []),
+        *list(task_sources.get("amendments") or []),
+    ]:
+        item = dict(raw or {})
+        observed = f" ({item['observed_at']})" if item.get("observed_at") else ""
+        lines.append(
+            f"- `{item.get('name', '')}`: {item.get('origin', 'source')}{observed}"
+        )
+    lines.extend(["", "## Contract Dependency Graph", ""])
     for name, raw_module in dict(submission.get("modules") or {}).items():
         module = dict(raw_module)
         paths = dict(module.get("paths") or {})
-        dependencies = ", ".join(module.get("depends_on") or []) or "none"
+        dependencies = ", ".join(module.get("contract_dependencies") or []) or "none"
+        implementation_scope = ", ".join(
+            f"`{dict(item).get('path', '')}`"
+            for item in list(paths.get("implementation_scopes") or [])
+        ) or "none"
+        test_scope = ", ".join(
+            f"`{dict(item).get('path', '')}`"
+            for item in list(paths.get("test_scopes") or [])
+        ) or "none"
         lines.extend(
             [
                 f"### {name}",
                 "",
                 f"- Module kind: {module.get('module_kind', '')}",
-                f"- Starts after: {dependencies}",
+                f"- Contract dependencies: {dependencies}",
+                f"- Contract enforcement: {paths.get('contract_mode', 'review_guarded')}",
                 f"- Contracts: {', '.join(f'`{item}`' for item in list(paths.get('contract_paths') or []))}",
-                f"- Consumes: {', '.join(_format_contract_reference(item) for item in list(module.get('consumes') or [])) or 'none'}",
-                "- Covers:",
+                f"- Implementation scope: {implementation_scope}",
+                f"- Test scope: {test_scope}",
+                f"- Reference only: {', '.join(f'`{item}`' for item in list(paths.get('reference_only') or [])) or 'none'}",
             ]
         )
-        lines.extend(
-            f"  - **{item.get('section', '')}**: {item.get('requirement', '')}"
-            for item in list(module.get("covers") or [])
-        )
         lines.append("")
-    lines.extend(["## Verification Topology", ""])
-    for name, raw_node in dict(submission.get("verification_nodes") or {}).items():
-        node = dict(raw_node)
-        dependencies = ", ".join(node.get("depends_on") or [])
-        lines.extend([f"### {name}", "", f"- Kind: {node.get('kind', '')}", f"- Combines: {dependencies}", "- Proves:"])
+    lines.extend(["## End-to-End Scenarios", ""])
+    for name, raw_scenario in dict(submission.get("scenarios") or {}).items():
+        scenario = dict(raw_scenario or {})
         lines.extend(
-            f"  - **{item.get('section', '')}**: {item.get('requirement', '')}"
-            for item in list(node.get("covers") or [])
+            [
+                f"### {name}",
+                "",
+                f"- Modules: {', '.join(str(item) for item in list(scenario.get('modules') or []))}",
+                f"- Entrypoint: {scenario.get('entrypoint', '')}",
+                f"- Observable behavior: {scenario.get('observable_behavior', '')}",
+                f"- Environment: {scenario.get('environment', '')}",
+                "",
+            ]
         )
-        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -584,6 +622,23 @@ def architecture_revision_scope(
     finding_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Compile a reviewer finding into semantic names and exact writable paths."""
+
+    if str(finding_payload.get("findings_markdown") or "").strip():
+        modules = {
+            str(name): dict(value or {})
+            for name, value in dict(base_submission.get("modules") or {}).items()
+        }
+        return {
+            "affected_modules": sorted(modules),
+            "allowed_paths": sorted(
+                {
+                    path
+                    for module in modules.values()
+                    for path in _module_declared_paths(module)
+                }
+            ),
+            "allow_topology_changes": True,
+        }
 
     findings = list(finding_payload.get("findings") or [])
     if not findings and finding_payload:
@@ -603,41 +658,12 @@ def architecture_revision_scope(
         module_name = str(finding.get("module_name") or "").strip()
         if module_name in modules:
             affected_modules.add(module_name)
-        elif module_name in dict(base_submission.get("verification_nodes") or {}):
-            verification_node = dict(
-                dict(base_submission.get("verification_nodes") or {}).get(module_name) or {}
-            )
-            affected_modules.update(
-                str(item)
-                for item in list(verification_node.get("depends_on") or [])
-                if str(item) in modules
-            )
         locations = [dict(item or {}) for item in list(finding.get("locations") or [])]
         locations.extend(
             {"path": str(path)}
             for path in list(finding.get("suggested_repair_boundary") or [])
             if str(path).strip()
         )
-        semantic_reference_error = dict(finding.get("semantic_reference_error") or {})
-        semantic_reference = dict(semantic_reference_error.get("reference") or {})
-        if semantic_reference:
-            locations.append(
-                {
-                    key: semantic_reference[key]
-                    for key in ("path", "symbol", "section")
-                    if str(semantic_reference.get(key) or "").strip()
-                }
-            )
-            for module_name, module in modules.items():
-                if any(
-                    _semantic_reference_matches(
-                        dict(item or {}),
-                        semantic_reference,
-                        error=str(semantic_reference_error.get("error") or ""),
-                    )
-                    for item in list(module.get("evidence") or [])
-                ):
-                    affected_modules.add(module_name)
         for raw_location in locations:
             path = _normalized_repo_path(str(dict(raw_location or {}).get("path") or ""))
             if not path:
@@ -655,58 +681,33 @@ def architecture_revision_scope(
             "architecture finding names unknown modules: " + ", ".join(unknown_modules)
         )
     affected_modules.intersection_update(modules)
-    affected_verification_nodes = {
-        str(name)
-        for name, raw_node in dict(base_submission.get("verification_nodes") or {}).items()
-        if affected_modules.intersection(
-            {
-                *(str(item) for item in list(dict(raw_node or {}).get("depends_on") or [])),
-                *(
-                    str(dict(item or {}).get("module") or "")
-                    for item in list(dict(raw_node or {}).get("consumes") or [])
-                ),
-            }
-        )
-    }
     if not affected_modules and not allowed_paths and not allow_topology_changes:
         raise ValueError("architecture finding has no semantic module or source-location scope")
     return {
         "affected_modules": sorted(affected_modules),
-        "affected_verification_nodes": sorted(affected_verification_nodes),
         "allowed_paths": sorted(allowed_paths),
         "allow_topology_changes": allow_topology_changes,
     }
 
 
-def _semantic_reference_matches(
-    candidate: Mapping[str, Any],
-    reference: Mapping[str, Any],
-    *,
-    error: str = "",
-) -> bool:
-    normalized_error = str(error or "").casefold()
-    if "path does not exist" in normalized_error or "reference root" in normalized_error:
-        # A missing physical source invalidates every claim that uses the same
-        # root/path, regardless of the symbol or section each module cites.
-        identity_fields = ("kind", "path", "reference_name")
-    else:
-        identity_fields = (
-            "kind",
-            "path",
-            "reference_name",
-            "symbol",
-            "source",
-            "section",
-            "conclusion",
-        )
-    compared = False
-    for field in identity_fields:
-        if field not in reference:
-            continue
-        compared = True
-        if str(candidate.get(field) or "").strip() != str(reference.get(field) or "").strip():
-            return False
-    return compared
+def _module_declared_paths(module: Mapping[str, Any]) -> set[str]:
+    paths = dict(module.get("paths") or {})
+    result = {
+        str(item)
+        for item in [
+            *list(paths.get("contract_paths") or []),
+            *list(paths.get("reference_only") or []),
+        ]
+    }
+    result.update(
+        str(dict(item or {}).get("path") or "")
+        for item in [
+            *list(paths.get("implementation_scopes") or []),
+            *list(paths.get("test_scopes") or []),
+        ]
+        if str(dict(item or {}).get("path") or "")
+    )
+    return result
 
 
 def validate_architecture_revision_scope(
@@ -733,36 +734,13 @@ def validate_architecture_revision_scope(
         for name in base_module_names & revised_module_names
         if base_modules.get(name) != revised_modules.get(name)
     }
-    base_verification = {
-        str(name): _revision_comparable_contract(dict(value or {}))
-        for name, value in dict(base_submission.get("verification_nodes") or {}).items()
-    }
-    revised_verification = {
-        str(name): _revision_comparable_contract(dict(value or {}))
-        for name, value in dict(revised_submission.get("verification_nodes") or {}).items()
-    }
-    base_verification_names = set(base_verification)
-    revised_verification_names = set(revised_verification)
-    added_verification = revised_verification_names - base_verification_names
-    removed_verification = base_verification_names - revised_verification_names
-    updated_verification = {
-        name
-        for name in base_verification_names & revised_verification_names
-        if base_verification.get(name) != revised_verification.get(name)
-    }
     affected_modules = set(scope.get("affected_modules") or [])
-    affected_verification = set(scope.get("affected_verification_nodes") or [])
     allow_topology_changes = bool(scope.get("allow_topology_changes"))
     unexpected_modules = sorted(
         (updated_modules | removed_modules) - affected_modules
     )
     if not allow_topology_changes:
         unexpected_modules.extend(sorted(added_modules))
-    unexpected_verification = sorted(
-        (updated_verification | removed_verification) - affected_verification
-    )
-    if not allow_topology_changes:
-        unexpected_verification.extend(sorted(added_verification))
     unexpected_paths = sorted(
         path
         for path in set(str(item) for item in changed_paths)
@@ -781,11 +759,6 @@ def validate_architecture_revision_scope(
         raise ValueError(
             "revision changes modules outside the finding scope: " + ", ".join(unexpected_modules)
         )
-    if unexpected_verification:
-        raise ValueError(
-            "revision changes Verification Nodes outside the finding scope: "
-            + ", ".join(unexpected_verification)
-        )
     if unexpected_paths:
         raise ValueError(
             "revision changes source paths outside the finding scope: " + ", ".join(unexpected_paths)
@@ -793,15 +766,7 @@ def validate_architecture_revision_scope(
 
 
 def _revision_comparable_contract(value: Mapping[str, Any]) -> dict[str, Any]:
-    comparable = json.loads(json.dumps(dict(value)))
-    comparable["covers"] = [
-        {
-            "section": str(dict(item or {}).get("section") or ""),
-            "requirement": str(dict(item or {}).get("requirement") or ""),
-        }
-        for item in list(comparable.get("covers") or [])
-    ]
-    return comparable
+    return json.loads(json.dumps(dict(value)))
 
 
 def _revision_path_is_allowed(
@@ -965,15 +930,33 @@ class GitBackedSkeletonService:
         revision_scope: Mapping[str, Any] | None = None,
         revision_base_path_states: Mapping[str, str] | None = None,
     ) -> ArtifactRef:
+        submitted = dict(submission)
+        clarification_refs = [
+            ArtifactRef.from_mapping(item)
+            for item in list(submitted.pop("clarification_refs", []) or [])
+            if isinstance(item, Mapping) and item.get("sha256")
+        ]
+        if clarification_refs:
+            requirements_ref = TaskSourceBundleService(
+                self.runtime_root,
+                self.artifacts,
+            ).append_existing_amendments(
+                base_ref=requirements_ref,
+                amendment_refs=clarification_refs,
+                actor="architect_user_io",
+                source_channel="bound_active_channel",
+            )
         requirements = self.artifacts.read_json(requirements_ref)
         evidence_catalog = self.artifacts.read_json(evidence_catalog_ref) if evidence_catalog_ref else None
-        normalized = validate_architecture_submission(
-            submission,
+        validation = analyze_architecture_submission(
+            submitted,
             requirements_payload=requirements,
             workspace_root=architecture_workspace.worktree,
             reference_roots=reference_roots,
             evidence_catalog=evidence_catalog,
         )
+        validation.raise_for_errors()
+        normalized = dict(validation.normalized_submission)
         changed_paths = _git_changed_paths(architecture_workspace.worktree, architecture_workspace.base_sha)
         if revision_base_artifact is not None:
             if revision_scope is None:
@@ -997,7 +980,7 @@ class GitBackedSkeletonService:
         _git(architecture_workspace.worktree, "add", "-A")
         submission_hash = _stable_hash(normalized)
         commit_key = hashlib.sha256(
-            f"{architecture_workspace.base_sha}\0{submission_hash}\0{workflow_name}\0{revision_name}".encode("utf-8")
+            f"{architecture_workspace.base_sha}\0{submission_hash}\0{requirements_ref.sha256}\0{workflow_name}\0{revision_name}".encode("utf-8")
         ).hexdigest()
         message = f"minion architecture skeleton {revision_name}\n\nPal-Architecture-Key: {commit_key}"
         existing_sha = _find_architecture_commit(architecture_workspace.worktree, commit_key)
@@ -1053,12 +1036,19 @@ class GitBackedSkeletonService:
             provenance={"workflow_name": workflow_name, "revision_name": revision_name},
             child_refs=((requirements_ref.sha256, "requirements"),),
         )
+        validation_report_ref = self.artifacts.put_json(
+            validation.report_dict(),
+            artifact_type=ARCHITECTURE_VALIDATION_REPORT_ARTIFACT,
+            provenance={"workflow_name": workflow_name, "revision_name": revision_name},
+            child_refs=((submission_ref.sha256, "architecture_submission"),),
+        )
         payload = {
             "schema_version": "3",
             "requirements_ref": requirements_ref.to_dict(),
             "evidence_catalog_ref": evidence_catalog_ref.to_dict() if evidence_catalog_ref else {},
             "submission": normalized,
             "submission_ref": submission_ref.to_dict(),
+            "validation_report_ref": validation_report_ref.to_dict(),
             "git_bundle_ref": bundle_ref.to_dict(),
             "workspace_snapshot_ref": architecture_workspace.workspace_snapshot_ref.to_dict(),
             "base_commit_sha": architecture_workspace.base_sha,
@@ -1081,6 +1071,7 @@ class GitBackedSkeletonService:
         children = [
             (requirements_ref.sha256, "requirements"),
             (submission_ref.sha256, "semantic_dag"),
+            (validation_report_ref.sha256, "validation_report"),
             (bundle_ref.sha256, "git_bundle"),
             (architecture_workspace.workspace_snapshot_ref.sha256, "workspace_snapshot"),
         ]
@@ -1105,40 +1096,36 @@ class GitBackedSkeletonService:
     ) -> ArchitectureReviewWorkspace:
         root = Path(tempfile.mkdtemp(prefix=f"pal-architecture-review-{_safe_component(review_name)}-"))
         stored_layout = dict(artifact.get("repository_layout") or {})
-        project_key = _safe_component(str(stored_layout.get("project_key") or ""))
-        shared_bare = minion_data_root(self.runtime_root) / "repos" / project_key / "project.git"
-        bare = shared_bare
+        raw_project_key = str(stored_layout.get("project_key") or "").strip()
+        project_key = _safe_component(raw_project_key) if raw_project_key else ""
+        bare = root / "project.git"
         temporary_common_git_dir = False
         worktree = root / "worktree"
         bundle_ref = ArtifactRef.from_mapping(dict(artifact.get("git_bundle_ref") or {}))
         skeleton_sha = str(artifact.get("skeleton_commit_sha") or "")
-        if project_key and bare.is_dir() and not _git_object_exists(bare, skeleton_sha):
-            self._import_bundle(bare, bundle_ref)
-        if not project_key or not bare.is_dir():
-            temporary_common_git_dir = True
-            bare = root / "project.git"
-            bundle = root / "architecture.bundle"
-            self.materialize_bundle(bundle_ref, bundle)
-            completed = subprocess.run(
-                ["git", "clone", "--bare", str(bundle), str(bare)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            bundle.unlink(missing_ok=True)
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr or completed.stdout or "failed to restore architecture review repository")
-        completed = subprocess.run(
-            ["git", f"--git-dir={bare}", "worktree", "add", "--detach", str(worktree), skeleton_sha],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
+        try:
+            if project_key:
+                layout = resolve_project_git_layout(
+                    self.runtime_root,
+                    workspace={},
+                    workflow_id="",
+                    workflow_name=str(stored_layout.get("workflow_name") or review_name),
+                    stored_layout=stored_layout,
+                )
+                bare = layout.common_git_dir
+                with project_git_layout_lock(layout):
+                    if not bare.is_dir():
+                        self._restore_bundle_repository(bare, bundle_ref, staging_root=root)
+                    elif not _git_object_exists(bare, skeleton_sha):
+                        self._import_bundle(bare, bundle_ref)
+                    self._add_review_worktree(bare, worktree=worktree, skeleton_sha=skeleton_sha)
+            else:
+                temporary_common_git_dir = True
+                self._restore_bundle_repository(bare, bundle_ref, staging_root=root)
+                self._add_review_worktree(bare, worktree=worktree, skeleton_sha=skeleton_sha)
+        except Exception:
             shutil.rmtree(root, ignore_errors=True)
-            raise RuntimeError(completed.stderr or completed.stdout or "failed to restore architecture review worktree")
+            raise
         if _git(worktree, "rev-parse", "HEAD").strip() != skeleton_sha:
             shutil.rmtree(root, ignore_errors=True)
             raise RuntimeError("architecture review worktree is not bound to the skeleton commit")
@@ -1148,6 +1135,61 @@ class GitBackedSkeletonService:
             common_git_dir=bare,
             temporary_common_git_dir=temporary_common_git_dir,
         )
+
+    def _restore_bundle_repository(
+        self,
+        common_git_dir: Path,
+        bundle_ref: ArtifactRef,
+        *,
+        staging_root: Path,
+    ) -> None:
+        common_git_dir.parent.mkdir(parents=True, exist_ok=True)
+        bundle = staging_root / "architecture.bundle"
+        self.materialize_bundle(bundle_ref, bundle)
+        completed = subprocess.run(
+            ["git", "clone", "--bare", str(bundle), str(common_git_dir)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        bundle.unlink(missing_ok=True)
+        if completed.returncode != 0:
+            shutil.rmtree(common_git_dir, ignore_errors=True)
+            raise RuntimeError(
+                completed.stderr
+                or completed.stdout
+                or "failed to restore architecture review repository"
+            )
+
+    @staticmethod
+    def _add_review_worktree(
+        common_git_dir: Path,
+        *,
+        worktree: Path,
+        skeleton_sha: str,
+    ) -> None:
+        completed = subprocess.run(
+            [
+                "git",
+                f"--git-dir={common_git_dir}",
+                "worktree",
+                "add",
+                "--detach",
+                str(worktree),
+                skeleton_sha,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                completed.stderr
+                or completed.stdout
+                or "failed to restore architecture review worktree"
+            )
 
     def _import_bundle(self, common_git_dir: Path, bundle_ref: ArtifactRef) -> None:
         with tempfile.TemporaryDirectory(prefix="pal-skeleton-import-") as temporary:
@@ -1254,6 +1296,16 @@ def _normalize_module_paths(
     module_kind: str,
 ) -> dict[str, Any]:
     paths = dict(value or {}) if isinstance(value, Mapping) else {}
+    default_contract_mode = "file_frozen" if module_kind == "contract_only" else "review_guarded"
+    contract_mode = str(paths.get("contract_mode") or default_contract_mode).strip()
+    if contract_mode not in {"file_frozen", "review_guarded"}:
+        raise ValueError(
+            f"module {module_name} paths.contract_mode must be file_frozen or review_guarded"
+        )
+    if module_kind == "contract_only" and contract_mode != "file_frozen":
+        raise ValueError(
+            f"contract_only module {module_name} must use file_frozen contract mode"
+        )
     contracts = [_normalized_repo_path(str(item)) for item in list(paths.get("contract_paths") or [])]
     if not contracts:
         raise ValueError(f"module {module_name} requires paths.contract_paths")
@@ -1273,125 +1325,12 @@ def _normalize_module_paths(
         )
     references = [_normalized_repo_path(str(item)) for item in list(paths.get("reference_only") or [])]
     return {
+        "contract_mode": contract_mode,
         "contract_paths": list(dict.fromkeys(contracts)),
         "implementation_scopes": [item.to_dict() for item in implementation],
         "test_scopes": [item.to_dict() for item in tests],
         "reference_only": list(dict.fromkeys(references)),
     }
-
-
-def _normalize_contract_reference(value: Any) -> dict[str, str]:
-    if not isinstance(value, Mapping):
-        raise ValueError("contract consumption references must be objects")
-    module = str(value.get("module") or "").strip()
-    path = _normalized_repo_path(str(value.get("path") or ""))
-    symbol = str(value.get("symbol") or "").strip()
-    if not module or not path:
-        raise ValueError("contract consumption references require module and path")
-    result = {"module": module, "path": path}
-    if symbol:
-        result["symbol"] = symbol
-    return result
-
-
-def _architecture_requirement_reference(
-    value: Mapping[str, Any],
-    requirements_payload: Mapping[str, Any],
-) -> dict[str, str]:
-    resolved = resolve_requirement_reference(value, requirements_payload)
-    # Strength remains owned by the immutable RequirementsArtifact. The DAG
-    # references only the natural-language Requirement identity.
-    return {
-        "section": resolved.section,
-        "requirement": resolved.requirement,
-    }
-
-
-def _normalize_verification_nodes(
-    value: Any,
-    *,
-    requirements_payload: Mapping[str, Any],
-    workspace_root: Path,
-) -> dict[str, dict[str, Any]]:
-    if not isinstance(value, Mapping) or not value:
-        raise ValueError("Architecture submission requires at least one Verification Node")
-    result: dict[str, dict[str, Any]] = {}
-    for raw_name, raw_node in value.items():
-        name = str(raw_name or "").strip()
-        if MODULE_NAME_PATTERN.fullmatch(name) is None:
-            raise ValueError(f"invalid semantic Verification Node name: {name or '<empty>'}")
-        if not isinstance(raw_node, Mapping):
-            raise ValueError(f"Verification Node {name} must be an object")
-        node = dict(raw_node)
-        kind = str(node.get("kind") or "").strip()
-        if kind not in VERIFICATION_KINDS:
-            raise ValueError(f"Verification Node {name} has invalid kind: {kind or '<empty>'}")
-        depends_on = _unique_text(node.get("depends_on"))
-        consumes = [_normalize_contract_reference(item) for item in list(node.get("consumes") or [])]
-        if not consumes:
-            raise ValueError(f"Verification Node {name} must consume at least one declared contract")
-        covers = [
-            _architecture_requirement_reference(dict(item or {}), requirements_payload)
-            for item in list(node.get("covers") or [])
-        ]
-        if not covers:
-            raise ValueError(f"Verification Node {name} must cover at least one Requirement")
-        entrypoints = [
-            _normalize_verification_entrypoint(item, node_name=name, workspace_root=workspace_root)
-            for item in list(node.get("entrypoints") or [])
-        ]
-        if not entrypoints:
-            raise ValueError(f"Verification Node {name} requires a real entrypoint or build target")
-        environment = node.get("environment")
-        if not isinstance(environment, Mapping):
-            raise ValueError(f"Verification Node {name} environment must be an object")
-        result[name] = {
-            "kind": kind,
-            "depends_on": depends_on,
-            "consumes": consumes,
-            "covers": covers,
-            "entrypoints": entrypoints,
-            "environment": dict(environment),
-        }
-    return result
-
-
-def _normalize_verification_entrypoint(
-    value: Any,
-    *,
-    node_name: str,
-    workspace_root: Path,
-) -> dict[str, str]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f"Verification Node {node_name} entrypoints must be objects")
-    kind = str(value.get("kind") or "").strip()
-    if kind not in VERIFICATION_ENTRYPOINT_KINDS:
-        raise ValueError(f"Verification Node {node_name} has invalid entrypoint kind: {kind or '<empty>'}")
-    path = _normalized_repo_path(str(value.get("path") or ""))
-    symbol = str(value.get("symbol") or "").strip()
-    target = str(value.get("target") or "").strip()
-    if kind in {"source_symbol", "product_entrypoint"} and not path:
-        raise ValueError(f"Verification Node {node_name} {kind} requires path")
-    if kind == "source_symbol" and not symbol:
-        raise ValueError(f"Verification Node {node_name} source_symbol requires symbol")
-    if kind in {"build_target", "platform_probe"} and not target:
-        raise ValueError(f"Verification Node {node_name} {kind} requires target")
-    if path:
-        source = workspace_root / path
-        if not source.is_file():
-            raise ValueError(f"Verification Node {node_name} entrypoint path does not exist: {path}")
-        if symbol:
-            content = source.read_text(encoding="utf-8", errors="replace")
-            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", content) is None:
-                raise ValueError(f"Verification Node {node_name} entrypoint symbol does not exist: {path}::{symbol}")
-    result = {"kind": kind}
-    if path:
-        result["path"] = path
-    if symbol:
-        result["symbol"] = symbol
-    if target:
-        result["target"] = target
-    return result
 
 
 def _normalize_path_scopes(
@@ -1419,218 +1358,87 @@ def _normalize_path_scopes(
 
 
 def _validate_path_policy(modules: Mapping[str, Mapping[str, Any]]) -> None:
-    owners: list[tuple[str, PathScope]] = []
-    frozen: dict[str, str] = {}
+    errors: list[str] = []
+    owners: list[tuple[str, str, PathScope]] = []
+    contracts: dict[str, tuple[str, str]] = {}
     references: list[tuple[str, str]] = []
     for name, module in modules.items():
         paths = dict(module["paths"])
         for path in paths["contract_paths"]:
-            previous = frozen.setdefault(path, name)
-            if previous != name:
-                raise ValueError(f"frozen contract path {path} is owned by both {previous} and {name}")
-        for value in [*paths["implementation_scopes"], *paths["test_scopes"]]:
-            owners.append((name, PathScope(str(value["kind"]), str(value["path"]))))
+            previous = contracts.setdefault(
+                path,
+                (name, str(paths.get("contract_mode") or "review_guarded")),
+            )
+            if previous[0] != name:
+                errors.append(f"contract path {path} is owned by both {previous[0]} and {name}")
+        for value in paths["implementation_scopes"]:
+            owners.append((name, "implementation", PathScope(str(value["kind"]), str(value["path"]))))
+        for value in paths["test_scopes"]:
+            owners.append((name, "test", PathScope(str(value["kind"]), str(value["path"]))))
         references.extend((name, path) for path in paths["reference_only"])
-    for index, (owner, scope) in enumerate(owners):
-        for other_owner, other_scope in owners[index + 1 :]:
+    for index, (owner, scope_kind, scope) in enumerate(owners):
+        for other_owner, _other_scope_kind, other_scope in owners[index + 1 :]:
             if owner != other_owner and _path_scopes_overlap(scope, other_scope):
-                raise ValueError(
+                errors.append(
                     f"writable path scopes overlap between {owner} and {other_owner}: {scope.path}, {other_scope.path}"
                 )
-        for contract_path, contract_owner in frozen.items():
+        for contract_path, (contract_owner, contract_mode) in contracts.items():
             if scope.matches(contract_path):
-                raise ValueError(
-                    f"writable scope {scope.path} for {owner} overlaps frozen contract {contract_path} owned by {contract_owner}"
-                )
+                if (
+                    owner != contract_owner
+                    or contract_mode == "file_frozen"
+                    or scope_kind != "implementation"
+                ):
+                    errors.append(
+                        f"writable scope {scope.path} for {owner} overlaps {contract_mode} contract {contract_path} owned by {contract_owner}"
+                    )
         for reference_owner, reference_path in references:
             if scope.matches(reference_path):
-                raise ValueError(
+                errors.append(
                     f"writable scope {scope.path} for {owner} overlaps reference-only path {reference_path} from {reference_owner}"
                 )
+    _raise_architecture_errors(errors)
 
 
-def _validate_contract_graph(
+def _validate_construction_graph(
     modules: Mapping[str, Mapping[str, Any]],
-    verification_nodes: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    contract_paths = {
-        name: set(str(item) for item in list(dict(module["paths"])["contract_paths"]))
+    contract_dependencies = {
+        name: set(str(item) for item in list(module.get("contract_dependencies") or []))
         for name, module in modules.items()
     }
-    consumed: set[tuple[str, str]] = set()
-    for consumer_name, module in modules.items():
-        for reference in list(module.get("consumes") or []):
-            provider = str(reference["module"])
-            path = str(reference["path"])
-            if provider == consumer_name:
-                raise ValueError(f"module {consumer_name} cannot consume its own cross-module contract")
-            _validate_contract_reference(provider, path, contract_paths, consumer=f"module {consumer_name}")
-            consumed.add((provider, path))
-    names = set(modules)
-    implementation_names = {
-        name
-        for name, module in modules.items()
-        if str(module.get("module_kind") or "") == "implementation"
-    }
-    construction_dependencies = {
-        name: set(str(item) for item in list(module.get("depends_on") or []))
-        for name, module in modules.items()
-    }
-    for module_name, dependencies in construction_dependencies.items():
-        module_kind = str(modules[module_name].get("module_kind") or "")
-        if module_kind == "contract_only" and dependencies:
-            raise ValueError(
-                f"contract_only module {module_name} cannot declare construction dependencies"
-            )
-        non_candidate_dependencies = sorted(dependencies - implementation_names)
-        if non_candidate_dependencies:
-            raise ValueError(
-                f"module {module_name} construction depends_on may name implementation modules only: "
-                + ", ".join(non_candidate_dependencies)
-            )
-    for node_name, node in verification_nodes.items():
-        dependencies = set(str(item) for item in list(node.get("depends_on") or []))
-        unknown = sorted(dependencies - names)
-        if unknown:
-            raise ValueError(
-                f"Verification Node {node_name} references unknown implementation modules: {', '.join(unknown)}"
-            )
-        non_candidate_dependencies = sorted(dependencies - implementation_names)
-        if non_candidate_dependencies:
-            raise ValueError(
-                f"Verification Node {node_name} depends_on may name implementation Candidates only; "
-                f"reference contract_only modules through consumes: {', '.join(non_candidate_dependencies)}"
-            )
-        required_closure = _dependency_closure(dependencies, construction_dependencies)
-        missing_dependencies = sorted(required_closure - dependencies)
-        if missing_dependencies:
-            raise ValueError(
-                f"Verification Node {node_name} must list the complete construction dependency closure; "
-                f"missing: {', '.join(missing_dependencies)}"
-            )
-        for reference in list(node.get("consumes") or []):
-            provider = str(reference["module"])
-            path = str(reference["path"])
-            _validate_contract_reference(provider, path, contract_paths, consumer=f"Verification Node {node_name}")
-            provider_kind = str(modules[provider].get("module_kind") or "")
-            if provider_kind == "implementation" and provider not in dependencies:
-                raise ValueError(
-                    f"Verification Node {node_name} consumes {provider}:{path} but does not include {provider} in depends_on"
-                )
-            consumed.add((provider, path))
-    unconsumed = sorted(
-        f"{module}:{path}"
-        for module, paths in contract_paths.items()
-        for path in paths
-        if (module, path) not in consumed
+    cycle = _cycle_nodes(
+        {name: sorted(dependencies) for name, dependencies in contract_dependencies.items()}
     )
-    if unconsumed:
-        raise ValueError(
-            "Architecture declares externally observable contracts with no real consumer: " + ", ".join(unconsumed)
-        )
-
-
-def _dependency_closure(
-    roots: set[str],
-    dependencies: Mapping[str, set[str]],
-) -> set[str]:
-    closure = set(roots)
-    frontier = list(roots)
-    while frontier:
-        current = frontier.pop()
-        for dependency in dependencies.get(current, set()):
-            if dependency not in closure:
-                closure.add(dependency)
-                frontier.append(dependency)
-    return closure
-
-
-def _validate_contract_reference(
-    provider: str,
-    path: str,
-    contract_paths: Mapping[str, set[str]],
-    *,
-    consumer: str,
-) -> None:
-    if provider not in contract_paths:
-        raise ValueError(f"{consumer} consumes an unknown provider module: {provider}")
-    if path not in contract_paths[provider]:
-        raise ValueError(f"{consumer} consumes an undeclared contract path: {provider}:{path}")
-
-
-def _validate_verification_coverage(
-    verification_nodes: Mapping[str, Mapping[str, Any]],
-    requirements_payload: Mapping[str, Any],
-) -> None:
-    verified = {
-        (_normalized_semantic_text(str(item["section"])), _normalized_semantic_text(str(item["requirement"])))
-        for node in verification_nodes.values()
-        for item in list(node.get("covers") or [])
-    }
-    missing = [
-        item
-        for item in semantic_requirements(requirements_payload)
-        if item.strength == "hard"
-        and (_normalized_semantic_text(item.section), _normalized_semantic_text(item.requirement)) not in verified
-    ]
-    if missing:
-        raise ValueError(
-            "Hard Requirements without a real Verification Node landing: "
-            + "; ".join(f"{item.section}: {item.requirement}" for item in missing)
-        )
+    if cycle:
+        raise ValueError("Architecture contract dependency graph contains a cycle: " + ", ".join(cycle))
 
 
 def _validate_declared_paths(
     modules: Mapping[str, Mapping[str, Any]],
-    verification_nodes: Mapping[str, Mapping[str, Any]],
     workspace_root: Path,
 ) -> None:
+    errors: list[str] = []
     for name, module in modules.items():
         paths = dict(module["paths"])
         entrypoint = str(list(paths["contract_paths"])[0])
         target = workspace_root / entrypoint
         if not target.is_file():
-            raise ValueError(f"module {name} contract entrypoint does not exist: {entrypoint}")
-        missing = contract_comment_missing_sections(target.read_text(encoding="utf-8"), module_name=name)
-        if missing:
-            raise ValueError(f"module {name} contract entrypoint is incomplete: {', '.join(missing)}")
+            errors.append(f"module {name} contract entrypoint does not exist: {entrypoint}")
         for contract_path in list(paths["contract_paths"]):
             if not (workspace_root / contract_path).is_file():
-                raise ValueError(f"module {name} contract path does not exist: {contract_path}")
+                errors.append(f"module {name} contract path does not exist: {contract_path}")
         for raw_scope in [*list(paths["implementation_scopes"]), *list(paths["test_scopes"])]:
             scope = PathScope(str(raw_scope["kind"]), str(raw_scope["path"]))
             declared = workspace_root / scope.path
             if scope.kind == "file" and not declared.is_file():
-                raise ValueError(f"module {name} writable file does not exist in the skeleton: {scope.path}")
+                errors.append(f"module {name} writable file does not exist in the skeleton: {scope.path}")
             if scope.kind == "directory" and not declared.is_dir():
-                raise ValueError(f"module {name} writable directory does not exist in the skeleton: {scope.path}")
+                errors.append(f"module {name} writable directory does not exist in the skeleton: {scope.path}")
         for reference in list(paths["reference_only"]):
             if not (workspace_root / reference).exists():
-                raise ValueError(f"module {name} reference-only path does not exist: {reference}")
-    for consumer_name, module in modules.items():
-        for reference in list(module.get("consumes") or []):
-            symbol = str(reference.get("symbol") or "")
-            if not symbol:
-                continue
-            target = workspace_root / str(reference["path"])
-            content = target.read_text(encoding="utf-8", errors="replace")
-            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", content) is None:
-                raise ValueError(
-                    f"module {consumer_name} consumes an unknown contract symbol: "
-                    f"{reference['module']}:{reference['path']}::{symbol}"
-                )
-    for node_name, node in verification_nodes.items():
-        for reference in list(node.get("consumes") or []):
-            symbol = str(reference.get("symbol") or "")
-            if not symbol:
-                continue
-            target = workspace_root / str(reference["path"])
-            content = target.read_text(encoding="utf-8", errors="replace")
-            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", content) is None:
-                raise ValueError(
-                    f"Verification Node {node_name} consumes an unknown contract symbol: "
-                    f"{reference['module']}:{reference['path']}::{symbol}"
-                )
+                errors.append(f"module {name} reference-only path does not exist: {reference}")
+    _raise_architecture_errors(errors)
 
 
 def _compiled_path_policy(submission: Mapping[str, Any]) -> dict[str, Any]:
@@ -1639,6 +1447,7 @@ def _compiled_path_policy(submission: Mapping[str, Any]) -> dict[str, Any]:
         paths = dict(dict(raw_module).get("paths") or {})
         modules[name] = {
             "module_kind": str(dict(raw_module).get("module_kind") or ""),
+            "contract_mode": str(paths.get("contract_mode") or "review_guarded"),
             "contract_paths": list(paths.get("contract_paths") or []),
             "implementation_scopes": list(paths.get("implementation_scopes") or []),
             "test_scopes": list(paths.get("test_scopes") or []),
@@ -1686,12 +1495,6 @@ def _path_scopes_overlap(left: PathScope, right: PathScope) -> bool:
     if right.kind == "directory":
         probes.add(right.path + "/__pal_probe__")
     return any(left.matches(path) and right.matches(path) for path in probes)
-
-
-def _format_contract_reference(value: Mapping[str, Any]) -> str:
-    symbol = str(value.get("symbol") or "")
-    suffix = f"::{symbol}" if symbol else ""
-    return f"`{value.get('module', '')}:{value.get('path', '')}{suffix}`"
 
 
 def _cycle_nodes(depends_on: Mapping[str, Sequence[str]]) -> tuple[str, ...]:
@@ -1859,21 +1662,6 @@ def _evidence_semantically_matches(reference: Mapping[str, Any], entry: Mapping[
     return compared
 
 
-def _semantic_requirement_suggestions(
-    text: str, section: str, requirements: Sequence[SemanticRequirement]
-) -> tuple[SemanticRequirement, ...]:
-    wanted = set(_normalized_semantic_text(text).split())
-    ranked: list[tuple[float, SemanticRequirement]] = []
-    for item in requirements:
-        if section and _normalized_semantic_text(section) != _normalized_semantic_text(item.section):
-            continue
-        words = set(_normalized_semantic_text(item.requirement).split())
-        score = len(wanted & words) / max(1, len(wanted | words))
-        if score:
-            ranked.append((score, item))
-    return tuple(item for _score, item in sorted(ranked, key=lambda pair: (-pair[0], pair[1].section))[:5])
-
-
 def _symbol_suggestions(symbol: str, content: str) -> tuple[str, ...]:
     wanted = symbol.casefold()
     identifiers = sorted(set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", content)))
@@ -1912,12 +1700,6 @@ def _normalized_repo_path(value: str) -> str:
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError(f"repository path must be normalized and relative: {value}")
     return str(path)
-
-
-def _requirement_strength(value: str) -> str:
-    if value not in {"hard", "soft"}:
-        raise ValueError(f"invalid Requirement strength: {value}")
-    return value
 
 
 def _unique_text(value: Any) -> list[str]:

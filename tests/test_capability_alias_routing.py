@@ -1,225 +1,159 @@
 from __future__ import annotations
 
 import unittest
-from dataclasses import dataclass, field
-from typing import Any
 
 from pal.core import PalCore as _PalCoreBootstrap
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
+from pal.execution.tool_facade import CompleteResult, RejectedResult
 from pal.llm.contracts import CanonicalToolCall
 from pal.shared import RuntimeStatus, SINGLETON_TARGET
 
 
-@dataclass
-class EchoTool:
-    name: str = "op_test_echo"
-    description: str = "Echo test input"
-    args_schema: dict[str, Any] = field(default_factory=dict)
-    result_schema: dict[str, Any] = field(default_factory=dict)
-    display_name: str = "Echo"
-    family: str = "test"
-    tags: tuple[str, ...] = ()
-    keywords: tuple[str, ...] = ()
-
-    def invoke(self, args: dict[str, Any]) -> CapabilityResult:
-        value = str(args.get("value") or "")
-        return CapabilityResult(status=RuntimeStatus.OK, text=value, llm_text=value or "empty")
-
-
-def echo_descriptor(*, name: str = "echo", canonical_path: str = "op_test_echo", aliases: tuple[str, ...] = ()) -> CapabilityDescriptor:
+def echo_descriptor(
+    *,
+    name: str = "echo",
+    canonical_path: str = "op_test_echo",
+    target_id: str | None = None,
+    aliases: tuple[str, ...] = (),
+    metadata: dict[str, object] | None = None,
+) -> CapabilityDescriptor:
     return CapabilityDescriptor(
         name=name,
         canonical_path=canonical_path,
         family="test",
         description="Echo test input",
         source="test",
+        target_id=target_id,
         aliases=aliases,
+        parameters_schema={
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+        result_schema={
+            "type": "object",
+            "properties": {"echo": {"type": "string"}},
+            "required": ["echo"],
+            "additionalProperties": False,
+        },
+        metadata=dict(metadata or {}),
     )
 
 
-def unused_provider_binding(_call: CapabilityCall) -> CapabilityResult:
-    return CapabilityResult(status=RuntimeStatus.ERROR, text="wrong binding", llm_text="wrong binding")
+def echo_binding(call: CapabilityCall) -> CapabilityResult:
+    value = str(call.args.get("value") or "")
+    return CapabilityResult(
+        status=RuntimeStatus.OK,
+        text=value,
+        structured={"echo": value},
+        llm_text=value,
+    )
 
 
 class CapabilityAliasRoutingTests(unittest.TestCase):
-    def test_alias_and_canonical_path_resolve_to_the_same_binding(self) -> None:
+    def test_only_exact_alias_is_public_and_canonical_stays_manager_internal(self) -> None:
         runtime = ExecutionRuntime()
-        runtime.register_tool(EchoTool())
-        runtime.register_capability(echo_descriptor(aliases=("repeat",)), unused_provider_binding)
-        try:
-            alias_path = runtime.resolve_llm_tool_name("repeat")
-            canonical_path = runtime.resolve_llm_tool_name("op_test_echo")
-
-            self.assertEqual(alias_path, "op_test_echo")
-            self.assertEqual(canonical_path, "op_test_echo")
-            self.assertIs(
-                runtime.bound_action_index.get(alias_path, SINGLETON_TARGET),
-                runtime.bound_action_index.get(canonical_path, SINGLETON_TARGET),
-            )
-            alias_result = runtime.execute_tool(CanonicalToolCall(name="repeat", args={"value": "alias"}))
-            canonical_result = runtime.execute_tool(CanonicalToolCall(name="op_test_echo", args={"value": "canonical"}))
-            self.assertEqual(alias_result.text, "alias")
-            self.assertEqual(canonical_result.text, "canonical")
-            self.assertEqual(alias_result.name, "op_test_echo")
-        finally:
-            runtime.shutdown()
-
-    def test_unregistered_resident_tool_cannot_bypass_canonical_binding(self) -> None:
-        runtime = ExecutionRuntime()
-        runtime.register_tool(EchoTool())
-        runtime.register_capability(echo_descriptor(aliases=("repeat",)), unused_provider_binding)
-        runtime.unregister_capability("echo")
-        try:
-            self.assertIn("op_test_echo", runtime.tools)
-            self.assertEqual(runtime.resolve_llm_tool_name("repeat"), "repeat")
-            self.assertIsNone(runtime.bound_action_index.get("op_test_echo", SINGLETON_TARGET))
-            alias_result = runtime.execute_tool(CanonicalToolCall(name="repeat", args={"value": "blocked"}))
-            canonical_result = runtime.execute_tool(CanonicalToolCall(name="op_test_echo", args={"value": "blocked"}))
-            self.assertEqual(alias_result.status, "unknown_tool")
-            self.assertEqual(canonical_result.status, "unknown_tool")
-        finally:
-            runtime.shutdown()
-
-    def test_alias_conflict_fails_without_registering_second_binding(self) -> None:
-        runtime = ExecutionRuntime()
-        runtime.register_capability(echo_descriptor(aliases=("repeat",)), unused_provider_binding)
-        conflicting = echo_descriptor(name="other", canonical_path="op_test_other", aliases=("repeat",))
-        try:
-            with self.assertRaisesRegex(ValueError, "alias already routes"):
-                runtime.register_capability(conflicting, unused_provider_binding)
-
-            self.assertEqual(runtime.resolve_llm_tool_name("repeat"), "op_test_echo")
-            self.assertIsNotNone(runtime.bound_action_index.get("op_test_echo", SINGLETON_TARGET))
-            self.assertIsNone(runtime.bound_action_index.get("op_test_other", SINGLETON_TARGET))
-            self.assertNotIn("other", runtime.compiled_capability_index.records)
-        finally:
-            runtime.shutdown()
-
-    def test_alias_cannot_shadow_an_existing_canonical_path(self) -> None:
-        runtime = ExecutionRuntime()
-        runtime.register_capability(echo_descriptor(), unused_provider_binding)
-        conflicting = echo_descriptor(name="other", canonical_path="op_test_other", aliases=("op_test_echo",))
-        try:
-            with self.assertRaisesRegex(ValueError, "alias conflicts with a canonical path"):
-                runtime.register_capability(conflicting, unused_provider_binding)
-
-            self.assertEqual(runtime.resolve_llm_tool_name("op_test_echo"), "op_test_echo")
-            self.assertIsNotNone(runtime.bound_action_index.get("op_test_echo", SINGLETON_TARGET))
-            self.assertIsNone(runtime.bound_action_index.get("op_test_other", SINGLETON_TARGET))
-        finally:
-            runtime.shutdown()
-
-    def test_canonical_path_cannot_shadow_an_existing_alias(self) -> None:
-        runtime = ExecutionRuntime()
-        runtime.register_capability(echo_descriptor(aliases=("repeat",)), unused_provider_binding)
-        conflicting = echo_descriptor(name="other", canonical_path="repeat")
-        try:
-            with self.assertRaisesRegex(ValueError, "canonical path is already registered as an alias"):
-                runtime.register_capability(conflicting, unused_provider_binding)
-
-            self.assertEqual(runtime.resolve_llm_tool_name("repeat"), "op_test_echo")
-            self.assertIsNone(runtime.bound_action_index.get("repeat", SINGLETON_TARGET))
-        finally:
-            runtime.shutdown()
-
-    def test_exact_instance_descriptor_name_can_be_unregistered(self) -> None:
-        runtime = ExecutionRuntime()
-        descriptor = CapabilityDescriptor(
-            name="echo::worker-a",
-            canonical_path="op_test_echo",
-            family="test",
-            description="Echo for one worker",
-            source="test",
-            target_id="worker-a",
-            aliases=("repeat worker-a",),
-        )
-        runtime.register_capability(descriptor, unused_provider_binding)
-        try:
-            self.assertIsNotNone(runtime.get_capability_spec("echo::worker-a"))
-            runtime.unregister_capability("echo::worker-a")
-
-            self.assertNotIn("echo::worker-a", runtime.compiled_capability_index.records)
-            self.assertIsNone(runtime.bound_action_index.get("op_test_echo", "worker-a"))
-            self.assertEqual(runtime.resolve_llm_tool_name("repeat worker-a"), "repeat worker-a")
-        finally:
-            runtime.shutdown()
-
-    def test_instance_base_name_routes_to_canonical_binding_by_target_id(self) -> None:
-        runtime = ExecutionRuntime()
-        descriptors = [
-            CapabilityDescriptor(
-                name=f"echo::{target_id}",
-                canonical_path="op_test_echo",
-                family="test",
-                description="Echo for one worker",
-                source="test",
-                target_id=target_id,
-            )
-            for target_id in ("worker-a", "worker-b")
-        ]
-
-        def invoke(call: CapabilityCall) -> CapabilityResult:
-            return CapabilityResult(
-                status=RuntimeStatus.OK,
-                text=str(call.args.get("target_id") or ""),
-                llm_text=str(call.args.get("target_id") or ""),
-            )
-
-        try:
-            for descriptor in descriptors:
-                runtime.register_capability(descriptor, invoke)
-
-            self.assertEqual(runtime.resolve_llm_tool_name("echo"), "op_test_echo")
-            selected = runtime.execute(CapabilityCall(name="echo", args={"target_id": "worker-b"}))
-            missing_target = runtime.execute(CapabilityCall(name="echo"))
-
-            self.assertEqual(selected.status, RuntimeStatus.OK)
-            self.assertEqual(selected.text, "worker-b")
-            self.assertEqual(missing_target.status, RuntimeStatus.INVALID)
-            self.assertEqual(missing_target.structured["available_target_ids"], ["worker-a", "worker-b"])
-        finally:
-            runtime.shutdown()
-
-    def test_explicit_alias_takes_precedence_over_conflicting_instance_base_projection(self) -> None:
-        runtime = ExecutionRuntime()
-        instance = CapabilityDescriptor(
-            name="show::task-a",
-            canonical_path="intro_task_show",
-            family="test",
-            description="Show task",
-            source="test",
-            target_id="task-a",
-        )
-        module = CapabilityDescriptor(
-            name="show",
-            canonical_path="intro_module_show",
-            family="test",
-            description="Show module",
-            source="test",
+        runtime.register_capability(
+            echo_descriptor(aliases=("repeat",)),
+            echo_binding,
         )
         try:
-            runtime.register_capability(instance, unused_provider_binding)
-            runtime.register_capability(module, unused_provider_binding)
+            direct = runtime.execute_tool(CanonicalToolCall(name="echo", args={"value": "direct"}))
+            exact = runtime.invoke_indirect_tool(CanonicalToolCall(name="echo", args={"value": "alias"}))
+            heuristic = runtime.invoke_indirect_tool(CanonicalToolCall(name="repeat", args={"value": "legacy"}))
+            canonical = runtime.invoke_indirect_tool(
+                CanonicalToolCall(name="op_test_echo", args={"value": "canonical"})
+            )
+            manager = runtime.execute(CapabilityCall(name="op_test_echo", args={"value": "internal"}))
 
-            self.assertEqual(runtime.resolve_llm_tool_name("show"), "intro_module_show")
-            self.assertEqual(runtime.resolve_llm_tool_name("show::task-a"), "intro_task_show")
-
-            runtime.unregister_capability("show")
-            self.assertEqual(runtime.resolve_llm_tool_name("show"), "intro_task_show")
+            self.assertIsInstance(direct.invocation_result, RejectedResult)
+            self.assertEqual(direct.status, "wrong_invocation_mode")
+            self.assertIsInstance(exact, CompleteResult)
+            self.assertEqual(exact.output, {"echo": "alias"})
+            self.assertIsInstance(heuristic, RejectedResult)
+            self.assertEqual(heuristic.error_code, "unknown_tool")
+            self.assertIsInstance(canonical, RejectedResult)
+            self.assertEqual(canonical.error_code, "unknown_tool")
+            self.assertEqual(manager.status, RuntimeStatus.OK)
+            self.assertEqual(manager.structured, {"echo": "internal"})
         finally:
             runtime.shutdown()
 
-    def test_unregistered_canonical_path_can_be_reused_as_an_alias(self) -> None:
+    def test_unregister_replaces_generation_without_mutating_old_snapshot(self) -> None:
         runtime = ExecutionRuntime()
-        runtime.register_capability(echo_descriptor(), unused_provider_binding)
-        runtime.unregister_capability("echo")
-        replacement = echo_descriptor(name="other", canonical_path="op_test_other", aliases=("op_test_echo",))
+        runtime.register_capability(echo_descriptor(), echo_binding)
+        old_generation = runtime.registry_generation
         try:
-            runtime.register_capability(replacement, unused_provider_binding)
+            runtime.unregister_capability("echo")
 
-            self.assertEqual(runtime.resolve_llm_tool_name("op_test_echo"), "op_test_other")
-            self.assertNotIn("op_test_echo", runtime.compiled_capability_index.by_canonical)
+            self.assertIsNot(runtime.registry_generation, old_generation)
+            self.assertIn("echo", old_generation.indirect_aliases)
+            self.assertNotIn("echo", runtime.registry_generation.indirect_aliases)
+            rejected = runtime.invoke_indirect_tool(CanonicalToolCall(name="echo", args={"value": "gone"}))
+            self.assertIsInstance(rejected, RejectedResult)
+            self.assertEqual(rejected.error_code, "unknown_tool")
+        finally:
+            runtime.shutdown()
+
+    def test_generation_wide_alias_conflict_is_atomic(self) -> None:
+        runtime = ExecutionRuntime()
+        runtime.register_capability(
+            echo_descriptor(name="first", metadata={"alias": "shared"}),
+            echo_binding,
+        )
+        before = runtime.registry_generation
+        conflicting = echo_descriptor(
+            name="second",
+            canonical_path="op_test_second",
+            metadata={"alias": "shared"},
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "tool alias conflict"):
+                runtime.register_capability(conflicting, echo_binding)
+
+            self.assertIs(runtime.registry_generation, before)
+            self.assertIn("shared", runtime.registry_generation.indirect_aliases)
+            self.assertIsNone(runtime.bound_action_index.get("op_test_second", SINGLETON_TARGET))
+        finally:
+            runtime.shutdown()
+
+    def test_targeted_aliases_are_exact_and_do_not_create_a_base_fallback(self) -> None:
+        runtime = ExecutionRuntime()
+        for target_id in ("worker_a", "worker_b"):
+            runtime.register_capability(
+                echo_descriptor(
+                    name=f"echo__{target_id}",
+                    target_id=target_id,
+                ),
+                echo_binding,
+            )
+        try:
+            selected = runtime.invoke_indirect_tool(
+                CanonicalToolCall(name="echo__worker_b", args={"value": "worker_b"})
+            )
+            missing_base = runtime.invoke_indirect_tool(
+                CanonicalToolCall(name="echo", args={"value": "worker_b"})
+            )
+
+            self.assertIsInstance(selected, CompleteResult)
+            self.assertEqual(selected.output, {"echo": "worker_b"})
+            self.assertIsInstance(missing_base, RejectedResult)
+            self.assertEqual(missing_base.error_code, "unknown_tool")
+        finally:
+            runtime.shutdown()
+
+    def test_non_provider_safe_alias_characters_reject_entire_candidate(self) -> None:
+        runtime = ExecutionRuntime()
+        before = runtime.registry_generation
+        try:
+            with self.assertRaisesRegex(ValueError, "invalid tool alias"):
+                runtime.register_capability(
+                    echo_descriptor(name="echo::worker-a", target_id="worker-a"),
+                    echo_binding,
+                )
+            self.assertIs(runtime.registry_generation, before)
         finally:
             runtime.shutdown()
 

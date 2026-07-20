@@ -6,7 +6,6 @@ from typing import Any
 from uuid import uuid4
 
 from pal.shared.result_rendering import render_structured_for_llm
-from pal.shared.tool_aliases import llm_tool_name
 
 
 ToolResultRenderer = Callable[[Any, Any], str]
@@ -31,7 +30,7 @@ def assistant_tool_message(
                 "id": str(tool_call.call_id or ""),
                 "type": "function",
                 "function": {
-                    "name": llm_tool_name(tool_call.name),
+                    "name": str(tool_call.name or "").strip(),
                     "arguments": json.dumps(tool_call.args, ensure_ascii=False, sort_keys=True),
                 },
             }

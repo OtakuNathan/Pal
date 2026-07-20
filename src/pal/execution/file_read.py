@@ -1,7 +1,7 @@
 """Structured file read tool for text files.
 
-Reads a text file, caches its full content in :class:`FileStateCache` for
-subsequent :class:`FileEditTool` edits, and returns a line-numbered slice.
+Reads a text file, returns a line-numbered slice, and records whether the
+caller actually saw the complete file before a later mutation.
 
 Only UTF-8 (and compatible) text files are supported.  Binary files,
 images, and PDFs should be handled through artifact / vision tools instead.
@@ -15,6 +15,12 @@ from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.execution.file_state import FileStateCache
+from pal.execution.file_tool_contracts import (
+    DEFAULT_FILE_READ_LIMIT,
+    FILE_READ_DESCRIPTION,
+    FILE_READ_RESULT_SCHEMA,
+    file_read_args_schema,
+)
 from pal.shared import RuntimeStatus
 
 
@@ -33,26 +39,27 @@ _ERROR_LLMS: dict[str, str] = {
     ERR_INVALID_ARGUMENT: "offset and limit must be positive integers.",
 }
 
-DEFAULT_LIMIT = 2000
+DEFAULT_LIMIT = DEFAULT_FILE_READ_LIMIT
+FILE_UNCHANGED_STUB = (
+    "File unchanged since the previous read of this line range. "
+    "Use the prior content already in context."
+)
 
 
 @dataclass
 class FileReadTool:
     """File read tool implementing the :class:`~pal.execution.contracts.Tool` protocol.
 
-    Every successful read populates the shared :class:`FileStateCache` so that
-    :class:`FileEditTool` can verify "read-before-edit" safety.
+    Every successful read populates the shared :class:`FileStateCache`. Only a
+    complete visible read authorizes a later whole-file mutation.
     """
 
     name: str = "op_file_read"
     display_name: str = "File Read"
     family: str = "system"
     description: str = (
-        "Use this first when you need to inspect a UTF-8 text file; do not use op_exec_shell with cat/head/tail for file reads when this tool is visible. "
-        "Read a text file and return a line-numbered slice. "
-        "The full content is cached for subsequent file_edit calls. "
-        "Supports offset and limit for large files. "
-        "Only text (UTF-8) files are supported."
+        "Use this instead of shell cat/head/tail when it is visible. "
+        + FILE_READ_DESCRIPTION
     )
     tags: tuple[str, ...] = ("file", "read", "system")
     keywords: tuple[str, ...] = ("read", "cat", "view", "file", "open", "load")
@@ -62,48 +69,9 @@ class FileReadTool:
 
     def __post_init__(self) -> None:
         if not self.args_schema:
-            self.args_schema = {
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the file to read.",
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Alias for file_path.",
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": (
-                            "1-based line number to start reading from. "
-                            "Defaults to 1 (beginning of file)."
-                        ),
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": (
-                            "Maximum number of lines to return. "
-                            f"Defaults to {DEFAULT_LIMIT}."
-                        ),
-                    },
-                },
-                "required": ["file_path"],
-            }
+            self.args_schema = file_read_args_schema()
         if not self.result_schema:
-            self.result_schema = {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "content": {"type": "string"},
-                    "start_line": {"type": "integer"},
-                    "end_line": {"type": "integer"},
-                    "total_lines": {"type": "integer"},
-                    "truncated": {"type": "boolean"},
-                    "encoding": {"type": "string"},
-                    "error_code": {"type": "string"},
-                },
-            }
+            self.result_schema = dict(FILE_READ_RESULT_SCHEMA)
 
     # ------------------------------------------------------------------
     # Tool protocol
@@ -145,32 +113,57 @@ class FileReadTool:
                 file_path=str(resolved),
             )
 
-        try:
-            raw = resolved.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            msg = _ERROR_LLMS[ERR_UNSUPPORTED_TEXT_ENCODING]
-            return _result(
-                RuntimeStatus.ERROR,
-                msg,
-                error_code=ERR_UNSUPPORTED_TEXT_ENCODING,
-                file_path=str(resolved),
-            )
-        except OSError as exc:
-            return _result(
-                RuntimeStatus.ERROR,
-                f"failed to read file: {exc}",
-                error_code="READ_FAILED",
-                file_path=str(resolved),
-            )
-
-        # Cache the FULL content (not just the slice) for file_edit safety.
-        self.cache.mark_read(str(resolved), raw)
+        cached_state = self.cache.get_valid_state(resolved)
+        if cached_state is not None:
+            raw = cached_state.content
+        else:
+            try:
+                raw = resolved.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                msg = _ERROR_LLMS[ERR_UNSUPPORTED_TEXT_ENCODING]
+                return _result(
+                    RuntimeStatus.ERROR,
+                    msg,
+                    error_code=ERR_UNSUPPORTED_TEXT_ENCODING,
+                    file_path=str(resolved),
+                )
+            except OSError as exc:
+                return _result(
+                    RuntimeStatus.ERROR,
+                    f"failed to read file: {exc}",
+                    error_code="READ_FAILED",
+                    file_path=str(resolved),
+                )
 
         # Build line-numbered output.
         lines = raw.splitlines(keepends=True)
         total_lines = len(lines)
         start = max(1, offset)
         end = min(start + limit - 1, total_lines)
+        full_view = start == 1 and (total_lines == 0 or end == total_lines)
+        view = (start, end)
+
+        if (
+            cached_state is not None
+            and cached_state.full_view
+            and cached_state.last_view == view
+        ):
+            return _result(
+                RuntimeStatus.OK,
+                FILE_UNCHANGED_STUB,
+                file_path=str(resolved),
+                start_line=start,
+                end_line=end,
+                total_lines=total_lines,
+                truncated=end < total_lines,
+                full_view=cached_state.full_view,
+                unchanged=True,
+                encoding="utf-8",
+            )
+
+        # The cache stores full bytes for stale detection, but only a complete
+        # visible read grants permission to mutate the whole file.
+        self.cache.mark_read(str(resolved), raw, full_view=full_view, view=view)
 
         # Offset beyond file: return informative message instead of empty content.
         if start > total_lines:
@@ -181,6 +174,8 @@ class FileReadTool:
                 "end_line": total_lines,
                 "total_lines": total_lines,
                 "truncated": False,
+                "full_view": False,
+                "unchanged": False,
                 "encoding": "utf-8",
             }
             return _result(RuntimeStatus.OK, msg, **structured)
@@ -202,6 +197,8 @@ class FileReadTool:
             "end_line": end,
             "total_lines": total_lines,
             "truncated": truncated,
+            "full_view": full_view,
+            "unchanged": False,
             "encoding": "utf-8",
         }
 

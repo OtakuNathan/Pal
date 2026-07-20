@@ -8,18 +8,34 @@ from pal.execution.contracts import (
     Tool,
     ToolCallBudget,
 )
+from pal.execution.tool_facade import (
+    CompleteResult,
+    EffectOutcome,
+    EffectReceipt,
+    FailedResult,
+    PagedResult,
+    RejectedResult,
+    ToolExecutionSemantics,
+    ToolGuidance,
+    ToolHandlerResult,
+    ToolInvocationResult,
+)
 __all__ = [
     "ApprovalExecutionDecorator",
     "CapabilityCall",
     "CapabilityCallable",
     "CapabilityDescriptor",
     "CapabilityResult",
+    "CompleteResult",
     "ChannelSendAttachmentTool",
     "ExecutionIntrospectionProvider",
     "ExecutionSnapshot",
     "ExecutionRuntime",
     "ExecutionApprovalRequest",
     "ExecutionRuntimePort",
+    "EffectOutcome",
+    "EffectReceipt",
+    "FailedResult",
     "FileEditTool",
     "FileReadTool",
     "FileStateCache",
@@ -27,13 +43,20 @@ __all__ = [
     "FileWriteTool",
     "GitTool",
     "PathDeleteTool",
+    "PagedResult",
     "Plugin",
+    "RejectedResult",
     "ShellExecTool",
     "ToolCallTool",
     "ToolReadTool",
     "ToolResultPageTool",
     "ToolSearchTool",
     "Tool",
+    "ToolExecutionSemantics",
+    "ToolGuidance",
+    "ToolHandlerResult",
+    "ToolInvocationResult",
+    "ToolRegistryGeneration",
     "ToolCallBudget",
     "get_file_state_cache",
     "inspect_execution",
@@ -43,6 +66,10 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    if name == "ToolRegistryGeneration":
+        from pal.execution.tool_registry import ToolRegistryGeneration
+
+        return ToolRegistryGeneration
     if name in {"ApprovalExecutionDecorator", "ExecutionApprovalRequest"}:
         from pal.execution.approval import ApprovalExecutionDecorator, ExecutionApprovalRequest
 

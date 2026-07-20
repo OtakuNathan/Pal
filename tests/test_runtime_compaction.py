@@ -184,6 +184,15 @@ def _build_core_with_compacting_llm(*, compact_on: str, memory_candidates: list[
             family="test",
             description=echo_tool.description,
             source="test",
+            metadata={
+                "execution_semantics": {
+                    "invocation_mode": "direct",
+                    "effect_kind": "none",
+                    "idempotency": "idempotent",
+                    "retry_policy": "automatic",
+                    "paging": "supported",
+                }
+            },
         ),
         lambda _call: CapabilityResult(
             status="error",
@@ -700,7 +709,8 @@ class RuntimeCompactionTests(unittest.TestCase):
 
         core.context.execution_runtime.register_capability(
             CapabilityDescriptor(
-                name="op_memory_write",
+                name="remember_memory",
+                canonical_path="op_memory_write",
                 family="memory",
                 description="record memory write",
                 source="test",

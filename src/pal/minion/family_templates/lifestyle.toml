@@ -12,7 +12,6 @@ repair = "lifestyle.nutrition_checkin_producer"
 verifier = "lifestyle.verifier"
 
 [builders]
-requirements = "requirements.v2"
 contract = "contract_sketch.v2"
 verification = "verification.v2"
 

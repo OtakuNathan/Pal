@@ -51,8 +51,31 @@ def coder_session_id(node_run_id: str, generation: int = 0) -> str:
     return _node_role_session_id("coder", node_run_id, generation)
 
 
-def verifier_session_id(node_run_id: str, generation: int = 0) -> str:
-    return _node_role_session_id("verifier", node_run_id, generation)
+def verifier_session_id(
+    node_run_id: str,
+    subject_key: str,
+    generation: int = 0,
+) -> str:
+    subject = str(subject_key or "").strip()
+    if not subject:
+        raise ValueError("verifier session requires an immutable candidate or scenario subject")
+    return _node_role_session_id(
+        "verifier",
+        f"{str(node_run_id).strip()}:{subject}",
+        generation,
+    )
+
+
+def verifier_session_subject(payload: Mapping[str, Any]) -> str:
+    if str(payload.get("node_kind") or "unit") == "verification":
+        fingerprint = str(payload.get("scenario_fingerprint") or "").strip()
+        if not fingerprint:
+            raise ValueError("verification scenario session requires scenario_fingerprint")
+        return f"scenario:{fingerprint}"
+    digest = str(payload.get("candidate_digest") or "").strip()
+    if not digest:
+        raise ValueError("candidate verifier session requires candidate_digest")
+    return f"candidate:{digest}"
 
 
 def node_role_generation(payload: Mapping[str, Any]) -> int:

@@ -6,18 +6,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.minion.v2 import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, MinionV2Repository
+from pal.minion.v2 import (
+    ActionEnvelope,
+    AggregateType,
+    ArtifactRef,
+    ContentAddressedArtifactStore,
+    MinionV2Repository,
+)
 from pal.minion.v2.architecture import (
     ArchitectureArtifactService,
-    ArchitectureFindingKind,
     ComplexityBudgetPolicy,
     HumanReviewCard,
-    ResearchMode,
     review_architecture_contract,
     validate_unit_contract,
 )
+from pal.minion.v2.contracts import UnknownTransitionError
 from pal.minion.v2.service import MinionV2WorkflowService
-from pal.minion.v2.skeleton import requirements_semantic_view
+from pal.minion.v2.orchestration import MinionV2OutboxProcessor
+from pal.minion.v2.task_sources import TaskSourceBundleService
 from pal.minion.v2.workers import apply_v2_research_capability_policy
 from pal.shared import MinionInvocationPack
 
@@ -69,133 +75,13 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
-    def test_evidence_publish_requires_all_requirements_to_be_linked(self) -> None:
-        requirements = self.service.publish_requirements(
-            {
-                "requirements": [
-                    {"requirement_id": "R-1", "statement": "First", "strength": "hard"},
-                    {"requirement_id": "R-2", "statement": "Second", "strength": "hard"},
-                ]
-            }
-        )
-
-        with self.assertRaisesRegex(ValueError, "requirements lack supporting evidence: R-2"):
-            self.service.publish_evidence_catalog(
-                {
-                    "evidence": [
-                        {
-                            "evidence_id": "E-1",
-                            "source_kind": "local",
-                            "location": "reference.patch:1-2",
-                            "line_start": 1,
-                            "line_end": 2,
-                            "summary": "Only the first requirement is linked.",
-                            "supports_requirement_ids": ["R-1"],
-                        }
-                    ]
-                },
-                requirements_ref=requirements,
-                research_mode=ResearchMode.LOCAL_ONLY,
-            )
-
-    def test_requirement_patch_is_manager_timestamped_and_creates_an_immutable_revision(self) -> None:
-        base_ref = self.service.publish_requirements(
-            {
-                "title": "Router",
-                "requirements": [
-                    {
-                        "section": "Routing",
-                        "statement": "Route matching must be deterministic.",
-                        "strength": "hard",
-                    }
-                ],
-            }
-        )
-        finding_ref = self.store.put_json(
-            {"summary": "Reset order is externally observable."},
-            artifact_type="RepairBillArtifact",
-        )
-        patch_ref, revised_ref = self.service.publish_requirement_patch(
-            base_requirements_ref=base_ref,
-            proposal={
-                "patch_kind": "derived_constraint",
-                "section": "Reset semantics",
-                "requirement": "Reset must preserve the configured route precedence order.",
-                "strength": "hard",
-                "reason": "The public reset operation otherwise changes observable routing behavior.",
-                "affected_modules": ["router"],
-                "affected_contracts": [
-                    {"module": "router", "path": "include/router.h", "symbol": "reset"}
-                ],
-            },
-            source={
-                "role": "verifier",
-                "stage": "scenario_verification",
-                "case": "reset preserves route precedence",
-                "finding_summary": "Reset reverses equal-priority routes.",
-            },
-            source_artifact_ref=finding_ref,
-        )
-
-        base = self.store.read_json(base_ref)
-        patch = self.store.read_json(patch_ref)
-        revised = self.store.read_json(revised_ref)
-        self.assertEqual(len(base["requirements"]), 1)
-        self.assertEqual(len(revised["requirements"]), 2)
-        self.assertEqual(patch["observed_at"], patch["proposed_at"])
-        self.assertEqual(patch["source"]["role"], "verifier")
-        self.assertEqual(revised["requirement_patch_refs"], [patch_ref.to_dict()])
-        semantic = requirements_semantic_view(revised)
-        encoded = json.dumps(semantic, sort_keys=True)
-        self.assertIn("Reset must preserve the configured route precedence order.", encoded)
-        self.assertIn("reset preserves route precedence", encoded)
-        self.assertNotIn(patch_ref.sha256, encoded)
-        self.assertNotIn("source_artifact_ref", encoded)
-
-        with self.assertRaisesRegex(ValueError, "add new product semantics"):
-            self.service.publish_requirement_patch(
-                base_requirements_ref=revised_ref,
-                proposal={
-                    "patch_kind": "derived_constraint",
-                    "section": "Reset semantics",
-                    "requirement": "Reset must preserve the configured route precedence order.",
-                    "strength": "hard",
-                    "reason": "Duplicate proposal.",
-                    "affected_modules": ["router"],
-                    "affected_contracts": [],
-                },
-                source={"role": "verifier", "stage": "module_verification"},
-            )
-
     def _publish_contract(self):
-        requirements = self.service.publish_requirements(
-            {
-                "requirements": [
-                    {
-                        "requirement_id": "R-1",
-                        "statement": "Expose stable geometry value types.",
-                        "strength": "hard",
-                        "source_refs": ["user:turn"],
-                    }
-                ]
-            }
-        )
-        evidence = self.service.publish_evidence_catalog(
-            {
-                "evidence": [
-                    {
-                        "evidence_id": "E-1",
-                        "source_kind": "local",
-                        "location": "reference.patch:10-40",
-                        "line_start": 10,
-                        "line_end": 40,
-                        "summary": "Reference value layout and mapping.",
-                        "supports_requirement_ids": ["R-1"],
-                    }
-                ]
-            },
-            requirements_ref=requirements,
-            research_mode=ResearchMode.LOCAL_ONLY,
+        requirements = TaskSourceBundleService(self.runtime_root, self.store).publish(
+            title="Geometry foundation",
+            request_text="Expose stable geometry value types.\n",
+            workspace={},
+            actor="test",
+            source_channel="test",
         )
         module = self.service.publish_unit_contract(_unit_contract())
         constraints = self.service.publish_fragment([], artifact_type="GlobalConstraintsArtifact")
@@ -232,16 +118,16 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                 "risk_ledger_ref": risks.to_dict(),
             }
         )
-        return requirements, evidence, manifest
+        return requirements, requirements, manifest
 
-    def test_stateless_module_does_not_need_a_fake_state_machine(self) -> None:
+    def test_manager_does_not_grade_lifecycle_semantics(self) -> None:
         validated = validate_unit_contract(_unit_contract(), complexity_policy=ComplexityBudgetPolicy())
         self.assertEqual(validated["state_model"], "stateless")
         stateful = {**_unit_contract(), "unit_behavior_kind": "resource_owner", "state_model": "", "lifecycle": ""}
-        with self.assertRaisesRegex(ValueError, "explicit lifecycle"):
-            validate_unit_contract(stateful, complexity_policy=ComplexityBudgetPolicy())
+        validated_stateful = validate_unit_contract(stateful, complexity_policy=ComplexityBudgetPolicy())
+        self.assertEqual(validated_stateful["state_model"], "")
 
-    def test_unit_contract_rejects_milestones_and_unbounded_complexity(self) -> None:
+    def test_unit_contract_rejects_implementation_checklists_but_not_semantic_budget_claims(self) -> None:
         with self.assertRaisesRegex(ValueError, "implementation-level"):
             validate_unit_contract(
                 {**_unit_contract(), "milestones": [{"title": "write it"}]},
@@ -251,8 +137,8 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             **_unit_contract(),
             "complexity_budget": _complexity_budget(target_file_count=40),
         }
-        with self.assertRaisesRegex(ValueError, "without split_conditions"):
-            validate_unit_contract(too_large, complexity_policy=ComplexityBudgetPolicy())
+        validated = validate_unit_contract(too_large, complexity_policy=ComplexityBudgetPolicy())
+        self.assertNotIn("complexity_budget", validated)
 
     def test_manifest_review_checks_evidence_coverage_and_topology(self) -> None:
         _requirements, _evidence, manifest = self._publish_contract()
@@ -263,7 +149,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         self.assertIn("### foundation", markdown)
         self.assertNotIn("milestone", markdown.lower())
 
-    def test_mechanical_review_rejects_unwaived_complexity_and_missing_handoff(self) -> None:
+    def test_mechanical_review_checks_topology_not_contract_semantics(self) -> None:
         producer = _unit_contract()
         producer["unit_id"] = "producer"
         producer["provided_interfaces"] = [{"name": "Published value"}]
@@ -283,13 +169,8 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             complexity_policy=ComplexityBudgetPolicy(),
         )
 
-        self.assertEqual(review.verdict, "FAIL")
-        self.assertTrue(all(item.revision_targets for item in review.findings))
-        self.assertTrue(any("complexity budget" in item.summary for item in review.findings))
-        handoff = next(item for item in review.findings if "without a directional cross-unit contract" in item.summary)
-        self.assertEqual(handoff.finding_kind, ArchitectureFindingKind.CONTRACT_DEFECT)
-        self.assertEqual(handoff.revision_targets[0].section, "cross_unit_contract")
-        self.assertEqual(handoff.revision_targets[0].operation, "create")
+        self.assertEqual(review.verdict, "PASS")
+        self.assertEqual(review.findings, ())
 
     def test_human_decision_token_is_bound_and_single_use(self) -> None:
         requirements, evidence, manifest = self._publish_contract()
@@ -336,6 +217,128 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "active_channel_id"):
             self.service.submit_human_decision(wrong_channel, decision="reject")
         self.assertEqual(self.repository.inspect_human_decision_token(card.decision_token)["status"], "issued")
+
+    def test_human_architecture_edit_reuses_immutable_requirements(self) -> None:
+        requirements, _evidence, manifest = self._publish_contract()
+        workflow_id = "wf_architecture_edit"
+        revision_id = "arch_architecture_edit"
+        card = self._prepare_workflow_human_review(
+            workflow_id=workflow_id,
+            revision_id=revision_id,
+            requirements_ref=requirements.to_dict(),
+            manifest_ref=manifest.to_dict(),
+        )
+        service = MinionV2WorkflowService(self.runtime_root)
+
+        result = service.submit_human_decision(
+            {
+                "workflow_id": workflow_id,
+                "decision_token": card.decision_token,
+                "decision": "edit",
+                "edit_scope": "architecture",
+                "edit_instruction": "Split ownership from runtime wiring.",
+                "actor": "nathan",
+                "source_channel": "socket:test",
+            }
+        )
+
+        self.assertEqual(result["edit_scope"], "architecture")
+        superseded = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
+        assert superseded is not None
+        self.assertNotIn("revised_requirements_ref", superseded.payload)
+        MinionV2OutboxProcessor(service)._create_revision(
+            {
+                "effect_key": "architecture-edit-child",
+                "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
+                "aggregate_id": revision_id,
+            }
+        )
+        child = next(
+            item
+            for item in self.repository.list_workflow_snapshots(workflow_id)
+            if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+            and item.payload.get("parent_revision_id") == revision_id
+        )
+        self.assertEqual(child.payload["requirements_ref"], requirements.to_dict())
+
+    def test_human_requirements_edit_publishes_replacement_before_revision(self) -> None:
+        requirements, _evidence, manifest = self._publish_contract()
+        workflow_id = "wf_requirements_edit"
+        revision_id = "arch_requirements_edit"
+        card = self._prepare_workflow_human_review(
+            workflow_id=workflow_id,
+            revision_id=revision_id,
+            requirements_ref=requirements.to_dict(),
+            manifest_ref=manifest.to_dict(),
+        )
+        service = MinionV2WorkflowService(self.runtime_root)
+
+        result = service.submit_human_decision(
+            {
+                "workflow_id": workflow_id,
+                "decision_token": card.decision_token,
+                "decision": "edit",
+                "edit_scope": "requirements",
+                "amendment": (
+                    "Expose stable geometry values and deterministic validation.\n"
+                    "Preserve the existing public C ABI.\n"
+                ),
+                "actor": "nathan",
+                "source_channel": "socket:test",
+            }
+        )
+
+        revised_ref = result["revised_requirements_ref"]
+        self.assertNotEqual(revised_ref["sha256"], requirements.sha256)
+        revised = self.store.read_json(revised_ref)
+        self.assertEqual(len(revised["amendments"]), 1)
+        amendment = self.store.read_bytes(revised["amendments"][0]["artifact_ref"]).decode("utf-8")
+        self.assertIn("Preserve the existing public C ABI.", amendment)
+        superseded = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
+        assert superseded is not None
+        self.assertEqual(superseded.payload["revised_requirements_ref"], revised_ref)
+        MinionV2OutboxProcessor(service)._create_revision(
+            {
+                "effect_key": "requirements-edit-child",
+                "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
+                "aggregate_id": revision_id,
+            }
+        )
+        child = next(
+            item
+            for item in self.repository.list_workflow_snapshots(workflow_id)
+            if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+            and item.payload.get("parent_revision_id") == revision_id
+        )
+        self.assertEqual(child.payload["requirements_ref"], revised_ref)
+        self.assertEqual(child.payload["edit_scope"], "requirements")
+
+    def test_invalid_requirements_edit_does_not_consume_human_decision(self) -> None:
+        requirements, _evidence, manifest = self._publish_contract()
+        workflow_id = "wf_invalid_requirements_edit"
+        revision_id = "arch_invalid_requirements_edit"
+        card = self._prepare_workflow_human_review(
+            workflow_id=workflow_id,
+            revision_id=revision_id,
+            requirements_ref=requirements.to_dict(),
+            manifest_ref=manifest.to_dict(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "amendment prose or source_files"):
+            MinionV2WorkflowService(self.runtime_root).submit_human_decision(
+                {
+                    "workflow_id": workflow_id,
+                    "decision_token": card.decision_token,
+                    "decision": "edit",
+                    "edit_scope": "requirements",
+                    "actor": "nathan",
+                    "source_channel": "socket:test",
+                }
+            )
+        self.assertEqual(
+            self.repository.inspect_human_decision_token(card.decision_token)["status"],
+            "issued",
+        )
 
     def test_manual_human_decision_rebinds_pending_card_to_current_channel(self) -> None:
         requirements, evidence, manifest = self._publish_contract()
@@ -546,7 +549,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             )
         )
 
-    def test_clarification_token_resumes_requirements_queue_once(self) -> None:
+    def test_architect_clarification_is_not_a_hidden_aggregate_state(self) -> None:
         workflow_id = "wf_clarify"
         revision_id = "arch_clarify"
         clarification = self.store.put_json(
@@ -576,47 +579,31 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                 payload={"fencing_token": 1},
             )
         )
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="CLARIFICATION_REQUIRED",
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                aggregate_id=revision_id,
-                actor="worker",
-                expected_version=2,
-                idempotency_key="clarify:required",
-                payload={"clarification_ref": clarification.to_dict()},
+        with self.assertRaises(UnknownTransitionError):
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="CLARIFICATION_REQUIRED",
+                    workflow_id=workflow_id,
+                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                    aggregate_id=revision_id,
+                    actor="worker",
+                    expected_version=2,
+                    idempotency_key="clarify:required",
+                    payload={"clarification_ref": clarification.to_dict()},
+                )
             )
+        current = self.repository.read_snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            revision_id,
         )
-        token = self.repository.issue_human_decision_token(
-            workflow_id=workflow_id,
-            architecture_revision_id=revision_id,
-            manifest_sha=clarification.sha256,
-            actor_id="nathan",
-            active_channel_id="socket:test",
+        self.assertEqual(current.state, "ARCHITECT_RUNNING")
+        self.assertNotIn(
+            "CLARIFICATION_REQUIRED",
+            self.repository.engine.legal_actions(
+                AggregateType.ARCHITECTURE_REVISION,
+                current.state,
+            ),
         )
-        service = MinionV2WorkflowService(self.runtime_root)
-        result = service.submit_human_decision(
-            {
-                "workflow_id": workflow_id,
-                "decision": "clarify",
-                "clarification_response": "The checked-in OHOS ABI headers are authoritative.",
-                "actor": "nathan",
-                "source_channel": "socket:test",
-            }
-        )
-        self.assertEqual(result["state"], "ARCHITECT_QUEUED")
-        self.assertEqual(self.repository.inspect_human_decision_token(token)["status"], "expired")
-        with self.assertRaisesRegex(ValueError, "no pending human decision"):
-            service.submit_human_decision(
-                {
-                    "workflow_id": workflow_id,
-                    "decision": "clarify",
-                    "clarification_response": "duplicate",
-                    "actor": "nathan",
-                    "source_channel": "socket:test",
-                }
-            )
 
     def test_new_human_review_card_invalidates_prior_revision_token(self) -> None:
         manifest = self.store.put_json({"version": 1}, artifact_type="ArchitectureSkeletonArtifact")
@@ -664,7 +651,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         actions = [
             ("CREATE_ARCHITECTURE_REVISION", {}, 0),
             ("START_ARCHITECT", {"fencing_token": 1}, 1),
-            ("ARCHITECT_COMPLETED", {"requirements_ref": requirements_ref, "architecture_manifest_ref": manifest_ref}, 2),
+            ("DATA_ARCHITECT_COMPLETED", {"requirements_ref": requirements_ref, "architecture_manifest_ref": manifest_ref}, 2),
             ("START_ARCHITECTURE_REVIEW", {"fencing_token": 2}, 3),
             (
                 "ARCHITECTURE_REVIEW_PASSED",
@@ -685,6 +672,65 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                     idempotency_key=f"{revision_id}:{action_type}",
                 )
             )
+
+    def _prepare_workflow_human_review(
+        self,
+        *,
+        workflow_id: str,
+        revision_id: str,
+        requirements_ref: dict,
+        manifest_ref: dict,
+    ) -> HumanReviewCard:
+        workspace = self.runtime_root / f"workspace-{workflow_id}"
+        workspace.mkdir()
+        request_ref = self.store.put_json(
+            {
+                "workspace": {
+                    "kind": "existing_repo",
+                    "repo_path": str(workspace),
+                }
+            },
+            artifact_type="WorkflowRequestArtifact",
+        )
+        for action_type, version, payload in (
+            (
+                "CREATE_WORKFLOW",
+                0,
+                {
+                    "owner": "nathan",
+                    "active_channel": "socket:test",
+                    "request_ref": request_ref.to_dict(),
+                },
+            ),
+            ("START_WORKFLOW", 1, {}),
+            ("LINK_ARCHITECTURE_REVISION", 2, {"architecture_revision_id": revision_id}),
+        ):
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW,
+                    aggregate_id=workflow_id,
+                    actor="nathan",
+                    expected_version=version,
+                    idempotency_key=f"{workflow_id}:{action_type}",
+                    payload=payload,
+                )
+            )
+        self._drive_revision_to_human_review(
+            workflow_id=workflow_id,
+            revision_id=revision_id,
+            requirements_ref=requirements_ref,
+            evidence_ref={},
+            manifest_ref=manifest_ref,
+        )
+        return self.service.create_human_review_card(
+            workflow_id=workflow_id,
+            architecture_revision_id=revision_id,
+            manifest_ref=ArtifactRef.from_mapping(manifest_ref),
+            actor_id="nathan",
+            active_channel_id="socket:test",
+        )
 
 
 if __name__ == "__main__":

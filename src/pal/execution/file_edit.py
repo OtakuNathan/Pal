@@ -9,8 +9,8 @@ Safety guarantees (matching Claude Code):
   (i.e. the caller has "read" it first).
 - The on-disk mtime must still match the cached snapshot; otherwise a
   ``STALE_FILE`` error is returned.
-- ``old_string`` must appear exactly once in the current content; otherwise
-  ``MULTIPLE_MATCHES`` or ``NOT_FOUND_MATCH`` is returned.
+- ``old_string`` must appear exactly once unless ``replace_all=true``;
+  otherwise ``MULTIPLE_MATCHES`` or ``NOT_FOUND_MATCH`` is returned.
 """
 
 from __future__ import annotations
@@ -22,11 +22,17 @@ from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.execution.file_state import FileStateCache
+from pal.execution.file_tool_contracts import (
+    FILE_EDIT_DESCRIPTION,
+    FILE_EDIT_RESULT_SCHEMA,
+    file_edit_args_schema,
+)
 from pal.shared import RuntimeStatus
 
 
 # Error codes
 ERR_NOT_READ = "NOT_READ"
+ERR_PARTIAL_READ = "PARTIAL_READ"
 ERR_STALE_FILE = "STALE_FILE"
 ERR_MULTIPLE_MATCHES = "MULTIPLE_MATCHES"
 ERR_NOT_FOUND_MATCH = "NOT_FOUND_MATCH"
@@ -36,6 +42,7 @@ ERR_NO_CHANGE = "NO_CHANGE"
 # LLM-friendly short descriptions for each error code
 _ERROR_LLMS: dict[str, str] = {
     ERR_NOT_READ: "File has not been read yet. Read it first before editing.",
+    ERR_PARTIAL_READ: "Only part of the file was read. Read the complete file before editing.",
     ERR_STALE_FILE: "File has been modified since read. Read it again before editing.",
     ERR_MULTIPLE_MATCHES: "old_string appears multiple times in the file. Provide more context to uniquely identify the match.",
     ERR_NOT_FOUND_MATCH: "old_string was not found in the file.",
@@ -59,10 +66,8 @@ class FileEditTool:
     display_name: str = "File Edit"
     family: str = "system"
     description: str = (
-        "Use this first for precise text edits; do not use op_exec_shell with sed/awk/python one-liners for file edits when this tool is visible. "
-        "Edit a file by replacing an exact old_string with new_string. "
-        "The file must have been read first (its content cached). "
-        "Returns a unified diff patch on success."
+        "Use this instead of shell sed/awk or one-off rewrite scripts when it is visible. "
+        + FILE_EDIT_DESCRIPTION
     )
     tags: tuple[str, ...] = ("file", "edit", "system", "write")
     keywords: tuple[str, ...] = ("edit", "modify", "replace", "patch", "diff", "file")
@@ -72,34 +77,9 @@ class FileEditTool:
 
     def __post_init__(self) -> None:
         if not self.args_schema:
-            self.args_schema = {
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the file to edit.",
-                    },
-                    "old_string": {
-                        "type": "string",
-                        "description": "Exact text to find and replace in the file.",
-                    },
-                    "new_string": {
-                        "type": "string",
-                        "description": "Replacement text.",
-                    },
-                },
-                "required": ["file_path", "old_string", "new_string"],
-            }
+            self.args_schema = file_edit_args_schema()
         if not self.result_schema:
-            self.result_schema = {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "error_code": {"type": "string"},
-                    "patch": {"type": "string"},
-                    "match_count": {"type": "integer"},
-                },
-            }
+            self.result_schema = dict(FILE_EDIT_RESULT_SCHEMA)
 
     # ------------------------------------------------------------------
     # Tool protocol
@@ -109,6 +89,7 @@ class FileEditTool:
         file_path = str(args.get("file_path") or "").strip()
         old_string = args.get("old_string", "")
         new_string = args.get("new_string", "")
+        replace_all = _semantic_bool(args.get("replace_all", False))
 
         if not file_path:
             return _err(RuntimeStatus.INVALID, "file_path is required", reason="missing_file_path")
@@ -118,6 +99,9 @@ class FileEditTool:
 
         if not isinstance(new_string, str):
             return _err(RuntimeStatus.INVALID, "new_string must be a string", reason="bad_new_string")
+
+        if replace_all is None:
+            return _err(RuntimeStatus.INVALID, "replace_all must be a boolean", reason="bad_replace_all")
 
         if old_string == "":
             return _err(
@@ -139,8 +123,8 @@ class FileEditTool:
         # Capture presence before get_valid(), because stale entries are
         # evicted as a side effect of validation.
         had_record = _resolve(file_path) in self.cache
-        cached_content = self.cache.get_valid(file_path)
-        if cached_content is None:
+        cached_state = self.cache.get_valid_state(file_path)
+        if cached_state is None:
             if not had_record:
                 return _err(
                     RuntimeStatus.FORBIDDEN,
@@ -154,6 +138,14 @@ class FileEditTool:
                 error_code=ERR_STALE_FILE,
                 file_path=file_path,
             )
+        if not cached_state.full_view:
+            return _err(
+                RuntimeStatus.FORBIDDEN,
+                _ERROR_LLMS[ERR_PARTIAL_READ],
+                error_code=ERR_PARTIAL_READ,
+                file_path=file_path,
+            )
+        cached_content = cached_state.content
 
         try:
             current_content = Path(file_path).expanduser().resolve().read_text(encoding="utf-8")
@@ -175,16 +167,17 @@ class FileEditTool:
             )
 
         # 2. Find occurrences of old_string.
-        count = cached_content.count(old_string)
-        if count == 0:
+        actual_old_string = _find_actual_string(cached_content, old_string)
+        if actual_old_string is None:
             return _err(
                 RuntimeStatus.ERROR,
                 _ERROR_LLMS[ERR_NOT_FOUND_MATCH],
                 error_code=ERR_NOT_FOUND_MATCH,
                 file_path=file_path,
             )
+        count = cached_content.count(actual_old_string)
 
-        if count > 1:
+        if count > 1 and not replace_all:
             return _err(
                 RuntimeStatus.ERROR,
                 _ERROR_LLMS[ERR_MULTIPLE_MATCHES],
@@ -194,7 +187,12 @@ class FileEditTool:
             )
 
         # 3. Apply replacement.
-        new_content = cached_content.replace(old_string, new_string, 1)
+        replacement = _preserve_quote_style(old_string, actual_old_string, new_string)
+        new_content = cached_content.replace(
+            actual_old_string,
+            replacement,
+            count if replace_all else 1,
+        )
 
         # 4. Write to disk.
         try:
@@ -221,7 +219,7 @@ class FileEditTool:
             structured={
                 "file_path": file_path,
                 "patch": patch,
-                "match_count": 1,
+                "match_count": count if replace_all else 1,
             },
         )
 
@@ -241,6 +239,53 @@ def _resolve(file_path: str) -> str:
         return str(Path(file_path).resolve())
     except (OSError, ValueError):
         return file_path
+
+
+def _semantic_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+_QUOTE_TRANSLATION = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
+
+
+def _find_actual_string(content: str, search: str) -> str | None:
+    if search in content:
+        return search
+    normalized_content = content.translate(_QUOTE_TRANSLATION)
+    normalized_search = search.translate(_QUOTE_TRANSLATION)
+    index = normalized_content.find(normalized_search)
+    if index < 0:
+        return None
+    return content[index : index + len(search)]
+
+
+def _preserve_quote_style(old: str, actual_old: str, new: str) -> str:
+    if old == actual_old:
+        return new
+    if "“" in actual_old or "”" in actual_old:
+        new = _curl_quotes(new, straight='"', left="“", right="”")
+    if "‘" in actual_old or "’" in actual_old:
+        new = _curl_quotes(new, straight="'", left="‘", right="’")
+    return new
+
+
+def _curl_quotes(text: str, *, straight: str, left: str, right: str) -> str:
+    output: list[str] = []
+    opening_predecessors = "([{<"
+    for index, character in enumerate(text):
+        if character != straight:
+            output.append(character)
+            continue
+        previous = text[index - 1] if index else ""
+        is_opening = index == 0 or previous.isspace() or previous in opening_predecessors
+        output.append(left if is_opening else right)
+    return "".join(output)
 
 
 def _unified_diff(file_path: str, old: str, new: str, context: int = 3) -> str:

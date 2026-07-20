@@ -29,6 +29,7 @@ class McpToolSpec:
     name: str
     description: str = ""
     input_schema: Any | None = None
+    output_schema: Any | None = None
     annotations: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -201,6 +202,7 @@ def _tool_from_dict(payload: dict[str, Any]) -> McpToolSpec:
         name=str(payload.get("name") or ""),
         description=str(payload.get("description") or ""),
         input_schema=payload.get("input_schema"),
+        output_schema=payload.get("output_schema"),
         annotations=dict(payload.get("annotations") or {}),
         raw=dict(payload.get("raw") or {}),
     )

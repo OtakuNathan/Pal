@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 16
+MINION_V2_SCHEMA_VERSION = 17
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -194,6 +194,8 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             aggregate_type TEXT NOT NULL,
             aggregate_id TEXT NOT NULL,
             role TEXT NOT NULL,
+            scope_kind TEXT NOT NULL DEFAULT '',
+            subject_key TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'active',
             continuation_ref_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
@@ -255,15 +257,6 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS minion_v2_worker_attempts_assignment
         ON minion_v2_worker_attempts(assignment_id, attempt_index);
-
-        CREATE TABLE IF NOT EXISTS minion_v2_worker_input_reads (
-            assignment_id TEXT NOT NULL,
-            input_name TEXT NOT NULL,
-            artifact_sha256 TEXT NOT NULL,
-            read_at TEXT NOT NULL,
-            PRIMARY KEY(assignment_id, input_name),
-            FOREIGN KEY(assignment_id) REFERENCES minion_v2_worker_assignments(assignment_id)
-        );
 
         CREATE TABLE IF NOT EXISTS minion_v2_effect_attempts (
             effect_id TEXT NOT NULL,
@@ -410,6 +403,8 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "minion_v2_worker_invocations", "total_wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_worker_invocations", "continuation_ref_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(connection, "minion_v2_worker_invocations", "authoring_contract_version", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_worker_sessions", "scope_kind", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_worker_sessions", "subject_key", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "minion_v2_worker_turns", "tool_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_worker_turns", "wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_submission_drafts", "submitted_artifact_ref_json", "TEXT NOT NULL DEFAULT '{}'")

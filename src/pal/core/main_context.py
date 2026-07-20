@@ -10,7 +10,6 @@ from pal.core.lifecycle_owner import ModuleLifecycleOwnerRegistry
 from pal.core.module_registry import ModuleHandle, ModuleRegistry
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.core.turn_events import TurnEventBus
-from pal.execution.capability_registry import CapabilityRegistry
 from pal.execution.runtime import ExecutionRuntime
 from pal.shared import IntrospectionPort
 
@@ -29,7 +28,7 @@ class MainContext:
     port_registry: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def capability_registry(self) -> CapabilityRegistry:
+    def capability_registry(self):
         return self.execution_runtime.capability_registry
 
     def register_module(self, handle: ModuleHandle) -> None:

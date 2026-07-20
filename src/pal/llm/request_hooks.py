@@ -5,7 +5,6 @@ from typing import Any, Callable, Iterable
 from pal.llm.contracts import CanonicalLLMRequest
 from pal.llm.llm_adaptor.base import _capabilities, _normalize_key
 from pal.llm.models import LLMEndpointModel
-from pal.shared import llm_tool_name
 
 
 BEHAVIOR_ROUTING_HOOK = "behavior_routing"
@@ -48,21 +47,16 @@ _MESSAGE_HOOKS: dict[str, MessageHook] = {
     BEHAVIOR_ROUTING_HOOK: _apply_behavior_routing_hook,
     LEGACY_MAIN_BEHAVIOR_ROUTING_HOOK: _apply_behavior_routing_hook,
 }
-_SHELL_TOOL_NAMES = {"op_exec_shell", llm_tool_name("op_exec_shell"), "shell_exec"}
+_SHELL_TOOL_NAMES = {"run_shell"}
 _DEDICATED_REPO_TOOL_ORDER = (
-    "op_tree",
-    "op_search",
-    "op_file_read",
-    "op_file_edit",
-    "op_file_write",
-    "op_path_delete",
+    "tree",
+    "search",
+    "read_file",
+    "edit_file",
+    "write_file",
+    "delete_path",
 )
-_DEDICATED_REPO_TOOL_NAMES = frozenset(
-    {
-        *[name for name in _DEDICATED_REPO_TOOL_ORDER],
-        *[llm_tool_name(name) for name in _DEDICATED_REPO_TOOL_ORDER],
-    }
-)
+_DEDICATED_REPO_TOOL_NAMES = frozenset(_DEDICATED_REPO_TOOL_ORDER)
 _BEHAVIOR_ROUTING_REMINDER_MARKER = "behavior-routing-reminder"
 _TOOL_ROUTING_REMINDER_MARKER = "tool-routing-reminder"
 _LEGACY_ZAI_TOOL_ROUTING_REMINDER_MARKER = "zai-tool-routing-reminder"

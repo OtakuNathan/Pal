@@ -12,6 +12,7 @@ from pal.execution.path_delete import (
     ERR_DIRECTORY_REQUIRES_RECURSIVE,
     ERR_INVALID_SHA256,
     ERR_NOT_READ,
+    ERR_PARTIAL_READ,
     ERR_PATH_NOT_FOUND,
     ERR_SHA256_MISMATCH,
     ERR_STALE_PATH,
@@ -70,6 +71,17 @@ class PathDeleteReadSafetyTests(_TempPathMixin, unittest.TestCase):
         self.assertEqual(result.structured["error_code"], ERR_STALE_PATH)
         self.assertTrue(path.exists())
         self.assertNotIn(path, self.cache)
+
+    def test_partial_file_read_fails_without_deleting(self) -> None:
+        path = self._path("partial.txt")
+        path.write_text("one\ntwo\n", encoding="utf-8")
+        self.cache.mark_read(path, "one\ntwo\n", full_view=False, view=(1, 1))
+
+        result = self.tool.invoke({"file_path": str(path)})
+
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(result.structured["error_code"], ERR_PARTIAL_READ)
+        self.assertTrue(path.exists())
 
 
 class PathDeleteShaTests(_TempPathMixin, unittest.TestCase):

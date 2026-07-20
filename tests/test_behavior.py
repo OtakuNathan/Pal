@@ -570,7 +570,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertNotIn("\n<behavior_guidance>\n", system)
         self.assertIn("LSP code intelligence", guidance)
-        self.assertIn("When reading or changing code, consider LSP capabilities", guidance)
+        self.assertIn("call lsp_prepare_workspace once before using LSP code intelligence", guidance)
         self.assertIn("lsp_document_symbols/workspace_symbols", guidance)
         self.assertIn("lsp_diagnostics after edits", guidance)
         self.assertIn("resident_affordances", prompt.metadata["reminder_sections"])
@@ -892,7 +892,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         def description(name: str) -> str:
             result = core.context.execution_runtime.execute_tool(CanonicalToolCall(name="read_tool", args={"name": name}))
             self.assertTrue(result.ok, result.text)
-            return str(result.structured["capability"]["description"])
+            return str(result.structured["description"])
 
         recall_description = description("recall_memory")
         remember_description = description("remember_memory")
@@ -1252,7 +1252,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
             [
                 CanonicalLLMOutcome(
                     text="",
-                    tool_calls=[CanonicalToolCall(name="op_behavior_advise", args={"scenario": "commit code"})],
+                    tool_calls=[CanonicalToolCall(name="advise_behavior", args={"scenario": "commit code"})],
                     finish_reason="tool_calls",
                 ),
                 CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop"),

@@ -137,7 +137,9 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
-        self.assertIn("broken endpoint", outcome.text)
+        self.assertIn("kind=unknown", outcome.text)
+        self.assertIn("type=RuntimeError", outcome.text)
+        self.assertNotIn("broken endpoint", outcome.text)
         self.assertEqual(invoker.calls, ["broken"])
         self.assertEqual(runtime.active_endpoint_id, "active")
 
@@ -184,7 +186,9 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
-        self.assertIn("broken endpoint", outcome.text)
+        self.assertIn("kind=unknown", outcome.text)
+        self.assertIn("type=RuntimeError", outcome.text)
+        self.assertNotIn("broken endpoint", outcome.text)
         self.assertEqual(invoker.calls, ["broken"])
 
     def test_codex_cli_connection_failure_skips_same_failure_domain(self) -> None:

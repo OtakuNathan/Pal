@@ -12,7 +12,6 @@ repair = "generic"
 verifier = "general.verifier"
 
 [builders]
-requirements = "requirements.v2"
 contract = "contract_sketch.v2"
 verification = "verification.v2"
 

@@ -424,6 +424,20 @@ def _build_bwrap_invocation(
         )
         if scoped_writable_workspace:
             _append_scoped_workspace_binds(args, workspace_path, write_scopes)
+            for raw_relative in list(
+                pack.workspace.get("read_only_overlay_paths") or []
+            ):
+                relative = str(raw_relative or "").strip().replace("\\", "/")
+                target = (workspace_path.resolve() / relative).resolve()
+                if not relative or not target.is_relative_to(workspace_path.resolve()):
+                    raise RuntimeError(
+                        f"read-only overlay escapes its worktree: {relative}"
+                    )
+                if not target.is_file():
+                    raise RuntimeError(
+                        f"read-only verifier test does not exist: {relative}"
+                    )
+                _append_bind_path(args, target, read_only=True)
         git_marker = workspace_path / ".git"
         if git_marker.exists() or git_marker.is_symlink():
             _append_bind_path(args, git_marker, read_only=True)
@@ -522,31 +536,93 @@ def _git_worktree_metadata_bind_paths(workspace_path: Path | None) -> tuple[Path
     if not workspace_path:
         return ()
     workspace = Path(workspace_path).expanduser()
-    git_file = workspace / ".git"
-    if not git_file.is_file():
+    git_marker = workspace / ".git"
+    if git_marker.is_dir():
+        try:
+            git_dir = git_marker.resolve()
+        except OSError:
+            return ()
+    elif git_marker.is_file():
+        git_dir = _git_dir_from_pointer(workspace, git_marker)
+        if git_dir is None:
+            return ()
+    else:
         return ()
+
+    common_dir = _git_common_dir_from_worktree_admin(git_dir)
+    object_roots: list[Path] = []
+    for metadata_dir in (git_dir, common_dir):
+        if metadata_dir is None:
+            continue
+        object_roots.extend(_git_alternate_object_roots(metadata_dir / "objects"))
+
+    candidates = [
+        path
+        for path in (common_dir, git_dir, *object_roots)
+        if path is not None and path.exists() and not _path_is_relative_to(path, workspace)
+    ]
+    return _dedupe_bind_roots(candidates)
+
+
+def _git_dir_from_pointer(workspace: Path, git_file: Path) -> Path | None:
     try:
         text = git_file.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
-        return ()
+        return None
     prefix = "gitdir:"
     if not text.lower().startswith(prefix):
-        return ()
+        return None
     git_dir_text = text.split(":", 1)[1].strip()
     if not git_dir_text:
-        return ()
+        return None
     git_dir = Path(git_dir_text).expanduser()
     if not git_dir.is_absolute():
         git_dir = workspace / git_dir
     try:
         git_dir = git_dir.resolve()
     except OSError:
-        return ()
+        return None
     if not git_dir.exists():
-        return ()
-    common_dir = _git_common_dir_from_worktree_admin(git_dir)
-    candidates = [path for path in (common_dir, git_dir) if path is not None and path.exists()]
-    return _dedupe_bind_roots(candidates)
+        return None
+    return git_dir
+
+
+def _git_alternate_object_roots(objects_dir: Path) -> tuple[Path, ...]:
+    pending = [objects_dir]
+    seen: set[Path] = set()
+    alternates: list[Path] = []
+    while pending:
+        current = pending.pop()
+        try:
+            current = current.resolve()
+        except OSError:
+            continue
+        if current in seen:
+            continue
+        seen.add(current)
+        alternates_file = current / "info" / "alternates"
+        if not alternates_file.is_file():
+            continue
+        try:
+            lines = alternates_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for raw_line in lines:
+            value = raw_line.strip()
+            if not value or value.startswith("#"):
+                continue
+            alternate = Path(value).expanduser()
+            if not alternate.is_absolute():
+                alternate = current / alternate
+            try:
+                alternate = alternate.resolve()
+            except OSError:
+                continue
+            if not alternate.is_dir() or alternate in seen:
+                continue
+            alternates.append(alternate)
+            pending.append(alternate)
+    return tuple(alternates)
 
 
 def _git_common_dir_from_worktree_admin(git_dir: Path) -> Path | None:

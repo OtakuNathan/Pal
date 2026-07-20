@@ -407,11 +407,11 @@ class McpPluginSidecarTests(unittest.TestCase):
         host._do_attach(handle)
         try:
             search = core.context.execution_runtime.execute(CapabilityCall(name="op_tool_search", args={"query": "alpha"}))
-            alpha_hit = next(item for item in search.structured["hits"] if item["name"] == "mcp_demo_tool_alpha")
+            alpha_hit = next(item for item in search.structured["hits"] if item["name"] == "mcp_demo_alpha")
             alpha_read = core.context.execution_runtime.execute(
                 CapabilityCall(name="op_tool_read", args={"name": alpha_hit["name"]})
             )
-            self.assertEqual(alpha_read.structured["capability"]["name"], "mcp_demo_tool_alpha")
+            self.assertEqual(alpha_read.structured["capability"]["name"], "mcp_demo_alpha")
             self.assertNotIn("result_schema", alpha_read.structured["capability"])
             self.assertIn("mcp_demo_prompt_brief", str(SkillSearchTool(service=skill_service).invoke({"query": "brief", "top_k": 5}).structured))
             show = core.context.execution_runtime.execute(CapabilityCall(name="mcp_show", args={}))
@@ -427,7 +427,7 @@ class McpPluginSidecarTests(unittest.TestCase):
             self.assertEqual(Path(path_image.structured["path"]), image_path.resolve())
         finally:
             host._do_detach(handle)
-        missing = core.context.execution_runtime.execute(CapabilityCall(name="mcp_demo_tool_alpha", args={}))
+        missing = core.context.execution_runtime.execute(CapabilityCall(name="mcp_demo_alpha", args={}))
         self.assertIn("unknown capability", missing.text)
 
     def test_default_disabled_first_party_mcp_can_attach_temporarily_or_enable(self) -> None:

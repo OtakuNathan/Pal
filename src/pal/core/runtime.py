@@ -43,7 +43,7 @@ from pal.memory.compact import coerce_memory_candidate_list, memory_candidates_f
 from pal.memory.interactions import memory_candidate_approval_delivery
 from pal.memory.tool_protocol import l1_tool_protocol_transcript
 from pal.shared import ChannelEnvelope, EventKind, SourceKind
-from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus, llm_tool_name
+from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus
 from pal.shared.payloads import extract_text_from_payload
 
 
@@ -1385,7 +1385,7 @@ class PalCore:
             await self._complete_action_reply_async(action, f"Tool surface refresh failed: {exc}")
             return
 
-        resident_names = [llm_tool_name(item) for item in list(payload.get("resident_tool_names") or []) if str(item).strip()]
+        resident_names = [str(item).strip() for item in list(payload.get("resident_tool_names") or []) if str(item).strip()]
         preview = ", ".join(resident_names[:12]) if resident_names else "-"
         if len(resident_names) > 12:
             preview = f"{preview}, ..."
@@ -1742,6 +1742,27 @@ class PalCore:
                 }
             if endpoint_id and status_kind:
                 queue_endpoint_status(endpoint_id, status_kind, payload=dict(status_payload))
+            return
+        if delivery.delivery_kind == "attachment":
+            envelope = self._route_to_channel_envelope(route)
+            if envelope is None:
+                return
+            path = Path(str(delivery.payload.get("path") or "")).expanduser()
+            if not path.is_file():
+                return
+            channel_runtime = self.context.port_registry.get("channel:channel")
+            queue_attachment = getattr(channel_runtime, "queue_attachment", None)
+            if not callable(queue_attachment):
+                return
+            queue_attachment(
+                envelope,
+                AttachmentSpec(
+                    path=str(path.resolve()),
+                    caption=str(delivery.payload.get("caption") or ""),
+                    file_name=str(delivery.payload.get("file_name") or path.name),
+                    mime_type=str(delivery.payload.get("mime_type") or ""),
+                ),
+            )
             return
         if delivery.delivery_kind in control_interactions.INTERACTIVE_DELIVERY_KINDS:
             if delivery.interaction is None:

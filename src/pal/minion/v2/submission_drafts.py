@@ -378,20 +378,19 @@ class SubmissionDraftStore:
         submission_artifact_ref: Mapping[str, Any] | None = None,
         submission_payload_hash: str = "",
         submission_payload: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> Mapping[str, Any]:
         self._assert_authoring_contract(context)
         if self._worker_gateway is not None:
             if not isinstance(submission_payload, Mapping):
                 raise ValueError("remote submission requires its compiled JSON payload")
-            self._worker_gateway.request_sync(
+            return dict(self._worker_gateway.request_sync(
                 "draft_submit",
                 {
                     "context": context.to_dict(),
                     "expected_version": int(expected_version),
                     "submission": dict(submission_payload),
                 },
-            )
-            return
+            ))
         self._ensure_schema()
         artifact_ref = dict(submission_artifact_ref or {})
         payload_hash = str(submission_payload_hash or "")
@@ -433,8 +432,17 @@ class SubmissionDraftStore:
                     existing_hash = str(row["submission_payload_hash"] or "")
                     if artifact_ref and (existing_ref != artifact_ref or existing_hash != payload_hash):
                         raise RuntimeError("submission Draft receipt changed after freeze")
-                    return
+                    return {
+                        "submitted": True,
+                        "submission_artifact_ref": existing_ref,
+                        "submission_payload_hash": existing_hash,
+                    }
                 raise RuntimeError("submission Draft changed before freeze")
+        return {
+            "submitted": True,
+            "submission_artifact_ref": artifact_ref,
+            "submission_payload_hash": payload_hash,
+        }
 
     def read_submitted(self, draft_key: str) -> SubmissionDraftSnapshot:
         """Read an immutable submission receipt without requiring the expired worker lease."""
@@ -767,7 +775,23 @@ def assert_authoring_schema_budget(schema: Mapping[str, Any], *, owner: str) -> 
             if isinstance(items, Mapping) and items.get("type") == "object":
                 raise ValueError(f"{owner} may not use arrays of objects")
         for key in ("properties",):
-            for child in dict(node.get(key) or {}).values():
+            for property_name, child in dict(node.get(key) or {}).items():
+                normalized_name = str(property_name).casefold()
+                if (
+                    normalized_name in {
+                        "handle",
+                        "refs",
+                        "json_pointer",
+                        "artifact_sha",
+                        "input_read",
+                    }
+                    or normalized_name.endswith("_id")
+                    or normalized_name.endswith("_ref")
+                    or normalized_name.endswith("_sha")
+                ):
+                    raise ValueError(
+                        f"{owner} exposes Manager-owned identity field {property_name}"
+                    )
                 visit(child, depth=depth + 1)
         if isinstance(node.get("items"), Mapping):
             visit(node["items"], depth=depth + 1)

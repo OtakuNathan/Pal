@@ -14,6 +14,13 @@ class WorkerSessionState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class WorkerSessionAction(StrEnum):
+    ACTIVATE = "activate"
+    SUSPEND = "suspend"
+    COMPLETE = "complete"
+    CANCEL = "cancel"
+
+
 class WorkerAssignmentState(StrEnum):
     QUEUED = "queued"
     CLAIMED = "claimed"
@@ -50,6 +57,36 @@ ACTIVE_ASSIGNMENT_STATES = frozenset(
         WorkerAssignmentState.RESULT_RECORDED,
     }
 )
+
+
+_SESSION_TRANSITIONS = {
+    (WorkerSessionState.ACTIVE, WorkerSessionAction.ACTIVATE): WorkerSessionState.ACTIVE,
+    (WorkerSessionState.ACTIVE, WorkerSessionAction.SUSPEND): WorkerSessionState.SUSPENDED,
+    (WorkerSessionState.SUSPENDED, WorkerSessionAction.ACTIVATE): WorkerSessionState.ACTIVE,
+    (WorkerSessionState.SUSPENDED, WorkerSessionAction.SUSPEND): WorkerSessionState.SUSPENDED,
+    (WorkerSessionState.ACTIVE, WorkerSessionAction.COMPLETE): WorkerSessionState.COMPLETED,
+    (WorkerSessionState.SUSPENDED, WorkerSessionAction.COMPLETE): WorkerSessionState.COMPLETED,
+    (WorkerSessionState.COMPLETED, WorkerSessionAction.COMPLETE): WorkerSessionState.COMPLETED,
+    (WorkerSessionState.ACTIVE, WorkerSessionAction.CANCEL): WorkerSessionState.CANCELLED,
+    (WorkerSessionState.SUSPENDED, WorkerSessionAction.CANCEL): WorkerSessionState.CANCELLED,
+    (WorkerSessionState.CANCELLED, WorkerSessionAction.CANCEL): WorkerSessionState.CANCELLED,
+}
+
+
+def worker_session_target(
+    state: WorkerSessionState | str,
+    action: WorkerSessionAction | str,
+) -> WorkerSessionState:
+    """Resolve the only legal durable logical-session transition."""
+
+    source = WorkerSessionState(str(state))
+    operation = WorkerSessionAction(str(action))
+    try:
+        return _SESSION_TRANSITIONS[(source, operation)]
+    except KeyError as exc:
+        raise ValueError(
+            f"illegal worker session transition: {source.value} + {operation.value}"
+        ) from exc
 
 
 _ASSIGNMENT_TRANSITIONS = {

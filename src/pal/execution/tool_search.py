@@ -239,7 +239,7 @@ class ToolCallTool:
     name: str = "op_tool_call"
     display_name: str = "Tool Call"
     family: str = "discovery"
-    description: str = "Invoke a discovered capability by its tool name or alias."
+    description: str = "Invoke one discovered indirect tool by its exact alias. Direct tools are rejected."
     tags: tuple[str, ...] = ("discovery", "capability", "invoke")
     keywords: tuple[str, ...] = ("call", "invoke", "capability", "tool")
     args_schema: dict[str, object] = None  # type: ignore[assignment]
@@ -250,7 +250,7 @@ class ToolCallTool:
             self.args_schema = {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Canonical path or alias of the capability to invoke."},
+                    "name": {"type": "string", "description": "Exact indirect alias returned by search_tools or read_tool."},
                     "args": {"type": "object", "description": "Arguments for the capability."},
                 },
                 "required": ["name"],
@@ -308,10 +308,8 @@ class ExecutionDiscoveryCapabilityMixin:
         family="exec",
         action_name="capability_call",
         description=(
-            "Invoke any registered capability by exact tool name or alias. Resident tools are the fast path for common "
-            "capabilities already exposed directly to the model; call_tool is the generic execution path for the broader "
-            "capability surface. Use search_tools/read_tool when you need to discover a capability name or inspect its "
-            "argument schema; do not guess hidden capability names."
+            "Invoke one indirect capability by its exact alias. Direct tools must be invoked directly and are rejected "
+            "here. Use search_tools/read_tool to discover the alias and inspect its argument schema."
         ),
         aliases=("capability_call",),
         args_schema={
@@ -319,7 +317,7 @@ class ExecutionDiscoveryCapabilityMixin:
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Exact registered capability name or alias. Use search_tools/read_tool first when unsure.",
+                    "description": "Exact indirect alias. Use search_tools/read_tool first when unsure.",
                 },
                 "args": {
                     "type": "object",
@@ -522,20 +520,18 @@ class ToolSearchTool:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "name": {"type": "string"},
-                                "description": {"type": "string"},
-                                "required_params": {"type": "array", "items": {"type": "string"}},
+                                "alias": {"type": "string"},
+                                "search_text": {"type": "string"},
+                                "invocation_mode": {"type": "string", "enum": ["direct", "indirect"]},
+                                "input_shape": {"type": "object"},
+                                "module_id": {"type": "string"},
+                                "family": {"type": "string"},
                             },
-                            "required": ["name", "description", "required_params"],
+                            "required": ["alias", "search_text", "invocation_mode", "input_shape"],
                         },
                     },
                     "total_count": {"type": "integer"},
                     "returned_count": {"type": "integer"},
-                    "top_k": {"type": "integer"},
-                    "truncated": {"type": "boolean"},
-                    "applied_filters": {"type": "object"},
-                    "facets": {"type": "object", "description": "Only present when requested with facets=true; counts deduplicated candidates."},
-                    "usage_hint": {"type": "string", "description": "Only present for broad facet responses that need narrowing guidance."},
                 },
             }
 
@@ -657,8 +653,14 @@ class ToolReadTool:
             self.result_schema = {
                 "type": "object",
                 "properties": {
-                    "capability": {"type": "object"},
+                    "alias": {"type": "string"},
+                    "invocation_mode": {"type": "string", "enum": ["direct", "indirect"]},
+                    "description": {"type": "string"},
+                    "example": {"type": ["object", "null"]},
+                    "input_schema": {"type": "object"},
+                    "output_schema": {"type": "object"},
                 },
+                "required": ["alias", "invocation_mode", "description", "input_schema", "output_schema"],
             }
 
     def invoke(self, args: dict[str, object]) -> CapabilityResult:

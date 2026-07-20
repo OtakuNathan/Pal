@@ -137,6 +137,7 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
             run_id="run-attempt-isolation",
             attempt_key="fence-1",
         )
+        (source / "candidate.txt").write_text("second", encoding="utf-8")
         second = prepare_v2_role_workspace(
             self.root,
             pack,
@@ -145,6 +146,14 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(first.workspace["run_dir"], second.workspace["run_dir"])
+        self.assertNotEqual(first.workspace["repo_path"], second.workspace["repo_path"])
+        self.assertFalse((Path(first.workspace["repo_path"]) / "candidate.txt").exists())
+        self.assertEqual(
+            (Path(second.workspace["repo_path"]) / "candidate.txt").read_text(encoding="utf-8"),
+            "second",
+        )
+        self.assertIn("attempts/fence-1", first.workspace["repo_path"])
+        self.assertIn("attempts/fence-2", second.workspace["repo_path"])
         self.assertNotEqual(first.workspace["artifact_dir"], second.workspace["artifact_dir"])
         self.assertIn("attempts/fence-1", first.workspace["artifact_stage_dir"])
         self.assertIn("attempts/fence-2", second.workspace["artifact_stage_dir"])

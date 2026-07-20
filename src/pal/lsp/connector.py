@@ -21,6 +21,7 @@ class LspProtocolError(RuntimeError):
 class AsyncLspConnector:
     config: LspServerConfig
     workspace_root: Path
+    extra_args: tuple[str, ...] = ()
     process: asyncio.subprocess.Process | None = None
     initialized: bool = False
     server_info: dict[str, Any] = field(default_factory=dict)
@@ -29,6 +30,7 @@ class AsyncLspConnector:
     _diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
     _diagnostic_events: dict[str, asyncio.Event] = field(default_factory=dict)
     _open_hashes: dict[str, str] = field(default_factory=dict)
+    _document_versions: dict[str, int] = field(default_factory=dict)
     _pending: dict[int, asyncio.Future[dict[str, Any]]] = field(default_factory=dict)
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _reader_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
@@ -43,6 +45,7 @@ class AsyncLspConnector:
         self.process = await asyncio.create_subprocess_exec(
             *self.config.command,
             *self.config.args,
+            *self.extra_args,
             cwd=str(self.workspace_root),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -80,6 +83,7 @@ class AsyncLspConnector:
         if process is None:
             await self._cancel_reader_task(reader_task)
             await self._cancel_stderr_task(stderr_task)
+            self._clear_document_state()
             return
         try:
             process_group = os.getpgid(process.pid)
@@ -111,11 +115,24 @@ class AsyncLspConnector:
         self._fail_pending(LspProtocolError("language server closed"))
         await self._cancel_reader_task(reader_task)
         await self._cancel_stderr_task(stderr_task)
+        self._clear_document_state()
+
+    @property
+    def healthy(self) -> bool:
+        return bool(
+            self.initialized
+            and self.process is not None
+            and self.process.returncode is None
+            and self._reader_task is not None
+            and not self._reader_task.done()
+        )
 
     def stderr_tail_text(self) -> str:
         return self._stderr_tail.strip()
 
     async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if not self.healthy and method not in {"initialize", "shutdown"}:
+            raise LspProtocolError("language server session is not healthy")
         ident = self._next_id
         self._next_id += 1
         loop = asyncio.get_running_loop()
@@ -138,15 +155,17 @@ class AsyncLspConnector:
         if self._open_hashes.get(uri) == digest:
             return {"uri": uri, "file_sha256": digest, "text": text}
         if uri in self._open_hashes:
+            version = self._document_versions.get(uri, 1) + 1
             self._diagnostics.pop(uri, None)
             self._diagnostic_events[uri] = asyncio.Event()
             await self.notify(
                 "textDocument/didChange",
                 {
-                    "textDocument": {"uri": uri, "version": 2},
+                    "textDocument": {"uri": uri, "version": version},
                     "contentChanges": [{"text": text}],
                 },
             )
+            self._document_versions[uri] = version
         else:
             self._diagnostics.pop(uri, None)
             self._diagnostic_events[uri] = asyncio.Event()
@@ -161,6 +180,7 @@ class AsyncLspConnector:
                     }
                 },
             )
+            self._document_versions[uri] = 1
         self._open_hashes[uri] = digest
         return {"uri": uri, "file_sha256": digest, "text": text}
 
@@ -271,6 +291,12 @@ class AsyncLspConnector:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+    def _clear_document_state(self) -> None:
+        self._diagnostics.clear()
+        self._diagnostic_events.clear()
+        self._open_hashes.clear()
+        self._document_versions.clear()
 
     def _fail_pending(self, exc: Exception) -> None:
         for future in list(self._pending.values()):

@@ -5,7 +5,8 @@ CONSTANT MaxCandidate
 
 NodeStates == {
     "Ready", "Executing", "Quiescing", "Snapshotting", "VerifyReady",
-    "Verifying", "RevisionReady", "Accepted", "Paused", "Frozen",
+    "Verifying", "VerifyQuiescing", "VerifySnapshotting",
+    "RevisionReady", "Accepted", "Paused", "Frozen",
     "Cancelled", "Triage"
 }
 
@@ -22,7 +23,10 @@ FailureKinds == {
 }
 ResultKinds == {"None", "Candidate", "Pass", "Fail"} \cup FailureKinds
 ControlStates == {"Run", "Pause", "Freeze", "Cancel"}
-ResumeStates == {"Ready", "Quiescing", "Snapshotting", "VerifyReady", "RevisionReady"}
+ResumeStates == {
+    "Ready", "Quiescing", "Snapshotting", "VerifyReady", "Verifying",
+    "VerifyQuiescing", "VerifySnapshotting", "RevisionReady"
+}
 ExecutionModes == {"Initial", "Revision"}
 
 VARIABLES
@@ -52,6 +56,8 @@ TerminalStates == {"Accepted", "Cancelled"}
 RetryTarget(state, mode) ==
     CASE state = "Executing" -> IF mode = "Revision" THEN "RevisionReady" ELSE "Ready"
       [] state = "Verifying" -> "VerifyReady"
+      [] state = "VerifyQuiescing" -> "VerifyQuiescing"
+      [] state = "VerifySnapshotting" -> "VerifySnapshotting"
       [] state = "Quiescing" -> "Ready"
       [] state = "Snapshotting" -> "Ready"
       [] state = "VerifyReady" -> "VerifyReady"
@@ -160,51 +166,62 @@ RecordVerifierResult(kind) ==
     /\ verifierState = "Running"
     /\ activeRole = "Verifier"
     /\ receiptState = "None"
+    /\ nodeState' = "VerifyQuiescing"
     /\ verifierState' = "AwaitingSettlement"
     /\ activeRole' = "None"
-    /\ receiptState' = "Recorded"
+    /\ receiptState' = "Settled"
     /\ resultKind' = kind
-    /\ UNCHANGED <<nodeState, coderState, writerLease, candidateVersion, verifiedVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<coderState, writerLease, candidateVersion, verifiedVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+
+QuiesceVerifier ==
+    /\ managerUp
+    /\ desiredControl = "Run"
+    /\ nodeState = "VerifyQuiescing"
+    /\ verifierState = "AwaitingSettlement"
+    /\ receiptState = "Settled"
+    /\ resultKind \in {"Pass", "Fail"}
+    /\ nodeState' = "VerifySnapshotting"
+    /\ UNCHANGED <<coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 SettleVerifierPass ==
     /\ managerUp
     /\ desiredControl \in {"Run", "Pause"}
-    /\ nodeState = "Verifying"
+    /\ nodeState = "VerifySnapshotting"
     /\ verifierState = "AwaitingSettlement"
-    /\ receiptState = "Recorded"
+    /\ receiptState = "Settled"
     /\ resultKind = "Pass"
     /\ candidateVersion > 0
     /\ nodeState' = "Accepted"
     /\ coderState' = "Done"
     /\ verifierState' = "Done"
-    /\ receiptState' = "Settled"
     /\ verifiedVersion' = candidateVersion
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 SettleVerifierFail ==
     /\ managerUp
     /\ desiredControl \in {"Run", "Pause"}
-    /\ nodeState = "Verifying"
+    /\ nodeState = "VerifySnapshotting"
     /\ verifierState = "AwaitingSettlement"
-    /\ receiptState = "Recorded"
+    /\ receiptState = "Settled"
     /\ resultKind = "Fail"
     /\ nodeState' = "RevisionReady"
     /\ coderState' = "Ready"
-    /\ verifierState' = "Suspended"
-    /\ receiptState' = "Settled"
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ verifierState' = "Done"
+    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 RecordFailure(kind) ==
     /\ kind \in FailureKinds
     /\ managerUp
     /\ desiredControl = "Run"
     /\ nodeState \notin TerminalStates \cup {"Paused", "Frozen", "Triage"}
-    /\ receiptState = "None"
+    /\ receiptState \in {"None", "Settled"}
+    /\ (receiptState = "Settled" =>
+        nodeState \in {"VerifyQuiescing", "VerifySnapshotting"})
     /\ (kind = "WorkerFailure" =>
         /\ nodeState \in {"Executing", "Verifying"}
         /\ activeRole \in {"Coder", "Verifier"})
-    /\ (kind = "QuiesceFailure" => nodeState = "Quiescing")
-    /\ (kind = "SnapshotFailure" => nodeState = "Snapshotting")
+    /\ (kind = "QuiesceFailure" => nodeState \in {"Quiescing", "VerifyQuiescing"})
+    /\ (kind = "SnapshotFailure" => nodeState \in {"Snapshotting", "VerifySnapshotting"})
     /\ receiptState' = "Recorded"
     /\ resultKind' = kind
     /\ triageResume' = RetryTarget(nodeState, executionMode)
@@ -344,6 +361,7 @@ Next ==
     \/ StartVerifier
     \/ RecordVerifierResult("Pass")
     \/ RecordVerifierResult("Fail")
+    \/ QuiesceVerifier
     \/ SettleVerifierPass
     \/ SettleVerifierFail
     \/ RecordFailure("WorkerFailure")
@@ -412,6 +430,16 @@ AcceptedWasVerified ==
         /\ verifiedVersion = candidateVersion
         /\ receiptState = "Settled"
         /\ resultKind = "Pass"
+
+CandidateOwnsFreshVerifier ==
+    nodeState = "VerifyReady" =>
+        /\ verifierState = "Ready"
+        /\ candidateVersion > verifiedVersion
+
+VerifierCompletesAfterVerdictSettlement ==
+    nodeState \in {"Accepted", "RevisionReady"} /\ resultKind \in {"Pass", "Fail"} =>
+        /\ verifierState = "Done"
+        /\ receiptState = "Settled"
 
 TerminalClosesSessions ==
     nodeState \in TerminalStates =>

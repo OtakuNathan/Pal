@@ -306,8 +306,9 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="start_workflow",
         description=(
-            "Start one durable Minion workflow and bind it to the current actor/channel. Supply the user-confirmed goal, natural-language Requirement "
-            "sections, family, workspace, and truth-source references. The Manager creates or reuses the internal Task and all identities. Use "
+            "Start one durable Minion workflow and bind it to the current actor/channel. Supply the user's exact goal, family, workspace, and optional "
+            "workspace-relative source files. The Manager preserves those bytes as the immutable task truth without extracting or normalizing requirements, "
+            "and creates or reuses all internal identities. Use "
             "review_then_execute with artifact for a named external architecture, execute_trusted only for a Manager-trusted named artifact, "
             "standalone_review for review-only, and review_and_repair for bounded repair. Never inspect or implement the target in the foreground first."
         ),
@@ -333,33 +334,18 @@ class MinionV2PublicProvider:
                     },
                     "additionalProperties": True,
                 },
-                "sections": {
-                    "type": "object",
-                    "description": (
-                        "Immutable user/product Requirement text grouped by natural-language section, including delivery-relevant compatibility, "
-                        "platform, source-of-truth, and implementation constraints. Do not restate Minion roles, gates, review order, tool rules, "
-                        "or other workflow policy here; the Manager enforces those through the selected family binding."
-                    ),
-                    "additionalProperties": {"type": "array", "items": {"type": "string"}},
-                },
-                "requirements": {
+                "source_files": {
                     "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "section": {"type": "string"},
-                            "statement": {"type": "string"},
-                            "strength": {"type": "string", "enum": ["hard", "soft"]},
-                        },
-                        "required": ["section", "statement"],
-                        "additionalProperties": False,
-                    },
+                    "items": {"type": "string"},
+                    "description": (
+                        "Workspace-relative UTF-8 Markdown or text files whose exact bytes are additional immutable task truth sources. "
+                        "The Manager does not extract, normalize, deduplicate, classify, or reinterpret them. Valid only for new_requirement."
+                    ),
                 },
-                "strengths": {"type": "object"},
                 "constraints": {
                     "type": "array",
                     "description": (
-                        "Optional machine/environment constraints for execution and fingerprinting. Product-visible obligations belong in sections; "
+                        "Optional machine/environment constraints for execution and fingerprinting. Product-visible obligations belong in the goal or source files; "
                         "Minion orchestration policy belongs to the family binding."
                     ),
                 },
@@ -543,8 +529,8 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="resume_workflow",
         description=(
-            "Resume a deliberately paused V2 workflow or resolve recoverable TRIAGE_REQUIRED child aggregates through their "
-            "declared RESOLVE_TRIAGE transitions. This never skips a gate or fabricates a checkpoint."
+            "Resume a deliberately paused V2 workflow. TRIAGE_REQUIRED work must be handled explicitly with resolve_triage after its "
+            "reported blocker has actually been addressed."
         ),
         args_schema={
             "type": "object",
@@ -573,6 +559,97 @@ class MinionV2PublicProvider:
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="minion",
+        action_name="restart_execution",
+        description=(
+            "Discard the current execution attempt and restart from its accepted architecture without rerunning Architect first. The Manager "
+            "safely cancels and settles the current workflow, creates a new review_then_execute workflow under the same Task with the latest "
+            "Family binding, requires Architecture Review and Human Accept, and reuses no Coder candidates. Use this when execution policy or "
+            "Coder behavior changed but the accepted architecture remains the intended baseline."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string"},
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Auditable reason the current execution must be discarded and restarted.",
+                },
+            },
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+    )
+    def restart_execution(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, channel = self._actor_and_channel(call)
+            workflow_id = self.service.resolve_workflow_selector(
+                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            )
+            payload = self.service.restart_execution_from_architecture(
+                workflow_id=workflow_id,
+                actor=actor,
+                source_channel=channel,
+                reason=str(call.args.get("reason") or ""),
+                control_route=self._control_route(call),
+            )
+            self._wake()
+            return _public_result("minion execution restart requested", payload)
+        except ValueError as exc:
+            return _invalid("minion V2 execution restart invalid", exc)
+        except Exception as exc:
+            return _error("minion V2 execution restart failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        action_name="resolve_triage",
+        description=(
+            "Mark one TRIAGE_REQUIRED workflow item as manually handled and resume it through the Manager's declared RESOLVE_TRIAGE "
+            "transition. Supply what was actually fixed or verified. This does not accept a candidate, waive verification, or skip a gate. "
+            "When several items need triage, select exactly one by its semantic module or phase name, such as ohos_font or architecture."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string"},
+                "subject": {
+                    "type": "string",
+                    "description": "Module or phase name. Optional only when the workflow has exactly one TRIAGE_REQUIRED item.",
+                },
+                "resolution": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Auditable summary of the external or manual action that removed the blocker.",
+                },
+            },
+            "required": ["resolution"],
+            "additionalProperties": False,
+        },
+    )
+    def resolve_triage(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, channel = self._actor_and_channel(call)
+            workflow_id = self.service.resolve_workflow_selector(
+                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            )
+            payload = self.service.resolve_triage(
+                workflow_id=workflow_id,
+                actor=actor,
+                source_channel=channel,
+                subject=str(call.args.get("subject") or ""),
+                resolution=str(call.args.get("resolution") or ""),
+            )
+            self._wake()
+            return _public_result("minion triage resolved", payload)
+        except ValueError as exc:
+            return _invalid("minion V2 triage resolution invalid", exc)
+        except Exception as exc:
+            return _error("minion V2 triage resolution failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
         action_name="submit_human_decision",
         description=(
             "Submit Accept/Edit/Reject for the current channel-bound architecture review. The Manager resolves the unique pending card and "
@@ -583,7 +660,25 @@ class MinionV2PublicProvider:
             "properties": {
                 "task": {"type": "string"},
                 "decision": {"type": "string", "enum": ["accept", "edit", "reject", "clarify"]},
-                "edit_instruction": {"type": "string"},
+                "edit_scope": {
+                    "type": "string",
+                    "enum": ["architecture", "requirements"],
+                    "default": "architecture",
+                    "description": "For decision=edit, choose whether product Requirements change or only the architecture changes.",
+                },
+                "edit_instruction": {
+                    "type": "string",
+                    "description": "Required for architecture edits. This changes the architecture, not the immutable task source.",
+                },
+                "amendment": {
+                    "type": "string",
+                    "description": "Raw user amendment appended verbatim to the immutable task sources. Valid only for edit_scope=requirements.",
+                },
+                "source_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Workspace-relative UTF-8 files appended verbatim to the task sources for a requirements edit.",
+                },
                 "clarification_response": {"type": "string"},
             },
             "required": ["decision"],
@@ -611,6 +706,46 @@ class MinionV2PublicProvider:
             return _invalid("minion V2 human decision stale or invalid", exc)
         except Exception as exc:
             return _error("minion V2 human decision failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        action_name="answer_question",
+        description=(
+            "Answer the single pending Architect question for the current channel-bound workflow with custom free text. "
+            "Use this when the user's response is not one of the inline options. The Architect remains running and receives "
+            "the answer through its existing tool call."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string"},
+                "answer": {"type": "string", "minLength": 1},
+            },
+            "required": ["answer"],
+            "additionalProperties": False,
+        },
+    )
+    def answer_question(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, channel = self._actor_and_channel(call)
+            workflow_id = self.service.resolve_workflow_selector(
+                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            )
+            if self.manager_request is None:
+                raise RuntimeError("minion sidecar request path is unavailable")
+            payload = self.manager_request(
+                "answer_workflow_question",
+                {
+                    "workflow_id": workflow_id,
+                    "answer": str(call.args.get("answer") or ""),
+                },
+            )
+            return _public_result("minion question answered", payload)
+        except ValueError as exc:
+            return _invalid("minion question answer invalid", exc)
+        except Exception as exc:
+            return _error("minion question answer failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,

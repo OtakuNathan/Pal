@@ -22,6 +22,8 @@ class FileState:
 
     content: str
     mtime_ns: int
+    full_view: bool = True
+    last_view: tuple[int, int] | None = None
 
 
 class FileStateCache:
@@ -43,7 +45,14 @@ class FileStateCache:
     # Public API
     # ------------------------------------------------------------------
 
-    def mark_read(self, file_path: str | Path, content: str) -> None:
+    def mark_read(
+        self,
+        file_path: str | Path,
+        content: str,
+        *,
+        full_view: bool = True,
+        view: tuple[int, int] | None = None,
+    ) -> None:
         """Record that *file_path* has been read with the given *content*.
 
         The resolved path and current mtime are captured.  If the cache is
@@ -51,7 +60,19 @@ class FileStateCache:
         """
         key = self._resolve(file_path)
         mtime_ns = self._get_mtime_ns(key)
-        entry = FileState(content=content, mtime_ns=mtime_ns)
+        previous = self._cache.get(key)
+        if (
+            previous is not None
+            and previous.mtime_ns == mtime_ns
+            and previous.content == content
+        ):
+            full_view = full_view or previous.full_view
+        entry = FileState(
+            content=content,
+            mtime_ns=mtime_ns,
+            full_view=full_view,
+            last_view=view,
+        )
         self._cache[key] = entry
         self._cache.move_to_end(key)
         self._evict_if_needed()
@@ -66,6 +87,18 @@ class FileStateCache:
         If the file has been modified (or deleted) since the read, the
         entry is automatically removed and ``None`` is returned.
         """
+        entry = self.get_valid_state(file_path)
+        return entry.content if entry is not None else None
+
+    def get_valid_full(self, file_path: str | Path) -> str | None:
+        """Return content only when the caller has seen the complete file."""
+        entry = self.get_valid_state(file_path)
+        if entry is None or not entry.full_view:
+            return None
+        return entry.content
+
+    def get_valid_state(self, file_path: str | Path) -> FileState | None:
+        """Return the current cached state, evicting stale snapshots."""
         key = self._resolve(file_path)
         entry = self._cache.get(key)
         if entry is None:
@@ -79,7 +112,7 @@ class FileStateCache:
 
         # Touch for LRU ordering.
         self._cache.move_to_end(key)
-        return entry.content
+        return entry
 
     def invalidate(self, file_path: str | Path) -> None:
         """Remove the cached entry for *file_path* (no-op if absent)."""
@@ -130,7 +163,7 @@ class FileStateTool:
     family: str = "system"
     description: str = (
         "Use this first when you need to check whether a file has a current read snapshot before editing, writing, or deleting it. "
-        "Inspect whether a file has a current cached read snapshot for safe file_edit use. "
+        "Inspect whether a file has a current complete cached read snapshot for safe mutation. "
         "This does not return cached file contents."
     )
     tags: tuple[str, ...] = ("file", "state", "cache", "system")
@@ -157,6 +190,7 @@ class FileStateTool:
                     "file_path": {"type": "string"},
                     "cached": {"type": "boolean"},
                     "valid": {"type": "boolean"},
+                    "full_view": {"type": "boolean"},
                     "content_length": {"type": "integer"},
                 },
             }
@@ -170,18 +204,20 @@ class FileStateTool:
 
         resolved = FileStateCache._resolve(file_path)
         was_cached = file_path in self.cache
-        cached_content = self.cache.get_valid(file_path)
-        valid = cached_content is not None
+        cached_state = self.cache.get_valid_state(file_path)
+        valid = cached_state is not None
         payload.update(
             {
                 "file_path": resolved,
                 "cached": was_cached,
                 "valid": valid,
-                "content_length": len(cached_content) if cached_content is not None else 0,
+                "full_view": bool(cached_state and cached_state.full_view),
+                "content_length": len(cached_state.content) if cached_state is not None else 0,
             }
         )
         if valid:
-            text = f"file state cache has a current read snapshot for {resolved}"
+            completeness = "complete" if cached_state and cached_state.full_view else "partial"
+            text = f"file state cache has a current {completeness} read snapshot for {resolved}"
         elif was_cached:
             text = f"file state cache had a stale snapshot for {resolved}; read the file again before editing"
         else:

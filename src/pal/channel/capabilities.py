@@ -579,14 +579,10 @@ class ChannelIntrospectionProvider:
         handle = context.module_registry.get(self.module_id)
         if handle is None:
             return []
-        context.capability_registry.unregister_module(self.module_id)
         context.execution_runtime.unmount_subtree(handle)
         handle.mounted_subtree = None
         context.execution_runtime.hydrate_module_handle(handle)
         published = context.execution_runtime.mount_subtree(handle)
-        for descriptor_name in published:
-            descriptor = context.execution_runtime.compiled_capability_index.records[descriptor_name]
-            context.capability_registry.register(descriptor)
         handle.published_capabilities = published
         return published
 

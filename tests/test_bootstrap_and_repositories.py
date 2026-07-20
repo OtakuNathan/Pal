@@ -979,7 +979,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                         {
                             "type": "function",
                             "function": {
-                                "name": "probe.alias",
+                                "name": "probe_alias",
                                 "description": "Probe.",
                                 "parameters": {"type": "object", "properties": {}},
                             },
@@ -990,7 +990,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(outcome.text, "thinking done")
         self.assertEqual(outcome.finish_reason, LLMFinishReason.TOOL_CALLS)
-        self.assertEqual(outcome.tool_calls[0].name, "probe.alias")
+        self.assertEqual(outcome.tool_calls[0].name, "probe_alias")
         self.assertEqual(outcome.tool_calls[0].args, {"ok": True})
         self.assertEqual(outcome.tool_calls[0].call_id, "call_1")
         self.assertEqual(calls[0][0], "client")
@@ -1162,10 +1162,10 @@ class PalV2BootstrapTests(unittest.TestCase):
                 ],
                 max_output_tokens=64,
                 tools=[
-                    {"type": "function", "function": {"name": "op_exec_shell", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "op_file_write", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "op_path_delete", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "op_tree", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "run_shell", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "delete_path", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "tree", "parameters": {"type": "object"}}},
                 ],
                 metadata={"think_level": "high"},
             ),
@@ -1214,8 +1214,8 @@ class PalV2BootstrapTests(unittest.TestCase):
                 messages=[{"role": "user", "content": "Continue."}],
                 max_output_tokens=64,
                 tools=[
-                    {"type": "function", "function": {"name": "op_exec_shell", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "op_file_write", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "run_shell", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object"}}},
                 ],
             ),
         )
@@ -1247,8 +1247,8 @@ class PalV2BootstrapTests(unittest.TestCase):
                 messages=[{"role": "user", "content": "Implement the task."}],
                 max_output_tokens=64,
                 tools=[
-                    {"type": "function", "function": {"name": "op_exec_shell", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "op_file_read", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "run_shell", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}},
                 ],
             ),
         )
@@ -1279,7 +1279,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 messages=[{"role": "user", "content": "hello"}],
                 max_output_tokens=64,
                 tools=[
-                    {"type": "function", "function": {"name": "op_file_write", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object"}}},
                 ],
             ),
         )
@@ -1316,8 +1316,8 @@ class PalV2BootstrapTests(unittest.TestCase):
                 ],
                 max_output_tokens=64,
                 tools=[
-                    {"type": "function", "function": {"name": "op_exec_shell", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "op_file_write", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "run_shell", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object"}}},
                 ],
             ),
         )
@@ -1359,9 +1359,9 @@ class PalV2BootstrapTests(unittest.TestCase):
                 messages=[{"role": "system", "content": "rules"}, {"role": "user", "content": "Continue."}],
                 max_output_tokens=4096,
                 tools=[
-                    {"type": "function", "function": {"name": "op_exec_shell", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "op_file_write", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "op_path_delete", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "run_shell", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "delete_path", "parameters": {"type": "object"}}},
                 ],
                 metadata={"think_level": "high"},
             ),
@@ -1683,7 +1683,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(invoker.last_payload_summary["endpoint_id"], "stub_route")
         self.assertEqual(invoker.last_payload_summary["message_count"], 1)
 
-    def test_llm_runtime_writes_failure_audit_for_empty_response(self) -> None:
+    def test_llm_runtime_logs_typed_failure_without_persisting_request_content(self) -> None:
         class EmptyResponseInvoker:
             def __init__(self) -> None:
                 self.last_payload_summary: dict[str, object] = {}
@@ -1694,8 +1694,19 @@ class PalV2BootstrapTests(unittest.TestCase):
                     "message_count": len(request.messages),
                     "roles": [message.get("role") for message in request.messages],
                     "authorization": "Bearer secret-provider-token",
+                    "image_parts": [
+                        {
+                            "message_index": 1,
+                            "part_index": 0,
+                            "transport": "http_url",
+                            "prefix": "https://private.invalid/user-secret-image",
+                            "url_length": 49,
+                        }
+                    ],
                 }
-                raise LLMEndpointInvocationError("llm response contained no assistant content or tool calls")
+                raise LLMEndpointInvocationError(
+                    "llm response contained no assistant content or tool calls; echoed first user message"
+                )
 
             def invoke_stream(self, endpoint, request):
                 _ = endpoint, request
@@ -1713,6 +1724,10 @@ class PalV2BootstrapTests(unittest.TestCase):
             enabled=True,
         )
         events: list[dict[str, object]] = []
+        legacy_audit_dir = self.runtime_root / "data" / "llm" / "audit"
+        legacy_audit_dir.mkdir(parents=True, exist_ok=True)
+        legacy_audit = legacy_audit_dir / "llm_failure_legacy.json"
+        legacy_audit.write_text('{"messages":["legacy private prompt"]}', encoding="utf-8")
         runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(repository=endpoint_repository),
             settings_repository=RuntimeSettingRepository(),
@@ -1720,40 +1735,45 @@ class PalV2BootstrapTests(unittest.TestCase):
             config=RuntimeConfig(runtime_root=self.runtime_root, llm_endpoint_retry_attempts=1),
             event_sink=events.append,
         )
+        self.assertFalse(legacy_audit.exists())
 
-        outcome = runtime.generate(
-            CanonicalLLMRequest(
-                messages=[
-                    {"role": "system", "content": "stable instructions"},
-                    {"role": "user", "content": "first user message"},
-                    {"role": "user", "content": "second user message"},
-                ],
-                max_output_tokens=64,
-                tools=[{"type": "function", "function": {"name": "op_demo", "parameters": {"type": "object"}}}],
-                metadata={
-                    "purpose": "minion_worker",
-                    "api_key": "secret-api-key",
-                    "prompt_observation_tag": "obs_failure_audit",
-                },
+        with self.assertLogs("pal.llm.runtime", level="WARNING") as captured:
+            outcome = runtime.generate(
+                CanonicalLLMRequest(
+                    messages=[
+                        {"role": "system", "content": "stable instructions"},
+                        {"role": "user", "content": "first user message"},
+                        {"role": "user", "content": "second user message"},
+                    ],
+                    max_output_tokens=64,
+                    tools=[{"type": "function", "function": {"name": "demo", "parameters": {"type": "object"}}}],
+                    metadata={
+                        "purpose": "minion_worker",
+                        "api_key": "secret-api-key",
+                        "prompt_observation_tag": "obs_failure_audit",
+                    },
+                )
             )
-        )
 
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
         audit_files = sorted((self.runtime_root / "data" / "llm" / "audit").glob("llm_failure_*.json"))
-        self.assertEqual(len(audit_files), 1)
-        payload = json.loads(audit_files[0].read_text(encoding="utf-8"))
-        self.assertTrue(payload["error"]["empty_response"])
-        self.assertEqual(payload["error"]["kind"], "unknown")
-        self.assertEqual(payload["endpoint"]["endpoint_id"], "glm_demo")
-        self.assertEqual(payload["request_summary"]["roles"], ["system", "user", "user"])
-        self.assertEqual(payload["request_summary"]["adjacent_same_roles"], [{"index": 2, "role": "user"}])
-        self.assertEqual(payload["request_summary"]["tool_names"], ["op_demo"])
-        self.assertEqual(payload["canonical_request"]["metadata"]["api_key"], "<redacted>")
-        self.assertEqual(payload["provider_payload_summary"]["authorization"], "<redacted>")
-        self.assertIn("audit_path", events[0])
-        audit_text = audit_files[0].read_text(encoding="utf-8")
-        self.assertNotIn("secret-api-key", audit_text)
-        self.assertNotIn("secret-provider-token", audit_text)
+        self.assertEqual(audit_files, [])
+        self.assertNotIn("error_message", events[0])
+        self.assertEqual(events[0]["error_type"], "LLMEndpointInvocationError")
+        logs = "\n".join(captured.output)
+        self.assertIn("error_kind=unknown", logs)
+        self.assertIn("error_type=LLMEndpointInvocationError", logs)
+        for secret in (
+            "stable instructions",
+            "first user message",
+            "second user message",
+            "parameters",
+            "obs_failure_audit",
+            "private.invalid",
+            "secret-api-key",
+            "secret-provider-token",
+        ):
+            self.assertNotIn(secret, logs)
 
     def test_openai_chat_wall_timeout_returns_without_waiting_for_stuck_call(self) -> None:
         from pal.llm.runtime import LLMEndpointInvocationError, _run_llm_with_wall_timeout
@@ -2036,7 +2056,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             {
                 "type": "function",
                 "function": {
-                    "name": "op_large_tool",
+                    "name": "large_tool",
                     "description": "d" * 500,
                     "parameters": {
                         "type": "object",
@@ -2480,12 +2500,12 @@ class PalV2BootstrapTests(unittest.TestCase):
             database=self.database,
         )
         runtime = handle.core.context.execution_runtime
-        cap_registry = handle.core.context.capability_registry
+        initial_registry = handle.core.context.capability_registry
         expectations = {
             "lsp": ("pal.lsp", "lsp_show"),
             "mcp": ("pal.mcp", "mcp_show"),
             "minion": ("pal.minion", "minion_start_workflow"),
-            "sqlite_vec_l3": ("pal.plugins.l3", "memory_provider_show::sqlite_vec_l3"),
+            "sqlite_vec_l3": ("pal.plugins.l3", "memory_provider_show__sqlite_vec_l3"),
             "web_fetch": ("pal.web_fetch", "web_fetch_show"),
             "web_search": ("pal.web_search", "web_search_show"),
         }
@@ -2500,10 +2520,11 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         try:
             for plugin_id, (reload_prefix, capability_name) in expectations.items():
-                self.assertIn(capability_name, cap_registry.descriptors, plugin_id)
+                self.assertIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
                 detached = runtime.execute(CapabilityCall(name="plugin_detach", args={"plugin_id": plugin_id}))
                 self.assertEqual(detached.status, "ok", plugin_id)
-                self.assertNotIn(capability_name, cap_registry.descriptors, plugin_id)
+                self.assertIn(capability_name, initial_registry.descriptors, plugin_id)
+                self.assertNotIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
 
                 probe_name = f"{reload_prefix}.__pal_hot_reload_probe__"
                 sys.modules[probe_name] = types.ModuleType(probe_name)
@@ -2511,7 +2532,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
                 self.assertEqual(attached.status, "ok", plugin_id)
                 self.assertNotIn(probe_name, sys.modules, plugin_id)
-                self.assertIn(capability_name, cap_registry.descriptors, plugin_id)
+                self.assertIn(capability_name, handle.core.context.capability_registry.descriptors, plugin_id)
                 record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == plugin_id)
                 self.assertTrue(record["attached"], plugin_id)
         finally:
@@ -2528,7 +2549,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             registration=self.registration,
             database=self.database,
         )
-        cap_registry = handle.core.context.capability_registry
+        initial_registry = handle.core.context.capability_registry
         prefixes = ("pal.minion", "pal.plugins_builtin.minion")
         original_modules = {
             name: module
@@ -2546,7 +2567,8 @@ class PalV2BootstrapTests(unittest.TestCase):
             detached = handle.core.detach_module("minion")
 
             self.assertEqual(detached, "ok")
-            self.assertNotIn("minion_start_workflow", cap_registry.descriptors)
+            self.assertIn("minion_start_workflow", initial_registry.descriptors)
+            self.assertNotIn("minion_start_workflow", handle.core.context.capability_registry.descriptors)
             self.assertNotIn("minion.manager", handle.core.context.event_source_registry.sources)
             self.assertNotIn("minion", handle.core.context.event_handler_registry.by_module)
             self.assertFalse(old_manager.client.socket_path.exists())
@@ -2560,7 +2582,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
             self.assertEqual(reattached, "ok")
             self.assertNotIn(probe_name, sys.modules)
-            self.assertIn("minion_start_workflow", cap_registry.descriptors)
+            self.assertIn("minion_start_workflow", handle.core.context.capability_registry.descriptors)
             new_handle = handle.core.context.module_registry.require("minion")
             new_manager = new_handle.ports["minion"]
             new_pid = int(new_manager._require_manager()["manager_pid"])
@@ -2590,14 +2612,14 @@ class PalV2BootstrapTests(unittest.TestCase):
         try:
             self.assertIn("plugins_show", handle.core.context.capability_registry.descriptors)
             self.assertIn("plugin_detach", handle.core.context.capability_registry.descriptors)
-            self.assertIn("memory_provider_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+            self.assertIn("memory_provider_show__sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
             detached = handle.core.context.execution_runtime.execute(
                 CapabilityCall(name="plugin_detach", args={"plugin_id": "sqlite_vec_l3"})
             )
 
             self.assertEqual(detached.status, "ok")
-            self.assertNotIn("memory_provider_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+            self.assertNotIn("memory_provider_show__sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
         finally:
             asyncio.run(handle.stop_async())
 
@@ -2628,11 +2650,11 @@ class PalV2BootstrapTests(unittest.TestCase):
             database=self.database,
         )
         runtime = handle.core.context.execution_runtime
-        cap_registry = handle.core.context.capability_registry
+        initial_registry = handle.core.context.capability_registry
         plugin_host = handle.plugin_host
 
         # Verify sqlite_vec_l3 starts attached with capabilities
-        l3_caps_before = [name for name in cap_registry.descriptors if "sqlite_vec_l3" in name]
+        l3_caps_before = [name for name in initial_registry.descriptors if "sqlite_vec_l3" in name]
         self.assertTrue(len(l3_caps_before) > 0, "L3 plugin should have capabilities on boot")
         self.assertIsNotNone(runtime.l3_plugin_registry.get("sqlite_vec_l3"))
 
@@ -2643,7 +2665,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(detached.status, "ok")
 
         # Capabilities withdrawn
-        l3_caps_after_detach = [name for name in cap_registry.descriptors if "sqlite_vec_l3" in name]
+        l3_caps_after_detach = [
+            name for name in handle.core.context.capability_registry.descriptors if "sqlite_vec_l3" in name
+        ]
         self.assertEqual(len(l3_caps_after_detach), 0, "All L3 capabilities should be withdrawn after detach")
 
         # Provider ref removed
@@ -2661,7 +2685,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(attached.status, "ok")
 
         # Capabilities restored
-        l3_caps_after_reattach = [name for name in cap_registry.descriptors if "sqlite_vec_l3" in name]
+        l3_caps_after_reattach = [
+            name for name in handle.core.context.capability_registry.descriptors if "sqlite_vec_l3" in name
+        ]
         self.assertEqual(len(l3_caps_after_reattach), len(l3_caps_before), "All L3 capabilities should be restored after re-attach")
 
         # Provider ref restored
@@ -2757,7 +2783,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         inventory = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="memory_provider_inventory",
+                name="memory_provider_inventory__sqlite_vec_l3",
                 args={"target_id": "sqlite_vec_l3"},
             )
         )
@@ -3774,7 +3800,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
-        self.assertIn("backend offline", outcome.text)
+        self.assertIn("kind=unknown", outcome.text)
+        self.assertIn("type=RuntimeError", outcome.text)
+        self.assertNotIn("backend offline", outcome.text)
 
     def test_llm_runtime_returns_compact_required_when_fallback_endpoint_window_is_tighter(self) -> None:
         endpoint_repository = LLMEndpointRepository()
@@ -4155,7 +4183,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         health = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="channel_endpoint_health",
+                name="channel_endpoint_health__demo_runtime_main",
                 args={"target_id": "demo_runtime_main"},
             )
         )
@@ -4192,14 +4220,14 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         self.assertIn("demo_runtime", result.structured["runtime_provider_ids"])
         self.assertIn("demo_runtime_main", result.structured["hydrated_endpoint_ids"])
-        self.assertIn("channel_endpoint_health::demo_runtime_main", result.structured["republished_capability_names"])
+        self.assertIn("channel_endpoint_health__demo_runtime_main", result.structured["republished_capability_names"])
         endpoint = handle.channel_runtime.get_endpoint("demo_runtime_main")
         self.assertIsNotNone(endpoint)
         self.assertEqual(endpoint.__class__.__name__, "DemoRuntimeEndpoint")
 
         health = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="channel_endpoint_health",
+                name="channel_endpoint_health__demo_runtime_main",
                 args={"target_id": "demo_runtime_main"},
             )
         )
@@ -4304,7 +4332,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         auth_result = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="web_search_provider_set_auth_material",
+                name="web_search_provider_set_auth_material__brave_search_default",
                 args={
                     "target_id": "brave_search_default",
                     "material": {"api_key": "brave-secret"},
@@ -4374,7 +4402,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         health = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="web_fetch_provider_health",
+                name="web_fetch_provider_health__playwright_fetch_default",
                 args={"target_id": "playwright_fetch_default"},
             )
         )
@@ -4402,7 +4430,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         disabled = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="web_fetch_provider_disable",
+                name="web_fetch_provider_disable__playwright_fetch_default",
                 args={"target_id": "playwright_fetch_default"},
             )
         )

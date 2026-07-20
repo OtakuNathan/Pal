@@ -926,7 +926,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 "singleton_count": 3,
                 "dynamic_count": 1,
                 "resident_tool_count": 2,
-                "resident_tool_names": ["op_tool_search", "op_tool_call"],
+                "resident_tool_names": ["search_tools", "call_tool"],
             }
 
         self.core.tool_surface.reload_config = reload_config  # type: ignore[method-assign]

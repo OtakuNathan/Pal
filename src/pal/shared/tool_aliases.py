@@ -30,7 +30,7 @@ EXPLICIT_LLM_TOOL_ALIASES: dict[str, str] = {
     "op_minion_memory_candidate_write": "memory_candidate_write",
     "op_tool_call": "call_tool",
     "op_tool_read": "read_tool",
-    "op_tool_result_page": "read_tool_result_page",
+    "op_tool_result_page": "read_tool_result",
     "op_tool_search": "search_tools",
     "op_web_read": "read_web",
     "op_web_search": "search_web",
@@ -44,7 +44,7 @@ DEDICATED_TOOL_ROUTE_HINTS: tuple[tuple[str, str], ...] = (
     ("op_search", "repository text search"),
     ("op_file_read", "reading repo text files"),
     ("op_file_edit", "precise repo text edits"),
-    ("op_file_write", "creating, overwriting, or appending repo text files"),
+    ("op_file_write", "creating or overwriting complete repo text files"),
     ("op_path_delete", "deleting repo paths"),
     ("op_git", "git status, diff, log, show, and conservative audited git mutations"),
 )

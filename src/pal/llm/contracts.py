@@ -55,6 +55,7 @@ class CanonicalToolResult:
     call_id: str | None = None
     status: str = ""
     result_handle: ToolResultHandle | None = None
+    invocation_result: Any | None = None
 
     def __post_init__(self) -> None:
         if not str(self.llm_text or "").strip():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import shutil
 import tempfile
@@ -54,7 +55,7 @@ from pal.minion.v2.formal import (
     render_implementation_topology,
     transition_topology,
 )
-from pal.minion.v2.workers import SEMANTIC_EFFECT_TYPES
+from pal.minion.v2.workers import MinionV2SemanticWorker, SEMANTIC_EFFECT_TYPES
 from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
 
 
@@ -96,6 +97,154 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 created,
                 self.action("MARK_COMPLETED", AggregateType.WORKFLOW, "wf_test", expected_version=1),
             )
+
+    def test_workflow_execution_restart_settles_before_replacement(self) -> None:
+        created = self.engine.transition(
+            None,
+            self.action("CREATE_WORKFLOW", AggregateType.WORKFLOW, "wf_test"),
+        ).snapshot
+        active = self.engine.transition(
+            created,
+            self.action(
+                "START_WORKFLOW",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=1,
+            ),
+        ).snapshot
+        requested = self.engine.transition(
+            active,
+            self.action(
+                "REQUEST_EXECUTION_RESTART",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=2,
+                payload={
+                    "restart_execution_request": {
+                        "task_id": "task_test",
+                        "architecture_manifest_ref": {"sha256": "architecture"},
+                        "requirements_ref": {"sha256": "requirements"},
+                    }
+                },
+            ),
+        )
+        restarting = self.engine.transition(
+            requested.snapshot,
+            self.action(
+                "CHILDREN_CANCELLED",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=3,
+            ),
+        )
+        cancelled = self.engine.transition(
+            restarting.snapshot,
+            self.action(
+                "REPLACEMENT_WORKFLOW_STARTED",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=4,
+                payload={"replacement_workflow_id": "wf_replacement"},
+            ),
+        )
+
+        self.assertEqual(requested.snapshot.state, WorkflowState.CANCEL_REQUESTED)
+        self.assertEqual(requested.effects[0].effect_type, "propagate_cancel")
+        self.assertEqual(restarting.snapshot.state, WorkflowState.RESTARTING)
+        self.assertEqual(
+            restarting.effects[0].effect_type,
+            "start_replacement_workflow_from_architecture",
+        )
+        self.assertEqual(cancelled.snapshot.state, WorkflowState.CANCELLED)
+        self.assertEqual(
+            cancelled.snapshot.payload["replacement_workflow_id"],
+            "wf_replacement",
+        )
+
+    def test_ordinary_workflow_cancel_does_not_enter_restarting(self) -> None:
+        created = self.engine.transition(
+            None,
+            self.action("CREATE_WORKFLOW", AggregateType.WORKFLOW, "wf_test"),
+        ).snapshot
+        requested = self.engine.transition(
+            created,
+            self.action(
+                "REQUEST_CANCEL",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=1,
+            ),
+        ).snapshot
+        cancelled = self.engine.transition(
+            requested,
+            self.action(
+                "CHILDREN_CANCELLED",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=2,
+            ),
+        )
+
+        self.assertEqual(cancelled.snapshot.state, WorkflowState.CANCELLED)
+        self.assertNotIn("restart_execution_request", cancelled.snapshot.payload)
+        self.assertEqual(cancelled.effects, ())
+
+    def test_workflow_restart_cancel_waits_for_replacement_effect_receipt(self) -> None:
+        created = self.engine.transition(
+            None,
+            self.action("CREATE_WORKFLOW", AggregateType.WORKFLOW, "wf_test"),
+        ).snapshot
+        active = self.engine.transition(
+            created,
+            self.action(
+                "START_WORKFLOW",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=1,
+            ),
+        ).snapshot
+        requested = self.engine.transition(
+            active,
+            self.action(
+                "REQUEST_EXECUTION_RESTART",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=2,
+                payload={"restart_execution_request": {"task_id": "task_test"}},
+            ),
+        ).snapshot
+        restarting = self.engine.transition(
+            requested,
+            self.action(
+                "CHILDREN_CANCELLED",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=3,
+            ),
+        ).snapshot
+        cancel_requested = self.engine.transition(
+            restarting,
+            self.action(
+                "REQUEST_CANCEL",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=4,
+            ),
+        )
+        cancelled = self.engine.transition(
+            cancel_requested.snapshot,
+            self.action(
+                "REPLACEMENT_WORKFLOW_ABORTED",
+                AggregateType.WORKFLOW,
+                "wf_test",
+                expected_version=5,
+            ),
+        )
+
+        self.assertEqual(cancel_requested.snapshot.state, WorkflowState.RESTARTING)
+        self.assertTrue(cancel_requested.snapshot.payload["restart_cancel_requested"])
+        self.assertEqual(cancel_requested.effects, ())
+        self.assertEqual(cancelled.snapshot.state, WorkflowState.CANCELLED)
 
     def test_task_family_is_bound_and_task_archival_is_terminal(self) -> None:
         created = self.engine.transition(
@@ -167,6 +316,15 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             {"session_id": "inv-session", "llm_round_count": 7},
             artifact_type="AgentSessionContinuationArtifact",
         )
+        repository.ensure_worker_session(
+            session_id="inv-session",
+            workflow_id="wf-session",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch-session",
+            role="architect",
+            scope_kind="architecture_revision",
+            subject_key="arch-session",
+        )
         lease = repository.claim_lease("architecture:arch-session:architect", "inv-session", ttl_seconds=60)
         repository.record_worker_invocation(
             invocation_id="inv-session",
@@ -205,6 +363,59 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertEqual(invocation["aggregate_id"], "arch-session-revision")
         self.assertEqual(invocation["continuation_ref"]["sha256"], continuation.sha256)
         self.assertEqual(invocation["prompt_pack_ref"]["sha256"], resumed_prompt.sha256)
+
+        worker = MinionV2SemanticWorker(MinionV2WorkflowService(root))
+        restore_path, checkpoint_path = worker._prepare_agent_session_attempt(
+            session_id="inv-session",
+            attempt_id="attempt-after-local-loss",
+        )
+        self.assertIsNotNone(restore_path)
+        restored = json.loads(Path(restore_path).read_text(encoding="utf-8"))
+        self.assertEqual(restored["schema_version"], "2")
+        self.assertEqual(restored["scope_kind"], "architecture_revision")
+        self.assertEqual(restored["subject_key"], "arch-session")
+        self.assertFalse(checkpoint_path.exists())
+
+        checkpoint_payload = {
+            **restored,
+            "fencing_token": resumed_lease.fencing_token,
+        }
+        checkpoint_path.write_text(
+            json.dumps(checkpoint_payload),
+            encoding="utf-8",
+        )
+        published = worker._publish_agent_session_checkpoint(
+            "inv-session",
+            resumed_lease.fencing_token,
+            checkpoint_path,
+        )
+        self.assertIsNotNone(published)
+        self.assertEqual(
+            store.read_json(published)["subject_key"],
+            "arch-session",
+        )
+
+        checkpoint_path.write_text(
+            json.dumps({**checkpoint_payload, "fencing_token": resumed_lease.fencing_token - 1}),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(RuntimeError, "stale fencing token"):
+            worker._publish_agent_session_checkpoint(
+                "inv-session",
+                resumed_lease.fencing_token,
+                checkpoint_path,
+            )
+
+        checkpoint_path.write_text(
+            json.dumps({**checkpoint_payload, "subject_key": "different-subject"}),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(RuntimeError, "wrong subject"):
+            worker._publish_agent_session_checkpoint(
+                "inv-session",
+                resumed_lease.fencing_token,
+                checkpoint_path,
+            )
 
     def test_role_session_ids_are_stable_across_response_effects(self) -> None:
         self.assertEqual(
@@ -282,12 +493,16 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertEqual(coder_session_id("node-1"), coder_session_id("node-1"))
         self.assertNotEqual(coder_session_id("node-1"), coder_session_id("node-2"))
         self.assertEqual(
-            verifier_session_id("node-1"),
-            verifier_session_id("node-1"),
+            verifier_session_id("node-1", "candidate:a"),
+            verifier_session_id("node-1", "candidate:a"),
         )
         self.assertNotEqual(
-            verifier_session_id("node-1"),
-            verifier_session_id("node-1", 1),
+            verifier_session_id("node-1", "candidate:a"),
+            verifier_session_id("node-1", "candidate:b"),
+        )
+        self.assertNotEqual(
+            verifier_session_id("node-1", "candidate:a"),
+            verifier_session_id("node-1", "candidate:a", 1),
         )
         self.assertEqual(node_role_generation({}), 0)
         self.assertEqual(node_role_generation({"role_session_generation": 2}), 2)
@@ -600,7 +815,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                         expected_version=3,
                     ),
                 )
-                self.assertEqual(resolved.snapshot.state, DagNodeRunState.QUEUED)
+                self.assertEqual(resolved.snapshot.state, state)
 
     def test_triage_can_record_a_later_failure_without_losing_resume_state(self) -> None:
         snapshot = AggregateSnapshot(
@@ -758,6 +973,78 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertNotIn("blocker", rebound.snapshot.payload)
         self.assertNotIn("failure_artifact_ref", rebound.snapshot.payload)
 
+    def test_semantic_verifier_has_explicit_quiesce_and_snapshot_boundaries(self) -> None:
+        reviewing = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-semantic-review",
+            workflow_id="wf_test",
+            state=DagNodeRunState.REVIEWING,
+            version=2,
+            payload={"fencing_token": 3, "active_worker_id": "verifier"},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        submitted = self.engine.transition(
+            reviewing,
+            self.action(
+                "SUBMIT_SEMANTIC_VERIFICATION",
+                AggregateType.DAG_NODE_RUN,
+                reviewing.aggregate_id,
+                expected_version=2,
+                payload={"pending_verification_ref": {"sha256": "pending"}},
+            ),
+        )
+        self.assertEqual(submitted.snapshot.state, DagNodeRunState.REVIEW_QUIESCING)
+        self.assertEqual([item.effect_type for item in submitted.effects], ["quiesce_verifier"])
+
+        quiesced = self.engine.transition(
+            submitted.snapshot,
+            self.action(
+                "VERIFIER_QUIESCED",
+                AggregateType.DAG_NODE_RUN,
+                reviewing.aggregate_id,
+                expected_version=3,
+                payload={
+                    "fencing_token": 3,
+                    "process_group_reaped": True,
+                    "exclusive_workspace_lock": True,
+                    "workspace_fingerprint": "stable",
+                },
+            ),
+        )
+        self.assertEqual(
+            quiesced.snapshot.state,
+            DagNodeRunState.REVIEW_SNAPSHOTTING,
+        )
+        self.assertEqual(
+            [item.effect_type for item in quiesced.effects],
+            ["snapshot_verification"],
+        )
+
+        triaged = self.engine.transition(
+            quiesced.snapshot,
+            self.action(
+                "ENTER_TRIAGE",
+                AggregateType.DAG_NODE_RUN,
+                reviewing.aggregate_id,
+                expected_version=4,
+            ),
+        )
+        resumed = self.engine.transition(
+            triaged.snapshot,
+            self.action(
+                "RESOLVE_TRIAGE",
+                AggregateType.DAG_NODE_RUN,
+                reviewing.aggregate_id,
+                expected_version=5,
+            ),
+        )
+        self.assertEqual(
+            resumed.snapshot.state,
+            DagNodeRunState.REVIEW_SNAPSHOTTING,
+        )
+        self.assertEqual(resumed.snapshot.payload["workspace_fingerprint"], "stable")
+
     def test_resolve_triage_clears_stale_worker_and_blocker_fields(self) -> None:
         cases = (
             (AggregateType.WORKFLOW, WorkflowState.ACTIVE, WorkflowState.ACTIVE),
@@ -799,13 +1086,13 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
     def test_worker_completion_transitions_clear_active_lease_fields(self) -> None:
         node_cases = (
             (
-                DagNodeRunState.REVIEWING,
+                DagNodeRunState.REVIEW_SNAPSHOTTING,
                 "REVIEW_PASSED",
                 DagNodeRunState.ACCEPTED,
                 {"verification_artifact_ref": "artifact:verification"},
             ),
             (
-                DagNodeRunState.REVIEWING,
+                DagNodeRunState.REVIEW_SNAPSHOTTING,
                 "REVIEW_FAILED",
                 DagNodeRunState.REPAIR_QUEUED,
                 {
@@ -815,13 +1102,13 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 },
             ),
             (
-                DagNodeRunState.REVIEWING,
+                DagNodeRunState.REVIEW_SNAPSHOTTING,
                 "DEPENDENCY_DEFECT",
                 DagNodeRunState.STALE,
                 {"repair_bill_ref": "artifact:repair", "dependency_node_id": "dependency"},
             ),
             (
-                DagNodeRunState.VERIFYING,
+                DagNodeRunState.VERIFY_SNAPSHOTTING,
                 "VERIFICATION_PASSED",
                 DagNodeRunState.ACCEPTED,
                 {
@@ -830,7 +1117,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 },
             ),
             (
-                DagNodeRunState.VERIFYING,
+                DagNodeRunState.VERIFY_SNAPSHOTTING,
                 "MODULE_DEFECT",
                 DagNodeRunState.STALE,
                 {"repair_bill_ref": "artifact:repair", "module_node_id": "module"},
@@ -852,7 +1139,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     version=6,
                     payload={
                         "node_kind": "verification"
-                        if source_state == DagNodeRunState.VERIFYING
+                        if source_state == DagNodeRunState.VERIFY_SNAPSHOTTING
                         else "unit",
                         "active_worker_id": "finished-worker",
                         "fencing_token": 7,
@@ -1431,10 +1718,14 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         declared: set[str] = set()
         for spec in all_transition_specs():
             action = self.action(spec.action_type, spec.aggregate_type, "aggregate")
-            declared.update(
-                effect.effect_type
-                for effect in spec.effect_builder({}, action, str(spec.target_state))
+            targets = tuple(getattr(spec.target_state, "target_states", ())) or (
+                str(spec.target_state),
             )
+            for target in targets:
+                declared.update(
+                    effect.effect_type
+                    for effect in spec.effect_builder({}, action, str(target))
+                )
         self.assertFalse(MECHANICAL_EFFECT_TYPES & SEMANTIC_EFFECT_TYPES)
         self.assertEqual(declared, MECHANICAL_EFFECT_TYPES | SEMANTIC_EFFECT_TYPES)
 
@@ -1744,7 +2035,7 @@ class MinionV2PersistenceTests(unittest.TestCase):
     def test_artifact_is_published_before_action_can_reference_it(self) -> None:
         ref = self.artifacts.put_json(
             {"requirements": [{"id": "R-1", "text": "do the thing"}]},
-            artifact_type="RequirementsArtifact",
+            artifact_type="TaskSourceBundleArtifact",
         )
         self.assertTrue(self.repository.artifact_is_durable(ref.sha256))
         self.assertEqual(self.artifacts.read_json(ref)["requirements"][0]["id"], "R-1")
@@ -1763,7 +2054,7 @@ class MinionV2PersistenceTests(unittest.TestCase):
     def test_artifact_manifest_requires_durable_children(self) -> None:
         requirements = self.artifacts.put_json(
             {"requirements": []},
-            artifact_type="RequirementsArtifact",
+            artifact_type="TaskSourceBundleArtifact",
         )
         manifest = self.artifacts.put_json(
             {"requirements_ref": requirements.to_dict()},

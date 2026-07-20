@@ -9,10 +9,6 @@ from typing import Any, Mapping
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.repository import MinionV2Repository
-from pal.minion.v2.submission_preflight import (
-    bound_reference_payload,
-    requirement_refs_from_view,
-)
 from pal.minion.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.shared import RuntimeStatus
 
@@ -28,9 +24,7 @@ async def run_shell_evidence(
     turn_id: str | None = None,
 ) -> CanonicalToolResult:
     try:
-        args = bind_semantic_case_arguments(
-            dict(call.args or {}), workspace=workspace, draft_kind=draft_kind
-        )
+        args = dict(call.args or {})
         name = _required_text(args, "name")
         command = _required_text(args, "command")
         description = str(args.get("description") or name).strip()
@@ -52,7 +46,11 @@ async def run_shell_evidence(
                 "workspace_fingerprint": execution_workspace_fingerprint(workspace),
             },
         )
-        if isinstance(existing, Mapping) and str(existing.get("request_fingerprint") or "") == request_fingerprint:
+        if (
+            isinstance(existing, Mapping)
+            and str(existing.get("request_fingerprint") or "") == request_fingerprint
+            and str(existing.get("status") or "") != "UNKNOWN"
+        ):
             return _success_result(
                 call,
                 f"reused recorded {name}: {existing.get('status')}",
@@ -100,7 +98,7 @@ async def run_shell_evidence(
             "command": ["/bin/sh", "-lc", command],
             "expected_exit_codes": expected_exit_codes,
             "description": description,
-            "requirements": _single_requirement(args),
+            "requirements": [],
             "locations": _single_location(args),
             "invariants": _string_list(args.get("invariants") or []),
             "status": status,
@@ -139,11 +137,12 @@ async def run_lsp_evidence(
     turn_id: str | None = None,
 ) -> CanonicalToolResult:
     try:
-        args = bind_semantic_case_arguments(
-            dict(call.args or {}), workspace=workspace, draft_kind=draft_kind
-        )
+        args = dict(call.args or {})
         name = _required_text(args, "name")
         file_path = _required_text(args, "file")
+        lsp_environment_fingerprint = str(
+            workspace.get("lsp_environment_fingerprint") or ""
+        ).strip()
         context = SubmissionDraftContext.from_workspace(workspace, draft_kind=draft_kind)
         store = SubmissionDraftStore(_runtime_root(workspace))
         snapshot = store.read(context, seed=_empty_payload())
@@ -155,9 +154,14 @@ async def run_lsp_evidence(
                 "tool": "lsp",
                 "obligation_tag": obligation_tag,
                 "workspace_fingerprint": execution_workspace_fingerprint(workspace),
+                "lsp_environment_fingerprint": lsp_environment_fingerprint,
             },
         )
-        if isinstance(existing, Mapping) and str(existing.get("request_fingerprint") or "") == request_fingerprint:
+        if (
+            isinstance(existing, Mapping)
+            and str(existing.get("request_fingerprint") or "") == request_fingerprint
+            and str(existing.get("status") or "") != "UNKNOWN"
+        ):
             return _success_result(
                 call,
                 f"reused recorded {name}: {existing.get('status')}",
@@ -188,15 +192,27 @@ async def run_lsp_evidence(
             artifact_type="VerificationStderrArtifact",
             media_type="text/plain",
         )
-        diagnostics = list(dict(result.structured or {}).get("diagnostics") or [])
-        diagnostics_state = str(dict(result.structured or {}).get("diagnostics_state") or "")
+        structured = dict(result.structured or {})
+        operation_result = (
+            dict(structured.get("result") or {})
+            if isinstance(structured.get("result"), Mapping)
+            else structured
+        )
+        diagnostics = list(operation_result.get("diagnostics") or [])
+        diagnostics_state = str(operation_result.get("diagnostics_state") or "")
+        operation_status = str(structured.get("status") or operation_result.get("status") or "")
         has_error = any(_diagnostic_is_error(item) for item in diagnostics)
         status = (
             "UNKNOWN"
-            if not result.ok or diagnostics_state == "timed_out"
+            if not result.ok or operation_status not in {"", "ok"} or diagnostics_state == "timed_out"
             else "FAIL"
             if has_error
             else "PASS"
+        )
+        lsp_evidence = (
+            dict(structured.get("evidence") or {})
+            if isinstance(structured.get("evidence"), Mapping)
+            else {}
         )
         case = {
             "name": name,
@@ -205,14 +221,22 @@ async def run_lsp_evidence(
             "command": ["<lsp-diagnostics>", file_path],
             "expected_exit_codes": [0],
             "description": str(args.get("description") or f"LSP diagnostics for {file_path}"),
-            "requirements": _single_requirement(args),
+            "requirements": [],
             "locations": [{"path": file_path}],
             "invariants": [],
             "status": status,
             "exit_code": 1 if status == "FAIL" else 0 if status == "PASS" else None,
             "stdout_ref": stdout_ref.to_dict(),
             "stderr_ref": stderr_ref.to_dict(),
-            "environment": {"workspace_root": str(workspace.get("repo_path") or ""), "runner": "lsp"},
+            "environment": {
+                "workspace_root": str(workspace.get("repo_path") or ""),
+                "runner": "lsp",
+                "primary_language": str(workspace.get("primary_language") or ""),
+                "environment_fingerprint": str(
+                    lsp_evidence.get("environment_fingerprint")
+                    or lsp_environment_fingerprint
+                ),
+            },
             "summary": str(result.text or result.llm_text or status)[:500],
             "request_fingerprint": request_fingerprint,
             "input_fingerprint": context.input_fingerprint,
@@ -241,9 +265,7 @@ def record_unavailable_evidence(
     draft_kind: str,
 ) -> CanonicalToolResult:
     try:
-        args = bind_semantic_case_arguments(
-            dict(call.args or {}), workspace=workspace, draft_kind=draft_kind
-        )
+        args = dict(call.args or {})
         name = _required_text(args, "name")
         reason = _required_text(args, "reason")
         obligation = _required_text(args, "obligation")
@@ -256,7 +278,7 @@ def record_unavailable_evidence(
             "command": ["<unavailable>", obligation],
             "expected_exit_codes": [0],
             "description": reason,
-            "requirements": _single_requirement(args),
+            "requirements": [],
             "locations": _single_location(args),
             "invariants": [],
             "status": "UNKNOWN",
@@ -380,57 +402,6 @@ def scratch_probe_fingerprint(workspace: Mapping[str, Any], probe_path: str) -> 
     return digest.hexdigest()
 
 
-def bind_semantic_case_arguments(
-    args: Mapping[str, Any],
-    *,
-    workspace: Mapping[str, Any],
-    draft_kind: str,
-) -> dict[str, Any]:
-    """Bind a case's semantic Requirement before any execution or Draft mutation."""
-
-    bound = dict(args)
-    section = str(bound.get("requirement_section") or "").strip()
-    hint = str(bound.get("requirement") or "").strip()
-    if not section and hint:
-        raise ValueError("requirement requires requirement_section")
-    if not section:
-        bound.pop("requirement", None)
-        bound.pop("requirement_section", None)
-        return bound
-    view_name = "review_request" if draft_kind == "standalone_review" else "module_work_view"
-    view = bound_reference_payload(workspace, view_name, required=False)
-    if not view:
-        if not hint:
-            raise ValueError(
-                "requirement is required when no bound Requirement catalog is available"
-            )
-        bound["requirement_section"] = section
-        bound["requirement"] = hint
-        return bound
-    by_section: dict[str, list[str]] = {}
-    for candidate_section, requirement in sorted(requirement_refs_from_view(view)):
-        by_section.setdefault(candidate_section, []).append(requirement)
-    candidates = by_section.get(section)
-    if not candidates:
-        rendered = ", ".join(sorted(by_section)) or "<none>"
-        raise ValueError(
-            f"Requirement section {section!r} is not bound. Available sections: {rendered}"
-        )
-    if len(candidates) == 1:
-        canonical = candidates[0]
-    elif hint in candidates:
-        canonical = hint
-    else:
-        rendered = "; ".join(candidates)
-        raise ValueError(
-            f"Requirement section {section!r} is ambiguous; provide one exact canonical requirement. "
-            f"Candidates: {rendered}"
-        )
-    bound["requirement_section"] = section
-    bound["requirement"] = canonical
-    return bound
-
-
 def execution_workspace_fingerprint(workspace: Mapping[str, Any]) -> str:
     root_value = str(workspace.get("repo_path") or "").strip()
     digest = hashlib.sha256()
@@ -505,14 +476,6 @@ def _runtime_root(workspace: Mapping[str, Any]) -> Path:
     if not value:
         raise ValueError("semantic evidence tool requires the bound runtime root")
     return Path(value)
-
-
-def _single_requirement(args: Mapping[str, Any]) -> list[dict[str, str]]:
-    section = str(args.get("requirement_section") or "").strip()
-    requirement = str(args.get("requirement") or "").strip()
-    if bool(section) != bool(requirement):
-        raise ValueError("requirement_section and requirement must be provided together")
-    return [{"section": section, "requirement": requirement}] if section else []
 
 
 def _single_location(args: Mapping[str, Any]) -> list[dict[str, str]]:

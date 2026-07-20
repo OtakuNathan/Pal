@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from pal.lsp.environment import (
+    detect_workspace_languages,
+    normalize_lsp_language,
+)
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.paths import (
     artifact_epoch_root,
@@ -24,62 +28,24 @@ from pal.shared import MinionInvocationPack
 SOFTWARE_GIT_ADAPTER = "software_git.v2"
 ARTIFACT_BUNDLE_ADAPTER = "artifact_bundle.v2"
 
-_LANGUAGE_BY_SUFFIX = {
-    ".c": "c",
-    ".cc": "cpp",
-    ".cpp": "cpp",
-    ".cxx": "cpp",
-    ".h": "cpp",
-    ".hh": "cpp",
-    ".hpp": "cpp",
-    ".go": "go",
-    ".java": "java",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".py": "python",
-    ".pyi": "python",
-    ".rs": "rust",
-    ".sh": "shell",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-}
-
-_LSP_BY_LANGUAGE = {
-    "c": ("clangd", "clangd"),
-    "cpp": ("clangd", "clangd"),
-    "go": ("gopls", "gopls"),
-    "java": ("jdtls", "jdtls"),
-    "javascript": ("typescript", "typescript-language-server"),
-    "python": ("pyright", "pyright-langserver"),
-    "rust": ("rust-analyzer", "rust-analyzer"),
-    "shell": ("bash", "bash-language-server"),
-    "typescript": ("typescript", "typescript-language-server"),
-}
-
-_IGNORED_DISCOVERY_DIRS = frozenset({".git", ".hg", ".svn", ".venv", "node_modules", "build", "dist", "__pycache__"})
-
-
-def prepare_v2_workspace_environment(workspace: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def prepare_v2_workspace_environment(
+    workspace: Mapping[str, Any],
+    *,
+    runtime_root: Path | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    _ = runtime_root
     prepared = dict(workspace or {})
     root_value = str(prepared.get("repo_path") or prepared.get("workspace_path") or "").strip()
     root = Path(root_value).expanduser().resolve() if root_value else None
-    declared = [str(item).strip() for item in list(prepared.get("languages") or []) if str(item).strip()]
+    declared = [
+        normalize_lsp_language(item)
+        for item in list(prepared.get("languages") or [])
+        if str(item).strip()
+    ]
     if prepared.get("primary_language"):
-        declared.insert(0, str(prepared["primary_language"]).strip())
-    detected, scanned_files = _detect_workspace_languages(root)
+        declared.insert(0, normalize_lsp_language(str(prepared["primary_language"])))
+    detected, scanned_files = detect_workspace_languages(root)
     languages = _dedupe([*declared, *detected])
-    available_servers: list[str] = []
-    unavailable_servers: list[dict[str, str]] = []
-    for language in languages:
-        server = _LSP_BY_LANGUAGE.get(language)
-        if server is None:
-            continue
-        server_id, command = server
-        if shutil.which(command):
-            if server_id not in available_servers:
-                available_servers.append(server_id)
-        else:
-            unavailable_servers.append({"language": language, "server_id": server_id, "missing_command": command})
     build_markers = [
         marker
         for marker in ("pyproject.toml", "setup.py", "CMakeLists.txt", "Makefile", "package.json", "Cargo.toml", "go.mod", "pom.xml")
@@ -87,8 +53,9 @@ def prepare_v2_workspace_environment(workspace: Mapping[str, Any]) -> tuple[dict
     ]
     if languages:
         prepared["languages"] = languages
-        prepared.setdefault("primary_language", languages[0])
-    prepared["lsp_setup"] = {"servers": available_servers, "languages": languages}
+        prepared["primary_language"] = normalize_lsp_language(
+            str(prepared.get("primary_language") or languages[0])
+        )
     report = {
         "schema_version": "1",
         "workspace_root": str(root or ""),
@@ -96,8 +63,6 @@ def prepare_v2_workspace_environment(workspace: Mapping[str, Any]) -> tuple[dict
         "primary_language": str(prepared.get("primary_language") or ""),
         "scanned_files": scanned_files,
         "build_markers": build_markers,
-        "lsp_setup": dict(prepared["lsp_setup"]),
-        "unavailable_lsp": unavailable_servers,
         "source_modified": False,
     }
     report["environment_fingerprint"] = hashlib.sha256(
@@ -105,26 +70,6 @@ def prepare_v2_workspace_environment(workspace: Mapping[str, Any]) -> tuple[dict
     ).hexdigest()
     prepared["prepared_environment_fingerprint"] = report["environment_fingerprint"]
     return prepared, report
-
-
-def _detect_workspace_languages(root: Path | None, *, limit: int = 5000) -> tuple[list[str], int]:
-    if root is None or not root.is_dir():
-        return [], 0
-    counts: dict[str, int] = {}
-    scanned = 0
-    for path in root.rglob("*"):
-        if any(part in _IGNORED_DISCOVERY_DIRS for part in path.parts):
-            continue
-        if not path.is_file():
-            continue
-        scanned += 1
-        language = _LANGUAGE_BY_SUFFIX.get(path.suffix.lower())
-        if language:
-            counts[language] = counts.get(language, 0) + 1
-        if scanned >= limit:
-            break
-    ordered = sorted(counts, key=lambda item: (-counts[item], item))
-    return ordered, scanned
 
 
 def _dedupe(values: Sequence[str]) -> list[str]:
@@ -145,6 +90,8 @@ def prepare_v2_role_workspace(
     workspace = dict(pack.workspace or {})
     source = str(workspace.get("repo_path") or workspace.get("cwd") or "").strip()
     target = role_workspace_root(runtime_root) / _safe_component(run_id)
+    if str(attempt_key or "").strip():
+        target = target / "attempts" / _safe_component(attempt_key)
     invocation_dir = invocation_root(runtime_root) / _safe_component(pack.invocation_id)
     attempt_dir = (
         invocation_dir / "attempts" / _safe_component(attempt_key)

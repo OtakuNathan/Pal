@@ -65,6 +65,7 @@ class MinionUserInteractionPort:
         ask_user_question: dict[str, Any],
         *,
         approval_policy: dict[str, Any],
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         clarification_id = f"clarify_{uuid4().hex[:16]}"
         payload = {
@@ -86,7 +87,12 @@ class MinionUserInteractionPort:
             )
             return {}
         await self.emit_event("clarification_requested", payload)
-        timeout = float((approval_policy or {}).get("clarification_timeout_seconds") or 3600)
+        configured_timeout = (approval_policy or {}).get("clarification_timeout_seconds")
+        timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else (float(configured_timeout) if configured_timeout is not None else None)
+        )
         response = await self.read_response(timeout)
         if not isinstance(response, dict):
             await self.emit_event("clarification_timeout", {"clarification_id": clarification_id})

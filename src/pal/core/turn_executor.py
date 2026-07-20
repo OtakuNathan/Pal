@@ -757,7 +757,7 @@ class TurnExecutor:
     def _build_tool_call_budget(self, continuation, *, execution_call=None) -> ToolCallBudget:
         cfg = self._config
         token_limit = cfg.max_tool_result_tokens
-        if execution_call is not None and str(getattr(execution_call, "name", "") or "").strip() in {"op_exec_shell", "run_shell", "shell_exec"}:
+        if execution_call is not None and str(getattr(execution_call, "name", "") or "").strip() in {"op_exec_shell", "run_shell"}:
             token_limit = min(cfg.max_tool_result_tokens, cfg.default_max_output_tokens)
         max_output_chars = min(
             cfg.default_max_result_size_chars,

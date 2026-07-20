@@ -11,12 +11,16 @@ from pal.minion.v2.contracts import ActionEnvelope, AggregateType
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.service import MinionV2WorkflowService
+from pal.minion.v2.workers import MinionV2SemanticWorker
 from pal.minion.v2.worker_protocol import (
     WorkerAssignmentAction,
     WorkerAssignmentRequest,
     WorkerAssignmentState,
+    WorkerSessionAction,
+    WorkerSessionState,
     stable_hash,
     worker_assignment_target,
+    worker_session_target,
 )
 
 
@@ -58,7 +62,7 @@ class MinionV2WorkerProtocolTests(unittest.TestCase):
             aggregate_id="node-router",
             role="producer",
             input_fingerprint="input-fingerprint",
-            required_inputs=("module_work_view",),
+            required_inputs=(),
             input_refs={"module_work_view": self.input_ref.to_dict()},
             execution_spec={"effect_type": "spawn_producer_worker"},
             submission_kind="candidate",
@@ -87,13 +91,6 @@ class MinionV2WorkerProtocolTests(unittest.TestCase):
         self.assertEqual(replay["assignment_id"], first["assignment_id"])
 
         attempt, fencing_token = self.start_attempt(first["assignment_id"])
-        self.repository.record_worker_input_read(
-            assignment_id=first["assignment_id"],
-            attempt_id_value=attempt["attempt_id"],
-            input_name="module_work_view",
-            artifact_sha256=self.input_ref.sha256,
-            fencing_token=fencing_token,
-        )
         action = {
             "action_type": "SUBMIT_CANDIDATE",
             "payload": {"producer_report_ref": self.submission_ref.to_dict()},
@@ -130,18 +127,18 @@ class MinionV2WorkerProtocolTests(unittest.TestCase):
             "settled",
         )
 
-    def test_submission_requires_every_mandatory_input_read(self) -> None:
+    def test_submission_does_not_require_input_read_receipts(self) -> None:
         assignment = self.repository.create_worker_assignment(self.request())
         attempt, fencing_token = self.start_attempt(assignment["assignment_id"])
-        with self.assertRaisesRegex(ValueError, "missing required input reads"):
-            self.repository.record_worker_submission(
-                assignment_id=assignment["assignment_id"],
-                attempt_id_value=attempt["attempt_id"],
-                fencing_token=fencing_token,
-                artifact_ref=self.submission_ref.to_dict(),
-                payload_hash=stable_hash({"status": "candidate_ready"}),
-                settlement_action={"action_type": "SUBMIT_CANDIDATE", "payload": {}},
-            )
+        receipt = self.repository.record_worker_submission(
+            assignment_id=assignment["assignment_id"],
+            attempt_id_value=attempt["attempt_id"],
+            fencing_token=fencing_token,
+            artifact_ref=self.submission_ref.to_dict(),
+            payload_hash=stable_hash({"status": "candidate_ready"}),
+            settlement_action={"action_type": "SUBMIT_CANDIDATE", "payload": {}},
+        )
+        self.assertEqual(receipt.assignment_id, assignment["assignment_id"])
 
     def test_retry_creates_a_new_attempt_without_replacing_the_session(self) -> None:
         assignment = self.repository.create_worker_assignment(self.request())
@@ -179,6 +176,106 @@ class MinionV2WorkerProtocolTests(unittest.TestCase):
             worker_assignment_target(
                 WorkerAssignmentState.RESULT_RECORDED,
                 WorkerAssignmentAction.CANCEL,
+            )
+
+    def test_worker_session_machine_is_explicit_and_terminal(self) -> None:
+        self.assertEqual(
+            worker_session_target(
+                WorkerSessionState.ACTIVE,
+                WorkerSessionAction.SUSPEND,
+            ),
+            WorkerSessionState.SUSPENDED,
+        )
+        self.assertEqual(
+            worker_session_target(
+                WorkerSessionState.SUSPENDED,
+                WorkerSessionAction.ACTIVATE,
+            ),
+            WorkerSessionState.ACTIVE,
+        )
+        self.assertEqual(
+            worker_session_target(
+                WorkerSessionState.SUSPENDED,
+                WorkerSessionAction.COMPLETE,
+            ),
+            WorkerSessionState.COMPLETED,
+        )
+        with self.assertRaisesRegex(ValueError, "illegal worker session transition"):
+            worker_session_target(
+                WorkerSessionState.COMPLETED,
+                WorkerSessionAction.ACTIVATE,
+            )
+
+    def test_verifier_session_completes_only_after_settled_verdict_receipt(self) -> None:
+        session_id = "session-router-candidate-a"
+        self.repository.ensure_worker_session(
+            session_id=session_id,
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-router",
+            role="verifier",
+            scope_kind="candidate",
+            subject_key="candidate:a",
+        )
+        request = WorkerAssignmentRequest(
+            assignment_key="router-review-candidate-a",
+            session_id=session_id,
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN.value,
+            aggregate_id="node-router",
+            role="verifier",
+            input_fingerprint="candidate-a",
+            required_inputs=(),
+            input_refs={"module_work_view": self.input_ref.to_dict()},
+            execution_spec={"effect_type": "spawn_verifier_worker"},
+            submission_kind="verification",
+        )
+        assignment = self.repository.create_worker_assignment(request)
+        attempt, fencing_token = self.start_attempt(assignment["assignment_id"])
+        payload_hash = stable_hash({"verdict": "FAIL"})
+        self.repository.record_worker_submission(
+            assignment_id=assignment["assignment_id"],
+            attempt_id_value=attempt["attempt_id"],
+            fencing_token=fencing_token,
+            artifact_ref=self.submission_ref.to_dict(),
+            payload_hash=payload_hash,
+            settlement_action={"action_type": "REVIEW_FAILED", "payload": {}},
+        )
+
+        with self.assertRaisesRegex(ValueError, "settled verdict receipt"):
+            self.repository.complete_worker_session(session_id)
+
+        self.repository.settle_worker_assignment(
+            assignment_id=assignment["assignment_id"],
+            submission_payload_hash=payload_hash,
+        )
+        self.assertTrue(self.repository.complete_worker_session(session_id))
+        self.assertEqual(
+            self.repository.read_worker_session(session_id)["status"],
+            WorkerSessionState.COMPLETED.value,
+        )
+
+    def test_worker_session_scope_is_backfilled_once_and_then_immutable(self) -> None:
+        session = self.repository.ensure_worker_session(
+            session_id="session-router",
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-router",
+            role="repair",
+            scope_kind="module_run",
+            subject_key="node-router",
+        )
+        self.assertEqual(session["scope_kind"], "module_run")
+        self.assertEqual(session["subject_key"], "node-router")
+        with self.assertRaisesRegex(ValueError, "scope is immutable"):
+            self.repository.ensure_worker_session(
+                session_id="session-router",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-router",
+                role="producer",
+                scope_kind="module_run",
+                subject_key="other-node",
             )
 
     def test_v15_migrates_activation_roles_and_obsolete_assignment_states(self) -> None:
@@ -377,6 +474,87 @@ class MinionV2WorkerProtocolTests(unittest.TestCase):
             "cancelled",
         )
 
+    def test_settled_submission_reconciliation_failure_can_triage_parent(self) -> None:
+        for action in (
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-router",
+                actor="test",
+                expected_version=0,
+                payload={
+                    "unit_contract_ref": self.input_ref.to_dict(),
+                    "epoch_id": "epoch-router",
+                    "dependency_node_ids": [],
+                },
+            ),
+            ActionEnvelope(
+                action_type="DEPENDENCIES_ACCEPTED",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-router",
+                actor="test",
+                expected_version=1,
+                payload={"accepted_dependency_node_ids": []},
+            ),
+            ActionEnvelope(
+                action_type="START_PRODUCING",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-router",
+                actor="test",
+                expected_version=2,
+                payload={
+                    "fencing_token": 1,
+                    "active_worker_id": "session-router",
+                    "lease_resource_key": "node:node-router:writer",
+                },
+            ),
+        ):
+            self.repository.dispatch(action)
+        assignment = self.repository.create_worker_assignment(self.request())
+        attempt, fencing_token = self.start_attempt(assignment["assignment_id"])
+        payload_hash = stable_hash({"status": "candidate_ready"})
+        self.repository.record_worker_submission(
+            assignment_id=assignment["assignment_id"],
+            attempt_id_value=attempt["attempt_id"],
+            fencing_token=fencing_token,
+            artifact_ref=self.submission_ref.to_dict(),
+            payload_hash=payload_hash,
+            settlement_action={"action_type": "SUBMIT_CANDIDATE"},
+        )
+        self.repository.settle_worker_assignment(
+            assignment_id=assignment["assignment_id"],
+            submission_payload_hash=payload_hash,
+        )
+
+        result = MinionV2SemanticWorker(
+            MinionV2WorkflowService(self.runtime_root)
+        )._settle_background_worker_failure(
+            {
+                "effect_type": "spawn_producer_worker",
+                "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                "aggregate_id": "node-router",
+            },
+            self.repository.read_worker_assignment(assignment["assignment_id"]),
+            RuntimeError("submission could not be applied"),
+            exhausted=True,
+        )
+
+        self.assertEqual(result["status"], "triage_required")
+        self.assertEqual(
+            self.repository.read_snapshot(
+                AggregateType.DAG_NODE_RUN,
+                "node-router",
+            ).state,
+            "TRIAGE_REQUIRED",
+        )
+        self.assertEqual(
+            self.repository.read_worker_assignment(assignment["assignment_id"])["state"],
+            "settled",
+        )
+
     def test_assignment_key_cannot_be_reused_for_different_inputs(self) -> None:
         self.repository.create_worker_assignment(self.request())
         changed = WorkerAssignmentRequest(
@@ -563,13 +741,6 @@ class MinionV2WorkerProtocolTests(unittest.TestCase):
     def test_aggregate_control_settles_an_already_recorded_result(self) -> None:
         assignment = self.repository.create_worker_assignment(self.request())
         attempt, fencing_token = self.start_attempt(assignment["assignment_id"])
-        self.repository.record_worker_input_read(
-            assignment_id=assignment["assignment_id"],
-            attempt_id_value=attempt["attempt_id"],
-            input_name="module_work_view",
-            artifact_sha256=self.input_ref.sha256,
-            fencing_token=fencing_token,
-        )
         self.repository.record_worker_submission(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
@@ -598,6 +769,28 @@ class MinionV2WorkerProtocolTests(unittest.TestCase):
         self.assertEqual(
             settled[0]["last_error"],
             "parent state superseded this result",
+        )
+
+    def test_assignment_cancellation_can_preserve_reused_submission(self) -> None:
+        preserved = self.repository.create_worker_assignment(self.request(key="preserved"))
+        other = self.repository.create_worker_assignment(self.request(key="other"))
+
+        cancelled = self.repository.cancel_worker_assignments(
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-router",
+            reason="superseded by preserved receipt",
+            exclude_assignment_id=preserved["assignment_id"],
+        )
+
+        self.assertEqual([item["assignment_id"] for item in cancelled], [other["assignment_id"]])
+        self.assertEqual(
+            self.repository.read_worker_assignment(preserved["assignment_id"])["state"],
+            "queued",
+        )
+        self.assertEqual(
+            self.repository.read_worker_assignment(other["assignment_id"])["state"],
+            "cancelled",
         )
 
     def test_business_action_and_submission_settlement_commit_atomically(self) -> None:

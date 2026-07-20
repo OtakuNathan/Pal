@@ -13,7 +13,6 @@ verifier = "software_engineering.v2_verifier"
 reviewer = "software_engineering.v2_reviewer"
 
 [builders]
-requirements = "requirements.v2"
 contract = "skeleton_git.v2"
 verification = "verification.v2"
 
@@ -57,7 +56,7 @@ planning_depth_policy = "explicit"
 include = ["workspace_read", "workspace_write", "code_intel", "verification_shell", "minion_artifacts"]
 
 [capability_groups.software_verifier]
-include = ["workspace_read", "code_intel", "verification_shell", "minion_artifacts"]
+include = ["swe_verifier_workspace"]
 
 [capability_groups.software_research]
 include = ["workspace_read", "code_intel", "memory_recall"]

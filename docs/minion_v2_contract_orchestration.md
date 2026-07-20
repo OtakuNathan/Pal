@@ -1,6 +1,6 @@
 # Minion V2 Contract-Driven Orchestration
 
-Status: active implementation as of 2026-07-15.
+Status: active implementation as of 2026-07-20.
 
 Minion V2 is a clean workflow cutover. V1 plans, milestones, cursors,
 checkpoints, write RPCs, and workflow resume paths are not accepted by V2.
@@ -30,13 +30,15 @@ ACKs once that assignment exists. The DAG Node Run is the sole owner of module
 business lifecycle: coding, verification, repair, acceptance, stale propagation,
 pause, cancellation, and triage are Node transitions, never assignment states.
 
-Each Node generation owns one canonical Coder session and one canonical
-Verifier session. `producer` and `repair` are activations of the same Coder
-session; repeated review cycles are activations of the same Verifier session.
-The session preserves cognitive continuation and behaves as a durable logical
-coroutine even when its replaceable subprocess exits between activations. Pause
-and `STALE` suspend these sessions. Only Node `ACCEPTED` or `CANCELLED` closes
-them. Reopening an already accepted Node creates a new role-session generation.
+Each Node generation owns one canonical Coder session for the complete module
+run. `producer` and `repair` are activations of that same session. Each immutable
+Candidate or verification-scenario fingerprint owns a separate Verifier
+session. A retry of the same Candidate resumes that session, while a new
+Candidate starts a fresh Verifier with no inherited dialogue or tool state.
+Historical failures cross Candidate boundaries only through Manager-owned
+RepairBills and verification obligations. Node `ACCEPTED` or `CANCELLED` closes
+the Coder session; a Verifier session closes after its verdict receipt is
+settled. Reopening an accepted Node creates a new role-session generation.
 
 A `WorkerAssignment` binds one immutable role/input/effect activation and uses
 one explicit receipt protocol:
@@ -77,19 +79,41 @@ aggregate enters `TRIAGE_REQUIRED`.
 
 ## Architecture Contract
 
-Requirements are immutable product truth. For software engineering, the
-accepted code-skeleton commit plus the semantic construction and verification
-topologies are architecture truth. For artifact families, the equivalent
+The immutable `TaskSourceBundleArtifact` is product truth. It preserves the
+user's exact request, supplied source files, examples, qualifications, and
+later amendments without extracting normalized Requirement records. For software engineering, the
+accepted code-skeleton commit plus the semantic Contract Dependency Graph and
+end-to-end Scenario Topology are architecture
+truth. For artifact families, the equivalent
 architecture is a content-addressed manifest of semantic unit and cross-unit
 contracts. Internal IDs and hashes are Manager concerns and are absent from the
 LLM authoring surface.
 
-Architect tools accept module names, exact Requirement text, paths, symbols,
-interfaces, ownership, lifecycle/state/invariants, errors, compatibility, and
-construction dependencies. Software Architect additionally writes only
-contract-level declarations and compile wiring in an isolated worktree. It may
-not write algorithms, functional implementations, milestones, test matrices,
-implementation checklists, or function-level construction steps.
+Architect tools accept complete module definitions, real end-to-end scenario
+definitions, an in-place user-question IO, and terminal submit. Each module
+contains its semantic name, kind, contract dependencies, contract enforcement
+mode and paths, writable implementation/test scopes, and reference-only paths.
+Each scenario names the exact implementation-module combination, real product or
+build entrypoint, observable behavior, and environment it verifies.
+`file_frozen` is reserved for a physically separate protocol/interface/schema
+file that remains Coder-read-only. `review_guarded` is the default when public
+shape and implementation share a module-owned file; Manager then binds an
+Accepted-Skeleton-to-Candidate contract diff that Verifier must read before
+submitting. Cross-module overlap remains invalid in both modes, and test scopes
+can never own contract files. Software Architect writes contract-level declarations,
+concise adjacent semantic comments where useful, and minimal compile wiring in
+an isolated worktree. It may not write algorithms, functional implementations,
+milestones, test matrices, implementation checklists, or function-level
+construction steps.
+
+Architecture submit performs only deterministic structure and safety checks.
+Malformed module/path records, unknown dependencies, cycles, overlapping
+writable scopes, missing declared paths, frozen/reference mutation, Git drift,
+and unstable snapshots remain blocking. The Manager does not parse comment
+chapters, bind task-source coverage, resolve evidence claims, infer consumers,
+or judge lifecycle/state/ownership/contract semantics. Architecture Reviewer
+receives every immutable task-source file and the skeleton diff and owns all of
+those semantic checks.
 
 Research mode is explicit: `none`, `local_only`, or `external_allowed`.
 `local_only` removes web capabilities from the resolved worker pack; this is
@@ -97,33 +121,48 @@ enforced by the Manager rather than prompt text. Architect research is limited
 to feasibility and boundary design. Coder handles implementation-local
 research from approved references and the repository.
 
-`stateless` modules explicitly declare a stateless model. Stateful behavior
-kinds must provide real lifecycle, state, and invariants.
+Stateless or stateful behavior is expressed in the skeleton using the target
+language's native shape and comments. Its semantic adequacy is Reviewer-owned,
+not a Manager schema rule.
 
 ## Schema-Bounded Authoring
 
-LLMs do not author canonical submission JSON. Requirements, architecture,
+LLMs do not author canonical submission JSON. Architecture,
 candidate, verification, and standalone-review roles receive narrow semantic
-mutation or execution tools. Terminal submit tools take no arguments. The
-Manager validates the live Draft, derives hidden identities and Git deltas,
-and materializes the canonical artifact before allowing the worker to exit.
+mutation or execution tools. The SWE Verifier writes executable tests and ends
+with one outcome tool carrying at most prose findings and semantic module
+names; it never maintains case/finding/evidence records. The Manager validates
+the live workspace, derives hidden identities and Git deltas, and materializes
+the canonical artifact before allowing the worker to exit.
 
 Authoring Drafts are durable, lease-fenced, versioned, and operation-idempotent.
 A replacement worker with the same immutable input fingerprint inherits only
-semantic definitions by default. Verification and standalone-review Drafts
-also inherit their recorded cases, findings, and summaries because the bound
-candidate and policy are unchanged. A finding remains active across worker or
-fence replacement and repeated FAIL/UNKNOWN results; a PASS for the same case
-resolves it. Explicit case or finding withdrawal requires an audited reason.
+semantic definitions by default. Every family Verifier uses one semantic
+outcome and restarts from immutable task sources, candidate or artifact diff,
+durable review-scratch probes, and prior Repair Packets. It never inherits an
+LLM-maintained case/finding database. Standalone review keeps its separate
+review-only Draft because it produces a report rather than a DAG-node verdict.
 Every authoring tool schema is bounded to at most 12 top-level properties and
 depth four, with no arrays of objects, schema-valued `additionalProperties`, or
-`oneOf`/`anyOf`. Old monolithic builder and revision-read capabilities are not
-compatibility aliases.
+`oneOf`/`anyOf`. Manager-owned identity fields such as IDs, refs, hashes,
+handles, and JSON pointers are rejected from worker authoring schemas. Old
+monolithic builder and revision-read capabilities are not compatibility aliases.
+
+Architecture Reviewer receives every immutable task-source file that Architect
+received, every module and scenario, the complete skeleton diff, and prior
+findings. It independently checks
+source-obligation preservation and coverage, contracts, consumers, ownership,
+lifecycle/state/invariants, implementation leakage, and end-to-end
+reachability. It submits once: PASS with no arguments, or FAIL with one
+deduplicated Markdown report containing all severity-labelled material findings.
+It does not maintain finding identities or mirror the input as positive audit rows.
 
 Sandboxed workers cannot mount Minion's database or content-addressed store.
 They receive only an assignment-scoped gateway endpoint and an opaque attempt
-token. The gateway exposes bound-input reads, fenced Draft mutation/submission,
-artifact publication, and the LLM broker. A token is checked against its active
+token. Immutable semantic inputs are materialized under named read-only
+reference roots and read with ordinary file/search tools; no receipt protocol
+is required for reading them. The gateway exposes fenced Draft
+mutation/submission, artifact publication, and the LLM broker. A token is checked against its active
 attempt lease and may use only the broker run owned by that assignment session.
 
 Pal's main SQLite database, WAL/SHM files, and configuration are mounted
@@ -139,6 +178,16 @@ model-authored test-plan JSON. Artifact producers may write their product
 files, but `producer_report.json` is Manager-owned and generated only by
 `candidate_submit`.
 
+Workspace preparation selects the LSP environment from the task's declared
+primary language. Repository language discovery is a fallback and does not
+automatically activate servers for fixture or reference languages; secondary
+languages require an explicit declaration. Each language adapter must bind a
+real project model or a declared fallback context before prewarm. Generated
+context lives in Manager-owned runtime storage, never in the candidate
+worktree. LSP evidence records that context and its fidelity, and a server that
+can start without a usable project context is still unavailable for semantic
+verification.
+
 ## Human Governance
 
 Architecture Markdown is mechanically compiled from the canonical manifest.
@@ -147,27 +196,56 @@ expiry, and a one-use decision token. Token consumption and the architecture
 transition are one database transaction. Human Accept marks only the revision
 accepted; starting execution is a separate outbox effect.
 
+Human Edit explicitly selects `architecture` or `requirements`. An architecture
+edit reuses the current immutable `TaskSourceBundleArtifact`. A requirements
+edit appends the user's raw amendment and/or workspace-relative source files,
+then publishes a new immutable task-source bundle before consuming the decision
+token or creating the child Architecture Revision. Existing source bytes are
+never mutated or normalized in place.
+
 Human waivers are immutable artifacts bound to the manifest and relevant
 fragment hashes. A changed fragment invalidates the waiver.
 
-Requirements clarification uses the same actor/channel-bound, one-use decision
-token mechanism and resumes at `REQUIREMENTS_QUEUED` with an immutable response
-artifact.
+Architect clarification is ordinary asynchronous tool IO, not a business state.
+The Architecture Revision remains `ARCHITECT_RUNNING` while Manager routes three
+inline choices plus a custom-answer path through the active channel. The same
+invocation receives the answer, which is persisted as an immutable task-source
+amendment and included in the exact source bundle later given to Architecture
+Reviewer, Coder, and Verifier.
 
 ## Execution and Verification
 
-An accepted manifest compiles to an immutable execution epoch. A construction
-node becomes ready only when every declared dependency node is `ACCEPTED`, the
-epoch is active, and a slot is available. Construction dependencies express
-what must be accepted before work starts; verification topology separately
-expresses real consumers, entrypoints, build targets, and environments. No
-synthetic all-module join is required. A whole-system integration or dogfood
-node exists only when the Requirements describe that real usage scenario.
+An accepted manifest compiles to an immutable execution epoch. Contract
+dependencies express protocol/data/ownership consumption and must be acyclic,
+but they are not Coder start barriers: every implementation Coder starts from
+the same Accepted Skeleton and all implementation nodes may compete for slots
+immediately. Contract dependency order is retained for semantic handoff,
+candidate reuse, impact analysis, and deterministic final union.
 
-Coder receives a filtered `ModuleWorkView` containing only its contract,
-requirements, architect evidence, cross-contracts, dependency outputs,
-assumptions, and RepairBills. Local progress is a lease-fenced mutable journal,
-not a global cursor.
+Each declared end-to-end scenario compiles to a separate Verification Node. It
+waits until exactly the implementation Candidates in its dependency closure are
+`ACCEPTED`, assembles their deterministic union, then verifies the declared real
+entrypoint, environment, and observable behavior. A scenario owns no product
+source. No universal final join is required; a whole-system scenario exists only
+when the product has a real whole-system entrypoint. Final publication requires
+all required implementation nodes and all declared scenario nodes to be
+`ACCEPTED`, with each scenario result matching its current combination
+fingerprint.
+
+Coder and Verifier receive the same immutable task-source files plus the
+accepted local module skeleton, path policy, semantic contract dependencies,
+assumptions, and RepairBills. The protocol surface is already present in the
+Accepted Skeleton, so a Coder may implement against another module's accepted
+contract before that module's Candidate exists. Verifier also receives a
+Manager-generated Git diff from the
+Accepted Skeleton to the current Candidate; `review_guarded` modules receive a
+contract-path diff, and repair cycles additionally receive the previous-to-current
+Candidate delta. They use normal file/search tools against semantic read-only
+roots; prompts and independent review enforce reading while Manager avoids a
+second receipt state machine. Every implementation module follows the same
+Coder-to-Verifier cycle and must have an accepted VerificationArtifact before
+final publication. Local progress is a lease-fenced mutable journal, not a
+global cursor.
 
 Coder cannot commit. Candidate submission follows:
 
@@ -180,15 +258,29 @@ fencing, and holds an exclusive worktree lock. Manager then checks owned and
 reference-only paths, verifies Git HEAD did not move, compares pre/post content
 fingerprints, creates the candidate commit, and publishes a candidate artifact.
 
-Verifier runs with a read-only candidate. It derives adversarial cases from
-contracts, lifecycle, state, ownership, invariants, and the diff, then executes
-them through dedicated fenced tools in a separate detached review worktree.
-Generated scratch sources, test-worktree diff, environment, stdout, stderr, and
-status are persisted before no-argument submission. Coder has no acceptance
-authority; verifier has no implementation authority.
+Module Verifier runs with product code read-only and write authority only over
+the module's declared test scopes. Scenario Verifier receives a read-only
+Manager-assembled Candidate union and writes executable probes/tests only to a
+durable review-scratch Artifact. Both derive adversarial cases from contracts,
+lifecycle, state, ownership, invariants, and the diff, write real regression
+tests, and execute them in an isolated review workspace. Their terminal
+tools carry only a semantic outcome and Markdown findings; Manager records tool
+receipts, snapshots the test delta, computes fingerprints, and owns routing.
+Submission follows an explicit durable boundary:
 
-FAIL creates a RepairBill with a stable finding fingerprint and regression-test
-obligation. Module defects return to the same worktree. Dependency defects
+```text
+REVIEWING -> REVIEW_QUIESCING -> REVIEW_SNAPSHOTTING -> verdict
+VERIFYING -> VERIFY_QUIESCING -> VERIFY_SNAPSHOTTING -> verdict
+```
+
+On PASS, Manager promotes the verifier test delta into the accepted Candidate.
+On FAIL, Manager creates a semantic Repair Packet, installs the failing tests
+read-only in the module worktree, and gives Coder the original findings and
+recorded regression commands. Coder repairs product code rather than translating
+or rewriting verifier-owned test schemas. Coder has no acceptance authority;
+verifier has no product implementation authority.
+
+Module defects return to the same worktree. Dependency defects
 reopen the dependency and stale transitive dependents. A contract or
 architecture defect is reported to the Execution Epoch; a DAG node never creates
 an Architecture Revision directly.
@@ -210,10 +302,10 @@ assumption reference, and a valid human waiver for hard/security/permission/
 public-API semantics.
 
 After architecture replan, accepted module candidates are reused only when the
-full contract/environment fingerprint matches: module contract, relevant
-requirements/evidence, global constraints, owned area, dependency set,
-dependency interfaces and outputs, integration subset, environment policy, and
-epoch baseline. Reused commits are imported by the manager; partial matches rerun.
+full contract/environment fingerprint matches: module contract, immutable task
+sources, global constraints, owned area, dependency set, dependency
+interfaces and outputs, environment policy, and epoch baseline. Reused commits
+are imported by the manager; partial matches rerun.
 
 ## Sidecar-Owned Profile Catalog
 
@@ -237,16 +329,33 @@ only subsequently created workflows.
 
 ## Public Surface
 
-Pal sees eight workflow capabilities:
+Pal sees ten workflow capabilities:
 
 - `op_minion_start_workflow`
 - `op_minion_submit_artifact`
 - `intro_minion_task_search`
 - `intro_minion_workflow_status`
 - `op_minion_resume_workflow`
+- `op_minion_restart_execution`
+- `op_minion_resolve_triage`
 - `op_minion_submit_human_decision`
 - `op_minion_control_workflow`
 - `op_minion_archive_workflow`
+
+`resume_workflow` only resumes a deliberately paused workflow. Operator triage is
+resolved explicitly with `resolve_triage`, an auditable semantic module/phase
+selection and a required resolution summary. The operation dispatches the
+aggregate's existing `RESOLVE_TRIAGE` transition; it cannot accept a candidate,
+waive verification, or bypass a gate.
+
+`restart_execution` is the explicit replacement path for an execution attempt
+whose accepted architecture is still valid. The old workflow first enters
+cancel settlement, then a durable replacement effect creates a new
+`review_then_execute` workflow for the same Task. The replacement resolves the
+latest Family binding, reruns Architecture Review and Human Review, and never
+reuses candidates from the discarded execution. The old workflow becomes
+terminal only after the replacement workflow exists, or after a concurrent
+restart cancellation has been durably acknowledged.
 
 Catalog administration is also exposed as a thin sidecar proxy:
 
@@ -274,6 +383,13 @@ atomically renames, fsyncs the parent, and only then records durable metadata.
 The address includes artifact type, schema version, media type, and bytes, so
 identical JSON used for different semantic artifact types cannot overwrite
 metadata.
+
+An `AgentSessionContinuationArtifact` is the sole recovery truth for a logical
+worker session. Before each physical attempt, the Manager resolves the Artifact
+reference stored on the session and materializes one explicit continuation
+input inside that attempt directory. The runner never scans older run files for
+a checkpoint; it writes one explicit output path, which the Manager validates
+against session scope, subject, and fencing before publication.
 
 Software repositories live under `data/minion/repos/<project>/`, where the
 directory name comes from the explicit project name or source repository name.

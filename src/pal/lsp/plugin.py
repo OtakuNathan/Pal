@@ -51,6 +51,56 @@ def _doctor_schema() -> dict[str, Any]:
     }
 
 
+def _prepare_workspace_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "workspace_root": {
+                "type": "string",
+                "description": "Canonical project/worktree root to prepare for later LSP queries.",
+            },
+            "primary_language": {
+                "type": "string",
+                "description": "Optional primary language; omit to detect it from workspace source files.",
+            },
+            "languages": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional additional workspace languages.",
+            },
+            "compile_commands_path": {
+                "type": "string",
+                "description": "Optional existing compile_commands.json path for C/C++/Objective-C.",
+            },
+            "include_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Existing project include directories, relative to workspace_root or absolute.",
+            },
+            "stub_include_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Existing caller-created SDK/stub include directories; LSP never fabricates these APIs.",
+            },
+            "cpp_standard": {
+                "type": "string",
+                "description": "Optional C/C++ language standard such as c++17.",
+            },
+            "lsp_compile_flags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional fallback compile flags when no project compile database exists.",
+            },
+            "prewarm": {
+                "type": "boolean",
+                "default": True,
+                "description": "Initialize matching language servers immediately after preparing the environment.",
+            },
+        },
+        "required": ["workspace_root"],
+    }
+
+
 def _position_schema() -> dict[str, Any]:
     schema = _file_schema()
     schema["properties"] = {
@@ -86,7 +136,9 @@ def _position_schema() -> dict[str, Any]:
         "symbol-aware language-server information."
     ),
     prompt_hint=(
-        "When reading or changing code, consider LSP capabilities for symbol-aware navigation and verification: "
+        "After selecting a project or worktree, call op_lsp_prepare_workspace once before using LSP code "
+        "intelligence; call it again only when compile commands, include paths, SDK stubs, or language settings "
+        "change. Then use LSP capabilities for symbol-aware navigation and verification: "
         "use lsp_document_symbols/workspace_symbols to map code, lsp_definition/references/hover/call hierarchy "
         "to understand relationships, and lsp_diagnostics after edits when a matching server is available. "
         "Pair LSP with source reads, search, and tests; do not treat LSP as a substitute for inspecting source."
@@ -110,6 +162,7 @@ def _position_schema() -> dict[str, Any]:
     ),
     capability_refs=(
         "op_lsp_status",
+        "op_lsp_prepare_workspace",
         "op_lsp_doctor",
         "op_lsp_diagnostics",
         "op_lsp_hover",
@@ -180,6 +233,24 @@ class LspManagerPluginProvider:
     def status(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
         return _capability_from_rpc("LSP status", self._request_or_error("status"))
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="lsp",
+        family="lsp",
+        action_name="prepare_workspace",
+        description=(
+            "Prepare and prewarm one workspace before LSP navigation or diagnostics. Call this once after "
+            "selecting a project/worktree, and call it again when compile commands, include paths, SDK stubs, "
+            "or language settings change. Later LSP tools reuse the manager-owned environment by workspace_root."
+        ),
+        args_schema=_prepare_workspace_schema(),
+    )
+    def prepare_workspace(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc(
+            "LSP workspace preparation",
+            self._request_or_error("prepare_workspace", dict(call.args or {})),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor", description="Check one selected LSP server's binary, workspace, initialize, and diagnostics readiness", args_schema=_doctor_schema())
     def doctor(self, call: CapabilityCall) -> CapabilityResult:
@@ -373,4 +444,6 @@ def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResul
     status = payload.get("status") or RuntimeStatus.OK
     if status == "unavailable":
         status = RuntimeStatus.ERROR
+    elif status == "partial":
+        status = RuntimeStatus.OK
     return CapabilityResult(status=status, text=title, structured=payload, llm_text=render_titled_structured_for_llm(title, payload))

@@ -34,7 +34,6 @@ from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_SKELETON_ARTIFACT,
     SKELETON_MODULE_CONTRACT_ARTIFACT,
-    requirements_semantic_view,
 )
 from pal.minion.v2.verification import candidate_reuse_fingerprint, repair_bill_semantic_view
 
@@ -415,29 +414,23 @@ class ExecutionCompiler:
             raise ValueError("ArchitectureSkeletonArtifact has no implementation modules")
         if initial_repair_bill_ref and len(implementation_modules) != 1:
             raise ValueError("an initial RepairBill requires a bounded single-module skeleton")
-        depends_on = {
-            name: [str(item) for item in list(module.get("depends_on") or [])]
+        contract_dependencies = {
+            name: [str(item) for item in list(module.get("contract_dependencies") or [])]
             for name, module in modules.items()
         }
-        _topological_module_order(depends_on)
-        verification_nodes = {
+        _topological_module_order(contract_dependencies)
+        scenarios = {
             str(name): dict(value or {})
-            for name, value in dict(submission.get("verification_nodes") or {}).items()
+            for name, value in dict(submission.get("scenarios") or {}).items()
         }
-        if not verification_nodes:
-            raise ValueError("ArchitectureSkeletonArtifact has no Verification Nodes")
+        if not scenarios:
+            raise ValueError("ArchitectureSkeletonArtifact has no end-to-end verification scenarios")
         topology_ref = self.architecture.artifacts.put_json(
             {
-                "construction": {"depends_on": depends_on},
-                "contract_consumption": {
-                    name: list(module.get("consumes") or []) for name, module in modules.items()
-                },
-                "verification": {
-                    name: {
-                        "depends_on": list(node.get("depends_on") or []),
-                        "consumes": list(node.get("consumes") or []),
-                    }
-                    for name, node in verification_nodes.items()
+                "contract_dependencies": contract_dependencies,
+                "verification_scenarios": {
+                    name: list(scenario.get("modules") or [])
+                    for name, scenario in scenarios.items()
                 },
             },
             artifact_type="SkeletonTopologyArtifact",
@@ -451,11 +444,8 @@ class ExecutionCompiler:
                 {
                     "module_name": name,
                     "module_kind": str(module.get("module_kind") or ""),
-                    "depends_on": depends_on[name],
-                    "consumes": list(module.get("consumes") or []),
+                    "contract_dependencies": contract_dependencies[name],
                     "paths": paths,
-                    "covers": list(module.get("covers") or []),
-                    "evidence": list(module.get("evidence") or []),
                     "contract_file_hashes": {
                         path: str(contract_file_hashes.get(path) or "")
                         for path in list(paths.get("contract_paths") or [])
@@ -464,14 +454,20 @@ class ExecutionCompiler:
                 artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
             )
-        verification_refs = {
-            name: self.architecture.artifacts.put_json(
-                {"verification_name": name, **node},
+        scenario_refs: dict[str, ArtifactRef] = {}
+        for name, scenario in scenarios.items():
+            scenario_refs[name] = self.architecture.artifacts.put_json(
+                {
+                    "verification_name": name,
+                    "kind": "end_to_end",
+                    "modules": [str(item) for item in list(scenario.get("modules") or [])],
+                    "entrypoints": [str(scenario.get("entrypoint") or "")],
+                    "observable_behavior": str(scenario.get("observable_behavior") or ""),
+                    "environment": {"description": str(scenario.get("environment") or "")},
+                },
                 artifact_type="VerificationScenarioContractArtifact",
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
             )
-            for name, node in verification_nodes.items()
-        }
         self.repository.dispatch(
             _action(
                 "CREATE_EXECUTION_EPOCH",
@@ -497,15 +493,14 @@ class ExecutionCompiler:
             if workflow is not None and workflow.payload.get("request_ref")
             else {}
         )
-        all_workspace_names = [*sorted(implementation_modules), *sorted(verification_nodes)]
         workspaces = provision_skeleton_epoch_worktrees(
             self.repository.runtime_root,
             artifacts=self.architecture.artifacts,
             workflow_id=workflow_id,
             workflow_name=str(request.get("workflow_name") or request.get("goal") or workflow_id),
             epoch_id=epoch_id,
-            unit_ids=all_workspace_names,
-            verification_unit_ids=set(verification_nodes),
+            unit_ids=sorted([*implementation_modules, *scenarios]),
+            verification_unit_ids=set(scenarios),
             workspace=dict(request.get("workspace") or {}),
             architecture_artifact=artifact,
         )
@@ -525,6 +520,9 @@ class ExecutionCompiler:
             }
         )
         unit_node_ids = {name: f"{epoch_id}:node:{name}" for name in implementation_modules}
+        verification_node_ids = {
+            name: f"{epoch_id}:verification:{name}" for name in scenarios
+        }
         for name in sorted(implementation_modules):
             paths = dict(modules[name].get("paths") or {})
             self.repository.dispatch(
@@ -542,12 +540,21 @@ class ExecutionCompiler:
                         "node_kind": "unit",
                         "unit_contract_ref": module_refs[name].to_dict(),
                         "architecture_manifest_ref": manifest_ref.to_dict(),
-                        "dependency_node_ids": [unit_node_ids[item] for item in depends_on[name]],
+                        # Contract dependencies describe protocol/data flow. Accepted
+                        # Skeleton contracts make them available before implementation,
+                        # so they are not Coder start barriers.
+                        "dependency_node_ids": [],
+                        "contract_dependency_node_ids": [
+                            unit_node_ids[item]
+                            for item in contract_dependencies[name]
+                            if item in unit_node_ids
+                        ],
                         "accepted_dependency_node_ids": [],
                         "epoch_frozen": False,
                         "environment_fingerprint": environment_fingerprint,
                         "global_constraint_hash": global_constraint_hash,
                         "path_policy": {
+                            "contract_mode": str(paths.get("contract_mode") or "review_guarded"),
                             "contract_paths": list(paths.get("contract_paths") or []),
                             "implementation_scopes": list(paths.get("implementation_scopes") or []),
                             "test_scopes": list(paths.get("test_scopes") or []),
@@ -562,11 +569,9 @@ class ExecutionCompiler:
                     },
                 )
             )
-        verification_node_ids = {
-            name: f"{epoch_id}:verification:{name}" for name in verification_nodes
-        }
-        for name in sorted(verification_nodes):
-            scenario = verification_nodes[name]
+        for name in sorted(scenarios):
+            scenario = scenarios[name]
+            dependency_ids = [unit_node_ids[str(item)] for item in list(scenario.get("modules") or [])]
             self.repository.dispatch(
                 _action(
                     "CREATE_NODE_RUN",
@@ -580,15 +585,15 @@ class ExecutionCompiler:
                         "unit_id": name,
                         "module_name": name,
                         "node_kind": "verification",
-                        "unit_contract_ref": verification_refs[name].to_dict(),
+                        "unit_contract_ref": scenario_refs[name].to_dict(),
                         "architecture_manifest_ref": manifest_ref.to_dict(),
-                        "dependency_node_ids": [unit_node_ids[item] for item in list(scenario.get("depends_on") or [])],
+                        "dependency_node_ids": dependency_ids,
                         "accepted_dependency_node_ids": [],
                         "epoch_frozen": False,
                         "environment_fingerprint": environment_fingerprint,
-                        "verification_environment": dict(scenario.get("environment") or {}),
-                        "verification_entrypoints": list(scenario.get("entrypoints") or []),
+                        "global_constraint_hash": global_constraint_hash,
                         "path_policy": {
+                            "contract_mode": "review_guarded",
                             "contract_paths": [],
                             "implementation_scopes": [],
                             "test_scopes": [],
@@ -609,10 +614,8 @@ class ExecutionCompiler:
                 actor=actor,
             )
         node_ids = tuple(
-            [
-                *(unit_node_ids[name] for name in sorted(unit_node_ids)),
-                *(verification_node_ids[name] for name in sorted(verification_node_ids)),
-            ]
+            [unit_node_ids[name] for name in sorted(unit_node_ids)]
+            + [verification_node_ids[name] for name in sorted(verification_node_ids)]
         )
         self.repository.dispatch(
             _action(
@@ -827,7 +830,7 @@ def _reuse_accepted_skeleton_candidates(
         for name, node in target_nodes.items()
     }
     dependencies = {
-        name: [str(item) for item in list(contract.get("depends_on") or [])]
+        name: [str(item) for item in list(contract.get("contract_dependencies") or [])]
         for name, (_ref, contract) in target_contracts.items()
     }
     if set(dependencies) != set(target_nodes):
@@ -947,23 +950,17 @@ def _skeleton_candidate_reuse_signature(
             "contract_hash": str(dependency_contract[0].get("sha256") or ""),
             "contract_file_hashes": dict(dependency_contract[1].get("contract_file_hashes") or {}),
         }
-    module_name = str(contract.get("module_name") or node.payload.get("module_name") or "")
-    verification_subset = {
-        name: scenario
-        for name, scenario in dict(dict(artifact.get("submission") or {}).get("verification_nodes") or {}).items()
-        if module_name in set(str(item) for item in list(dict(scenario).get("depends_on") or []))
-    }
     try:
         return candidate_reuse_fingerprint(
             unit_contract_hash=str(contract_ref.get("sha256") or ""),
-            relevant_requirements_hash=_stable_json_hash(list(contract.get("covers") or [])),
-            relevant_evidence_hash=_stable_json_hash(list(contract.get("evidence") or [])),
+            relevant_requirements_hash=_stable_json_hash(dict(artifact.get("requirements_ref") or {})),
+            relevant_evidence_hash=_stable_json_hash({}),
             global_constraint_hash=str(node.payload.get("global_constraint_hash") or ""),
             owned_area_hash=_stable_json_hash(dict(contract.get("paths") or {})),
             dependency_set_hash=_stable_json_hash(sorted(dependencies)),
             dependency_interface_hash=_stable_json_hash(dependency_interfaces),
             dependency_output_hash=_stable_json_hash(dependency_outputs),
-            integration_contract_subset_hash=_stable_json_hash(verification_subset),
+            integration_contract_subset_hash=_stable_json_hash({}),
             environment_policy_hash=str(node.payload.get("environment_fingerprint") or ""),
         )
     except ValueError:
@@ -1089,12 +1086,7 @@ def _candidate_reuse_signature(
     node: AggregateSnapshot,
     node_by_module: Mapping[str, AggregateSnapshot],
 ) -> str:
-    requirement_ids = {str(item) for item in list(contract.get("requirement_ids") or [])}
-    requirements = [
-        item
-        for item in list(dict(fragments.get("requirements") or {}).get("requirements") or [])
-        if str(item.get("requirement_id") or "") in requirement_ids
-    ]
+    task_source_hash = str(dict(manifest.get("requirements_ref") or {}).get("sha256") or "")
     dependency_modules = sorted(dependencies.get(unit_id) or [])
     dependency_interfaces = {
         dependency: dict(_contract_value(node_by_module.get(dependency), fragments)).get("provided_interfaces") or []
@@ -1114,7 +1106,7 @@ def _candidate_reuse_signature(
     ]
     return candidate_reuse_fingerprint(
         unit_contract_hash=str(contract_ref.get("sha256") or ""),
-        relevant_requirements_hash=_stable_json_hash(requirements),
+        relevant_requirements_hash=task_source_hash,
         relevant_evidence_hash=_stable_json_hash([]),
         global_constraint_hash=str(dict(manifest.get("global_constraints_ref") or {}).get("sha256") or ""),
         owned_area_hash=_stable_json_hash(list(contract.get("owned_area") or [])),
@@ -1258,11 +1250,15 @@ class DagScheduler:
             item.state in {
                 "PRODUCING",
                 "REVIEWING",
+                "REVIEW_QUIESCING",
+                "REVIEW_SNAPSHOTTING",
                 "REPAIRING",
                 "QUIESCING",
                 "SNAPSHOTTING",
                 "VERIFY_PREPARING",
                 "VERIFYING",
+                "VERIFY_QUIESCING",
+                "VERIFY_SNAPSHOTTING",
             }
             for item in node_by_id.values()
         )
@@ -1328,6 +1324,30 @@ class DagScheduler:
         return tuple(scheduled)
 
 
+def _semantic_contract_value(value: Any) -> Any:
+    """Project Manager-owned contract records onto semantic worker-facing names."""
+
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {
+                "id",
+                "schema_version",
+                "requirement_ids",
+                "evidence_ids",
+                "complexity_policy_violations",
+            }:
+                continue
+            if key == "unit_id":
+                result["name"] = _semantic_contract_value(item)
+                continue
+            result[str(key)] = _semantic_contract_value(item)
+        return result
+    if isinstance(value, list):
+        return [_semantic_contract_value(item) for item in value]
+    return value
+
+
 @dataclass
 class UnitWorkViewBuilder:
     architecture: ArchitectureArtifactService
@@ -1340,15 +1360,6 @@ class UnitWorkViewBuilder:
         manifest = validate_architecture_manifest(self.architecture.artifacts.read_json(manifest_ref))
         fragments = self.architecture.load_manifest_fragments(manifest)
         unit_contract = self.architecture.artifacts.read_json(dict(node.payload["unit_contract_ref"]))
-        requirement_ids = {str(item) for item in list(unit_contract.get("requirement_ids") or [])}
-        requirements = [
-            item
-            for item in list(dict(fragments.get("requirements") or {}).get("requirements") or [])
-            if str(item.get("requirement_id") or "") in requirement_ids
-        ]
-        found_requirement_ids = {str(item.get("requirement_id") or "") for item in requirements}
-        if found_requirement_ids != requirement_ids:
-            raise ValueError(f"UnitWorkView lost requirements: {sorted(requirement_ids - found_requirement_ids)}")
         unit_id = str(unit_contract.get("unit_id") or "")
         cross_contracts = [
             item
@@ -1357,14 +1368,10 @@ class UnitWorkViewBuilder:
         ]
         payload = {
             "schema_version": "1",
-            "workflow_id": node.workflow_id,
-            "node_run_id": node.aggregate_id,
-            "epoch_id": str(node.payload.get("epoch_id") or ""),
-            "unit_contract": unit_contract,
-            "requirements": requirements,
-            "cross_unit_contracts": cross_contracts,
-            "global_constraints": fragments.get("global_constraints"),
-            "assumptions": fragments.get("assumption_ledger"),
+            "unit_contract": _semantic_contract_value(unit_contract),
+            "cross_unit_contracts": _semantic_contract_value(cross_contracts),
+            "global_constraints": _semantic_contract_value(fragments.get("global_constraints")),
+            "assumptions": _semantic_contract_value(fragments.get("assumption_ledger")),
             "dependency_outputs": dict(dependency_outputs),
             "historical_repair_bills": list(node.payload.get("historical_repair_bill_refs") or []),
             "node_run_journal": dict(
@@ -1379,7 +1386,6 @@ class UnitWorkViewBuilder:
                 (str(dict(node.payload["unit_contract_ref"])["sha256"]), "unit_contract"),
             ),
         )
-
     def _build_skeleton_view(
         self,
         node: AggregateSnapshot,
@@ -1391,22 +1397,12 @@ class UnitWorkViewBuilder:
         contract_ref = dict(node.payload.get("unit_contract_ref") or {})
         contract = dict(self.architecture.artifacts.read_json(contract_ref))
         requirements_ref = dict(artifact.get("requirements_ref") or {})
-        requirements = requirements_semantic_view(self.architecture.artifacts.read_json(requirements_ref))
-        covered = {
-            (str(item.get("section") or ""), str(item.get("requirement") or ""))
-            for item in list(contract.get("covers") or [])
-        }
-        requirement_sections = {
-            section: [text for text in values if (str(section), str(text)) in covered]
-            for section, values in dict(requirements.get("sections") or {}).items()
-        }
-        requirement_sections = {section: values for section, values in requirement_sections.items() if values}
-        if sum(len(values) for values in requirement_sections.values()) != len(covered):
-            raise ValueError("ModuleWorkView lost one or more semantic Requirement references")
         path_policy = dict(node.payload.get("path_policy") or contract.get("paths") or {})
         semantic_dependency_outputs: dict[str, Any] = {}
-        dependency_names = {str(item) for item in list(contract.get("depends_on") or [])}
-        for dependency_id in list(node.payload.get("dependency_node_ids") or []):
+        dependency_names = {
+            str(item) for item in list(contract.get("contract_dependencies") or [])
+        }
+        for dependency_id in list(node.payload.get("contract_dependency_node_ids") or []):
             dependency = self.architecture.repository.read_snapshot(
                 AggregateType.DAG_NODE_RUN, str(dependency_id)
             )
@@ -1441,17 +1437,12 @@ class UnitWorkViewBuilder:
             "schema_version": "1",
             "module_name": str(contract.get("module_name") or node.payload.get("module_name") or ""),
             "module_kind": str(contract.get("module_kind") or ""),
-            "requirements": {
-                "title": str(requirements.get("title") or "Requirements"),
-                "sections": requirement_sections,
-            },
+            "contract_mode": str(path_policy.get("contract_mode") or "review_guarded"),
             "contract_paths": list(path_policy.get("contract_paths") or []),
             "implementation_scopes": list(path_policy.get("implementation_scopes") or []),
             "test_scopes": list(path_policy.get("test_scopes") or []),
             "reference_only": list(path_policy.get("reference_only") or []),
-            "construction_dependencies": list(contract.get("depends_on") or []),
-            "contract_consumption": list(contract.get("consumes") or []),
-            "evidence": list(contract.get("evidence") or []),
+            "contract_dependencies": list(contract.get("contract_dependencies") or []),
             "dependency_outputs": semantic_dependency_outputs,
             "historical_repair_bills": [
                 repair_bill_semantic_view(self.architecture.artifacts, item) for item in historical_refs
@@ -1466,6 +1457,7 @@ class UnitWorkViewBuilder:
             child_refs=(
                 (str(manifest_ref["sha256"]), "architecture_skeleton"),
                 (str(contract_ref["sha256"]), "module_contract"),
+                (str(requirements_ref["sha256"]), "requirements"),
                 *((str(item["sha256"]), "historical_repair_bill") for item in historical_refs),
             ),
         )
@@ -1828,30 +1820,49 @@ def prepare_node_dependency_baseline(
     if not workspace.is_dir():
         raise ValueError(f"node workspace does not exist: {workspace}")
     adapter = str(node.payload.get("execution_adapter") or SOFTWARE_GIT_ADAPTER)
+    if adapter == SOFTWARE_GIT_ADAPTER and apply_candidates and node.state == "BLOCKED_BY_DEPS":
+        declared_base = str(node.payload.get("base_sha") or "")
+        if not declared_base:
+            raise ValueError("blocked node has no declared Git baseline")
+        _abort_cherry_pick(workspace)
+        _git(workspace, "reset", "--hard", declared_base)
+        _git(workspace, "clean", "-fd")
+    starting_head = (
+        _git(workspace, "rev-parse", "HEAD").strip()
+        if adapter == SOFTWARE_GIT_ADAPTER and apply_candidates
+        else ""
+    )
     accepted_digests: list[str] = []
     output_hashes: dict[str, str] = {}
     dependency_outputs: dict[str, Any] = {}
-    for dependency in _ordered_dependency_closure(node, node_by_id):
-        dependency_id = dependency.aggregate_id
-        if dependency.state != "ACCEPTED":
-            raise ValueError(f"dependency is not accepted: {dependency_id}")
-        candidate_digest = str(dependency.payload.get("candidate_digest") or "")
-        if not candidate_digest:
-            raise ValueError(f"accepted dependency has no candidate digest: {dependency_id}")
-        if adapter == SOFTWARE_GIT_ADAPTER:
-            if apply_candidates and not _git_is_ancestor(workspace, candidate_digest, "HEAD"):
-                _git(workspace, "cherry-pick", candidate_digest)
-        elif adapter != ARTIFACT_BUNDLE_ADAPTER:
-            raise ValueError(f"unsupported execution adapter: {adapter}")
-        accepted_digests.append(candidate_digest)
-        dependency_outputs[dependency_id] = {
-            "candidate_ref": dict(dependency.payload.get("candidate_ref") or {}),
-            "candidate_digest": candidate_digest,
-            "output_hashes": dict(dependency.payload.get("output_hashes") or {}),
-        }
-        output_hashes[dependency_id] = hashlib.sha256(
-            json.dumps(dict(dependency.payload.get("output_hashes") or {}), sort_keys=True).encode("utf-8")
-        ).hexdigest()
+    try:
+        for dependency in _ordered_dependency_closure(node, node_by_id):
+            dependency_id = dependency.aggregate_id
+            if dependency.state != "ACCEPTED":
+                raise ValueError(f"dependency is not accepted: {dependency_id}")
+            candidate_digest = str(dependency.payload.get("candidate_digest") or "")
+            if not candidate_digest:
+                raise ValueError(f"accepted dependency has no candidate digest: {dependency_id}")
+            if adapter == SOFTWARE_GIT_ADAPTER:
+                if apply_candidates:
+                    _apply_dependency_candidate_delta(workspace, dependency)
+            elif adapter != ARTIFACT_BUNDLE_ADAPTER:
+                raise ValueError(f"unsupported execution adapter: {adapter}")
+            accepted_digests.append(candidate_digest)
+            dependency_outputs[dependency_id] = {
+                "candidate_ref": dict(dependency.payload.get("candidate_ref") or {}),
+                "candidate_digest": candidate_digest,
+                "output_hashes": dict(dependency.payload.get("output_hashes") or {}),
+            }
+            output_hashes[dependency_id] = hashlib.sha256(
+                json.dumps(dict(dependency.payload.get("output_hashes") or {}), sort_keys=True).encode("utf-8")
+            ).hexdigest()
+    except BaseException:
+        if starting_head:
+            _abort_cherry_pick(workspace)
+            _git(workspace, "reset", "--hard", starting_head)
+            _git(workspace, "clean", "-fd")
+        raise
     base_digest = (
         _git(workspace, "rev-parse", "HEAD").strip()
         if adapter == SOFTWARE_GIT_ADAPTER
@@ -1865,6 +1876,50 @@ def prepare_node_dependency_baseline(
         "dependency_outputs": dependency_outputs,
         "dependency_fingerprint": dependency_fingerprint(node, node_by_id),
     }
+
+
+def _apply_dependency_candidate_delta(
+    workspace: Path,
+    dependency: AggregateSnapshot,
+) -> None:
+    candidate_digest = str(dependency.payload.get("candidate_digest") or "")
+    candidate_base = str(dependency.payload.get("base_sha") or "")
+    if not candidate_base:
+        raise ValueError(
+            f"accepted dependency has no Candidate baseline: {dependency.aggregate_id}"
+        )
+    if not _git_is_ancestor(workspace, candidate_base, candidate_digest):
+        raise ValueError(
+            f"accepted dependency Candidate is not based on its declared baseline: {dependency.aggregate_id}"
+        )
+    commits = [
+        line.strip()
+        for line in _git(
+            workspace,
+            "rev-list",
+            "--reverse",
+            "--topo-order",
+            candidate_digest,
+            f"^{candidate_base}",
+        ).splitlines()
+        if line.strip()
+    ]
+    if not commits:
+        raise ValueError(
+            f"accepted dependency Candidate contains no delta: {dependency.aggregate_id}"
+        )
+    for commit in commits:
+        _git(workspace, "cherry-pick", commit)
+
+
+def _abort_cherry_pick(workspace: Path) -> None:
+    subprocess.run(
+        ["git", "cherry-pick", "--abort"],
+        cwd=workspace,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
 
 
 def _ordered_dependency_closure(
@@ -2109,6 +2164,9 @@ def _validate_reference_only_paths(changed_paths: list[str], reference_only_path
 
 
 def _validate_skeleton_candidate_paths(changed_paths: list[str], policy: Mapping[str, Any]) -> None:
+    contract_mode = str(policy.get("contract_mode") or "file_frozen")
+    if contract_mode not in {"file_frozen", "review_guarded"}:
+        raise ValueError(f"unknown contract enforcement mode: {contract_mode}")
     frozen = {str(item).replace(os.sep, "/") for item in list(policy.get("contract_paths") or [])}
     references = {str(item).replace(os.sep, "/") for item in list(policy.get("reference_only") or [])}
     writable = [
@@ -2118,9 +2176,28 @@ def _validate_skeleton_candidate_paths(changed_paths: list[str], policy: Mapping
             *list(policy.get("test_scopes") or []),
         ]
     ]
-    frozen_violations = sorted(path for path in changed_paths if path.replace(os.sep, "/") in frozen)
+    frozen_violations = sorted(
+        path
+        for path in changed_paths
+        if contract_mode == "file_frozen" and path.replace(os.sep, "/") in frozen
+    )
     if frozen_violations:
         raise ValueError("candidate modified frozen architecture contracts: " + ", ".join(frozen_violations))
+    implementation_scopes = [
+        dict(item or {}) for item in list(policy.get("implementation_scopes") or [])
+    ]
+    guarded_scope_violations = sorted(
+        path
+        for path in changed_paths
+        if contract_mode == "review_guarded"
+        and path.replace(os.sep, "/") in frozen
+        and not any(_path_scope_matches(path, scope) for scope in implementation_scopes)
+    )
+    if guarded_scope_violations:
+        raise ValueError(
+            "candidate modified review-guarded contracts outside implementation scope: "
+            + ", ".join(guarded_scope_violations)
+        )
     reference_violations = sorted(path for path in changed_paths if path.replace(os.sep, "/") in references)
     if reference_violations:
         raise ValueError("candidate modified reference-only paths: " + ", ".join(reference_violations))

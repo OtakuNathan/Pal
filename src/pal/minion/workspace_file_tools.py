@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 
+from pal.execution.file_tool_contracts import (
+    FILE_EDIT_DESCRIPTION,
+    FILE_READ_DESCRIPTION,
+    FILE_WRITE_DESCRIPTION,
+    file_edit_args_schema,
+    file_read_args_schema,
+    file_write_args_schema,
+)
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.shared import RuntimeStatus
 
@@ -20,62 +27,28 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_file_read": {
         "name": "op_file_read",
         "description": (
-            "Use this first when you need to inspect a UTF-8 text file under the current project repo or a declared read-only reference root; do not use op_exec_shell with cat/head/tail for repo/reference file reads when this tool is visible. "
-            "Read using a root-relative path. Use root='reference:<name>' or reference_name='<name>' for declared truth-source references; omit it for the current project repo. "
-            "A successful read also caches the file for op_file_edit, op_file_write overwrite/append, "
-            "and op_path_delete safety checks."
+            "Use this instead of shell cat/head/tail for repo or reference files. "
+            + FILE_READ_DESCRIPTION
+            + " Paths are root-relative. Use root='reference:<name>' or reference_name='<name>' "
+            "for declared read-only truth-source references; omit it for the project repo."
         ),
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Root-relative file path, for example src/app.py."},
-                "root": {
-                    "type": "string",
-                    "description": "Optional root selector. Omit or use project for the current project repo; use reference:<name> for a declared read-only truth-source reference.",
-                },
-                "reference_name": {"type": "string", "description": "Optional declared reference root name; equivalent to root=reference:<name>."},
-                "start_line": {"type": "integer", "default": 1},
-                "limit_lines": {"type": "integer", "default": 2000},
-            },
-            "required": ["path"],
-            "additionalProperties": False,
-        },
+        "parameters_schema": file_read_args_schema(scoped=True),
     },
     "op_file_edit": {
         "name": "op_file_edit",
         "description": (
-            "Use this first for precise repo text edits; do not use op_exec_shell with sed/awk/python one-liners for file edits when this tool is visible. "
-            "Edit a UTF-8 text file under the current project repo by replacing one exact old_string with new_string. "
-            "The file must first be read with op_file_read so Pal can detect stale edits."
+            "Use this instead of shell sed/awk or one-off rewrite scripts for repo files. "
+            + FILE_EDIT_DESCRIPTION
         ),
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Repo-relative file path, for example src/app.py."},
-                "old_string": {"type": "string", "description": "Exact text to find and replace."},
-                "new_string": {"type": "string", "description": "Replacement text."},
-            },
-            "required": ["path", "old_string", "new_string"],
-            "additionalProperties": False,
-        },
+        "parameters_schema": file_edit_args_schema(scoped=True),
     },
     "op_file_write": {
         "name": "op_file_write",
         "description": (
-            "Use this first for creating, overwriting, or appending UTF-8 text files under the current project repo; do not use op_exec_shell with tee/echo/printf redirection when this tool is visible. "
-            "Set mode to create, overwrite, or append for a UTF-8 text file under the current project repo. "
-            "Create mode fails if the file exists. Overwrite and append require a current prior op_file_read snapshot."
+            "Use this instead of shell redirection for project repo files. "
+            + FILE_WRITE_DESCRIPTION
         ),
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Repo-relative file path, for example tests/test_app.py."},
-                "content": {"type": "string", "description": "UTF-8 text content to write."},
-                "mode": {"type": "string", "enum": ["create", "overwrite", "append"], "default": "create"},
-            },
-            "required": ["path", "content"],
-            "additionalProperties": False,
-        },
+        "parameters_schema": file_write_args_schema(scoped=True),
     },
     "op_path_delete": {
         "name": "op_path_delete",
@@ -107,7 +80,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": (
             "Use this first when you need to check read-before-edit state for a repo-relative file. "
             "Inspect whether a repo-relative file has a current cached read snapshot for safe op_file_edit, "
-            "op_file_write overwrite/append, or op_path_delete use. This does not return cached file contents."
+            "op_file_write, or op_path_delete use. This does not return cached file contents."
         ),
         "parameters_schema": {
             "type": "object",
@@ -152,6 +125,18 @@ async def workspace_file_tool_result(
             and not any(_write_scope_matches(relative, dict(item or {})) for item in list(workspace["write_path_scopes"]))
         ):
             raise ValueError("path is outside this module's writable implementation/test scopes")
+        if (
+            str(root_info.get("root_kind") or "") != "reference"
+            and call.name in {"op_file_edit", "op_file_write", "op_path_delete"}
+            and relative.replace("\\", "/")
+            in {
+                str(item).replace("\\", "/")
+                for item in list(workspace.get("read_only_overlay_paths") or [])
+            }
+        ):
+            raise ValueError(
+                "path is a verifier-owned regression test; repair product code and rerun the test without editing it"
+            )
         tool_name, tool_args = _underlying_file_tool(call, absolute)
     except Exception as exc:
         message = str(exc) or exc.__class__.__name__
@@ -174,104 +159,6 @@ async def workspace_file_tool_result(
     return _workspace_result(call, result, relative=relative, absolute=absolute, root=root, root_info=root_info)
 
 
-async def bound_input_tool_result(
-    call: CanonicalToolCall,
-    workspace: dict[str, Any],
-    base_runtime: Any,
-    *,
-    allow_tools: bool = True,
-    budget: Any = None,
-    turn_id: str | None = None,
-) -> CanonicalToolResult:
-    name = str(call.args.get("name") or "").strip()
-    references = _normalized_reference_paths(workspace)
-    reference = next((item for item in references if name in {str(item.get("name") or ""), str(item.get("id") or "")}), None)
-    if reference is None:
-        available = ", ".join(str(item.get("name") or "") for item in references)
-        return _bound_input_error(call, f"unknown bound input: {name}; available: {available or '(none)'}")
-    if bool(reference.get("bound_input")):
-        from pal.minion.v2.worker_gateway import worker_gateway_client_from_env
-
-        gateway = worker_gateway_client_from_env(
-            Path(str(workspace.get("runtime_root") or ""))
-        )
-        if gateway is not None:
-            try:
-                response = await asyncio.to_thread(
-                    gateway.request_sync,
-                    "bound_input_read",
-                    {
-                        "name": name,
-                        "path": str(call.args.get("path") or ""),
-                        "start_line": int(call.args.get("start_line") or 1),
-                        "limit_lines": int(call.args.get("limit_lines") or 2000),
-                    },
-                )
-            except Exception as exc:
-                return _bound_input_error(call, f"{exc.__class__.__name__}: {exc}")
-            text = str(response.get("content") or "")
-            return CanonicalToolResult(
-                name=call.name,
-                ok=True,
-                text=text,
-                structured={
-                    "input_name": name,
-                    "start_line": int(response.get("start_line") or 1),
-                    "returned_lines": int(response.get("returned_lines") or 0),
-                    "total_lines": int(response.get("total_lines") or 0),
-                    "has_more": bool(response.get("has_more")),
-                },
-                call_id=call.call_id,
-                llm_text=text,
-                status=RuntimeStatus.OK,
-            )
-    includes = [str(item) for item in list(reference.get("include") or []) if str(item).strip()]
-    relative = str(call.args.get("path") or "").strip()
-    if not relative:
-        if len(includes) != 1:
-            return _bound_input_error(call, "path is required when the bound input is a directory or contains multiple files")
-        relative = includes[0]
-    delegated = CanonicalToolCall(
-        name="op_file_read",
-        args={
-            "reference_name": name,
-            "path": relative,
-            "start_line": call.args.get("start_line") or 1,
-            "limit_lines": call.args.get("limit_lines") or 2000,
-        },
-        call_id=call.call_id,
-    )
-    result = await workspace_file_tool_result(
-        delegated,
-        workspace,
-        base_runtime,
-        allow_tools=allow_tools,
-        budget=budget,
-        turn_id=turn_id,
-    )
-    return CanonicalToolResult(
-        name=call.name,
-        ok=result.ok,
-        text=result.text,
-        structured={**dict(result.structured or {}), "input_name": name},
-        call_id=call.call_id,
-        llm_text=result.llm_text,
-        status=result.status,
-    )
-
-
-def _bound_input_error(call: CanonicalToolCall, message: str) -> CanonicalToolResult:
-    return CanonicalToolResult(
-        name=call.name,
-        ok=False,
-        text=message,
-        structured={"error": message, "error_type": "BoundInputError"},
-        call_id=call.call_id,
-        llm_text=message,
-        status=RuntimeStatus.ERROR,
-    )
-
-
 def _workspace_file_path(root: Path, args: dict[str, Any]) -> tuple[str, Path]:
     raw = str(args.get("path") or args.get("file_path") or "").strip()
     if not raw:
@@ -289,8 +176,8 @@ def _underlying_file_tool(call: CanonicalToolCall, absolute: Path) -> tuple[str,
             "op_file_read",
             {
                 "file_path": str(absolute),
-                "offset": args.get("start_line") or args.get("offset") or 1,
-                "limit": args.get("limit_lines") or args.get("limit") or 2000,
+                "offset": args.get("offset") or args.get("start_line") or 1,
+                "limit": args.get("limit") or args.get("limit_lines") or 2000,
             },
         )
     if call.name == "op_file_edit":
@@ -300,6 +187,7 @@ def _underlying_file_tool(call: CanonicalToolCall, absolute: Path) -> tuple[str,
                 "file_path": str(absolute),
                 "old_string": args.get("old_string", ""),
                 "new_string": args.get("new_string", ""),
+                "replace_all": args.get("replace_all", False),
             },
         )
     if call.name == "op_file_write":
@@ -308,7 +196,6 @@ def _underlying_file_tool(call: CanonicalToolCall, absolute: Path) -> tuple[str,
             {
                 "file_path": str(absolute),
                 "content": args.get("content"),
-                "mode": args.get("mode") or "create",
             },
         )
     if call.name == "op_path_delete":

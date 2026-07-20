@@ -347,7 +347,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="delete",
         description="Delete (destroy) a proactive task",
-        aliases=("proactive_destroy",),
+        aliases=(),
         args_schema={
             "type": "object",
             "properties": {"target_id": {"type": "string"}},

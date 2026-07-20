@@ -17,8 +17,7 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftStore,
     assert_authoring_schema_budget,
 )
-from pal.minion.v2.submission_preflight import bound_reference_payload, validate_submission_requirement_refs
-from pal.minion.v2.verification import repair_checklist_items
+from pal.minion.v2.submission_preflight import bound_reference_payload
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
@@ -33,7 +32,6 @@ CANDIDATE_BUILDER_CAPABILITIES = (
     "op_minion_candidate_report_architecture_defect",
     "op_minion_candidate_request_module_split",
 )
-REPAIR_CHECKLIST_CAPABILITY = "op_minion_repair_checklist"
 
 _NOTE_SCHEMA = {
     "type": "object",
@@ -55,8 +53,6 @@ _RUN_SCHEMA = {
         "description": {"type": "string"},
         "expected_exit_codes": {"type": "array", "items": {"type": "integer"}},
         "timeout_seconds": {"type": "integer", "minimum": 1},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
     },
     "required": ["name", "command"],
     "additionalProperties": False,
@@ -67,8 +63,6 @@ _LSP_SCHEMA = {
         "name": {"type": "string", "minLength": 1},
         "file": {"type": "string", "minLength": 1},
         "description": {"type": "string"},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
     },
     "required": ["name", "file"],
     "additionalProperties": False,
@@ -79,8 +73,6 @@ _UNAVAILABLE_SCHEMA = {
         "name": {"type": "string", "minLength": 1},
         "obligation": {"type": "string", "enum": ["focused_tests", "compile", "warning_clean", "lsp"]},
         "reason": {"type": "string", "minLength": 1},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
     },
     "required": ["name", "obligation", "reason"],
     "additionalProperties": False,
@@ -89,8 +81,7 @@ _DEFECT_SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string", "minLength": 1},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
+        "source_file": {"type": "string"},
         "path": {"type": "string"},
         "symbol": {"type": "string"},
         "contract_section": {"type": "string"},
@@ -101,14 +92,6 @@ _DEFECT_SCHEMA = {
 _NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 
 CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
-    REPAIR_CHECKLIST_CAPABILITY: {
-        "name": "op_repair_checklist",
-        "description": (
-            "Read the Manager-bound RepairBill as the current repair checklist. Takes no arguments, records the required input receipt, "
-            "and returns every regression case that must be reproduced and pass before Candidate submission."
-        ),
-        "parameters_schema": _NO_ARGS_SCHEMA,
-    },
     "op_minion_developer_note": {
         "name": "op_developer_note",
         "description": "Record one durable local progress item. kind is micro_plan, completed, file_inspected, open_question, or known_failure.",
@@ -141,7 +124,7 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_candidate_report_architecture_defect": {
         "name": "op_candidate_report_architecture_defect",
-        "description": "Terminally report that the frozen architecture contract cannot satisfy the Requirement. Cite natural-language Requirement or a source location.",
+        "description": "Terminally report that the frozen architecture contract cannot satisfy the task. Explain the semantic conflict and optionally cite a task source filename or code location.",
         "parameters_schema": _DEFECT_SCHEMA,
     },
     "op_minion_candidate_request_module_split": {
@@ -168,11 +151,6 @@ async def candidate_builder_tool_result(
     turn_id: str | None = None,
 ) -> CanonicalToolResult:
     name = str(call.name or "")
-    if name == REPAIR_CHECKLIST_CAPABILITY:
-        try:
-            return _read_repair_checklist(call, workspace)
-        except Exception as exc:
-            return _error(call, exc)
     if name == "op_minion_developer_test":
         return await run_shell_evidence(
             call,
@@ -215,75 +193,6 @@ async def candidate_builder_tool_result(
         raise ValueError(f"unknown candidate authoring capability: {name}")
     except Exception as exc:
         return _error(call, exc)
-
-
-def _read_repair_checklist(
-    call: CanonicalToolCall,
-    workspace: Mapping[str, Any],
-) -> CanonicalToolResult:
-    if dict(call.args or {}):
-        raise ValueError("repair_checklist takes no arguments")
-    bill = bound_reference_payload(workspace, "repair_bill")
-    items = repair_checklist_items(bill)
-    if not items:
-        raise ValueError("bound RepairBill contains no named regression cases")
-    context = SubmissionDraftContext.from_workspace(workspace, draft_kind="candidate")
-    store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
-
-    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-        definitions = dict(payload.get("definitions") or {})
-        definitions["repair_checklist"] = {
-            "module_name": str(bill.get("module_name") or ""),
-            "items": items,
-            "regression_test_obligation": str(
-                bill.get("regression_test_obligation") or ""
-            ),
-        }
-        payload["definitions"] = definitions
-        return payload, {
-            "recorded": True,
-            "required_cases": [str(item["case"]) for item in items],
-        }
-
-    mutation = store.mutate(
-        context,
-        operation_key=str(call.call_id or "repair-checklist-read"),
-        request={},
-        reducer=reducer,
-        seed=_empty_candidate_payload(),
-    )
-    lines = [
-        f"Repair checklist for {str(bill.get('module_name') or 'the bound module')}:"
-    ]
-    for index, item in enumerate(items, start=1):
-        lines.append(f"{index}. {item['case']}: {item.get('summary') or item.get('failure_reason') or 'regression required'}")
-        if item.get("failure_reason"):
-            lines.append(f"   Failure: {item['failure_reason']}")
-        locations = [
-            "::".join(
-                part
-                for part in (
-                    str(location.get("path") or ""),
-                    str(location.get("symbol") or ""),
-                )
-                if part
-            )
-            for location in list(item.get("locations") or [])
-        ]
-        if locations:
-            lines.append("   Locations: " + ", ".join(locations))
-    lines.append(
-        "For each item, reproduce it first and record a PASS developer_test using the exact checklist case name."
-    )
-    return _ok(
-        call,
-        "\n".join(lines),
-        {
-            **dict(mutation),
-            "module_name": str(bill.get("module_name") or ""),
-            "items": items,
-        },
-    )
 
 
 def _record_note(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> CanonicalToolResult:
@@ -336,32 +245,6 @@ def _submit_candidate(
             raise ValueError("developer checks still fail: " + ", ".join(str(item.get("name")) for item in failures))
         if not cases:
             raise ValueError("candidate_submit requires at least one recorded developer check")
-        if _has_bound_reference(workspace, "repair_bill"):
-            checklist = dict(
-                dict(snapshot.payload.get("definitions") or {}).get("repair_checklist")
-                or {}
-            )
-            required_cases = [
-                str(dict(item).get("case") or "").strip()
-                for item in list(checklist.get("items") or [])
-                if str(dict(item).get("case") or "").strip()
-            ]
-            if not required_cases:
-                raise ValueError(
-                    "repair Candidate must call repair_checklist before editing, testing, or submitting"
-                )
-            recorded_by_name = {
-                str(item.get("name") or ""): str(item.get("status") or "")
-                for item in cases
-            }
-            incomplete = [
-                name for name in required_cases if recorded_by_name.get(name) != "PASS"
-            ]
-            if incomplete:
-                raise ValueError(
-                    "repair checklist still requires PASS developer regressions named exactly: "
-                    + ", ".join(incomplete)
-                )
     else:
         _validate_defect_args(args, work_view=work_view)
     files_changed = _live_worktree_delta(workspace, work_view=work_view)
@@ -397,10 +280,12 @@ def _submit_candidate(
                 "summary": str(args.get("summary") or "").strip(),
                 "affected_module": module_name,
                 "locations": _defect_locations(args),
-                "requirements": _defect_requirements(args),
+                "source_file": str(args.get("source_file") or "").strip(),
             }
         )
-    validate_candidate_submission(report, work_view=work_view)
+    reference_warnings = validate_candidate_submission(report, work_view=work_view)
+    if reference_warnings:
+        report["reference_warnings"] = list(reference_warnings)
     artifact_filename = (
         "coder_report.json" if _is_software_module_view(work_view) else "producer_report.json"
     )
@@ -438,11 +323,13 @@ def _submit_candidate(
     return _ok(
         call,
         "Candidate intent recorded. Stop now; Manager will quiesce and snapshot the worktree.",
-        {"submitted": True, "artifact": artifact},
+        {"submitted": True},
     )
 
 
-def validate_candidate_submission(value: Mapping[str, Any], *, work_view: Mapping[str, Any]) -> None:
+def validate_candidate_submission(
+    value: Mapping[str, Any], *, work_view: Mapping[str, Any]
+) -> tuple[str, ...]:
     required = {
         "current_micro_plan",
         "completed_checklist",
@@ -468,9 +355,8 @@ def validate_candidate_submission(value: Mapping[str, Any], *, work_view: Mappin
             raise ValueError(f"status={status} requires summary")
         if str(value.get("affected_module") or "") != _bound_unit_name(work_view):
             raise ValueError("candidate defect must target the bound module")
-        if not list(value.get("locations") or []) and not list(value.get("requirements") or []):
-            raise ValueError("candidate defect requires Requirement text or a source location")
-        validate_submission_requirement_refs(value, work_view=work_view, owner="Coder submission")
+        return ()
+    return ()
 
 
 def _live_worktree_delta(workspace: Mapping[str, Any], *, work_view: Mapping[str, Any]) -> list[str]:
@@ -529,15 +415,9 @@ def _scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
 
 
 def _validate_defect_args(args: Mapping[str, Any], *, work_view: Mapping[str, Any]) -> None:
+    del work_view
     if not str(args.get("summary") or "").strip():
         raise ValueError("summary is required")
-    if not _defect_locations(args) and not _defect_requirements(args):
-        raise ValueError("cite Requirement text or a source path")
-    validate_submission_requirement_refs(
-        {"requirements": _defect_requirements(args)},
-        work_view=work_view,
-        owner="Coder defect",
-    )
 
 
 def _is_software_module_view(work_view: Mapping[str, Any]) -> bool:
@@ -554,15 +434,8 @@ def _bound_unit_name(work_view: Mapping[str, Any]) -> str:
     module_name = str(work_view.get("module_name") or "").strip()
     if module_name:
         return module_name
-    return str(dict(work_view.get("unit_contract") or {}).get("unit_id") or "").strip()
-
-
-def _defect_requirements(args: Mapping[str, Any]) -> list[dict[str, str]]:
-    section = str(args.get("requirement_section") or "").strip()
-    requirement = str(args.get("requirement") or "").strip()
-    if bool(section) != bool(requirement):
-        raise ValueError("requirement_section and requirement must be provided together")
-    return [{"section": section, "requirement": requirement}] if section else []
+    contract = dict(work_view.get("unit_contract") or {})
+    return str(contract.get("name") or contract.get("unit_id") or "").strip()
 
 
 def _defect_locations(args: Mapping[str, Any]) -> list[dict[str, str]]:

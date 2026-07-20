@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from pal.execution.capability_registry import CapabilityRegistry
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
+from pydantic import BaseModel, ValidationError
+
 from pal.execution.capability_compiler import compile_provider_subtree
 from pal.execution.contracts import (
     CapabilityCall,
@@ -19,8 +22,33 @@ from pal.execution.contracts import (
     CapabilityCallable,
     CapabilityResult,
     ExecutionRuntimePort,
-    Tool,
     ToolCallBudget,
+)
+from pal.execution.tool_facade import (
+    CompleteResult,
+    EffectKind,
+    EffectOutcome,
+    EffectReceipt,
+    FailedResult,
+    InvocationMode,
+    McpToolOutput,
+    PagingMode,
+    PagedResult,
+    RejectedResult,
+    RetryDirective,
+    Tool as ImmutableTool,
+    ToolAffordance,
+    ToolHandlerResult,
+    ToolInvocationResult,
+    derive_retry_directive,
+    rejection,
+    validate_output,
+)
+from pal.execution.tool_registry import (
+    CompiledToolRecord,
+    ToolRegistryGeneration,
+    compile_registry_generation,
+    subtree_for_tool,
 )
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.plugins.l3.registry import L3PluginRegistry
@@ -29,20 +57,13 @@ from pal.execution.tool_result_pager import (
     DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS,
     ToolResultPage,
     ToolResultPagerStore,
-    render_tool_result_page_for_llm,
 )
 from pal.shared import (
-    BoundActionIndex,
     BoundCapabilityAction,
-    CapabilityForestRegistry,
-    CompiledCapabilityIndex,
+    MountedSubtreeHandle,
     RuntimeStatus,
     SINGLETON_TARGET,
-    llm_tool_name,
-    replace_internal_tool_names,
-    replace_internal_tool_names_in_value,
 )
-from pal.shared.result_rendering import render_head_tail_preview_for_llm
 
 if TYPE_CHECKING:
     from pal.core.module_registry import ModuleHandle
@@ -50,11 +71,6 @@ if TYPE_CHECKING:
 
 @dataclass
 class ExecutionRuntime(ExecutionRuntimePort):
-    capability_registry: CapabilityRegistry = field(default_factory=CapabilityRegistry)
-    capability_forest: CapabilityForestRegistry = field(default_factory=CapabilityForestRegistry)
-    compiled_capability_index: CompiledCapabilityIndex = field(default_factory=CompiledCapabilityIndex)
-    bound_action_index: BoundActionIndex = field(default_factory=BoundActionIndex)
-    tools: dict[str, Tool] = field(default_factory=dict)
     provider_registry: dict[str, Any] = field(default_factory=dict)
     l3_plugin_registry: L3PluginRegistry = field(default_factory=L3PluginRegistry)
     runtime_root: Path | None = None
@@ -65,6 +81,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
     _interrupt_handles: dict[str, set[Any]] = field(default_factory=dict)
     _interrupt_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _interrupt_state_lock: threading.Lock = field(default_factory=threading.Lock)
+    _registry_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _registry_generation: ToolRegistryGeneration = field(
+        default_factory=ToolRegistryGeneration.empty,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         default_l3 = NullL3Plugin()
@@ -82,6 +104,30 @@ class ExecutionRuntime(ExecutionRuntimePort):
             self.sync_executor.shutdown(wait=False, cancel_futures=True)
             self.sync_executor = None
 
+    @property
+    def registry_generation(self) -> ToolRegistryGeneration:
+        return self._registry_generation
+
+    @property
+    def capability_registry(self):
+        return self._registry_generation.capability_registry
+
+    @property
+    def capability_forest(self):
+        return self._registry_generation.forest
+
+    @property
+    def compiled_capability_index(self):
+        return self._registry_generation.capability_index
+
+    @property
+    def bound_action_index(self):
+        return self._registry_generation.canonical_bindings
+
+    @property
+    def tools(self):
+        return self._registry_generation.tool_implementations
+
     def register_capability(self, descriptor: CapabilityDescriptor, callable: CapabilityCallable) -> None:
         canonical_path = str(descriptor.canonical_path or descriptor.name).strip()
         binding = self._binding_for_action(
@@ -92,28 +138,44 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 callable=callable,
             )
         )
-        self.compiled_capability_index.validate_register(descriptor)
-        self.bound_action_index.register(binding)
-        try:
-            self.compiled_capability_index.register(descriptor)
-            self.capability_registry.register(descriptor)
-        except Exception:
-            self.bound_action_index.unregister_many([(binding.canonical_path, binding.target_id)])
-            self.compiled_capability_index.unregister_many([descriptor.name])
-            self.capability_registry.unregister(descriptor.name)
-            raise
+        subtree = MountedSubtreeHandle(module_id=descriptor.module_id or "standalone")
+        subtree.descriptors.append(descriptor)
+        subtree.bound_actions.append(binding)
+        subtree.bound_action_keys.append((binding.canonical_path, binding.target_id))
+        subtree.search_record_ids.append(descriptor.name)
+        key = f"__standalone__:{descriptor.name}"
+        with self._registry_lock:
+            current = self._registry_generation
+            mounted = dict(current.mounted_subtrees)
+            if key in mounted:
+                raise ValueError(f"capability descriptor name already registered: {descriptor.name}")
+            mounted[key] = subtree
+            self._registry_generation = compile_registry_generation(
+                generation_id=current.generation_id + 1,
+                mounted_subtrees=mounted,
+                tool_implementations=dict(current.tool_implementations),
+            )
+            subtree.mounted = True
 
     def unregister_capability(self, name: str) -> None:
-        descriptor = self.compiled_capability_index.records.get(str(name or "").strip())
-        if descriptor is None:
-            descriptor = self._resolve_descriptor(name)
-        if not isinstance(descriptor, CapabilityDescriptor):
-            return
-        canonical_path = str(descriptor.canonical_path or descriptor.name).strip()
-        target_id = descriptor.target_id or SINGLETON_TARGET
-        self.bound_action_index.unregister_many([(canonical_path, target_id)])
-        self.compiled_capability_index.unregister_many([descriptor.name])
-        self.capability_registry.unregister(descriptor.name)
+        normalized = str(name or "").strip()
+        with self._registry_lock:
+            current = self._registry_generation
+            descriptor = current.capability_index.records.get(normalized)
+            if descriptor is None:
+                resolved = self._resolve_descriptor(normalized)
+                descriptor = resolved if isinstance(resolved, CapabilityDescriptor) else None
+            if descriptor is None:
+                return
+            key = f"__standalone__:{descriptor.name}"
+            mounted = dict(current.mounted_subtrees)
+            if mounted.pop(key, None) is None:
+                return
+            self._registry_generation = compile_registry_generation(
+                generation_id=current.generation_id + 1,
+                mounted_subtrees=mounted,
+                tool_implementations=dict(current.tool_implementations),
+            )
 
     def register_provider_ref(self, provider_id: str, provider: Any) -> None:
         self.provider_registry[provider_id] = provider
@@ -121,8 +183,43 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def unregister_provider_ref(self, provider_id: str) -> None:
         self.provider_registry.pop(provider_id, None)
 
-    def register_tool(self, tool: Tool) -> None:
-        self.tools[tool.name] = tool
+    def register_tool(self, tool: Any) -> None:
+        canonical_path = str(
+            tool.canonical_path if isinstance(tool, ImmutableTool) else getattr(tool, "name", "")
+        ).strip()
+        if not canonical_path:
+            raise ValueError("tool canonical path is required")
+        with self._registry_lock:
+            current = self._registry_generation
+            implementations = dict(current.tool_implementations)
+            implementations[canonical_path] = tool
+            mounted = dict(current.mounted_subtrees)
+            if isinstance(tool, ImmutableTool):
+                mounted[f"__tool__:{canonical_path}"] = subtree_for_tool(tool)
+            self._registry_generation = compile_registry_generation(
+                generation_id=current.generation_id + 1,
+                mounted_subtrees=mounted,
+                tool_implementations=implementations,
+            )
+
+    def unregister_tool(self, name: str) -> None:
+        normalized = str(name or "").strip()
+        with self._registry_lock:
+            current = self._registry_generation
+            canonical_path = normalized
+            record = current.record_for_alias(normalized)
+            if record is not None:
+                canonical_path = record.canonical_path
+            implementations = dict(current.tool_implementations)
+            if implementations.pop(canonical_path, None) is None:
+                return
+            mounted = dict(current.mounted_subtrees)
+            mounted.pop(f"__tool__:{canonical_path}", None)
+            self._registry_generation = compile_registry_generation(
+                generation_id=current.generation_id + 1,
+                mounted_subtrees=mounted,
+                tool_implementations=implementations,
+            )
 
     def begin_tool_result_turn(
         self,
@@ -149,44 +246,27 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return self.tool_result_pager.read_page(result_ref, page=page, page_size=page_size, anchor=anchor)
 
     def list_tool_specs(self) -> list[dict[str, Any]]:
-        specs: list[dict[str, Any]] = []
-        for name in sorted(self.tools):
-            tool = self.tools[name]
-            specs.append(
-                {
-                    "name": llm_tool_name(tool.name),
-                    "display_name": str(getattr(tool, "display_name", "") or tool.name),
-                    "family": str(getattr(tool, "family", "") or "general"),
-                    "description": replace_internal_tool_names(getattr(tool, "description", "") or f"Tool {tool.name}"),
-                    "tags": list(getattr(tool, "tags", ()) or ()),
-                    "keywords": list(getattr(tool, "keywords", ()) or ()),
-                    "args_schema": replace_internal_tool_names_in_value(
-                        dict(getattr(tool, "args_schema", {}) or {"type": "object", "properties": {}})
-                    ),
-                    "result_schema": replace_internal_tool_names_in_value(
-                        dict(getattr(tool, "result_schema", {}) or {"type": "object", "properties": {}})
-                    ),
-                }
-            )
-        return specs
+        generation = self._registry_generation
+        records = {**generation.direct_aliases, **generation.indirect_aliases}
+        return [self._tool_spec_from_record(records[alias]) for alias in sorted(records)]
 
     def get_tool_spec(self, name: str) -> dict[str, Any] | None:
-        tool = self.tools.get(self.resolve_llm_tool_name(name))
-        if tool is None:
+        record = self._registry_generation.record_for_alias(str(name or "").strip())
+        if record is None:
             return None
+        return self._tool_spec_from_record(record)
+
+    @staticmethod
+    def _tool_spec_from_record(record: CompiledToolRecord) -> dict[str, Any]:
         return {
-            "name": llm_tool_name(tool.name),
-            "display_name": str(getattr(tool, "display_name", "") or tool.name),
-            "family": str(getattr(tool, "family", "") or "general"),
-            "description": replace_internal_tool_names(getattr(tool, "description", "") or f"Tool {tool.name}"),
-            "tags": list(getattr(tool, "tags", ()) or ()),
-            "keywords": list(getattr(tool, "keywords", ()) or ()),
-            "args_schema": replace_internal_tool_names_in_value(
-                dict(getattr(tool, "args_schema", {}) or {"type": "object", "properties": {}})
-            ),
-            "result_schema": replace_internal_tool_names_in_value(
-                dict(getattr(tool, "result_schema", {}) or {"type": "object", "properties": {}})
-            ),
+            "name": record.alias,
+            "display_name": record.alias,
+            "family": record.family or "general",
+            "description": record.description,
+            "search_text": record.search_text,
+            "invocation_mode": record.execution.invocation_mode.value,
+            "args_schema": dict(record.input_schema),
+            "result_schema": dict(record.output_schema),
         }
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
@@ -250,44 +330,50 @@ class ExecutionRuntime(ExecutionRuntimePort):
         subtree = handle.mounted_subtree
         if subtree is None:
             return []
-        if subtree.mounted:
-            return [descriptor.name for descriptor in subtree.descriptors]
-        bindings = [self._binding_for_action(action) for action in subtree.bound_actions]
-        self.compiled_capability_index.validate_register_many(subtree.descriptors)
-        pending_binding_keys: set[tuple[str, str]] = set()
-        for binding in bindings:
-            key = (binding.canonical_path, binding.target_id)
-            if key in pending_binding_keys:
-                raise ValueError(
-                    f"canonical capability binding duplicated in subtree: {binding.canonical_path} "
-                    f"target={binding.target_id}"
-                )
-            pending_binding_keys.add(key)
-            if key in self.bound_action_index.actions:
-                raise ValueError(
-                    f"canonical capability binding already registered: {binding.canonical_path} "
-                    f"target={binding.target_id}"
-                )
-        self.capability_forest.mount(subtree)
-        for descriptor in subtree.descriptors:
-            self.compiled_capability_index.register(descriptor)
-            self.capability_registry.register(descriptor)
-        for binding in bindings:
-            self.bound_action_index.register(binding)
+        with self._registry_lock:
+            if subtree.mounted:
+                return [descriptor.name for descriptor in subtree.descriptors]
+            current = self._registry_generation
+            prepared = self._prepared_subtree(subtree)
+            mounted = dict(current.mounted_subtrees)
+            mounted[subtree.module_id] = prepared
+            candidate = compile_registry_generation(
+                generation_id=current.generation_id + 1,
+                mounted_subtrees=mounted,
+                tool_implementations=dict(current.tool_implementations),
+            )
+            self._registry_generation = candidate
+            subtree.mounted = True
         return [descriptor.name for descriptor in subtree.descriptors]
 
     def unmount_subtree(self, handle: "ModuleHandle") -> list[str]:
         subtree = handle.mounted_subtree
-        if subtree is None or not subtree.mounted:
+        if subtree is None:
             return []
-        # Teardown must be exact. The mounted subtree handle records every key
-        # and record id so we never rely on prefix scans or whole-table walks.
-        self.bound_action_index.unregister_many(subtree.bound_action_keys)
-        self.compiled_capability_index.unregister_many(subtree.search_record_ids)
-        for descriptor in subtree.descriptors:
-            self.capability_registry.unregister(descriptor.name)
-        self.capability_forest.unmount(subtree)
+        with self._registry_lock:
+            if not subtree.mounted:
+                return []
+            current = self._registry_generation
+            mounted = dict(current.mounted_subtrees)
+            mounted.pop(subtree.module_id, None)
+            candidate = compile_registry_generation(
+                generation_id=current.generation_id + 1,
+                mounted_subtrees=mounted,
+                tool_implementations=dict(current.tool_implementations),
+            )
+            self._registry_generation = candidate
+            subtree.mounted = False
         return list(subtree.search_record_ids)
+
+    def _prepared_subtree(self, subtree: MountedSubtreeHandle) -> MountedSubtreeHandle:
+        prepared = MountedSubtreeHandle(module_id=subtree.module_id)
+        prepared.nodes.extend(subtree.nodes)
+        prepared.descriptors.extend(subtree.descriptors)
+        prepared.bound_actions.extend(self._binding_for_action(action) for action in subtree.bound_actions)
+        prepared.node_ids.extend(subtree.node_ids)
+        prepared.bound_action_keys.extend(subtree.bound_action_keys)
+        prepared.search_record_ids.extend(subtree.search_record_ids)
+        return prepared
 
     def _binding_for_action(self, action: BoundCapabilityAction) -> BoundCapabilityAction:
         tool = self.tools.get(action.canonical_path)
@@ -326,6 +412,749 @@ class ExecutionRuntime(ExecutionRuntimePort):
             async_callable=async_callable,
         )
 
+    def invoke_direct_tool(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: ToolCallBudget | None = None,
+        turn_id: str | None = None,
+        generation: ToolRegistryGeneration | None = None,
+    ) -> ToolInvocationResult:
+        captured = generation or self._registry_generation
+        return self._invoke_tool_record_sync(
+            captured,
+            call,
+            invocation_mode=InvocationMode.DIRECT,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+        )
+
+    def invoke_indirect_tool(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: ToolCallBudget | None = None,
+        turn_id: str | None = None,
+        generation: ToolRegistryGeneration | None = None,
+    ) -> ToolInvocationResult:
+        captured = generation or self._registry_generation
+        return self._invoke_tool_record_sync(
+            captured,
+            call,
+            invocation_mode=InvocationMode.INDIRECT,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+        )
+
+    async def invoke_direct_tool_async(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: ToolCallBudget | None = None,
+        turn_id: str | None = None,
+        generation: ToolRegistryGeneration | None = None,
+    ) -> ToolInvocationResult:
+        captured = generation or self._registry_generation
+        return await self._invoke_tool_record_async(
+            captured,
+            call,
+            invocation_mode=InvocationMode.DIRECT,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+        )
+
+    async def invoke_indirect_tool_async(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: ToolCallBudget | None = None,
+        turn_id: str | None = None,
+        generation: ToolRegistryGeneration | None = None,
+    ) -> ToolInvocationResult:
+        captured = generation or self._registry_generation
+        return await self._invoke_tool_record_async(
+            captured,
+            call,
+            invocation_mode=InvocationMode.INDIRECT,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+        )
+
+    def _invoke_tool_record_sync(
+        self,
+        generation: ToolRegistryGeneration,
+        call: CanonicalToolCall,
+        *,
+        invocation_mode: InvocationMode,
+        allow_tools: bool,
+        budget: ToolCallBudget | None,
+        turn_id: str | None,
+    ) -> ToolInvocationResult:
+        resolved = self._resolve_invocation_record(generation, call, invocation_mode=invocation_mode)
+        if isinstance(resolved, RejectedResult):
+            return resolved
+        record = resolved
+        validated = self._validate_invocation_input(record, call.args)
+        if isinstance(validated, RejectedResult):
+            return validated
+        special = self._invoke_facade_builtin_sync(
+            generation,
+            record,
+            call,
+            validated,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+        )
+        if special is not None:
+            return special
+        if not allow_tools:
+            return rejection(
+                "finalization_only",
+                "tool execution disabled in finalization mode",
+                retry=RetryDirective.DO_NOT_RETRY,
+            )
+        lifecycle = self._maybe_handle_lifecycle_action(record.binding.descriptor)
+        try:
+            raw = lifecycle if lifecycle is not None else self._call_record_sync(record, call, validated, turn_id, budget, allow_tools)
+            return self._normalize_invocation_result(record, call, raw, budget=budget)
+        except Exception as exc:
+            return self._handler_exception_result(record, exc)
+
+    async def _invoke_tool_record_async(
+        self,
+        generation: ToolRegistryGeneration,
+        call: CanonicalToolCall,
+        *,
+        invocation_mode: InvocationMode,
+        allow_tools: bool,
+        budget: ToolCallBudget | None,
+        turn_id: str | None,
+    ) -> ToolInvocationResult:
+        resolved = self._resolve_invocation_record(generation, call, invocation_mode=invocation_mode)
+        if isinstance(resolved, RejectedResult):
+            return resolved
+        record = resolved
+        validated = self._validate_invocation_input(record, call.args)
+        if isinstance(validated, RejectedResult):
+            return validated
+        special = await self._invoke_facade_builtin_async(
+            generation,
+            record,
+            call,
+            validated,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+        )
+        if special is not None:
+            return special
+        if not allow_tools:
+            return rejection(
+                "finalization_only",
+                "tool execution disabled in finalization mode",
+                retry=RetryDirective.DO_NOT_RETRY,
+            )
+        lifecycle = self._maybe_handle_lifecycle_action(record.binding.descriptor)
+        try:
+            raw = lifecycle if lifecycle is not None else await self._call_record_async(
+                record, call, validated, turn_id, budget, allow_tools
+            )
+            return self._normalize_invocation_result(record, call, raw, budget=budget)
+        except Exception as exc:
+            return self._handler_exception_result(record, exc)
+
+    @staticmethod
+    def _resolve_invocation_record(
+        generation: ToolRegistryGeneration,
+        call: CanonicalToolCall,
+        *,
+        invocation_mode: InvocationMode,
+    ) -> CompiledToolRecord | RejectedResult:
+        alias = str(call.name or "").strip()
+        expected = generation.direct_aliases if invocation_mode is InvocationMode.DIRECT else generation.indirect_aliases
+        wrong = generation.indirect_aliases if invocation_mode is InvocationMode.DIRECT else generation.direct_aliases
+        record = expected.get(alias)
+        if record is not None:
+            return record
+        wrong_record = wrong.get(alias)
+        if wrong_record is not None:
+            if invocation_mode is InvocationMode.DIRECT:
+                affordance = ToolAffordance(
+                    tool="call_tool",
+                    arguments={"name": alias, "args": dict(call.args)},
+                    reason="This tool is indirect and must be invoked through call_tool.",
+                )
+            else:
+                affordance = ToolAffordance(
+                    tool=alias,
+                    arguments=dict(call.args),
+                    reason="This tool is direct and must be invoked as a provider tool.",
+                )
+            return rejection(
+                "wrong_invocation_mode",
+                f"tool {alias!r} uses {wrong_record.execution.invocation_mode.value} invocation",
+                retry=RetryDirective.CORRECT_INPUT,
+                affordances=[affordance],
+                details={"correct_invocation_mode": wrong_record.execution.invocation_mode.value},
+            )
+        return rejection(
+            "unknown_tool",
+            f"unknown tool alias: {alias}",
+            retry=RetryDirective.CORRECT_INPUT,
+            affordances=[
+                ToolAffordance(
+                    tool="search_tools",
+                    arguments={"query": alias},
+                    reason="Aliases are generation-scoped; search the current registry instead of guessing a canonical path.",
+                )
+            ],
+        )
+
+    @staticmethod
+    def _validate_invocation_input(
+        record: CompiledToolRecord,
+        args: dict[str, Any],
+    ) -> BaseModel | dict[str, Any] | RejectedResult:
+        try:
+            if record.is_mcp:
+                Draft202012Validator(record.input_schema).validate(dict(args or {}))
+                return dict(args or {})
+            if record.input_model is None:
+                raise TypeError("internal tool has no InputModel")
+            return record.input_model.model_validate(dict(args or {}), strict=True)
+        except (ValidationError, JsonSchemaValidationError, TypeError) as exc:
+            details = (
+                {"validation_errors": exc.errors(include_url=False, include_input=False)}
+                if isinstance(exc, ValidationError)
+                else {"validation_error": str(exc)}
+            )
+            return rejection(
+                "invalid_arguments",
+                f"invalid arguments for {record.alias}: {exc}",
+                retry=RetryDirective.CORRECT_INPUT,
+                affordances=[
+                    ToolAffordance(
+                        tool="read_tool",
+                        arguments={"name": record.alias},
+                        reason="Read the bound input schema and valid example before correcting the call.",
+                    )
+                ],
+                details=details,
+            )
+
+    def _invoke_facade_builtin_sync(
+        self,
+        generation: ToolRegistryGeneration,
+        record: CompiledToolRecord,
+        call: CanonicalToolCall,
+        validated: BaseModel | dict[str, Any],
+        *,
+        allow_tools: bool,
+        budget: ToolCallBudget | None,
+        turn_id: str | None,
+    ) -> ToolInvocationResult | None:
+        args = validated.model_dump(mode="python") if isinstance(validated, BaseModel) else dict(validated)
+        if record.alias == "search_tools":
+            return self._complete_builtin(record, self._search_generation(generation, args))
+        if record.alias == "read_tool":
+            payload = self._read_generation_tool(generation, str(args.get("name") or ""))
+            if payload is None:
+                return rejection(
+                    "unknown_tool",
+                    f"unknown tool alias: {args.get('name')}",
+                    affordances=[ToolAffordance(tool="search_tools", arguments={"query": args.get("name") or ""}, reason="Search current aliases.")],
+                )
+            return self._complete_builtin(record, payload)
+        if record.alias == "call_tool":
+            target = CanonicalToolCall(
+                name=str(args.get("name") or ""),
+                args=dict(args.get("args") or {}),
+                call_id=call.call_id,
+            )
+            return self._invoke_tool_record_sync(
+                generation,
+                target,
+                invocation_mode=InvocationMode.INDIRECT,
+                allow_tools=allow_tools,
+                budget=budget,
+                turn_id=turn_id,
+            )
+        if record.alias == "read_tool_result":
+            return self._read_tool_result_builtin(record, call, args)
+        return None
+
+    async def _invoke_facade_builtin_async(
+        self,
+        generation: ToolRegistryGeneration,
+        record: CompiledToolRecord,
+        call: CanonicalToolCall,
+        validated: BaseModel | dict[str, Any],
+        *,
+        allow_tools: bool,
+        budget: ToolCallBudget | None,
+        turn_id: str | None,
+    ) -> ToolInvocationResult | None:
+        args = validated.model_dump(mode="python") if isinstance(validated, BaseModel) else dict(validated)
+        if record.alias == "search_tools":
+            return self._complete_builtin(record, self._search_generation(generation, args))
+        if record.alias == "read_tool":
+            payload = self._read_generation_tool(generation, str(args.get("name") or ""))
+            if payload is None:
+                return rejection(
+                    "unknown_tool",
+                    f"unknown tool alias: {args.get('name')}",
+                    affordances=[ToolAffordance(tool="search_tools", arguments={"query": args.get("name") or ""}, reason="Search current aliases.")],
+                )
+            return self._complete_builtin(record, payload)
+        if record.alias == "call_tool":
+            target = CanonicalToolCall(
+                name=str(args.get("name") or ""),
+                args=dict(args.get("args") or {}),
+                call_id=call.call_id,
+            )
+            return await self._invoke_tool_record_async(
+                generation,
+                target,
+                invocation_mode=InvocationMode.INDIRECT,
+                allow_tools=allow_tools,
+                budget=budget,
+                turn_id=turn_id,
+            )
+        if record.alias == "read_tool_result":
+            return self._read_tool_result_builtin(record, call, args)
+        return None
+
+    def _read_tool_result_builtin(
+        self,
+        record: CompiledToolRecord,
+        call: CanonicalToolCall,
+        args: dict[str, Any],
+    ) -> ToolInvocationResult:
+        raw = record.binding.callable(
+            CapabilityCall(name=record.canonical_path, args=args, meta={"tool_call": call})
+        )
+        if not isinstance(raw, CapabilityResult):
+            return FailedResult(
+                error_code="invalid_pager_result",
+                error="read_tool_result returned an invalid internal result",
+                effect=EffectOutcome.NONE,
+                retry=RetryDirective.DO_NOT_RETRY,
+                llm_text="read_tool_result returned an invalid internal result",
+            )
+        if raw.status != RuntimeStatus.OK:
+            return FailedResult(
+                error_code=str((raw.structured or {}).get("reason") or "result_handle_expired"),
+                error=raw.text,
+                effect=EffectOutcome.NONE,
+                retry=RetryDirective.DO_NOT_RETRY,
+                llm_text=raw.llm_text,
+                details=dict(raw.structured or {}),
+                affordances=[
+                    ToolAffordance(
+                        tool="search_tools",
+                        arguments={"query": "original tool"},
+                        reason="The handle is expired; rediscover and rerun the original tool if its retry semantics permit.",
+                    )
+                ],
+            )
+        output = {**dict(raw.structured or {}), "page_text": raw.text}
+        affordances: list[ToolAffordance] = []
+        result_ref = str(output.get("result_ref") or "")
+        page = int(output.get("anchor_page") or output.get("page") or 1)
+        anchor = str(output.get("anchor") or "head")
+        if bool(output.get("has_more_after")):
+            next_page = page - 1 if anchor == "tail" else page + 1
+            affordances.append(
+                ToolAffordance(
+                    tool="read_tool_result",
+                    arguments={"result_ref": result_ref, "page": next_page, "anchor": anchor},
+                    reason="Read the exact adjacent newer/next page.",
+                )
+            )
+        if bool(output.get("has_more_before")):
+            previous_page = page + 1 if anchor == "tail" else max(1, page - 1)
+            affordances.append(
+                ToolAffordance(
+                    tool="read_tool_result",
+                    arguments={"result_ref": result_ref, "page": previous_page, "anchor": anchor},
+                    reason="Read the exact adjacent older/previous page.",
+                )
+            )
+        return self._complete_builtin(
+            record,
+            output,
+            llm_text=raw.llm_text,
+            affordances=affordances,
+        )
+
+    @staticmethod
+    def _search_generation(generation: ToolRegistryGeneration, args: dict[str, Any]) -> dict[str, Any]:
+        query = str(args.get("query") or "").strip().lower()
+        try:
+            limit = max(1, int(args.get("top_k") or args.get("limit") or 10))
+        except (TypeError, ValueError):
+            limit = 10
+        terms = [item for item in query.split() if item]
+        scored: list[tuple[int, str, dict[str, Any]]] = []
+        for alias, item in generation.search_records.items():
+            haystack = f"{alias} {item['search_text']}".lower()
+            score = sum(3 if term in alias.lower() else 1 for term in terms if term in haystack)
+            if terms and score == 0:
+                continue
+            scored.append((score, alias, dict(item)))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        hits = [item for _, _, item in scored[:limit]]
+        return {"hits": hits, "total_count": len(scored), "returned_count": len(hits)}
+
+    @staticmethod
+    def _read_generation_tool(generation: ToolRegistryGeneration, alias: str) -> dict[str, Any] | None:
+        record = generation.record_for_alias(alias)
+        if record is None:
+            return None
+        return {
+            "alias": record.alias,
+            "invocation_mode": record.execution.invocation_mode.value,
+            "description": record.description,
+            "example": dict(record.example) if record.example is not None else None,
+            "input_schema": dict(record.input_schema),
+            "output_schema": dict(record.output_schema),
+        }
+
+    @staticmethod
+    def _complete_builtin(
+        record: CompiledToolRecord,
+        output: dict[str, Any],
+        *,
+        llm_text: str = "",
+        affordances: list[ToolAffordance] | None = None,
+    ) -> ToolInvocationResult:
+        try:
+            if record.output_model is None:
+                raise TypeError("internal built-in has no OutputModel")
+            validated = validate_output(record.output_model, output).model_dump(mode="json", exclude_none=True)
+        except (ValidationError, TypeError) as exc:
+            outcome = EffectOutcome.NONE if record.execution.effect_kind is EffectKind.NONE else EffectOutcome.NOT_APPLIED
+            return FailedResult(
+                error_code="output_validation_failed",
+                error=str(exc),
+                effect=outcome,
+                retry=derive_retry_directive(record.execution, outcome),
+                llm_text=f"Built-in output failed validation for {record.alias}.",
+                details={"output_schema": record.output_schema},
+            )
+        return CompleteResult(
+            output=validated,
+            effect=EffectOutcome.NONE if record.execution.effect_kind is EffectKind.NONE else EffectOutcome.APPLIED,
+            llm_text=llm_text.strip() or json.dumps(validated, ensure_ascii=False, sort_keys=True),
+            affordances=list(affordances or ()),
+        )
+
+    def _call_record_sync(
+        self,
+        record: CompiledToolRecord,
+        call: CanonicalToolCall,
+        validated: BaseModel | dict[str, Any],
+        turn_id: str | None,
+        budget: ToolCallBudget | None,
+        allow_tools: bool,
+    ) -> Any:
+        if record.facade_tool is not None:
+            handler = record.facade_tool.handler
+            result = handler(
+                validated,
+                **_tool_invoke_kwargs(
+                    handler,
+                    runtime=self,
+                    turn_id=turn_id,
+                    tool_call=call,
+                    budget=budget,
+                    allow_tools=allow_tools,
+                ),
+            )
+        else:
+            args = validated.model_dump(mode="python", exclude_none=True) if isinstance(validated, BaseModel) else dict(validated)
+            result = record.binding.callable(
+                CapabilityCall(
+                    name=record.canonical_path,
+                    args=args,
+                    meta=self._invocation_meta(call, turn_id=turn_id, budget=budget, allow_tools=allow_tools),
+                )
+            )
+        if inspect.isawaitable(result):
+            raise RuntimeError(f"tool requires async execution: {record.alias}")
+        return result
+
+    async def _call_record_async(
+        self,
+        record: CompiledToolRecord,
+        call: CanonicalToolCall,
+        validated: BaseModel | dict[str, Any],
+        turn_id: str | None,
+        budget: ToolCallBudget | None,
+        allow_tools: bool,
+    ) -> Any:
+        if record.facade_tool is not None:
+            handler = record.facade_tool.handler
+            result = handler(
+                validated,
+                **_tool_invoke_kwargs(
+                    handler,
+                    runtime=self,
+                    turn_id=turn_id,
+                    tool_call=call,
+                    budget=budget,
+                    allow_tools=allow_tools,
+                ),
+            )
+            return await result if inspect.isawaitable(result) else result
+        args = validated.model_dump(mode="python", exclude_none=True) if isinstance(validated, BaseModel) else dict(validated)
+        capability_call = CapabilityCall(
+            name=record.canonical_path,
+            args=args,
+            meta=self._invocation_meta(call, turn_id=turn_id, budget=budget, allow_tools=allow_tools),
+        )
+        if record.binding.async_callable is not None:
+            result = record.binding.async_callable(capability_call)
+            return await result if inspect.isawaitable(result) else result
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(self.sync_executor, lambda: record.binding.callable(capability_call))
+        return await result if inspect.isawaitable(result) else result
+
+    def _normalize_invocation_result(
+        self,
+        record: CompiledToolRecord,
+        call: CanonicalToolCall,
+        raw: Any,
+        *,
+        budget: ToolCallBudget | None,
+    ) -> ToolInvocationResult:
+        receipt: EffectReceipt | None = None
+        affordances: list[ToolAffordance] = []
+        llm_text = ""
+        if isinstance(raw, ToolHandlerResult):
+            candidate = raw.output
+            receipt = raw.effect_receipt
+            affordances = list(raw.affordances)
+            llm_text = raw.llm_text
+        elif isinstance(raw, CapabilityResult) or all(
+            hasattr(raw, attribute) for attribute in ("status", "text", "structured", "llm_text")
+        ):
+            llm_text = str(getattr(raw, "llm_text", "") or "")
+            raw_status = getattr(raw, "status", RuntimeStatus.ERROR)
+            raw_structured = getattr(raw, "structured", None)
+            raw_text = str(getattr(raw, "text", "") or "")
+            if raw_status != RuntimeStatus.OK:
+                outcome = EffectOutcome.NONE if record.execution.effect_kind is EffectKind.NONE else EffectOutcome.UNKNOWN
+                return FailedResult(
+                    error_code=str((raw_structured or {}).get("error_code") or raw_status or "handler_failed"),
+                    error=raw_text or llm_text,
+                    effect=outcome,
+                    retry=derive_retry_directive(record.execution, outcome),
+                    llm_text=llm_text or raw_text,
+                    details=dict(raw_structured or {}),
+                )
+            candidate = raw_structured if raw_structured is not None else {"text": raw_text}
+            if record.is_mcp and isinstance(candidate, dict) and isinstance(candidate.get("raw_result"), dict):
+                mcp_raw = dict(candidate["raw_result"])
+                candidate = mcp_raw.get("structuredContent") if record.output_schema != McpToolOutput.model_json_schema(mode="validation") else {
+                    "content": list(mcp_raw.get("content") or []),
+                    "structured_content": mcp_raw.get("structuredContent"),
+                    "is_error": bool(mcp_raw.get("isError")),
+                }
+                receipt = EffectReceipt(outcome=EffectOutcome.APPLIED, receipt={"mcp_response": True})
+        else:
+            candidate = raw
+
+        if record.execution.effect_kind is EffectKind.NONE:
+            outcome = EffectOutcome.NONE
+        elif receipt is not None:
+            outcome = receipt.outcome
+        elif record.requires_effect_receipt:
+            outcome = EffectOutcome.UNKNOWN
+            return FailedResult(
+                error_code="missing_effect_receipt",
+                error=f"effectful handler for {record.alias} returned no effect receipt",
+                effect=outcome,
+                retry=derive_retry_directive(record.execution, outcome),
+                llm_text=f"Effect outcome is unknown for {record.alias}; reconcile before retrying.",
+            )
+        else:
+            outcome = EffectOutcome.APPLIED
+
+        try:
+            if record.is_mcp:
+                Draft202012Validator(record.output_schema).validate(candidate)
+                output: Any = candidate
+            else:
+                if record.output_model is None:
+                    raise TypeError("internal tool has no OutputModel")
+                output_model = validate_output(record.output_model, candidate)
+                output = output_model.model_dump(mode="json", exclude_none=True)
+        except (ValidationError, JsonSchemaValidationError, TypeError) as exc:
+            return FailedResult(
+                error_code="output_validation_failed",
+                error=str(exc),
+                effect=outcome,
+                retry=derive_retry_directive(record.execution, outcome),
+                llm_text=f"Tool output failed validation for {record.alias}; effect={outcome.value}.",
+                details={"output_schema": record.output_schema},
+            )
+        rendered = llm_text.strip() or json.dumps(output, ensure_ascii=False, sort_keys=True)
+        paged = self._page_validated_output(record, call, output, rendered, outcome, budget)
+        if paged is not None:
+            return paged
+        return CompleteResult(
+            output=output,
+            effect=outcome,
+            llm_text=rendered,
+            affordances=affordances,
+        )
+
+    def _page_validated_output(
+        self,
+        record: CompiledToolRecord,
+        call: CanonicalToolCall,
+        output: Any,
+        rendered: str,
+        outcome: EffectOutcome,
+        budget: ToolCallBudget | None,
+    ) -> PagedResult | None:
+        if budget is None or record.execution.paging is PagingMode.NEVER:
+            return None
+        char_limit = self._resolve_char_limit(budget)
+        serialized = json.dumps(output, ensure_ascii=False, sort_keys=True)
+        if char_limit is None or len(serialized) <= char_limit:
+            return None
+        result_ref = str(call.call_id or "").strip() or f"call_{uuid4().hex[:12]}"
+        page_size = min(max(256, int(budget.preview_chars or 1000)), char_limit)
+        handle = self.tool_result_pager.store(
+            runtime_root=self.runtime_root,
+            turn_id=str(budget.artifact_bucket_id or result_ref),
+            result_ref=result_ref,
+            tool_name=record.alias,
+            status=RuntimeStatus.OK,
+            ok=True,
+            rendered=serialized,
+            page_size=page_size,
+        )
+        page = self.tool_result_pager.read_page(result_ref, page=1)
+        page_text = page.content if page is not None else serialized[:page_size]
+        affordances: list[ToolAffordance] = []
+        if handle.page_count > 1:
+            affordances.append(
+                ToolAffordance(
+                    tool="read_tool_result",
+                    arguments={"result_ref": result_ref, "page": 2, "anchor": "head"},
+                    reason="Read the exact next page of the validated complete output.",
+                )
+            )
+        return PagedResult(
+            result_handle={
+                "result_ref": handle.result_ref,
+                "page_size": handle.page_size,
+                "original_size": handle.original_size,
+                "page_count": handle.page_count,
+            },
+            page_text=page_text,
+            effect=outcome,
+            llm_text=page_text,
+            affordances=affordances,
+        )
+
+    @staticmethod
+    def _handler_exception_result(record: CompiledToolRecord, exc: Exception) -> FailedResult:
+        receipt = getattr(exc, "effect_receipt", None)
+        if record.execution.effect_kind is EffectKind.NONE:
+            outcome = EffectOutcome.NONE
+        elif isinstance(receipt, EffectReceipt):
+            outcome = receipt.outcome
+        else:
+            outcome = EffectOutcome.UNKNOWN
+        affordances = list(getattr(exc, "affordances", ()) or ())
+        if not affordances:
+            affordances = [
+                ToolAffordance(
+                    tool="read_tool",
+                    arguments={"name": record.alias},
+                    reason=(
+                        "Review failure and retry semantics before recovering; reconcile the external effect first "
+                        "when effect=unknown."
+                    ),
+                )
+            ]
+        return FailedResult(
+            error_code=str(getattr(exc, "error_code", "handler_exception") or "handler_exception"),
+            error=f"{exc.__class__.__name__}: {exc}",
+            effect=outcome,
+            retry=derive_retry_directive(record.execution, outcome),
+            llm_text=f"Tool {record.alias} failed; effect={outcome.value}. {exc.__class__.__name__}: {exc}",
+            affordances=affordances,
+            details=dict(getattr(exc, "details", {}) or {}),
+        )
+
+    @staticmethod
+    def _canonical_result_from_invocation(
+        alias: str,
+        call_id: str | None,
+        result: ToolInvocationResult,
+    ) -> CanonicalToolResult:
+        rendered = ExecutionRuntime._render_invocation_for_llm(result)
+        if isinstance(result, CompleteResult):
+            structured = result.output if isinstance(result.output, dict) else {"output": result.output}
+            return CanonicalToolResult(
+                name=alias,
+                ok=True,
+                text=rendered,
+                structured=structured,
+                call_id=call_id,
+                llm_text=rendered,
+                status=RuntimeStatus.OK,
+                invocation_result=result,
+            )
+        payload = result.model_dump(mode="json")
+        return CanonicalToolResult(
+            name=alias,
+            ok=False if isinstance(result, (RejectedResult, FailedResult)) else True,
+            text=rendered,
+            structured=payload,
+            call_id=call_id,
+            llm_text=rendered,
+            status=result.error_code if isinstance(result, (RejectedResult, FailedResult)) else "paged",
+            invocation_result=result,
+        )
+
+    @staticmethod
+    def _render_invocation_for_llm(result: ToolInvocationResult) -> str:
+        base = str(result.llm_text or "").strip()
+        metadata: dict[str, Any] = {
+            "kind": result.kind,
+            "effect": result.effect.value,
+        }
+        if isinstance(result, (RejectedResult, FailedResult)):
+            metadata.update(
+                {
+                    "error_code": result.error_code,
+                    "retry": result.retry.value,
+                }
+            )
+        if isinstance(result, PagedResult):
+            metadata["result_handle"] = dict(result.result_handle)
+        if result.affordances:
+            metadata["affordances"] = [item.model_dump(mode="json") for item in result.affordances]
+        if metadata == {"kind": "complete", "effect": EffectOutcome.NONE.value}:
+            return base
+        rendered_metadata = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+        return f"{base}\n\nTool result metadata: {rendered_metadata}".strip()
+
     def execute_tool(
         self,
         call: CanonicalToolCall,
@@ -334,54 +1163,15 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None = None,
         turn_id: str | None = None,
     ) -> CanonicalToolResult:
-        call_id = getattr(call, "call_id", None)
-        canonical_path = self.resolve_llm_tool_name(call.name)
-        call = CanonicalToolCall(name=canonical_path, args=dict(call.args), call_id=call_id)
-        try:
-            if not allow_tools:
-                return CanonicalToolResult(
-                    name=call.name,
-                    ok=False,
-                    text="tool execution disabled in finalization mode",
-                    structured={"reason": "finalization_only"},
-                    call_id=call_id,
-                    llm_text="tool execution disabled in finalization mode",
-                    status="finalization_only",
-                )
-            meta = self._invocation_meta(call, turn_id=turn_id, budget=budget, allow_tools=allow_tools)
-            capability_result = self.call_registered(
-                CapabilityCall(name=canonical_path, args=dict(call.args), meta=meta)
-            )
-            if capability_result.status == RuntimeStatus.ERROR and str(capability_result.text).startswith("unknown capability:"):
-                return CanonicalToolResult(
-                    name=canonical_path,
-                    ok=False,
-                    text=f"unknown tool: {canonical_path}",
-                    structured={"reason": "unknown_tool"},
-                    call_id=call_id,
-                    llm_text=f"unknown tool: {canonical_path}",
-                    status="unknown_tool",
-                )
-            canonical_result = CanonicalToolResult(
-                name=canonical_path,
-                ok=capability_result.status == RuntimeStatus.OK,
-                text=capability_result.text,
-                structured=capability_result.structured,
-                call_id=call_id,
-                llm_text=getattr(capability_result, "llm_text", ""),
-                status=capability_result.status,
-            )
-            return self._apply_tool_budget(call, canonical_result, budget=budget)
-        except Exception as exc:
-            return CanonicalToolResult(
-                name=canonical_path,
-                ok=False,
-                text=f"tool execution failed: {exc.__class__.__name__}",
-                structured={"error": str(exc), "tool": canonical_path},
-                call_id=call_id,
-                llm_text=f"tool execution failed: {exc.__class__.__name__}",
-                status=RuntimeStatus.ERROR,
-            )
+        captured = self._registry_generation
+        invocation = self.invoke_direct_tool(
+            call,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+            generation=captured,
+        )
+        return self._canonical_result_from_invocation(call.name, getattr(call, "call_id", None), invocation)
 
     async def execute_tool_async(
         self,
@@ -391,46 +1181,15 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None = None,
         turn_id: str | None = None,
     ) -> CanonicalToolResult:
-        call_id = getattr(call, "call_id", None)
-        canonical_path = self.resolve_llm_tool_name(call.name)
-        call = CanonicalToolCall(name=canonical_path, args=dict(call.args), call_id=call_id)
-        if not allow_tools:
-            return self.execute_tool(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id)
-        try:
-            meta = self._invocation_meta(call, turn_id=turn_id, budget=budget, allow_tools=allow_tools)
-            capability_result = await self.call_registered_async(
-                CapabilityCall(name=canonical_path, args=dict(call.args), meta=meta)
-            )
-            if capability_result.status == RuntimeStatus.ERROR and str(capability_result.text).startswith("unknown capability:"):
-                return CanonicalToolResult(
-                    name=canonical_path,
-                    ok=False,
-                    text=f"unknown tool: {canonical_path}",
-                    structured={"reason": "unknown_tool"},
-                    call_id=call_id,
-                    llm_text=f"unknown tool: {canonical_path}",
-                    status="unknown_tool",
-                )
-            canonical_result = CanonicalToolResult(
-                name=canonical_path,
-                ok=capability_result.status == RuntimeStatus.OK,
-                text=capability_result.text,
-                structured=capability_result.structured,
-                call_id=call_id,
-                llm_text=getattr(capability_result, "llm_text", ""),
-                status=capability_result.status,
-            )
-            return self._apply_tool_budget(call, canonical_result, budget=budget)
-        except Exception as exc:
-            return CanonicalToolResult(
-                name=canonical_path,
-                ok=False,
-                text=f"tool execution failed: {exc.__class__.__name__}",
-                structured={"error": str(exc), "tool": canonical_path},
-                call_id=call_id,
-                llm_text=f"tool execution failed: {exc.__class__.__name__}",
-                status=RuntimeStatus.ERROR,
-            )
+        captured = self._registry_generation
+        invocation = await self.invoke_direct_tool_async(
+            call,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+            generation=captured,
+        )
+        return self._canonical_result_from_invocation(call.name, getattr(call, "call_id", None), invocation)
 
     @staticmethod
     def _invocation_meta(
@@ -447,93 +1206,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
             "allow_tools": bool(allow_tools),
         }
 
-    def _apply_tool_budget(
-        self,
-        call: CanonicalToolCall,
-        result: CanonicalToolResult,
-        *,
-        budget: ToolCallBudget | None,
-    ) -> CanonicalToolResult:
-        if budget is None:
-            return result
-        rendered = self._render_result_payload(result)
-        original_size = len(rendered)
-        char_limit = self._resolve_char_limit(budget)
-        if char_limit is None or original_size <= char_limit:
-            return result
-        preview_chars = max(256, int(budget.preview_chars or 1000))
-        page_size = min(preview_chars, char_limit)
-        result_ref = str(call.call_id or result.call_id or "").strip() or f"call_{uuid4().hex[:12]}"
-        turn_id = str(budget.artifact_bucket_id or result_ref)
-        result_handle = None
-        preview_payload = ""
-        preview_size = 0
-        if self.runtime_root is not None:
-            result_handle = self.tool_result_pager.store(
-                runtime_root=self.runtime_root,
-                turn_id=turn_id,
-                result_ref=result_ref,
-                tool_name=call.name,
-                status=result.status,
-                ok=result.ok,
-                rendered=rendered,
-                page_size=page_size,
-            )
-            page = self.tool_result_pager.read_page(result_ref, page=1)
-            if page is not None:
-                preview_payload = render_tool_result_page_for_llm(page, tag="tool_result")
-                preview_size = len(page.content)
-        if not preview_payload:
-            preview_text, preview_size = render_head_tail_preview_for_llm(rendered, max_chars=page_size)
-            preview_payload = (
-                f'<tool_result page="1" page_count="1" has_more="false" status="{result.status}">\n'
-                f"{preview_text}\n"
-                f"</tool_result>"
-            ).strip()
-        structured = dict(result.structured or {})
-        structured.update(
-            {
-                "truncated": True,
-                "original_size": original_size,
-                "preview_size": preview_size,
-                "preview_strategy": "pager" if result_handle is not None else "head_tail",
-                "max_output_chars": char_limit,
-                "max_output_tokens_estimate": budget.max_output_tokens_estimate,
-                "result_ref": result_ref,
-                "result_handle": result_handle.to_dict() if result_handle is not None else None,
-            }
-        )
-        return CanonicalToolResult(
-            name=result.name,
-            ok=result.ok,
-            text=preview_payload,
-            structured=structured,
-            call_id=result.call_id or result_ref,
-            llm_text=preview_payload,
-            status=result.status,
-            result_handle=result_handle,
-        )
-
     def _resolve_char_limit(self, budget: ToolCallBudget) -> int | None:
         candidates = [value for value in (budget.max_output_chars, budget.max_stdout_chars) if isinstance(value, int) and value > 0]
         if not candidates:
             return None
         return min(candidates)
 
-    @staticmethod
-    def _render_result_payload(result: CanonicalToolResult) -> str:
-        if str(result.llm_text or "").strip():
-            return str(result.llm_text).strip()
-        if str(result.text or "").strip():
-            return str(result.text).strip()
-        if result.structured:
-            return json.dumps(result.structured, ensure_ascii=False, sort_keys=True)
-        return ""
-
     def call_registered(self, call: CapabilityCall) -> CapabilityResult:
-        canonical_path = self.resolve_llm_tool_name(call.name)
+        generation = self._registry_generation
+        canonical_path = generation.capability_index.canonical_path_for(call.name)
         call = CapabilityCall(name=canonical_path, args=dict(call.args), meta=dict(call.meta))
-        bound = self._resolve_binding(call)
+        bound = self._resolve_binding(call, generation=generation)
         if isinstance(bound, CapabilityResult):
             return bound
         lifecycle_result = self._maybe_handle_lifecycle_action(bound.descriptor)
@@ -545,9 +1228,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return result
 
     async def call_registered_async(self, call: CapabilityCall) -> CapabilityResult:
-        canonical_path = self.resolve_llm_tool_name(call.name)
+        generation = self._registry_generation
+        canonical_path = generation.capability_index.canonical_path_for(call.name)
         call = CapabilityCall(name=canonical_path, args=dict(call.args), meta=dict(call.meta))
-        bound = self._resolve_binding(call)
+        bound = self._resolve_binding(call, generation=generation)
         if isinstance(bound, CapabilityResult):
             return bound
         lifecycle_result = self._maybe_handle_lifecycle_action(bound.descriptor)
@@ -560,18 +1244,24 @@ class ExecutionRuntime(ExecutionRuntimePort):
         result = await loop.run_in_executor(self.sync_executor, lambda: bound.callable(call))
         return await result if inspect.isawaitable(result) else result
 
-    def _resolve_binding(self, call: CapabilityCall) -> BoundCapabilityAction | CapabilityResult:
-        singleton = self.bound_action_index.get(call.name, SINGLETON_TARGET)
+    def _resolve_binding(
+        self,
+        call: CapabilityCall,
+        *,
+        generation: ToolRegistryGeneration | None = None,
+    ) -> BoundCapabilityAction | CapabilityResult:
+        captured = generation or self._registry_generation
+        singleton = captured.canonical_bindings.get(call.name, SINGLETON_TARGET)
         if singleton is not None:
             return singleton
 
         target_id = str(call.args.get("target_id") or SINGLETON_TARGET)
-        bound = self.bound_action_index.get(call.name, target_id)
+        bound = captured.canonical_bindings.get(call.name, target_id)
         if bound is not None:
             return bound
-        matching = self.compiled_capability_index.by_canonical.get(call.name, [])
+        matching = captured.capability_index.by_canonical.get(call.name, [])
         if matching and target_id == SINGLETON_TARGET:
-            descriptors = [self.compiled_capability_index.records[record_id] for record_id in matching]
+            descriptors = [captured.capability_index.records[record_id] for record_id in matching]
             instance_targets = sorted(
                 {
                     descriptor.target_id
@@ -631,7 +1321,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return direct
         canonical_path = self.resolve_llm_tool_name(raw)
         if target_id != SINGLETON_TARGET:
-            targeted_name = f"{raw}::{target_id}"
+            targeted_name = f"{raw}__{target_id}"
             targeted = self.compiled_capability_index.records.get(targeted_name)
             if targeted is not None:
                 candidates.append(targeted)

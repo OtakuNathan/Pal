@@ -45,7 +45,26 @@ def minion_question_delivery(payload: dict[str, Any], route: ControlRoute) -> Co
     clarification_id = str(payload.get("clarification_id") or f"clarify_{uuid4().hex[:8]}")
     questions = [dict(item) for item in list(payload.get("questions") or []) if isinstance(item, dict)]
     question = questions[0] if questions else {"question": payload.get("question") or payload.get("summary")}
-    text = str(question.get("question") or "Minion needs clarification.").strip()
+    title = str(question.get("title") or payload.get("title") or "Architecture question").strip()
+    descriptions = [
+        f"- {option.get('label') or option.get('answer') or f'Option {index}'}: "
+        f"{option.get('description') or option.get('label') or option.get('answer') or ''}"
+        for index, option in enumerate(
+            [dict(item) for item in list(question.get("options") or []) if isinstance(item, dict)][:3],
+            start=1,
+        )
+    ]
+    text = "\n".join(
+        [
+            title,
+            "",
+            str(question.get("question") or "Minion needs clarification.").strip(),
+            "",
+            *descriptions,
+            "",
+            "Choose an option, or reply with a custom answer.",
+        ]
+    )
     options = [dict(item) for item in list(question.get("options") or []) if isinstance(item, dict)][:3]
     buttons = tuple(
         _button(
@@ -93,16 +112,13 @@ def minion_architecture_review_delivery(payload: dict[str, Any], route: ControlR
         "actor_id": str(payload.get("actor_id") or "pal"),
         "active_channel_id": str(payload.get("active_channel_id") or "local"),
     }
-    if bool(payload.get("clarification_pending")):
-        buttons = ((_button("Answer", "minion_v2_human_decision", workflow_id, {**common, "decision": "clarify"}),),)
-    else:
-        buttons = (
-            (
-                _button("Accept", "minion_v2_human_decision", workflow_id, {**common, "decision": "accept"}),
-                _button("Edit", "minion_v2_human_decision", workflow_id, {**common, "decision": "edit"}),
-                _button("Reject", "minion_v2_human_decision", workflow_id, {**common, "decision": "reject"}),
-            ),
-        )
+    buttons = (
+        (
+            _button("Accept", "minion_v2_human_decision", workflow_id, {**common, "decision": "accept"}),
+            _button("Edit", "minion_v2_human_decision", workflow_id, {**common, "decision": "edit"}),
+            _button("Reject", "minion_v2_human_decision", workflow_id, {**common, "decision": "reject"}),
+        ),
+    )
     interaction = InteractionMessageSpec(
         interaction_id=f"minion_v2_architecture_{revision_id}",
         interaction_kind="minion_v2_architecture_review",

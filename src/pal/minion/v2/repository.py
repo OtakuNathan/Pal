@@ -33,11 +33,13 @@ from pal.minion.v2.worker_protocol import (
     WorkerAssignmentRequest,
     WorkerAssignmentState,
     WorkerAttemptState,
+    WorkerSessionAction,
     WorkerSessionState,
     WorkerSubmissionReceipt,
     attempt_id,
     worker_assignment_target,
     worker_session_role,
+    worker_session_target,
 )
 from pal.shared.text_search import compile_jieba_fts_queries, jieba_fts_text
 
@@ -49,7 +51,7 @@ _QUEUED_STATES = {
     "REPAIR_QUEUED",
     "STARTING",
 }
-_HUMAN_WAIT_STATES = {"HUMAN_REVIEW", "CLARIFICATION_PENDING"}
+_HUMAN_WAIT_STATES = {"HUMAN_REVIEW"}
 _TERMINAL_WORKFLOW_STATES = {"COMPLETED", "REJECTED", "CANCELLED"}
 _TASK_FTS_INDEX_VERSION = "jieba-v1"
 
@@ -1472,14 +1474,22 @@ class MinionV2Repository:
         aggregate_type: AggregateType,
         aggregate_id: str,
         role: str,
+        scope_kind: str = "",
+        subject_key: str = "",
     ) -> dict[str, Any]:
         values = {
             "session_id": str(session_id or "").strip(),
             "workflow_id": str(workflow_id or "").strip(),
             "aggregate_id": str(aggregate_id or "").strip(),
             "role": worker_session_role(role),
+            "scope_kind": str(scope_kind or "").strip(),
+            "subject_key": str(subject_key or "").strip(),
         }
-        missing = [name for name, value in values.items() if not value]
+        missing = [
+            name
+            for name in ("session_id", "workflow_id", "aggregate_id", "role")
+            if not values[name]
+        ]
         if missing:
             raise ValueError("worker session missing fields: " + ", ".join(missing))
         self.ensure_schema()
@@ -1504,13 +1514,33 @@ class MinionV2Repository:
                 )
                 if actual != identity:
                     raise ValueError("worker session identity is immutable")
+                existing_scope = (
+                    str(existing["scope_kind"] or ""),
+                    str(existing["subject_key"] or ""),
+                )
+                requested_scope = (values["scope_kind"], values["subject_key"])
+                if any(existing_scope) and existing_scope != requested_scope:
+                    raise ValueError("worker session scope is immutable")
+                if not any(existing_scope) and any(requested_scope):
+                    connection.execute(
+                        """
+                        UPDATE minion_v2_worker_sessions
+                        SET scope_kind = ?, subject_key = ?, updated_at = ?
+                        WHERE session_id = ?
+                        """,
+                        (*requested_scope, now, values["session_id"]),
+                    )
+                    existing = connection.execute(
+                        "SELECT * FROM minion_v2_worker_sessions WHERE session_id = ?",
+                        (values["session_id"],),
+                    ).fetchone()
                 return _decode_worker_session(existing)
             connection.execute(
                 """
                 INSERT INTO minion_v2_worker_sessions(
                     session_id, workflow_id, aggregate_type, aggregate_id, role,
-                    status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    scope_kind, subject_key, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     values["session_id"],
@@ -1518,6 +1548,8 @@ class MinionV2Repository:
                     aggregate_type.value,
                     values["aggregate_id"],
                     values["role"],
+                    values["scope_kind"],
+                    values["subject_key"],
                     WorkerSessionState.ACTIVE.value,
                     now,
                     now,
@@ -1537,6 +1569,33 @@ class MinionV2Repository:
                 (str(session_id),),
             ).fetchone()
         return _decode_worker_session(row) if row is not None else None
+
+    def list_worker_sessions(
+        self,
+        *,
+        workflow_id: str,
+        aggregate_type: AggregateType | str,
+        aggregate_id: str,
+        role: str = "",
+    ) -> tuple[dict[str, Any], ...]:
+        self.ensure_schema()
+        clauses = ["workflow_id = ?", "aggregate_type = ?", "aggregate_id = ?"]
+        parameters: list[Any] = [
+            str(workflow_id),
+            AggregateType(str(aggregate_type)).value,
+            str(aggregate_id),
+        ]
+        if str(role or "").strip():
+            clauses.append("role = ?")
+            parameters.append(worker_session_role(role))
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM minion_v2_worker_sessions WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY created_at, session_id",
+                tuple(parameters),
+            ).fetchall()
+        return tuple(_decode_worker_session(row) for row in rows)
 
     def create_worker_assignment(self, request: WorkerAssignmentRequest) -> dict[str, Any]:
         self.ensure_schema()
@@ -1732,16 +1791,11 @@ class MinionV2Repository:
                     str(assignment_id),
                 ),
             )
-            connection.execute(
-                """
-                UPDATE minion_v2_worker_sessions
-                SET status = ?, updated_at = ? WHERE session_id = ?
-                """,
-                (
-                    WorkerSessionState.ACTIVE.value,
-                    now,
-                    str(assignment["session_id"]),
-                ),
+            self._transition_worker_session_locked(
+                connection,
+                str(assignment["session_id"]),
+                WorkerSessionAction.ACTIVATE,
+                now=now,
             )
             row = connection.execute(
                 "SELECT * FROM minion_v2_worker_attempts WHERE attempt_id = ?",
@@ -1881,48 +1935,6 @@ class MinionV2Repository:
                 "fencing_token": int(row["authenticated_fencing_token"]),
             }
 
-    def record_worker_input_read(
-        self,
-        *,
-        assignment_id: str,
-        attempt_id_value: str,
-        input_name: str,
-        artifact_sha256: str,
-        fencing_token: int,
-    ) -> None:
-        self.ensure_schema()
-        with self._transaction() as connection:
-            assignment, attempt = self._worker_assignment_attempt_locked(
-                connection,
-                assignment_id=assignment_id,
-                attempt_id_value=attempt_id_value,
-            )
-            if str(assignment["state"]) != WorkerAssignmentState.RUNNING.value:
-                raise ValueError("worker input can be read only by a running assignment")
-            self._assert_lease_locked(
-                connection,
-                str(attempt["lease_resource_key"]),
-                str(attempt_id_value),
-                int(fencing_token),
-            )
-            refs = json.loads(str(assignment["input_refs_json"] or "{}"))
-            name = str(input_name or "").strip()
-            expected = str(dict(refs.get(name) or {}).get("sha256") or "")
-            actual = str(artifact_sha256 or "").removeprefix("sha256:")
-            if not expected or expected != actual:
-                raise ValueError("worker input read does not match the bound artifact")
-            connection.execute(
-                """
-                INSERT INTO minion_v2_worker_input_reads(
-                    assignment_id, input_name, artifact_sha256, read_at
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(assignment_id, input_name) DO UPDATE SET
-                    artifact_sha256 = excluded.artifact_sha256,
-                    read_at = excluded.read_at
-                """,
-                (str(assignment_id), name, actual, utc_now()),
-            )
-
     def record_worker_submission(
         self,
         *,
@@ -1980,23 +1992,6 @@ class MinionV2Repository:
                 int(fencing_token),
             )
             self._assert_artifact_refs_durable(connection, artifact_ref)
-            required = set(json.loads(str(assignment["required_inputs_json"] or "[]")))
-            consumed = {
-                str(row["input_name"])
-                for row in connection.execute(
-                    """
-                    SELECT input_name FROM minion_v2_worker_input_reads
-                    WHERE assignment_id = ?
-                    """,
-                    (str(assignment_id),),
-                ).fetchall()
-            }
-            missing = sorted(required - consumed)
-            if missing:
-                raise ValueError(
-                    "worker submission is missing required input reads: "
-                    + ", ".join(missing)
-                )
             now = utc_now()
             connection.execute(
                 """
@@ -2131,16 +2126,11 @@ class MinionV2Repository:
                         fencing_token,
                     ),
                 )
-        connection.execute(
-            """
-            UPDATE minion_v2_worker_sessions
-            SET status = ?, updated_at = ? WHERE session_id = ?
-            """,
-            (
-                WorkerSessionState.SUSPENDED.value,
-                now,
-                str(assignment["session_id"]),
-            ),
+        self._transition_worker_session_locked(
+            connection,
+            str(assignment["session_id"]),
+            WorkerSessionAction.SUSPEND,
+            now=now,
         )
 
     def queue_worker_attempt_retry(
@@ -2303,16 +2293,11 @@ class MinionV2Repository:
                     """,
                     (lease_resource, str(attempt_id_value), fencing_token),
                 )
-            connection.execute(
-                """
-                UPDATE minion_v2_worker_sessions
-                SET status = ?, updated_at = ? WHERE session_id = ?
-                """,
-                (
-                    WorkerSessionState.SUSPENDED.value,
-                    now,
-                    str(assignment["session_id"]),
-                ),
+            self._transition_worker_session_locked(
+                connection,
+                str(assignment["session_id"]),
+                WorkerSessionAction.SUSPEND,
+                now=now,
             )
             return WorkerSubmissionReceipt(
                 assignment_id=str(assignment_id),
@@ -2328,6 +2313,7 @@ class MinionV2Repository:
         aggregate_type: AggregateType | str,
         aggregate_id: str,
         reason: str,
+        exclude_assignment_id: str = "",
     ) -> tuple[dict[str, Any], ...]:
         """Terminate nonterminal invocations bound to one aggregate.
 
@@ -2353,6 +2339,7 @@ class MinionV2Repository:
                 """
                 SELECT * FROM minion_v2_worker_assignments
                 WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
+                  AND assignment_id != ?
                   AND state IN (?, ?, ?, ?, ?)
                 ORDER BY created_at, assignment_id
                 """,
@@ -2360,6 +2347,7 @@ class MinionV2Repository:
                     str(workflow_id),
                     aggregate_type_value,
                     str(aggregate_id),
+                    str(exclude_assignment_id),
                     *cancellable_states,
                 ),
             ).fetchall()
@@ -2431,16 +2419,11 @@ class MinionV2Repository:
                         str(assignment["assignment_id"]),
                     ),
                 )
-                connection.execute(
-                    """
-                    UPDATE minion_v2_worker_sessions
-                    SET status = ?, updated_at = ? WHERE session_id = ?
-                    """,
-                    (
-                        WorkerSessionState.SUSPENDED.value,
-                        now,
-                        str(assignment["session_id"]),
-                    ),
+                self._transition_worker_session_locked(
+                    connection,
+                    str(assignment["session_id"]),
+                    WorkerSessionAction.SUSPEND,
+                    now=now,
                 )
             if not rows:
                 return ()
@@ -2628,30 +2611,32 @@ class MinionV2Repository:
                 int(fencing_token),
             )
             self._assert_artifact_refs_durable(connection, continuation_ref)
+            now = utc_now()
             connection.execute(
                 """
                 UPDATE minion_v2_worker_invocations
                 SET status = ?, continuation_ref_json = ?, updated_at = ?
                 WHERE invocation_id = ?
                 """,
-                (normalized, _json(dict(continuation_ref)), utc_now(), str(invocation_id)),
+                (normalized, _json(dict(continuation_ref)), now, str(invocation_id)),
+            )
+            self._transition_worker_session_locked(
+                connection,
+                str(invocation_id),
+                WorkerSessionAction.SUSPEND,
+                now=now,
             )
             connection.execute(
                 """
                 UPDATE minion_v2_worker_sessions
-                SET status = ?, continuation_ref_json = ?, updated_at = ?
+                SET continuation_ref_json = ?, updated_at = ?
                 WHERE session_id = ?
                 """,
-                (
-                    WorkerSessionState.SUSPENDED.value,
-                    _json(dict(continuation_ref)),
-                    utc_now(),
-                    str(invocation_id),
-                ),
+                (_json(dict(continuation_ref)), now, str(invocation_id)),
             )
             self._rebuild_workflow_projection_locked(connection, str(invocation["workflow_id"]), "")
 
-    def complete_worker_session(self, invocation_id: str, *, status: str = "completed") -> bool:
+    def complete_worker_session(self, session_id: str, *, status: str = "completed") -> bool:
         normalized = str(status or "completed").strip().lower()
         if normalized not in {"completed", "cancelled"}:
             raise ValueError("worker session completion status must be completed or cancelled")
@@ -2659,11 +2644,11 @@ class MinionV2Repository:
         with self._transaction() as connection:
             invocation = connection.execute(
                 "SELECT * FROM minion_v2_worker_invocations WHERE invocation_id = ?",
-                (str(invocation_id),),
+                (str(session_id),),
             ).fetchone()
             session = connection.execute(
                 "SELECT * FROM minion_v2_worker_sessions WHERE session_id = ?",
-                (str(invocation_id),),
+                (str(session_id),),
             ).fetchone()
             if invocation is None and session is None:
                 return False
@@ -2673,35 +2658,79 @@ class MinionV2Repository:
             ):
                 return True
             owner = session if session is not None else invocation
-            snapshot = self._read_snapshot_locked(
-                connection,
-                AggregateType(str(owner["aggregate_type"])),
-                str(owner["aggregate_id"]),
-            )
-            allowed_terminal = {
-                AggregateType.ARCHITECTURE_REVISION: {
-                    "ACCEPTED",
-                    "REJECTED",
-                    "SUPERSEDED",
-                    "CANCELLED",
-                },
-                AggregateType.DAG_NODE_RUN: {"ACCEPTED", "CANCELLED"},
-            }
-            if snapshot is None or snapshot.state not in allowed_terminal.get(snapshot.aggregate_type, set()):
-                raise ValueError("worker session cannot complete before its owned aggregate reaches a terminal outcome")
+            session_role = str(owner["role"] or "")
+            if normalized == WorkerSessionState.COMPLETED.value and session_role == "verifier":
+                assignments = connection.execute(
+                    "SELECT state FROM minion_v2_worker_assignments WHERE session_id = ?",
+                    (str(session_id),),
+                ).fetchall()
+                states = {str(row["state"]) for row in assignments}
+                if not assignments or WorkerAssignmentState.SETTLED.value not in states:
+                    raise ValueError("verifier session cannot complete before a settled verdict receipt")
+                if states - {
+                    WorkerAssignmentState.SETTLED.value,
+                    WorkerAssignmentState.CANCELLED.value,
+                }:
+                    raise ValueError("verifier session cannot complete with an active assignment")
+            else:
+                snapshot = self._read_snapshot_locked(
+                    connection,
+                    AggregateType(str(owner["aggregate_type"])),
+                    str(owner["aggregate_id"]),
+                )
+                allowed_terminal = {
+                    AggregateType.ARCHITECTURE_REVISION: {
+                        "ACCEPTED",
+                        "REJECTED",
+                        "SUPERSEDED",
+                        "CANCELLED",
+                    },
+                    AggregateType.DAG_NODE_RUN: {"ACCEPTED", "CANCELLED"},
+                }
+                if snapshot is None or snapshot.state not in allowed_terminal.get(snapshot.aggregate_type, set()):
+                    raise ValueError(
+                        "worker session cannot complete before its owned aggregate reaches a terminal outcome"
+                    )
             now = utc_now()
             if invocation is not None:
                 connection.execute(
                     "UPDATE minion_v2_worker_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
-                    (normalized, now, str(invocation_id)),
+                    (normalized, now, str(session_id)),
                 )
             if session is not None:
-                connection.execute(
-                    "UPDATE minion_v2_worker_sessions SET status = ?, updated_at = ? WHERE session_id = ?",
-                    (normalized, now, str(invocation_id)),
+                self._transition_worker_session_locked(
+                    connection,
+                    str(session_id),
+                    (
+                        WorkerSessionAction.COMPLETE
+                        if normalized == WorkerSessionState.COMPLETED.value
+                        else WorkerSessionAction.CANCEL
+                    ),
+                    now=now,
                 )
             self._rebuild_workflow_projection_locked(connection, str(owner["workflow_id"]), "")
             return True
+
+    @staticmethod
+    def _transition_worker_session_locked(
+        connection: sqlite3.Connection,
+        session_id: str,
+        action: WorkerSessionAction,
+        *,
+        now: str,
+    ) -> WorkerSessionState:
+        session = connection.execute(
+            "SELECT status FROM minion_v2_worker_sessions WHERE session_id = ?",
+            (str(session_id),),
+        ).fetchone()
+        if session is None:
+            raise KeyError(f"unknown worker session: {session_id}")
+        target = worker_session_target(str(session["status"]), action)
+        connection.execute(
+            "UPDATE minion_v2_worker_sessions SET status = ?, updated_at = ? WHERE session_id = ?",
+            (target.value, str(now), str(session_id)),
+        )
+        return target
 
     def record_worker_event(self, event: Mapping[str, Any]) -> None:
         invocation_id = str(event.get("invocation_id") or event.get("minion_id") or "").strip()
@@ -2989,7 +3018,7 @@ class MinionV2Repository:
                 raise ValueError(f"action references an artifact with missing storage: {digest}")
 
     def _consume_human_decision_locked(self, connection: sqlite3.Connection, action: ActionEnvelope) -> None:
-        if action.action_type not in {"HUMAN_ACCEPT", "HUMAN_EDIT", "HUMAN_REJECT", "CLARIFICATION_PROVIDED"}:
+        if action.action_type not in {"HUMAN_ACCEPT", "HUMAN_EDIT", "HUMAN_REJECT"}:
             return
         token = str(action.payload.get("decision_token") or "")
         if not token:
@@ -3144,7 +3173,14 @@ class MinionV2Repository:
                     for item in snapshots
                     if item.aggregate_type == AggregateType.DAG_NODE_RUN
                     and str(item.payload.get("epoch_id") or "") == active.aggregate_id
-                    and item.state in {"REVIEWING", "VERIFYING"}
+                    and item.state in {
+                        "REVIEWING",
+                        "REVIEW_QUIESCING",
+                        "REVIEW_SNAPSHOTTING",
+                        "VERIFYING",
+                        "VERIFY_QUIESCING",
+                        "VERIFY_SNAPSHOTTING",
+                    }
                     and str(item.payload.get("active_worker_id") or "")
                 ),
                 key=lambda item: item.aggregate_id,
@@ -3550,7 +3586,7 @@ def _current_phase(workflow: AggregateSnapshot, active: AggregateSnapshot | None
         return "created" if workflow.state == "CREATED" else "routing"
     if active.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
         state = active.state
-        if state.startswith("ARCHITECT") or state == "CLARIFICATION_PENDING":
+        if state.startswith("ARCHITECT"):
             return "architecture"
         if state in {"REVIEW_QUEUED", "REVIEWING"}:
             return "architecture_review"

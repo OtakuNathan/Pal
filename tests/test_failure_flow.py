@@ -300,10 +300,20 @@ class FailureFlowTests(unittest.TestCase):
         core.context.execution_runtime.register_capability(
             CapabilityDescriptor(
                 name="safe_probe",
+                canonical_path="op_test_safe_probe",
                 family="failure_test",
                 description="safe mode diagnostic probe",
                 source="test",
                 parameters_schema={"type": "object", "properties": {}},
+                metadata={
+                    "execution_semantics": {
+                        "invocation_mode": "direct",
+                        "effect_kind": "none",
+                        "idempotency": "idempotent",
+                        "retry_policy": "automatic",
+                        "paging": "never",
+                    }
+                },
             ),
             safe_probe,
         )

@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import platform
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,14 @@ SERVICE_LOG_SINK_SYSTEMD_JOURNAL = "systemd_journal"
 SERVICE_LOG_SINK_MACOS_UNIFIED = "macos_unified"
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+_TELEGRAM_BOT_URL_RE = re.compile(
+    r"(?i)(https?://api\.telegram\.org/(?:file/)?bot)[^/\s\"']+"
+)
+_TELEGRAM_BOT_TOKEN_RE = re.compile(r"(?i)\bbot\d{5,}:[A-Za-z0-9_-]{20,}\b")
+_BEARER_TOKEN_RE = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+\-/=]{8,}")
+_SENSITIVE_QUERY_RE = re.compile(
+    r"(?i)([?&](?:access_token|api_key|apikey|key|secret|password|authorization)=)[^&\s\"']+"
+)
 
 
 @dataclass(frozen=True)
@@ -112,6 +121,7 @@ def configure_process_logging(*, component: str = "pal", level: int = logging.IN
         _configure_macos_unified_logging(tag=tag, level=level)
         return
     logging.basicConfig(level=level, format=_LOG_FORMAT, stream=sys.stderr, force=True)
+    _install_redacting_formatters()
 
 
 def _configure_macos_unified_logging(*, tag: str, level: int) -> None:
@@ -119,12 +129,33 @@ def _configure_macos_unified_logging(*, tag: str, level: int) -> None:
         import syslog
     except Exception:
         logging.basicConfig(level=level, format=_LOG_FORMAT, stream=sys.stderr, force=True)
+        _install_redacting_formatters()
         return
     stdout = _SyslogTextStream(syslog_module=syslog, tag=tag, priority=syslog.LOG_INFO)
     stderr = _SyslogTextStream(syslog_module=syslog, tag=tag, priority=syslog.LOG_ERR)
     sys.stdout = stdout
     sys.stderr = stderr
     logging.basicConfig(level=level, format=_LOG_FORMAT, stream=stderr, force=True)
+    _install_redacting_formatters()
+
+
+class _RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_service_log_text(super().format(record))
+
+
+def _install_redacting_formatters() -> None:
+    formatter = _RedactingFormatter(_LOG_FORMAT)
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(formatter)
+
+
+def redact_service_log_text(value: object) -> str:
+    text = str(value or "")
+    text = _TELEGRAM_BOT_URL_RE.sub(r"\1<redacted>", text)
+    text = _TELEGRAM_BOT_TOKEN_RE.sub("bot<redacted>", text)
+    text = _BEARER_TOKEN_RE.sub(r"\1<redacted>", text)
+    return _SENSITIVE_QUERY_RE.sub(r"\1<redacted>", text)
 
 
 class _SyslogTextStream(io.TextIOBase):
@@ -164,7 +195,7 @@ class _SyslogTextStream(io.TextIOBase):
         self._emit(line)
 
     def _emit(self, line: str) -> None:
-        text = line.strip()
+        text = redact_service_log_text(line.strip())
         if not text:
             return
         try:

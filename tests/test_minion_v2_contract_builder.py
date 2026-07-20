@@ -28,27 +28,20 @@ class ContractBuilderTests(unittest.TestCase):
         self.invocation = "inv_contract"
         self.resource = "architecture:arch_1:contract"
         lease = self.repository.claim_lease(self.resource, self.invocation, ttl_seconds=60)
-        self.requirements = {
-            "title": "Bound requirements",
-            "requirements": [
-                {
-                    "section": "Delivery",
-                    "statement": "Produce a deterministic report through a real entrypoint.",
-                    "strength": "hard",
-                }
-            ],
-        }
-        requirements_path = self.root / "requirements.json"
-        requirements_path.write_text(json.dumps(self.requirements), encoding="utf-8")
+        task_source_path = self.root / "request.md"
+        task_source_path.write_text(
+            "Produce a deterministic report through a real entrypoint.\n",
+            encoding="utf-8",
+        )
         self.workspace = {
             "runtime_root": str(self.root),
             "artifact_dir": str(self.root / "artifacts"),
             "artifact_stage_dir": str(self.root / "artifact-stage"),
             "reference_paths": [
                 {
-                    "name": "requirements",
-                    "path": str(requirements_path),
-                    "bound_input": True,
+                    "name": "task",
+                    "path": str(task_source_path),
+                    "truth_source": True,
                 }
             ],
             "minion_v2": {
@@ -141,33 +134,12 @@ class ContractBuilderTests(unittest.TestCase):
                     "statement": "The public report shape remains stable.",
                 },
             ),
-            (
-                "op_minion_contract_unit_set_complexity",
-                {
-                    "unit": name,
-                    "target_file_count": 2,
-                    "estimated_context_tokens": 4000,
-                    "public_interface_count": 1,
-                    "cross_unit_contract_count": len(depends_on or []),
-                    "stateful_resource_count": 0,
-                    "expected_candidate_cycles": 1,
-                    "platform_dependency_level": 0,
-                },
-            ),
-            (
-                "op_minion_contract_unit_cover_requirement",
-                {
-                    "unit": name,
-                    "section": "Delivery",
-                    "requirement": "Produce a deterministic report through a real entrypoint.",
-                },
-            ),
         ]
         for capability, args in operations:
             result = self.call("contract", capability, args)
             self.assertTrue(result.ok, result.text)
 
-    def test_requirements_are_built_incrementally_and_submitted_without_payload(self) -> None:
+    def test_normalized_requirements_builder_is_not_available(self) -> None:
         result = self.call(
             "requirements",
             "op_minion_requirement_upsert",
@@ -177,12 +149,10 @@ class ContractBuilderTests(unittest.TestCase):
                 "strength": "hard",
             },
         )
-        self.assertTrue(result.ok, result.text)
-        submitted = self.call("requirements", "op_minion_requirements_submit")
-        self.assertTrue(submitted.ok, submitted.text)
-        artifact = json.loads((Path(self.workspace["artifact_stage_dir"]) / "requirements.json").read_text())
-        self.assertEqual(artifact["requirements"][0]["section"], "Delivery")
-        self.assertTrue(artifact["requirements"][0]["requirement_id"].startswith("req_"))
+        self.assertFalse(result.ok)
+        self.assertFalse(
+            (Path(self.workspace["artifact_stage_dir"]) / "requirements.json").exists()
+        )
 
     def test_contract_submit_compiles_manager_owned_identity(self) -> None:
         self.add_complete_unit("report")
@@ -205,7 +175,7 @@ class ContractBuilderTests(unittest.TestCase):
             (Path(self.workspace["artifact_stage_dir"]) / "architecture_bundle.json").read_text()
         )
         self.assertEqual(artifact["units"][0]["unit_id"], "report")
-        self.assertTrue(artifact["units"][0]["requirement_ids"][0].startswith("req_"))
+        self.assertNotIn("requirement_ids", artifact["units"][0])
         self.assertEqual(artifact["topology"]["depends_on"], {"report": []})
 
     def test_submit_rejects_cycle_after_local_semantic_edits(self) -> None:
@@ -232,7 +202,6 @@ class ContractBuilderTests(unittest.TestCase):
         self.workspace.update(
             {
                 "contract_review_base_payload": base,
-                "contract_review_requirements_payload": self.requirements,
             }
         )
         finding = self.call(
@@ -246,7 +215,7 @@ class ContractBuilderTests(unittest.TestCase):
                 "target_name": "report",
                 "fields": ["ownership"],
                 "operation": "update",
-                "refs": ["report::report_report"],
+                "related_names": ["report::report_report"],
             },
         )
         self.assertTrue(finding.ok, finding.text)

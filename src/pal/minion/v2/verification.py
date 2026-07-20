@@ -265,10 +265,26 @@ class VerificationService:
             locations=all_locations,
             invariants=all_invariants,
         )
+        semantic_case_names = sorted(
+            {
+                str(item).strip()
+                for item in (
+                    case_name,
+                    *(
+                        str(item.get("case_name") or item.get("case") or "")
+                        for item in finding_values
+                    ),
+                )
+                if str(item).strip()
+            }
+        )
+        reproducer_identity = _normalized_hash(
+            {"semantic_case_names": semantic_case_names}
+        )
         fingerprint = finding_fingerprint(
             defect_kind=defect_kind,
             contract_refs=semantic_contract_refs,
-            reproducer_hash=str(minimal_reproducer_ref.get("sha256") or ""),
+            reproducer_hash=reproducer_identity,
             expected=expected,
             actual=actual,
         )
@@ -325,11 +341,15 @@ class VerificationService:
         defect_kind: DefectKind = DefectKind.MODULE,
         dependency_node_id: str = "",
         module_node_id: str = "",
+        dependency_node_ids: Sequence[str] = (),
+        module_node_ids: Sequence[str] = (),
         scenario_fingerprint: str = "",
         requirement_patch_ref: ArtifactRef | None = None,
         revised_requirements_ref: ArtifactRef | None = None,
         worker_assignment_id: str = "",
         worker_submission_payload_hash: str = "",
+        accepted_candidate_ref: ArtifactRef | None = None,
+        accepted_candidate_digest: str = "",
     ) -> DispatchResult:
         if (requirement_patch_ref is None) != (revised_requirements_ref is None):
             raise ValueError(
@@ -340,7 +360,37 @@ class VerificationService:
             DefectKind.ARCHITECTURE,
         }:
             raise ValueError("RequirementPatch can only accompany a contract or architecture defect")
-        common = {"verification_artifact_ref": verification_ref.to_dict()}
+        if bool(accepted_candidate_ref) != bool(accepted_candidate_digest):
+            raise ValueError(
+                "accepted verifier candidate requires both artifact ref and digest"
+            )
+        if accepted_candidate_ref is not None and status != VerificationStatus.PASS:
+            raise ValueError("only a PASS verdict may promote verifier-authored tests")
+        common = {
+            "verification_artifact_ref": verification_ref.to_dict(),
+            **(
+                {
+                    "candidate_ref": accepted_candidate_ref.to_dict(),
+                    "candidate_digest": accepted_candidate_digest,
+                }
+                if accepted_candidate_ref is not None
+                else {}
+            ),
+        }
+        dependency_targets = tuple(
+            dict.fromkeys(
+                str(item)
+                for item in (dependency_node_id, *dependency_node_ids)
+                if str(item)
+            )
+        )
+        module_targets = tuple(
+            dict.fromkeys(
+                str(item)
+                for item in (module_node_id, *module_node_ids)
+                if str(item)
+            )
+        )
         scenario = str(node.payload.get("node_kind") or "") == "verification"
         if scenario:
             if not scenario_fingerprint or scenario_fingerprint != str(node.payload.get("scenario_fingerprint") or ""):
@@ -364,15 +414,11 @@ class VerificationService:
                     "human_waiver_ref": dict(policy.human_waiver_ref or {}),
                 }
             else:
-                if repair_bill_ref is None:
-                    raise ValueError("blocking UNKNOWN requires a RepairBill")
-                action_type = "ENTER_TRIAGE" if scenario else "REVIEW_FAILED"
+                action_type = "ENTER_TRIAGE"
                 payload = {
                     **common,
-                    "repair_bill_ref": repair_bill_ref.to_dict(),
-                    "finding_fingerprint": finding_fingerprint_value,
                     "unknown_blocking": True,
-                    **({"blocker": {"kind": "blocking_unknown"}} if scenario else {}),
+                    "blocker": {"kind": "blocking_unknown"},
                 }
         else:
             if repair_bill_ref is None or not finding_fingerprint_value:
@@ -395,13 +441,14 @@ class VerificationService:
                     "blocker": {"kind": "no_progress", "rounds": 3},
                 }
             elif defect_kind == DefectKind.DEPENDENCY:
-                if not dependency_node_id:
+                if not dependency_targets:
                     raise ValueError("dependency defect requires dependency_node_id")
                 action_type = "DEPENDENCY_DEFECT"
                 payload = {
                     **common,
                     "repair_bill_ref": repair_bill_ref.to_dict(),
-                    "dependency_node_id": dependency_node_id,
+                    "dependency_node_id": dependency_targets[0],
+                    "dependency_node_ids": list(dependency_targets),
                     "finding_fingerprint": finding_fingerprint_value,
                     "failure_history": history,
                 }
@@ -436,13 +483,14 @@ class VerificationService:
                     ),
                 }
             elif scenario:
-                if not module_node_id:
+                if not module_targets:
                     raise ValueError("scenario module defect requires module_node_id")
                 action_type = "MODULE_DEFECT"
                 payload = {
                     **common,
                     "repair_bill_ref": repair_bill_ref.to_dict(),
-                    "module_node_id": module_node_id,
+                    "module_node_id": module_targets[0],
+                    "module_node_ids": list(module_targets),
                     "finding_fingerprint": finding_fingerprint_value,
                     "failure_history": history,
                 }
@@ -526,6 +574,24 @@ def repair_bill_semantic_view(
     """Compile a RepairBill for a worker without exposing manager identities."""
 
     bill = dict(artifacts.read_json(repair_bill_ref))
+    if str(bill.get("artifact_kind") or "") == "semantic_repair_packet":
+        return {
+            "artifact_kind": "semantic_repair_packet",
+            "module_name": str(bill.get("module_name") or ""),
+            "route": str(bill.get("route") or "module_repair"),
+            "target_modules": [
+                str(item) for item in list(bill.get("target_modules") or [])
+            ],
+            "findings_markdown": str(bill.get("findings_markdown") or ""),
+            "regression_commands": [
+                str(item)
+                for item in list(bill.get("regression_commands") or [])
+                if str(item).strip()
+            ],
+            "verifier_test_paths": [
+                str(item) for item in list(bill.get("changed_test_paths") or [])
+            ],
+        }
     reproducer: dict[str, Any] = {}
     reproducer_ref = bill.get("minimal_reproducer_ref")
     if isinstance(reproducer_ref, Mapping) and reproducer_ref.get("sha256"):
@@ -638,6 +704,8 @@ def repair_checklist_items(value: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Compile semantic, model-facing repair work without exposing internal IDs."""
 
     bill = dict(value or {})
+    if str(bill.get("artifact_kind") or "") == "semantic_repair_packet":
+        return []
     raw_findings = [
         dict(item)
         for item in list(bill.get("findings") or [])

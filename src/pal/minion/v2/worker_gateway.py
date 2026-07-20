@@ -19,15 +19,20 @@ from pal.minion.v2.worker_protocol import WorkerAssignmentState, stable_hash
 
 WORKER_GATEWAY_TOKEN_ENV = "PAL_MINION_ASSIGNMENT_TOKEN"
 
-_SUBMISSION_ARTIFACT_TYPES = {
+WORKER_SUBMISSION_ARTIFACT_TYPES = {
     "architecture": "ArchitectureWorkerSubmissionArtifact",
     "architecture_review": "ArchitectureReviewWorkerSubmissionArtifact",
     "candidate": "CandidateWorkerSubmissionArtifact",
     "contract": "ContractWorkerSubmissionArtifact",
-    "requirements": "RequirementsWorkerSubmissionArtifact",
     "standalone_review": "StandaloneReviewSubmissionArtifact",
+    # The submission kind is shared by data-driven families. Its payload is
+    # role-specific; Manager compilation produces the final typed artifact.
     "verification": "VerifierSubmissionArtifact",
 }
+
+
+def worker_submission_artifact_type(submission_kind: str) -> str:
+    return str(WORKER_SUBMISSION_ARTIFACT_TYPES.get(str(submission_kind or "")) or "")
 
 
 def worker_gateway_client_from_env(runtime_root: Path) -> MinionWorkerGatewayClient | None:
@@ -53,10 +58,6 @@ class WorkerAssignmentGateway:
     def call(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         payload = dict(params or {})
         authenticated = self.authorize(str(payload.pop("access_token", "")))
-        if method == "bound_input_read":
-            return self._read_bound_input(authenticated, payload)
-        if method == "bound_input_json":
-            return self._read_bound_input_json(authenticated, payload)
         if method == "submission_status":
             return self._submission_status(authenticated)
         if method == "draft_read":
@@ -86,72 +87,6 @@ class WorkerAssignmentGateway:
             assignment.get("submission_payload_hash")
         )
         return {"recorded": recorded, "state": state}
-
-    def _read_bound_input(
-        self,
-        authenticated: Mapping[str, Any],
-        params: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        assignment = dict(authenticated["assignment"])
-        name = str(params.get("name") or "").strip()
-        refs = dict(assignment.get("input_refs") or {})
-        ref = dict(refs.get(name) or {})
-        if not ref:
-            available = ", ".join(sorted(refs)) or "(none)"
-            raise ValueError(
-                f"unknown bound input: {name or '<missing>'}; available: {available}"
-            )
-        data = self.service.artifacts.read_bytes(ref)
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError(f"bound input {name!r} is not UTF-8 text") from exc
-        start_line = max(1, int(params.get("start_line") or 1))
-        limit_lines = min(4000, max(1, int(params.get("limit_lines") or 2000)))
-        lines = text.splitlines()
-        selected = lines[start_line - 1 : start_line - 1 + limit_lines]
-        rendered = "\n".join(
-            f"{line_number:>6}  {line}"
-            for line_number, line in enumerate(selected, start=start_line)
-        )
-        self.repository.record_worker_input_read(
-            assignment_id=str(assignment["assignment_id"]),
-            attempt_id_value=str(authenticated["attempt_id"]),
-            input_name=name,
-            artifact_sha256=str(ref["sha256"]),
-            fencing_token=int(authenticated["fencing_token"]),
-        )
-        return {
-            "content": rendered,
-            "input_name": name,
-            "start_line": start_line,
-            "returned_lines": len(selected),
-            "total_lines": len(lines),
-            "has_more": start_line - 1 + len(selected) < len(lines),
-        }
-
-    def _read_bound_input_json(
-        self,
-        authenticated: Mapping[str, Any],
-        params: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        assignment = dict(authenticated["assignment"])
-        name = str(params.get("name") or "").strip()
-        refs = dict(assignment.get("input_refs") or {})
-        ref = dict(refs.get(name) or {})
-        if not ref:
-            raise ValueError(f"unknown bound input: {name or '<missing>'}")
-        value = self.service.artifacts.read_json(ref)
-        if not isinstance(value, Mapping):
-            raise ValueError(f"bound input {name!r} must contain a JSON object")
-        self.repository.record_worker_input_read(
-            assignment_id=str(assignment["assignment_id"]),
-            attempt_id_value=str(authenticated["attempt_id"]),
-            input_name=name,
-            artifact_sha256=str(ref["sha256"]),
-            fencing_token=int(authenticated["fencing_token"]),
-        )
-        return {"value": dict(value)}
 
     def _draft_read(
         self,
@@ -193,8 +128,8 @@ class WorkerAssignmentGateway:
         if not isinstance(submission, Mapping):
             raise ValueError("worker submission must be a JSON object")
         payload = dict(submission)
-        artifact_type = _SUBMISSION_ARTIFACT_TYPES.get(context.draft_kind)
-        if artifact_type is None:
+        artifact_type = worker_submission_artifact_type(context.draft_kind)
+        if not artifact_type:
             raise ValueError(f"unsupported worker submission kind: {context.draft_kind}")
         store = SubmissionDraftStore(self.service.runtime_root)
         snapshot = store.read(context, seed={})
@@ -241,7 +176,11 @@ class WorkerAssignmentGateway:
             submission_artifact_ref=artifact_ref.to_dict(),
             submission_payload_hash=payload_hash,
         )
-        return {"submitted": True}
+        return {
+            "submitted": True,
+            "submission_artifact_ref": artifact_ref.to_dict(),
+            "submission_payload_hash": payload_hash,
+        }
 
     def _validate_repair_candidate(
         self,
@@ -257,8 +196,12 @@ class WorkerAssignmentGateway:
         if not repair_ref:
             raise ValueError("repair assignment is missing its bound RepairBill")
         bill = self.service.artifacts.read_json(repair_ref)
+        semantic_packet = (
+            str(dict(bill).get("artifact_kind") or "")
+            == "semantic_repair_packet"
+        )
         required = [str(item["case"]) for item in repair_checklist_items(bill)]
-        if not required:
+        if not required and not semantic_packet:
             raise ValueError("bound RepairBill contains no named regression cases")
         cases = recorded_cases(draft.payload)
         status_by_name = {
@@ -270,6 +213,12 @@ class WorkerAssignmentGateway:
             raise ValueError(
                 "repair checklist still requires Manager-recorded PASS regressions: "
                 + ", ".join(incomplete)
+            )
+        if semantic_packet and not any(
+            str(item.get("status") or "") == "PASS" for item in cases
+        ):
+            raise ValueError(
+                "semantic repair requires a Manager-recorded PASS developer check"
             )
         expected_tests = [
             f"{item.get('name')}: {item.get('status')}" for item in cases

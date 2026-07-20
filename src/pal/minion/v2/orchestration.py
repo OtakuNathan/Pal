@@ -29,7 +29,6 @@ from pal.minion.v2.sessions import (
     architect_session_id_for_revision,
     coder_session_id,
     node_role_generation,
-    verifier_session_id,
 )
 from pal.minion.v2.verification import DefectPropagationService
 
@@ -70,6 +69,7 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "submit_standalone_completion",
     "start_review_repair_execution",
     "submit_workflow_rejection",
+    "start_replacement_workflow_from_architecture",
     "reconcile_execution_epoch",
     "reconcile_workflow",
 })
@@ -308,14 +308,25 @@ class MinionV2OutboxProcessor:
         if effect_type == "reopen_dependency_and_stale_descendants":
             node = self._effect_snapshot(effect)
             repair_ref = ArtifactRef.from_mapping(dict(node.payload.get("repair_bill_ref") or {}))
-            DefectPropagationService(self.repository).propagate_dependency_defect(
-                workflow_id=node.workflow_id,
-                epoch_id=str(node.payload.get("epoch_id") or ""),
-                dependency_node_id=str(
-                    node.payload.get("dependency_node_id") or node.payload.get("module_node_id") or ""
-                ),
-                repair_bill_ref=repair_ref,
+            targets = tuple(
+                dict.fromkeys(
+                    str(item)
+                    for item in (
+                        *list(node.payload.get("dependency_node_ids") or []),
+                        *list(node.payload.get("module_node_ids") or []),
+                        node.payload.get("dependency_node_id") or "",
+                        node.payload.get("module_node_id") or "",
+                    )
+                    if str(item)
+                )
             )
+            for target in targets:
+                DefectPropagationService(self.repository).propagate_dependency_defect(
+                    workflow_id=node.workflow_id,
+                    epoch_id=str(node.payload.get("epoch_id") or ""),
+                    dependency_node_id=target,
+                    repair_bill_ref=repair_ref,
+                )
             return {}
         if effect_type == "request_epoch_replan":
             return self._request_epoch_replan(effect)
@@ -363,6 +374,8 @@ class MinionV2OutboxProcessor:
                 causation_key=str(effect["effect_key"]),
                 initial_repair_bill_ref=dict(review.payload.get("repair_bill_ref") or {}) or None,
             )
+        if effect_type == "start_replacement_workflow_from_architecture":
+            return self._start_replacement_workflow_from_architecture(effect)
         if effect_type == "submit_workflow_rejection":
             revision = self._effect_snapshot(effect)
             self.repository.complete_worker_session(
@@ -457,9 +470,8 @@ class MinionV2OutboxProcessor:
                 and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
             ]
             integration = [item for item in nodes if str(item.payload.get("node_kind") or "") == "integration"]
-            verification = [item for item in nodes if str(item.payload.get("node_kind") or "") == "verification"]
             implementation = [item for item in nodes if str(item.payload.get("node_kind") or "unit") == "unit"]
-            if not nodes or (not integration and (not implementation or not verification)):
+            if not nodes or (not integration and not implementation):
                 raise RuntimeError("execution compilation is incomplete and requires operator triage")
             payload = {"node_ids": [item.aggregate_id for item in nodes]}
             if integration:
@@ -467,12 +479,7 @@ class MinionV2OutboxProcessor:
                     raise RuntimeError("legacy execution compilation has multiple integration nodes")
                 payload["integration_node_id"] = integration[0].aggregate_id
             else:
-                payload.update(
-                    {
-                        "implementation_node_ids": [item.aggregate_id for item in implementation],
-                        "verification_node_ids": [item.aggregate_id for item in verification],
-                    }
-                )
+                payload["implementation_node_ids"] = [item.aggregate_id for item in implementation]
             self.repository.dispatch(
                 ActionEnvelope(
                     action_type="NODES_COMPILED",
@@ -821,7 +828,11 @@ class MinionV2OutboxProcessor:
                     actor="minion-v2-router",
                     expected_version=0,
                     idempotency_key=f"effect:{effect['effect_key']}:import",
-                    payload={"architecture_manifest_ref": artifact_ref, "revision_number": 1},
+                    payload={
+                        "architecture_manifest_ref": artifact_ref,
+                        "requirements_ref": dict(request.get("requirements_ref") or {}),
+                        "revision_number": 1,
+                    },
                 )
             )
             self._link_workflow(workflow.workflow_id, "LINK_ARCHITECTURE_REVISION", {"architecture_revision_id": revision_id}, str(effect["effect_key"]))
@@ -875,10 +886,14 @@ class MinionV2OutboxProcessor:
                 idempotency_key=f"effect:{effect['effect_key']}:revision",
                 payload={
                     "request_ref": previous.payload.get("request_ref"),
-                    "requirements_ref": previous.payload.get("requirements_ref"),
+                    "requirements_ref": (
+                        previous.payload.get("revised_requirements_ref")
+                        or previous.payload.get("requirements_ref")
+                    ),
                     "parent_revision_id": previous.aggregate_id,
                     "revision_number": int(previous.payload.get("revision_number") or 1) + 1,
                     "edit_instruction_ref": previous.payload.get("edit_instruction_ref"),
+                    "edit_scope": previous.payload.get("edit_scope", "architecture"),
                     "base_architecture_manifest_ref": previous.payload.get("architecture_manifest_ref"),
                     "research_mode": previous.payload.get("research_mode", "local_only"),
                 },
@@ -985,7 +1000,11 @@ class MinionV2OutboxProcessor:
                 "CANCELLED",
                 "TRIAGE_REQUIRED",
                 "REVIEWING",
+                "REVIEW_QUIESCING",
+                "REVIEW_SNAPSHOTTING",
                 "VERIFYING",
+                "VERIFY_QUIESCING",
+                "VERIFY_SNAPSHOTTING",
             }:
                 continue
             legal = self.repository.engine.legal_actions(AggregateType.DAG_NODE_RUN, node.state)
@@ -1031,7 +1050,11 @@ class MinionV2OutboxProcessor:
             "QUIESCING",
             "SNAPSHOTTING",
             "REVIEWING",
+            "REVIEW_QUIESCING",
+            "REVIEW_SNAPSHOTTING",
             "VERIFYING",
+            "VERIFY_QUIESCING",
+            "VERIFY_SNAPSHOTTING",
             "VERIFY_PREPARING",
             "PAUSE_REQUESTED",
             "CANCEL_REQUESTED",
@@ -1211,15 +1234,117 @@ class MinionV2OutboxProcessor:
                 )
         return {"epoch_id": epoch_id, "node_ids": list(compilation.node_run_ids)}
 
+    def _start_replacement_workflow_from_architecture(
+        self,
+        effect: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        source = self._effect_snapshot(effect)
+        restart_request = dict(source.payload.get("restart_execution_request") or {})
+        if not restart_request:
+            return {}
+        existing_replacement_id = str(source.payload.get("replacement_workflow_id") or "")
+        if source.state == "CANCELLED" and existing_replacement_id:
+            replacement = self.repository.read_snapshot(
+                AggregateType.WORKFLOW,
+                existing_replacement_id,
+            )
+            if replacement is None:
+                raise RuntimeError("cancelled source workflow references a missing replacement")
+            return {"replacement_workflow_id": existing_replacement_id}
+        if source.aggregate_type != AggregateType.WORKFLOW or source.state != "RESTARTING":
+            raise RuntimeError(
+                "replacement workflow creation requires the source workflow to be RESTARTING"
+            )
+        request = restart_request
+        manifest_ref = dict(request.get("architecture_manifest_ref") or {})
+        requirements_ref = dict(request.get("requirements_ref") or {})
+        task_id = str(request.get("task_id") or "")
+        if not task_id or not manifest_ref or not requirements_ref:
+            raise PermanentEffectError(
+                "execution restart request is missing Task, architecture, or Requirements binding"
+            )
+        replacement_id = _derived_id("wf", str(effect["effect_key"]))
+        replacement = self.repository.read_snapshot(
+            AggregateType.WORKFLOW,
+            replacement_id,
+        )
+        if source.payload.get("restart_cancel_requested") and replacement is None:
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="REPLACEMENT_WORKFLOW_ABORTED",
+                    workflow_id=source.workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW,
+                    aggregate_id=source.aggregate_id,
+                    actor="minion-v2-manager",
+                    expected_version=source.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:replacement-aborted",
+                )
+            )
+            return {"status": "replacement_cancelled"}
+        if replacement is None:
+            self.service.start_workflow(
+                {
+                    "task_id": task_id,
+                    "workflow_id": replacement_id,
+                    "operation": "review_then_execute",
+                    "artifact_ref": manifest_ref,
+                    "requirements_ref": requirements_ref,
+                    "goal": str(request.get("goal") or ""),
+                    "research_mode": str(request.get("research_mode") or "none"),
+                    "actor": str(request.get("actor") or "pal"),
+                    "source_channel": str(request.get("source_channel") or "local"),
+                    "control_route": dict(request.get("control_route") or {}),
+                }
+            )
+            replacement = self.repository.read_snapshot(
+                AggregateType.WORKFLOW,
+                replacement_id,
+            )
+        latest = self.repository.read_snapshot(AggregateType.WORKFLOW, source.aggregate_id)
+        if latest is None:
+            raise RuntimeError("source workflow disappeared while creating replacement")
+        if latest.state == "RESTARTING":
+            if latest.payload.get("restart_cancel_requested"):
+                if replacement is None:
+                    raise RuntimeError("replacement workflow disappeared before cancellation")
+                if "REQUEST_CANCEL" in self.repository.engine.legal_actions(
+                    AggregateType.WORKFLOW,
+                    replacement.state,
+                ):
+                    self.service.control_workflow(
+                        workflow_id=replacement.aggregate_id,
+                        command="cancel",
+                        actor="minion-v2-manager",
+                        source_channel=str(request.get("source_channel") or "local"),
+                        reason="execution restart was cancelled before replacement activation",
+                    )
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="REPLACEMENT_WORKFLOW_STARTED",
+                    workflow_id=latest.workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW,
+                    aggregate_id=latest.aggregate_id,
+                    actor="minion-v2-manager",
+                    expected_version=latest.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:replacement-started",
+                    payload={"replacement_workflow_id": replacement_id},
+                )
+            )
+        elif not (
+            latest.state == "CANCELLED"
+            and str(latest.payload.get("replacement_workflow_id") or "") == replacement_id
+        ):
+            raise RuntimeError(
+                f"source workflow left RESTARTING while creating replacement: {latest.state}"
+            )
+        return {"replacement_workflow_id": replacement_id}
+
     def _node_accepted(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
         if str(node.payload.get("node_kind") or "unit") == "unit":
             generation = node_role_generation(node.payload)
             self.repository.complete_worker_session(
                 coder_session_id(node.aggregate_id, generation)
-            )
-            self.repository.complete_worker_session(
-                verifier_session_id(node.aggregate_id, generation)
             )
         epoch_id = str(node.payload.get("epoch_id") or "")
         if str(node.payload.get("node_kind") or "") == "integration":
@@ -1251,8 +1376,8 @@ class MinionV2OutboxProcessor:
         ]
         if nodes and not any(str(item.payload.get("node_kind") or "") == "integration" for item in nodes):
             implementation = [item for item in nodes if str(item.payload.get("node_kind") or "unit") == "unit"]
-            verification = [item for item in nodes if str(item.payload.get("node_kind") or "") == "verification"]
-            if implementation and verification and all(item.state == "ACCEPTED" for item in nodes):
+            scenarios = [item for item in nodes if str(item.payload.get("node_kind") or "") == "verification"]
+            if implementation and scenarios and all(item.state == "ACCEPTED" for item in nodes):
                 epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
                 if epoch is not None and epoch.state == "RUNNING":
                     self.repository.dispatch(
@@ -1266,7 +1391,10 @@ class MinionV2OutboxProcessor:
                             idempotency_key=f"effect:{effect['effect_key']}:all-required-accepted",
                             payload={
                                 "accepted_candidate_refs": [dict(item.payload["candidate_ref"]) for item in implementation],
-                                "verification_artifact_refs": [dict(item.payload["verification_artifact_ref"]) for item in verification],
+                                "verification_artifact_refs": [
+                                    dict(item.payload["verification_artifact_ref"])
+                                    for item in scenarios
+                                ],
                             },
                         )
                     )
@@ -1300,6 +1428,7 @@ class MinionV2OutboxProcessor:
                 }
             )
         manifest = self.service.artifacts.read_json(dict(node.payload.get("architecture_manifest_ref") or {}))
+        requirements_ref = dict(manifest.get("requirements_ref") or {})
         skeleton_sha = str(manifest.get("skeleton_commit_sha") or "")
         workspace = Path(str(node.payload.get("workspace_path") or ""))
         if not workspace.is_dir() or not skeleton_sha:
@@ -1331,7 +1460,7 @@ class MinionV2OutboxProcessor:
             {
                 "verification_name": fingerprint_payload["verification_name"],
                 "kind": str(scenario.get("kind") or ""),
-                "requirements": list(scenario.get("covers") or []),
+                "coverage_claims": list(scenario.get("covers") or []),
                 "contract_consumption": list(scenario.get("consumes") or []),
                 "accepted_modules": [
                     {
@@ -1343,11 +1472,13 @@ class MinionV2OutboxProcessor:
                 ],
                 "entrypoints": list(scenario.get("entrypoints") or []),
                 "environment": dict(scenario.get("environment") or {}),
+                "observable_behavior": str(scenario.get("observable_behavior") or ""),
             },
             artifact_type="VerificationScenarioWorkViewArtifact",
             child_refs=(
                 (str(scenario_ref.get("sha256") or ""), "verification_contract"),
                 (union_ref.sha256, "scenario_candidate_union"),
+                (str(requirements_ref.get("sha256") or ""), "task_sources"),
             ),
         )
         current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
@@ -1942,7 +2073,7 @@ def _topological_scenario_nodes(nodes: list[AggregateSnapshot]) -> list[Aggregat
     for node in nodes:
         missing = {
             str(item)
-            for item in list(node.payload.get("dependency_node_ids") or [])
+            for item in list(node.payload.get("contract_dependency_node_ids") or [])
             if str(item) not in selected
         }
         if missing:
@@ -1960,7 +2091,7 @@ def _topological_scenario_nodes(nodes: list[AggregateSnapshot]) -> list[Aggregat
                 for node in remaining.values()
                 if {
                     str(item)
-                    for item in list(node.payload.get("dependency_node_ids") or [])
+                    for item in list(node.payload.get("contract_dependency_node_ids") or [])
                 }
                 <= accepted
             ),

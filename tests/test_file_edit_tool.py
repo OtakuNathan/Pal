@@ -13,6 +13,7 @@ from pal.execution.file_edit import (
     ERR_NO_CHANGE,
     ERR_NOT_FOUND_MATCH,
     ERR_NOT_READ,
+    ERR_PARTIAL_READ,
     ERR_STALE_FILE,
     FileEditTool,
 )
@@ -121,6 +122,56 @@ class MultipleMatchesErrorTests(_TempFileMixin, unittest.TestCase):
         self.assertEqual(result.structured.get("match_count"), 2)
         self.assertEqual(path.read_text(), "aaa\nbbb\naaa\n")
 
+    def test_replace_all_replaces_every_exact_match(self) -> None:
+        path = self._write_tmp("all.txt", "aaa\nbbb\naaa\n")
+        self.cache.mark_read(path, "aaa\nbbb\naaa\n")
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": "aaa",
+                "new_string": "zzz",
+                "replace_all": True,
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(result.structured["match_count"], 2)
+        self.assertEqual(path.read_text(), "zzz\nbbb\nzzz\n")
+
+    def test_replace_all_tolerates_string_boolean(self) -> None:
+        path = self._write_tmp("string_bool.txt", "aaa aaa\n")
+        self.cache.mark_read(path, "aaa aaa\n")
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": "aaa",
+                "new_string": "zzz",
+                "replace_all": "true",
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(path.read_text(), "zzz zzz\n")
+
+
+class PartialReadErrorTests(_TempFileMixin, unittest.TestCase):
+    def test_partial_read_cannot_authorize_edit(self) -> None:
+        path = self._write_tmp("partial.txt", "alpha\nbeta\n")
+        self.cache.mark_read(path, "alpha\nbeta\n", full_view=False, view=(1, 1))
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": "alpha",
+                "new_string": "gamma",
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(result.structured["error_code"], ERR_PARTIAL_READ)
+
 
 class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
     """Successful edits: verify file content changes and diff output."""
@@ -214,6 +265,22 @@ class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
         self.assertIn("return 42", path.read_text())
         self.assertNotIn("return 1", path.read_text())
 
+    def test_curly_quote_match_preserves_file_typography(self) -> None:
+        content = "message = “hello”\n"
+        path = self._write_tmp("quotes.txt", content)
+        self.cache.mark_read(path, content)
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": 'message = "hello"',
+                "new_string": 'message = "goodbye"',
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(path.read_text(), "message = “goodbye”\n")
+
 
 class ValidationTests(_TempFileMixin, unittest.TestCase):
     """Input validation tests."""
@@ -240,6 +307,17 @@ class ValidationTests(_TempFileMixin, unittest.TestCase):
             "old_string": 123,
             "new_string": "b",
         })
+        self.assertEqual(result.status, RuntimeStatus.INVALID)
+
+    def test_non_boolean_replace_all_is_invalid(self) -> None:
+        result = self.tool.invoke(
+            {
+                "file_path": "any.txt",
+                "old_string": "a",
+                "new_string": "b",
+                "replace_all": "yes",
+            }
+        )
         self.assertEqual(result.status, RuntimeStatus.INVALID)
 
     def test_empty_old_string_is_invalid_and_does_not_write(self) -> None:
@@ -283,6 +361,7 @@ class ToolProtocolTests(unittest.TestCase):
         self.assertIn("file_path", tool.args_schema.get("properties", {}))
         self.assertIn("old_string", tool.args_schema.get("properties", {}))
         self.assertIn("new_string", tool.args_schema.get("properties", {}))
+        self.assertIn("replace_all", tool.args_schema.get("properties", {}))
 
     def test_ainvoke_delegates_to_invoke(self) -> None:
         import asyncio

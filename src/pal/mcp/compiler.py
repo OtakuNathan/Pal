@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor
+from pal.execution.tool_facade import McpToolOutput
 from pal.mcp.model import McpDiscoverySnapshot, McpRejectedItem, McpToolSpec
 from pal.mcp.normalize import (
     normalize_prompt_result,
@@ -82,7 +86,7 @@ class McpCompiler:
                         module_id=module_id,
                         snapshot=snapshot,
                         prompt=prompt,
-                        capability_ref=descriptor.canonical_path,
+                        capability_ref=descriptor.name,
                     )
                 )
             compiled_snapshots.append(snapshot.with_diagnostics(warnings=tuple(warnings), rejected_items=tuple(rejected)))
@@ -112,22 +116,69 @@ class McpCompiler:
         )
         if rejection is not None:
             return None, None, warnings, rejection
+        try:
+            Draft202012Validator.check_schema(schema or {})
+        except SchemaError:
+            return (
+                None,
+                None,
+                warnings,
+                McpRejectedItem(
+                    kind="tool",
+                    external_name=tool.name,
+                    reason="invalid_input_json_schema",
+                    raw_schema=dict(schema or {}),
+                    raw=tool.raw,
+                ),
+            )
         server_key = sanitize_name(snapshot.server_id, fallback="server")
         tool_key = sanitize_name(tool.name, fallback="tool")
         canonical_path = _unique_path(f"op_mcp_{server_key}_tool_{tool_key}", used_paths)
+        alias = f"mcp_{server_key}_{tool_key}"
+        if tool.output_schema is None:
+            output_schema = McpToolOutput.model_json_schema(mode="validation")
+        elif isinstance(tool.output_schema, dict):
+            output_schema = dict(tool.output_schema)
+            try:
+                Draft202012Validator.check_schema(output_schema)
+            except SchemaError:
+                return (
+                    None,
+                    None,
+                    warnings,
+                    McpRejectedItem(
+                        kind="tool",
+                        external_name=tool.name,
+                        reason="invalid_output_json_schema",
+                        raw_schema=output_schema,
+                        raw=tool.raw,
+                    ),
+                )
+        else:
+            return (
+                None,
+                None,
+                warnings,
+                McpRejectedItem(
+                    kind="tool",
+                    external_name=tool.name,
+                    reason="invalid_output_schema",
+                    raw=tool.raw,
+                ),
+            )
         descriptor = CapabilityDescriptor(
-            name=canonical_path,
+            name=alias,
             canonical_path=canonical_path,
             family="mcp",
             description=tool.description or f"MCP tool `{tool.name}` from `{snapshot.server_id}`.",
             source=f"mcp:{snapshot.server_id}",
-            display_name=canonical_path,
-            aliases=tuple(dict.fromkeys((tool_key, f"{server_key}_{tool_key}"))),
+            display_name=alias,
+            aliases=(),
             target_kind="mcp_tool",
             target_id=SINGLETON_TARGET,
             target_label=tool.name,
             parameters_schema=dict(schema or {"type": "object", "properties": {}, "required": []}),
-            result_schema={"type": "object"},
+            result_schema=output_schema,
             metadata=_mcp_metadata(
                 server_id=snapshot.server_id,
                 transport=snapshot.transport,
@@ -162,14 +213,15 @@ class McpCompiler:
         server_key = sanitize_name(snapshot.server_id, fallback="server")
         prompt_key = sanitize_name(prompt.name, fallback="prompt")
         canonical_path = _unique_path(f"op_mcp_{server_key}_prompt_{prompt_key}_render", used_paths)
+        alias = f"mcp_{server_key}_{prompt_key}_render"
         descriptor = CapabilityDescriptor(
-            name=canonical_path,
+            name=alias,
             canonical_path=canonical_path,
             family="mcp",
             description=prompt.description or f"Render MCP prompt `{prompt.name}` from `{snapshot.server_id}`.",
             source=f"mcp:{snapshot.server_id}",
-            display_name=canonical_path,
-            aliases=tuple(dict.fromkeys((prompt_key, f"{server_key}_{prompt_key}_render"))),
+            display_name=alias,
+            aliases=(),
             target_kind="mcp_prompt",
             target_id=SINGLETON_TARGET,
             target_label=prompt.name,

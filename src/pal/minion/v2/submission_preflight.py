@@ -8,6 +8,26 @@ from typing import Any, Iterable, Mapping
 RequirementRef = tuple[str, str]
 
 
+def raise_submission_errors(errors: Iterable[Any], *, owner: str) -> None:
+    unique_by_message: dict[str, Any] = {}
+    for item in errors:
+        message = str(item).strip()
+        if message:
+            unique_by_message.setdefault(message, item)
+    unique = list(unique_by_message.items())
+    if not unique:
+        return
+    if len(unique) == 1:
+        message, original = unique[0]
+        if isinstance(original, ValueError):
+            raise original
+        raise ValueError(message)
+    raise ValueError(
+        f"{owner} found {len(unique)} consistent errors:\n"
+        + "\n".join(f"- {message}" for message, _original in unique)
+    )
+
+
 def bound_reference_payload(
     workspace: Mapping[str, Any],
     name: str,
@@ -93,17 +113,17 @@ def validate_bound_requirement_refs(
     *,
     allowed: set[RequirementRef],
     owner: str,
-) -> None:
+) -> tuple[str, ...]:
     unknown = sorted(set(references) - allowed)
     if not unknown:
-        return
+        return ()
     rendered = "; ".join(f"{section}: {requirement}" for section, requirement in unknown)
     allowed_rendered = "; ".join(
         f"{section}: {requirement}" for section, requirement in sorted(allowed)
     ) or "<none>"
-    raise ValueError(
-        f"{owner} referenced Requirement text outside its bound work view: {rendered}. "
-        f"Allowed exact Requirement references: {allowed_rendered}"
+    return (
+        f"{owner} used an advisory Requirement citation outside its exact bound text: {rendered}. "
+        f"Available exact Requirement text: {allowed_rendered}",
     )
 
 
@@ -112,8 +132,8 @@ def validate_submission_requirement_refs(
     *,
     work_view: Mapping[str, Any],
     owner: str,
-) -> None:
-    validate_bound_requirement_refs(
+) -> tuple[str, ...]:
+    return validate_bound_requirement_refs(
         submission_requirement_refs(value),
         allowed=requirement_refs_from_view(work_view),
         owner=owner,

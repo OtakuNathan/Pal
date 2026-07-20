@@ -506,7 +506,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             turn_id=self.turn_id,
         )
         self.assertTrue(search.ok, search.text)
-        hit_names = {hit["name"] for hit in search.structured["hits"]}
+        hit_names = {hit["alias"] for hit in search.structured["hits"]}
         self.assertIn("search_artifacts", hit_names)
         self.assertIn("read_artifact", hit_names)
 
@@ -515,7 +515,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             turn_id=self.turn_id,
         )
         self.assertTrue(read_tool.ok, read_tool.text)
-        schema = read_tool.structured["capability"]["parameters_schema"]
+        schema = read_tool.structured["input_schema"]
         self.assertIn("artifact_id", schema["properties"])
         self.assertIn("representation", schema["properties"])
 

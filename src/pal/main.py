@@ -61,6 +61,14 @@ def _build_parser() -> argparse.ArgumentParser:
     codex_bridge_parser.add_argument("--max-concurrency", type=int, default=None)
     codex_bridge_parser.add_argument("--max-concurrency-env", default="PAL_CODEX_BRIDGE_MAX_CONCURRENCY")
 
+    # -- eval tools ----------------------------------------------------------
+    eval_parser = subparsers.add_parser("eval", help="Run versioned Pal evaluations")
+    eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
+    tools_eval_parser = eval_subparsers.add_parser("tools", help="Run the LLM tool-usability benchmark")
+    tools_eval_parser.add_argument("--runtime-root", type=Path, required=True)
+    tools_eval_parser.add_argument("--manifest", type=Path, default=None)
+    tools_eval_parser.add_argument("--output", type=Path, default=None)
+
     return parser
 
 
@@ -116,6 +124,14 @@ def main() -> int:
             models_env=str(args.models_env),
             max_concurrency=getattr(args, "max_concurrency", None),
             max_concurrency_env=str(args.max_concurrency_env),
+        )
+    if args.command == "eval" and args.eval_command == "tools":
+        from pal.eval_tools import DEFAULT_TOOLS_BENCHMARK, run_tools_eval_cli
+
+        return run_tools_eval_cli(
+            runtime_root=args.runtime_root,
+            manifest_path=args.manifest or DEFAULT_TOOLS_BENCHMARK,
+            output_path=args.output,
         )
     return asyncio.run(_run_async(args))
 

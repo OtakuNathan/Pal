@@ -13,11 +13,12 @@ from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.llm.contracts import ToolResultHandle
-from pal.shared import RuntimeStatus, llm_tool_name
+from pal.shared import RuntimeStatus
 
 
 DEFAULT_TOOL_RESULT_PAGE_SIZE = 4_000
 DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS = 5
+TOOL_RESULT_READER_ALIAS = "read_tool_result"
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class ToolResultPagerStore:
     _tool_names: dict[str, str] = field(default_factory=dict)
     _statuses: dict[str, str] = field(default_factory=dict)
     _ok: dict[str, bool] = field(default_factory=dict)
+    _rendered: dict[str, str] = field(default_factory=dict)
     _turn_indices: dict[str, int] = field(default_factory=dict)
     _current_user_turn_index: int = 0
     _initialized_roots: set[str] = field(default_factory=set)
@@ -76,7 +78,7 @@ class ToolResultPagerStore:
     def store(
         self,
         *,
-        runtime_root: Path,
+        runtime_root: Path | None,
         turn_id: str,
         result_ref: str,
         tool_name: str,
@@ -91,22 +93,25 @@ class ToolResultPagerStore:
         normalized_turn_id = str(turn_id or "").strip() or "unknown_turn"
         safe_file = _safe_file_name(normalized_ref)
         root = self._ephemeral_root(runtime_root)
-        if root is None:
-            raise ValueError("runtime_root is required")
         with self._lock:
-            self._cleanup_stale_root_once(root)
-            turn_dir = root / _safe_file_name(normalized_turn_id)
-            turn_dir.mkdir(parents=True, exist_ok=True)
-            path = turn_dir / f"{safe_file}.txt"
-            path.write_text(str(rendered or ""), encoding="utf-8")
+            path: Path | None = None
+            rendered_text = str(rendered or "")
+            if root is not None:
+                self._cleanup_stale_root_once(root)
+                turn_dir = root / _safe_file_name(normalized_turn_id)
+                turn_dir.mkdir(parents=True, exist_ok=True)
+                path = turn_dir / f"{safe_file}.txt"
+                path.write_text(rendered_text, encoding="utf-8")
+            else:
+                self._rendered[normalized_ref] = rendered_text
             resolved_page_size = max(256, int(page_size or DEFAULT_TOOL_RESULT_PAGE_SIZE))
-            original_size = len(str(rendered or ""))
+            original_size = len(rendered_text)
             page_count = max(1, math.ceil(original_size / resolved_page_size))
             turn_index = self._turn_indices.get(normalized_turn_id, self._current_user_turn_index)
             handle = ToolResultHandle(
                 result_ref=normalized_ref,
                 turn_id=normalized_turn_id,
-                backing_path=str(path),
+                backing_path=str(path) if path is not None else "",
                 page_size=resolved_page_size,
                 original_size=original_size,
                 page_count=page_count,
@@ -134,11 +139,17 @@ class ToolResultPagerStore:
             handle = self._handles.get(normalized_ref)
             if handle is None:
                 return None
-            path = Path(handle.backing_path)
-            if not path.is_file():
-                self._drop_handle(normalized_ref)
-                return None
-            text = path.read_text(encoding="utf-8")
+            if handle.backing_path:
+                path = Path(handle.backing_path)
+                if not path.is_file():
+                    self._drop_handle(normalized_ref)
+                    return None
+                text = path.read_text(encoding="utf-8")
+            else:
+                text = self._rendered.get(normalized_ref)
+                if text is None:
+                    self._drop_handle(normalized_ref)
+                    return None
             resolved_page_size = max(256, int(page_size or handle.page_size or DEFAULT_TOOL_RESULT_PAGE_SIZE))
             page_count = max(1, math.ceil(len(text) / resolved_page_size))
             requested_page = max(1, int(page or 1))
@@ -207,7 +218,7 @@ class ToolResultPagerStore:
             return
         handle = self._handles.get(normalized_ref)
         self._drop_handle(normalized_ref)
-        if handle is not None:
+        if handle is not None and handle.backing_path:
             path = Path(handle.backing_path)
             with contextlib.suppress(OSError):
                 path.unlink()
@@ -221,6 +232,7 @@ class ToolResultPagerStore:
         self._tool_names.pop(result_ref, None)
         self._statuses.pop(result_ref, None)
         self._ok.pop(result_ref, None)
+        self._rendered.pop(result_ref, None)
 
     def _cleanup_stale_root_once(self, root: Path) -> None:
         key = str(root)
@@ -296,6 +308,8 @@ class ToolResultPageTool:
                     "anchor_page": {"type": "integer"},
                     "original_size": {"type": "integer"},
                     "page_size": {"type": "integer"},
+                    "page_text": {"type": "string"},
+                    "affordances": {"type": "array", "items": {"type": "object"}},
                 },
             }
 
@@ -380,27 +394,27 @@ def render_tool_result_page_for_llm(page: ToolResultPage, *, tag: str = "tool_re
         if page.anchor_page > 1 and page.has_more_after:
             parts.append(
                 "newer_page: "
-                f"{llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, "
+                f"{TOOL_RESULT_READER_ALIAS}(result_ref={json.dumps(page.result_ref)}, "
                 f"anchor=\"tail\", page={page.anchor_page - 1})"
             )
         if page.has_more_before:
             parts.append(
                 "older_page: "
-                f"{llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, "
+                f"{TOOL_RESULT_READER_ALIAS}(result_ref={json.dumps(page.result_ref)}, "
                 f"anchor=\"tail\", page={page.anchor_page + 1})"
             )
     else:
         if page.page > 1:
             parts.append(
-                f"previous_page: {llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, page={page.page - 1})"
+                f"previous_page: {TOOL_RESULT_READER_ALIAS}(result_ref={json.dumps(page.result_ref)}, page={page.page - 1})"
             )
         if page.has_more_after:
             parts.append(
-                f"next_page: {llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, page={page.page + 1})"
+                f"next_page: {TOOL_RESULT_READER_ALIAS}(result_ref={json.dumps(page.result_ref)}, page={page.page + 1})"
             )
         if page.page_count > 1 and page.page != page.page_count:
             parts.append(
-                f"tail_page: {llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, anchor=\"tail\")"
+                f"tail_page: {TOOL_RESULT_READER_ALIAS}(result_ref={json.dumps(page.result_ref)}, anchor=\"tail\")"
             )
     parts.append(f"</{tag}>")
     return "\n".join(part for part in parts if part).strip()

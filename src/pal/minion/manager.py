@@ -292,6 +292,7 @@ class MinionManager:
             "llm_resolve_endpoint_facts": self.llm_broker_resolve_endpoint_facts,
             "send_decision": self.send_decision,
             "send_clarification": self.send_clarification,
+            "answer_workflow_question": self.answer_workflow_question,
         }
         if method in handlers:
             payload = dict(params.get("decision") or {}) if method == "send_decision" else dict(params.get("clarification") or {}) if method == "send_clarification" else params
@@ -466,6 +467,41 @@ class MinionManager:
         state.pending_clarification = {}
         state.status = "running"
         return {"ok": True, "run": state.summary(), "clarification": dict(payload)}
+
+    async def answer_workflow_question(self, payload: dict[str, Any]) -> dict[str, Any]:
+        workflow_id = str(payload.get("workflow_id") or "").strip()
+        answer = str(payload.get("answer") or "").strip()
+        if not workflow_id or not answer:
+            raise ValueError("workflow_id and answer are required")
+        matches: list[MinionRunState] = []
+        for state in self.runs.values():
+            if not state.pending_clarification:
+                continue
+            binding = dict(dict(state.pack.workspace or {}).get("minion_v2") or {})
+            if str(binding.get("workflow_id") or "") == workflow_id:
+                matches.append(state)
+        if len(matches) != 1:
+            raise ValueError(
+                f"workflow has {len(matches)} pending worker questions; expected exactly one"
+            )
+        state = matches[0]
+        pending = dict(state.pending_clarification)
+        questions = [
+            dict(item) for item in list(pending.get("questions") or []) if isinstance(item, dict)
+        ]
+        question_id = str(
+            (questions[0] if questions else {}).get("question_id")
+            or (questions[0] if questions else {}).get("id")
+            or "question-1"
+        )
+        return await self.send_clarification(
+            {
+                "clarification_id": str(pending.get("clarification_id") or ""),
+                "run_id": state.run_id,
+                "minion_id": state.minion_id,
+                "answers": [{"question_id": question_id, "answer": answer}],
+            }
+        )
 
     async def llm_broker_preflight(self, params: dict[str, Any]) -> dict[str, Any]:
         self._require_broker_run(params)

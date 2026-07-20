@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from pal.execution.file_tool_contracts import (
+    FILE_EDIT_DESCRIPTION,
+    FILE_EDIT_RESULT_SCHEMA,
+    FILE_READ_DESCRIPTION,
+    FILE_READ_RESULT_SCHEMA,
+    FILE_WRITE_DESCRIPTION,
+    FILE_WRITE_RESULT_SCHEMA,
+    file_edit_args_schema,
+    file_read_args_schema,
+    file_write_args_schema,
+)
 from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, RuntimeStatus, capability_action
 
 
@@ -19,33 +30,10 @@ class FileCapabilityMixin:
         scope="module",
         family="file",
         action_name="read",
-        description=(
-            "Read a UTF-8 text file and return a line-numbered slice. "
-            "A successful read caches the full file for subsequent file_edit calls."
-        ),
+        description=FILE_READ_DESCRIPTION,
         aliases=("file_read",),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Path to the file to read."},
-                "offset": {"type": "integer", "minimum": 1, "description": "1-based starting line number."},
-                "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines to return."},
-            },
-            "required": ["file_path"],
-        },
-        result_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string"},
-                "content": {"type": "string"},
-                "start_line": {"type": "integer"},
-                "end_line": {"type": "integer"},
-                "total_lines": {"type": "integer"},
-                "truncated": {"type": "boolean"},
-                "encoding": {"type": "string"},
-                "error_code": {"type": "string"},
-            },
-        },
+        args_schema=file_read_args_schema(),
+        result_schema=FILE_READ_RESULT_SCHEMA,
         metadata={"canonical_path": "op_file_read"},
     )
     def file_read(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -56,30 +44,10 @@ class FileCapabilityMixin:
         scope="module",
         family="file",
         action_name="edit",
-        description=(
-            "Edit a UTF-8 text file by replacing one exact old_string with new_string. "
-            "The file must first be read with op_file_read so Pal can detect stale edits. "
-            "Returns a unified diff patch on success."
-        ),
+        description=FILE_EDIT_DESCRIPTION,
         aliases=("file_edit",),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Path to the file to edit."},
-                "old_string": {"type": "string", "description": "Exact text to find and replace."},
-                "new_string": {"type": "string", "description": "Replacement text."},
-            },
-            "required": ["file_path", "old_string", "new_string"],
-        },
-        result_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string"},
-                "error_code": {"type": "string"},
-                "patch": {"type": "string"},
-                "match_count": {"type": "integer"},
-            },
-        },
+        args_schema=file_edit_args_schema(),
+        result_schema=FILE_EDIT_RESULT_SCHEMA,
         metadata={"canonical_path": "op_file_edit"},
     )
     def file_edit(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -90,42 +58,10 @@ class FileCapabilityMixin:
         scope="module",
         family="file",
         action_name="write",
-        description=(
-            "Create, overwrite, or append to a UTF-8 text file. "
-            "Create mode creates missing parent directories. "
-            "Overwrite and append require a current prior op_file_read snapshot."
-        ),
+        description=FILE_WRITE_DESCRIPTION,
         aliases=("file_write",),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Path to write."},
-                "content": {"type": "string", "description": "UTF-8 text content to write."},
-                "mode": {
-                    "type": "string",
-                    "enum": ["create", "overwrite", "append"],
-                    "default": "create",
-                    "description": (
-                        "Write mode. 'create' creates a new file and fails if it exists. "
-                        "Create mode also creates missing parent directories. "
-                        "'overwrite' replaces the full existing file after file_read. "
-                        "'append' adds content to the end of an existing file after file_read."
-                    ),
-                },
-            },
-            "required": ["file_path", "content"],
-        },
-        result_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string"},
-                "bytes_written": {"type": "integer"},
-                "created": {"type": "boolean"},
-                "encoding": {"type": "string"},
-                "mode": {"type": "string"},
-                "error_code": {"type": "string"},
-            },
-        },
+        args_schema=file_write_args_schema(),
+        result_schema=FILE_WRITE_RESULT_SCHEMA,
         metadata={"canonical_path": "op_file_write"},
     )
     def file_write(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -199,6 +135,7 @@ class FileCapabilityMixin:
                 "file_path": {"type": "string"},
                 "cached": {"type": "boolean"},
                 "valid": {"type": "boolean"},
+                "full_view": {"type": "boolean"},
                 "content_length": {"type": "integer"},
             },
         },

@@ -720,6 +720,7 @@ class MinionRunner:
             "coder_report.json": "candidate_submit",
             "producer_report.json": "candidate_submit",
             "verification_plan.json": "verification_submit",
+            "verification_submission.json": "a semantic verification outcome tool",
             "standalone_review.json": "review_submit",
         }.get(primary, "the bound role-specific submit tool")
         return (
@@ -762,6 +763,7 @@ class MinionRunner:
                     dict(self.pack.resolved_profile or {}).get("capability_description_overrides") or {}
                 ).items()
             },
+            request_user_clarification=self._request_architecture_clarification,
         )
         session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
         session_id = str(session_metadata.get("session_id") or "").strip()
@@ -918,23 +920,27 @@ class MinionRunner:
     def _load_agent_session_checkpoint(self, workspace: dict[str, Any], *, session_id: str) -> dict[str, Any]:
         if not session_id:
             return {}
-        run_dir = Path(str(workspace.get("run_dir") or ""))
-        if not run_dir.is_dir():
+        session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
+        restore_text = str(session_metadata.get("continuation_input_path") or "").strip()
+        if not restore_text:
             return {}
-        candidates: list[tuple[int, Path]] = []
-        for path in run_dir.glob("session-continuation-*.json"):
-            match = re.fullmatch(r"session-continuation-(\d+)\.json", path.name)
-            if match:
-                candidates.append((int(match.group(1)), path))
-        for _, path in sorted(candidates, reverse=True):
-            try:
-                value = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if isinstance(value, dict) and str(value.get("session_id") or "") == session_id:
-                self._agent_session_checkpoint = dict(value)
-                return dict(value)
-        return {}
+        restore_path = Path(restore_text)
+        if not restore_path.is_file():
+            raise RuntimeError("manager-selected agent continuation is unavailable")
+        try:
+            value = json.loads(restore_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("manager-selected agent continuation is unreadable") from exc
+        if not isinstance(value, dict) or str(value.get("session_id") or "") != session_id:
+            raise RuntimeError("manager-selected agent continuation has the wrong session identity")
+        expected_scope = str(session_metadata.get("scope_kind") or "")
+        expected_subject = str(session_metadata.get("subject_key") or "")
+        if str(value.get("scope_kind") or "") != expected_scope:
+            raise RuntimeError("manager-selected agent continuation has the wrong scope")
+        if str(value.get("subject_key") or "") != expected_subject:
+            raise RuntimeError("manager-selected agent continuation has the wrong subject")
+        self._agent_session_checkpoint = dict(value)
+        return dict(value)
 
     def _persist_agent_session_checkpoint(
         self,
@@ -948,14 +954,17 @@ class MinionRunner:
         session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
         session_id = str(session_metadata.get("session_id") or "").strip()
         fencing_token = int(session_metadata.get("fencing_token") or 0)
-        run_dir = Path(str(workspace.get("run_dir") or ""))
-        if not session_id or fencing_token <= 0 or not run_dir.is_dir():
+        checkpoint_text = str(session_metadata.get("continuation_output_path") or "").strip()
+        if not session_id or fencing_token <= 0 or not checkpoint_text:
             return
+        checkpoint_path = Path(checkpoint_text)
         if continuation.pending_tool_call_batch or continuation.pending_tool_results:
             return
         payload = {
-            "schema_version": "1",
+            "schema_version": "2",
             "session_id": session_id,
+            "scope_kind": str(session_metadata.get("scope_kind") or ""),
+            "subject_key": str(session_metadata.get("subject_key") or ""),
             "invocation_id": self.pack.invocation_id,
             "fencing_token": fencing_token,
             "initial_instruction": str(initial_instruction),
@@ -967,8 +976,9 @@ class MinionRunner:
             "preferred_llm_endpoint_id": str(continuation.preferred_llm_endpoint_id or ""),
             "preferred_llm_model_id": str(continuation.preferred_llm_model_id or ""),
         }
-        target = run_dir / f"session-continuation-{fencing_token}.json"
-        temporary = run_dir / f".{target.name}.{os.getpid()}.tmp"
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        target = checkpoint_path
+        temporary = target.parent / f".{target.name}.{os.getpid()}.tmp"
         temporary.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
         os.replace(temporary, target)
         self._agent_session_checkpoint = payload
@@ -1457,11 +1467,7 @@ class MinionRunner:
             or ""
         ).strip()
         if repo_path:
-            effective_args.setdefault("workspace_root", repo_path)
-        for key in ("primary_language", "languages", "lsp_setup"):
-            value = workspace.get(key)
-            if value not in (None, "", [], {}) and key not in effective_args:
-                effective_args[key] = value
+            effective_args["workspace_root"] = repo_path
         if tool_call.name == "op_tool_call":
             args = dict(tool_call.args or {})
             args["args"] = effective_args
@@ -1747,6 +1753,17 @@ class MinionRunner:
                 auto_accept_approvals=self.auto_accept_approvals,
             )
         return self.user_interaction
+
+    async def _request_architecture_clarification(
+        self,
+        payload: dict[str, Any],
+        timeout_seconds: float | None,
+    ) -> dict[str, Any]:
+        return await self._user_interaction_port().request_clarification(
+            payload,
+            approval_policy=self.pack.approval_policy or {},
+            timeout_seconds=timeout_seconds,
+        )
 
     def _completion_evidence_present(self) -> bool:
         if self._manager_submission_receipt_required():
@@ -2417,7 +2434,7 @@ def _llm_tools_for_allowed(execution_runtime: Any, allowed_capabilities: list[st
             {
                 "type": "function",
                 "function": {
-                    "name": llm_tool_name(spec.get("name") or canonical),
+                    "name": str(spec.get("name") or canonical).strip(),
                     "description": replace_internal_tool_names(
                         spec.get("description") or spec.get("display_name") or canonical
                     ),

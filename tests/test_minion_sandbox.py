@@ -121,6 +121,24 @@ class MinionSandboxTests(unittest.TestCase):
 
             self.assertEqual(bind_paths, (common_dir.resolve(),))
 
+    def test_git_metadata_bind_paths_include_shared_clone_object_store(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_shared_meta_") as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            workspace = root / "workspace"
+            source.mkdir()
+            _git(source, "init")
+            _git(source, "config", "user.email", "pal-test@example.invalid")
+            _git(source, "config", "user.name", "Pal Test")
+            (source / "README.md").write_text("source\n", encoding="utf-8")
+            _git(source, "add", "README.md")
+            _git(source, "commit", "-m", "initial")
+            _git(root, "clone", "--shared", str(source), str(workspace))
+
+            bind_paths = _git_worktree_metadata_bind_paths(workspace)
+
+            self.assertEqual(bind_paths, ((source / ".git" / "objects").resolve(),))
+
     def test_sandbox_env_scrubs_secret_like_values_and_enables_broker(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_env_") as tmp:
             with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(Path(tmp) / "tmp_scratch")}):
@@ -364,6 +382,71 @@ if printf bad > .git/config 2>/dev/null; then exit 23; fi
             self.assertEqual((repo / "contracts" / "router.py").read_text(), "contract\n")
             self.assertEqual((repo / "src" / "sibling.py").read_text(), "sibling\n")
 
+    def test_verifier_regression_overlay_is_read_only_inside_sandbox(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_overlay_") as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            repo = root / "repo"
+            (repo / "src").mkdir(parents=True)
+            (repo / "tests").mkdir()
+            (repo / "src" / "router.py").write_text("old\n", encoding="utf-8")
+            (repo / "tests" / "test_router.py").write_text(
+                "def test_router():\n    assert False\n",
+                encoding="utf-8",
+            )
+            _git(repo, "init")
+            _git(repo, "config", "user.email", "pal-test@example.invalid")
+            _git(repo, "config", "user.name", "Pal Test")
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-m", "initial")
+            pack = MinionInvocationPack(
+                invocation_id="repair-overlay",
+                goal="repair router without changing verifier tests",
+                workspace={
+                    "repo_path": str(repo),
+                    "require_os_path_enforcement": True,
+                    "write_path_scopes": [
+                        {"kind": "directory", "path": "src"},
+                        {"kind": "directory", "path": "tests"},
+                    ],
+                    "read_only_overlay_paths": ["tests/test_router.py"],
+                    "workspace_policy": {"mode": "writable_git_branch"},
+                },
+            )
+            with patch.dict(
+                os.environ,
+                {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "scratch")},
+            ):
+                pack = with_minion_sandbox_metadata(
+                    runtime_root,
+                    pack,
+                    run_id="run_overlay",
+                )
+                script = """
+printf fixed > src/router.py
+if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
+"""
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=runtime_root,
+                    pack=pack,
+                    argv=["/bin/sh", "-c", script],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
+
+            result = subprocess.run(
+                argv,
+                env=env,
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((repo / "src" / "router.py").read_text(), "fixed")
+            self.assertIn("assert False", (repo / "tests" / "test_router.py").read_text())
+
     def test_scoped_writable_workspace_fails_closed_without_sandbox(self) -> None:
         pack = MinionInvocationPack(
             invocation_id="scoped-disabled",
@@ -457,6 +540,50 @@ if printf bad > .git/config 2>/dev/null; then exit 23; fi
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "")
 
+    def test_sandboxed_shared_clone_can_resolve_alternate_object_store(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_shared_clone_") as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            source = root / "source"
+            workspace = root / "workspace"
+            source.mkdir()
+            _git(source, "init")
+            _git(source, "config", "user.email", "pal-test@example.invalid")
+            _git(source, "config", "user.name", "Pal Test")
+            (source / "README.md").write_text("source\n", encoding="utf-8")
+            _git(source, "add", "README.md")
+            _git(source, "commit", "-m", "initial")
+            _git(root, "clone", "--shared", str(source), str(workspace))
+            (workspace / "README.md").write_text("changed\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")}):
+                pack = with_minion_sandbox_metadata(
+                    runtime_root,
+                    MinionInvocationPack(
+                        invocation_id="shared-clone",
+                        goal="inspect shared clone",
+                        workspace={
+                            "repo_path": str(workspace),
+                            "require_os_path_enforcement": True,
+                            "write_path_scopes": [{"kind": "file", "path": "README.md"}],
+                        },
+                    ),
+                    run_id="run_shared_clone",
+                )
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=runtime_root,
+                    pack=pack,
+                    argv=["git", "diff", "--name-only", "HEAD", "--"],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
+
+            result = subprocess.run(argv, env=env, cwd=str(workspace), capture_output=True, text=True, timeout=20)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "README.md")
+
     def test_sandboxed_python_can_import_runtime_dependencies(self) -> None:
         if not shutil.which("bwrap"):
             self.skipTest("bubblewrap is not available")
@@ -546,7 +673,6 @@ if printf bad > .git/config 2>/dev/null; then exit 23; fi
                     "repo_path": str(workspace),
                     "primary_language": "cpp",
                     "languages": ["c", "cpp"],
-                    "lsp_setup": {"languages": ["cpp"], "servers": ["clangd"]},
                 },
             ),
             minion_id="m_lsp",
@@ -569,11 +695,12 @@ if printf bad > .git/config 2>/dev/null; then exit 23; fi
         )
 
         self.assertEqual(direct.args["workspace_root"], str(workspace))
-        self.assertEqual(direct.args["primary_language"], "cpp")
-        self.assertEqual(direct.args["lsp_setup"]["servers"], ["clangd"])
+        self.assertNotIn("primary_language", direct.args)
+        self.assertNotIn("lsp_setup", direct.args)
         nested_args = dict(nested.args["args"])
         self.assertEqual(nested_args["workspace_root"], str(workspace))
-        self.assertEqual(nested_args["languages"], ["c", "cpp"])
+        self.assertNotIn("languages", nested_args)
+        self.assertNotIn("lsp_setup", nested_args)
 
 
 class MinionLLMBrokerSerializationTests(unittest.TestCase):

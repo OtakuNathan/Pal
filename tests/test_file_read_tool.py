@@ -12,6 +12,7 @@ from pal.execution.file_read import (
     ERR_FILE_NOT_FOUND,
     ERR_INVALID_ARGUMENT,
     ERR_UNSUPPORTED_TEXT_ENCODING,
+    FILE_UNCHANGED_STUB,
     FileReadTool,
 )
 from pal.execution.file_state import FileStateCache
@@ -50,6 +51,7 @@ class BasicReadTests(_TempFileMixin, unittest.TestCase):
         self.tool.invoke({"file_path": str(path)})
         cached = self.cache.get_valid(str(path))
         self.assertEqual(cached, "cached content\n")
+        self.assertEqual(self.cache.get_valid_full(str(path)), "cached content\n")
 
     def test_path_alias_reads_file(self) -> None:
         path = self._write_tmp("alias.txt", "alias content\n")
@@ -64,6 +66,15 @@ class BasicReadTests(_TempFileMixin, unittest.TestCase):
         result = self.tool.invoke({"file_path": str(path)})
         self.assertIn("     1\taaa", result.text)
         self.assertIn("     3\tccc", result.text)
+
+    def test_repeated_unchanged_range_returns_compact_stub(self) -> None:
+        path = self._write_tmp("repeat.txt", "one\ntwo\n")
+        first = self.tool.invoke({"file_path": str(path)})
+        second = self.tool.invoke({"file_path": str(path)})
+
+        self.assertEqual(first.status, RuntimeStatus.OK)
+        self.assertEqual(second.text, FILE_UNCHANGED_STUB)
+        self.assertTrue(second.structured["unchanged"])
 
 
 class OffsetLimitTests(_TempFileMixin, unittest.TestCase):
@@ -114,14 +125,23 @@ class CacheIntegrationTests(_TempFileMixin, unittest.TestCase):
         self.assertIn("patch", edit_result.structured)
         self.assertEqual(path.read_text(), "goodbye world\n")
 
-    def test_cache_stores_full_content_not_slice(self) -> None:
-        """Even when reading with offset/limit, the full file is cached."""
+    def test_partial_read_caches_bytes_but_does_not_grant_mutation(self) -> None:
         content = "\n".join(f"line {i}" for i in range(50))
         path = self._write_tmp("full_cache.txt", content)
         self.tool.invoke({"file_path": str(path), "offset": 1, "limit": 5})
 
         cached = self.cache.get_valid(str(path))
         self.assertEqual(cached, content)
+        self.assertIsNone(self.cache.get_valid_full(str(path)))
+
+        edit_result = FileEditTool(cache=self.cache).invoke(
+            {
+                "file_path": str(path),
+                "old_string": "line 1",
+                "new_string": "changed",
+            }
+        )
+        self.assertEqual(edit_result.structured["error_code"], "PARTIAL_READ")
 
 
 class ErrorHandlingTests(_TempFileMixin, unittest.TestCase):

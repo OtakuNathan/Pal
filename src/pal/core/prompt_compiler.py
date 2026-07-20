@@ -7,7 +7,6 @@ from pal.shared import (
     PromptFragment,
     PromptIR,
     PromptIRBlock,
-    llm_tool_name,
     replace_internal_tool_names,
 )
 from pal.shared.payloads import extract_text_from_payload
@@ -792,9 +791,6 @@ class PromptCompiler:
             function = payload.get("function")
             if isinstance(function, dict):
                 rendered_function = dict(function)
-                name = str(rendered_function.get("name") or "").strip()
-                if name:
-                    rendered_function["name"] = llm_tool_name(name)
                 payload["function"] = rendered_function
             rendered.append(payload)
         return rendered

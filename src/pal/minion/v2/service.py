@@ -21,6 +21,10 @@ from pal.minion.v2.skeleton import (
     compile_skeleton_markdown,
     review_architecture_skeleton,
 )
+from pal.minion.v2.task_sources import (
+    TASK_SOURCE_BUNDLE_ARTIFACT,
+    TaskSourceBundleService,
+)
 
 
 ROUTER_OPERATIONS = {
@@ -31,7 +35,6 @@ ROUTER_OPERATIONS = {
     "review_and_repair",
 }
 
-
 @dataclass
 class MinionV2WorkflowService:
     runtime_root: Path
@@ -40,6 +43,7 @@ class MinionV2WorkflowService:
     architecture: ArchitectureArtifactService = field(init=False)
     catalog: MinionV2Catalog = field(init=False)
     skeleton: GitBackedSkeletonService = field(init=False)
+    task_sources: TaskSourceBundleService = field(init=False)
 
     def __post_init__(self) -> None:
         self.repository = MinionV2Repository(Path(self.runtime_root))
@@ -47,6 +51,7 @@ class MinionV2WorkflowService:
         self.architecture = ArchitectureArtifactService(self.artifacts, self.repository)
         self.catalog = MinionV2Catalog(Path(self.runtime_root), self.artifacts)
         self.skeleton = GitBackedSkeletonService(Path(self.runtime_root), self.artifacts)
+        self.task_sources = TaskSourceBundleService(Path(self.runtime_root), self.artifacts)
 
     def create_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
@@ -98,22 +103,33 @@ class MinionV2WorkflowService:
         }
 
     def prepare_requirements(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Publish the immutable raw task source used by every V2 role.
+
+        This administrative helper intentionally accepts prose rather than a
+        normalized Requirement graph. Public callers should use start_workflow.
+        """
+
         data = dict(request)
-        payload = {
-            "title": str(data.get("title") or "Requirements").strip(),
-            "requirements": list(data.get("requirements") or []),
-            "sections": dict(data.get("sections") or {}),
-            "strengths": dict(data.get("strengths") or {}),
-            "open_clarifications": list(data.get("open_clarifications") or []),
-            "source_coverage": list(data.get("source_coverage") or []),
-        }
-        ref = self.architecture.publish_requirements(
-            payload,
-            provenance={
-                "actor": str(data.get("actor") or "pal"),
-                "source_channel": str(data.get("source_channel") or "local"),
-                "owner": "foreground_pal",
-            },
+        forbidden = {
+            "requirements",
+            "sections",
+            "strengths",
+            "source_coverage",
+            "source_documents",
+            "source_artifact_refs",
+        }.intersection(data)
+        if forbidden:
+            raise ValueError(
+                "V2 no longer accepts normalized Requirements fields: "
+                + ", ".join(sorted(forbidden))
+            )
+        ref = self.task_sources.publish(
+            title=str(data.get("title") or "Task"),
+            request_text=str(data.get("request_text") or data.get("goal") or ""),
+            workspace=_normalize_workspace(data.get("workspace")),
+            source_files=[str(item) for item in list(data.get("source_files") or [])],
+            actor=str(data.get("actor") or "pal"),
+            source_channel=str(data.get("source_channel") or "local"),
         )
         return {"status": "prepared", "requirements_ref": ref.to_dict()}
 
@@ -260,7 +276,8 @@ class MinionV2WorkflowService:
         operation = str(data.get("operation") or "new_requirement").strip().lower()
         if operation not in ROUTER_OPERATIONS:
             raise ValueError(f"unsupported artifact router operation: {operation}")
-        goal = str(data.get("goal") or "").strip()
+        raw_goal = str(data.get("goal") or "")
+        goal = raw_goal.strip()
         artifact_ref = _artifact_ref_mapping(data.get("artifact_ref"))
         requirements_ref = _artifact_ref_mapping(data.get("requirements_ref"))
         if operation == "new_requirement" and not goal:
@@ -279,48 +296,48 @@ class MinionV2WorkflowService:
             raise ValueError("workflow workspace is owned by Task; update the Task instead")
         task_revision_ref = dict(task.payload.get("task_revision_ref") or {})
         task_revision = dict(self.artifacts.read_json(task_revision_ref))
+        workspace = _normalize_workspace(task_revision.get("workspace"))
         family_binding_ref = self.catalog.publish_family_binding(str(task.payload.get("family_id") or ""))
         workflow_id = str(data.get("workflow_id") or f"wf_{uuid4().hex}").strip()
         actor = str(data.get("actor") or "pal").strip()
         source_channel = str(data.get("source_channel") or "local").strip()
         research_mode = ResearchMode(str(data.get("research_mode") or ResearchMode.LOCAL_ONLY))
+        source_files = [str(item) for item in list(data.get("source_files") or [])]
+        if operation != "new_requirement" and source_files:
+            raise ValueError("source_files are only valid for new_requirement workflows")
+        if requirements_ref and source_files:
+            raise ValueError("source_files cannot be combined with an existing task source bundle")
         if operation == "new_requirement" and not requirements_ref:
-            requirements_payload: dict[str, Any]
-            if data.get("sections"):
-                requirements_payload = {
-                    "title": str(data.get("title") or goal or "Requirements"),
-                    "sections": dict(data.get("sections") or {}),
-                    "strengths": dict(data.get("strengths") or {}),
-                }
-            elif data.get("requirements"):
-                requirements_payload = {
-                    "title": str(data.get("title") or goal or "Requirements"),
-                    "requirements": list(data.get("requirements") or []),
-                }
-            else:
-                requirements_payload = {
-                    "title": str(data.get("title") or goal or "Requirements"),
-                    "sections": {"Requested outcome": [goal]},
-                }
-            prepared = self.prepare_requirements(
-                {
-                    **requirements_payload,
-                    "actor": actor,
-                    "source_channel": source_channel,
-                    "source_coverage": ["foreground user request"],
-                }
-            )
-            requirements_ref = dict(prepared["requirements_ref"])
-        if requirements_ref:
-            record = self.repository.read_artifact_record(str(requirements_ref.get("sha256") or ""))
-            if record is None or str(record.get("artifact_type") or "") != "RequirementsArtifact":
-                raise ValueError("requirements_ref must reference a durable RequirementsArtifact")
+            requirements_ref = self.task_sources.publish(
+                title=str(data.get("title") or goal or "Task"),
+                request_text=raw_goal,
+                workspace=workspace,
+                source_files=source_files,
+                actor=actor,
+                source_channel=source_channel,
+            ).to_dict()
         if operation in {"execute_trusted", "review_then_execute"}:
             self._validate_external_architecture_ref(
                 artifact_ref,
                 trusted_required=operation == "execute_trusted",
                 family_id=str(task.payload.get("family_id") or ""),
             )
+            architecture = dict(self.artifacts.read_json(artifact_ref))
+            architecture_requirements_ref = dict(
+                architecture.get("requirements_ref") or {}
+            )
+            if requirements_ref and requirements_ref != architecture_requirements_ref:
+                raise ValueError(
+                    "workflow task sources differ from the imported architecture"
+                )
+            requirements_ref = architecture_requirements_ref
+        if requirements_ref:
+            record = self.repository.read_artifact_record(str(requirements_ref.get("sha256") or ""))
+            if record is None or str(record.get("artifact_type") or "") != TASK_SOURCE_BUNDLE_ARTIFACT:
+                raise ValueError(
+                    "task source must reference a durable TaskSourceBundleArtifact; "
+                    "legacy RequirementsArtifact workflows cannot be resumed"
+                )
         if operation == "review_and_repair" and str(task.payload.get("family_id") or "") == "software_engineering":
             self._validate_external_architecture_ref(
                 artifact_ref,
@@ -345,12 +362,13 @@ class MinionV2WorkflowService:
             "task_revision_ref": task_revision_ref,
             "family_binding_ref": family_binding_ref.to_dict(),
             "operation": operation,
-            "goal": goal,
+            "goal": raw_goal,
             "workflow_name": str(task_revision.get("title") or goal or "Minion workflow"),
             "requirements_ref": requirements_ref,
             "constraints": data.get("constraints") or [],
             "approved_evidence": list(data.get("approved_evidence") or []),
-            "workspace": _normalize_workspace(task_revision.get("workspace")),
+            "workspace": workspace,
+            "source_files": source_files,
             "references": _normalize_references(
                 [*list(task_revision.get("references") or []), *list(data.get("references") or [])]
             ),
@@ -713,7 +731,10 @@ class MinionV2WorkflowService:
             record = self.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
             if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
                 requirements = self.artifacts.read_json(dict(manifest.get("requirements_ref") or {}))
-                markdown = compile_skeleton_markdown(manifest, requirements_payload=requirements)
+                markdown = compile_skeleton_markdown(
+                    manifest,
+                    requirements_payload=requirements,
+                )
             else:
                 markdown = self.architecture.compile_human_review_markdown(manifest_ref)
             actions = ["accept", "edit", "reject"]
@@ -764,6 +785,72 @@ class MinionV2WorkflowService:
         )
         return {"status": "accepted", "workflow_id": workflow_id, "state": result.snapshot.state}
 
+    def restart_execution_from_architecture(
+        self,
+        *,
+        workflow_id: str,
+        actor: str,
+        source_channel: str,
+        reason: str,
+        control_route: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        summary = str(reason or "").strip()
+        if not summary:
+            raise ValueError("execution restart requires a non-empty reason")
+        workflow = self._workflow_snapshot(workflow_id)
+        if "REQUEST_EXECUTION_RESTART" not in self.repository.engine.legal_actions(
+            AggregateType.WORKFLOW,
+            workflow.state,
+        ):
+            raise ValueError(
+                f"workflow cannot restart execution from state {workflow.state}"
+            )
+        revision = self._accepted_architecture_revision_for_restart(workflow)
+        manifest_ref = dict(revision.payload.get("architecture_manifest_ref") or {})
+        manifest = dict(self.artifacts.read_json(manifest_ref))
+        requirements_ref = dict(manifest.get("requirements_ref") or {})
+        if not requirements_ref:
+            raise ValueError("accepted architecture has no bound task source bundle")
+        request = workflow_request_from_snapshot(self, workflow)
+        task_id = str(workflow.payload.get("task_id") or request.get("task_id") or "")
+        if not task_id:
+            raise ValueError("workflow has no Task binding")
+        restart_request = {
+            "task_id": task_id,
+            "architecture_manifest_ref": manifest_ref,
+            "requirements_ref": requirements_ref,
+            "goal": str(request.get("goal") or ""),
+            "research_mode": "none",
+            "actor": actor,
+            "source_channel": source_channel,
+            "control_route": dict(control_route or {}),
+            "reason": summary,
+            "operation": "review_then_execute",
+            "reuse_candidates": False,
+        }
+        result = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="REQUEST_EXECUTION_RESTART",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor=actor,
+                source_channel=source_channel,
+                expected_version=workflow.version,
+                idempotency_key=f"restart-execution:{workflow_id}:{workflow.version}",
+                payload={"restart_execution_request": restart_request},
+            )
+        )
+        return {
+            "status": "restart_requested",
+            "workflow_id": workflow_id,
+            "state": result.snapshot.state,
+            "reason": summary,
+            "architecture_review": "required",
+            "candidate_reuse": False,
+            "next_action": "settle current workflow and create replacement workflow",
+        }
+
     def resume_workflow(
         self,
         *,
@@ -791,47 +878,14 @@ class MinionV2WorkflowService:
             actor=actor,
             source_channel=source_channel,
         )
-        triaged = [
-            item
-            for item in self.repository.list_workflow_snapshots(workflow_id)
-            if item.aggregate_type != AggregateType.WORKFLOW
-            and item.state == "TRIAGE_REQUIRED"
-            and "RESOLVE_TRIAGE" in self.repository.engine.legal_actions(item.aggregate_type, item.state)
-        ]
+        triaged = self._triage_candidates(workflow_id)
         if triaged:
-            resumed = []
-            for item in sorted(
-                triaged,
-                key=lambda value: (
-                    value.aggregate_type == AggregateType.EXECUTION_EPOCH,
-                    value.aggregate_type.value,
-                    value.aggregate_id,
-                ),
-            ):
-                result = self.repository.dispatch(
-                    ActionEnvelope(
-                        action_type="RESOLVE_TRIAGE",
-                        workflow_id=workflow_id,
-                        aggregate_type=item.aggregate_type,
-                        aggregate_id=item.aggregate_id,
-                        actor=actor,
-                        source_channel=source_channel,
-                        expected_version=item.version,
-                        idempotency_key=f"resolve-triage:{item.aggregate_id}:{item.version}",
-                    )
-                )
-                resumed.append(
-                    {
-                        "aggregate_type": result.snapshot.aggregate_type.value,
-                        "aggregate_id": result.snapshot.aggregate_id,
-                        "state": result.snapshot.state,
-                    }
-                )
             return {
-                "status": "triage_resolved",
+                "status": "triage_requires_resolution",
                 "workflow_id": workflow_id,
                 "state": workflow.state,
-                "resumed": resumed,
+                "triage": [_public_triage_candidate(item) for item in triaged],
+                "next_legal_action": "resolve_triage",
             }
         return {
             "status": "not_resumable",
@@ -839,6 +893,88 @@ class MinionV2WorkflowService:
             "state": workflow.state,
             "next_legal_actions": list(self.repository.engine.legal_actions(AggregateType.WORKFLOW, workflow.state)),
         }
+
+    def resolve_triage(
+        self,
+        *,
+        workflow_id: str,
+        actor: str,
+        source_channel: str,
+        resolution: str,
+        subject: str = "",
+    ) -> dict[str, Any]:
+        summary = str(resolution or "").strip()
+        if not summary:
+            raise ValueError("manual triage resolution requires a non-empty resolution summary")
+        candidates = self._triage_candidates(workflow_id)
+        if not candidates:
+            raise ValueError("workflow has no TRIAGE_REQUIRED item that can be resolved")
+        selected = _select_triage_candidate(candidates, subject=subject)
+        resolution_payload: dict[str, Any] = {
+            "triage_resolution": summary,
+            "triage_resolution_kind": "manual",
+        }
+        if (
+            selected.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+            and str(selected.payload.get("triage_resume_state") or "") == "REVIEW_QUEUED"
+            and not selected.payload.get("requirements_ref")
+            and selected.payload.get("architecture_manifest_ref")
+        ):
+            manifest = dict(
+                self.artifacts.read_json(
+                    dict(selected.payload["architecture_manifest_ref"])
+                )
+            )
+            manifest_requirements_ref = dict(manifest.get("requirements_ref") or {})
+            workflow = self._workflow_snapshot(workflow_id)
+            request = workflow_request_from_snapshot(self, workflow)
+            request_requirements_ref = dict(request.get("requirements_ref") or {})
+            if not manifest_requirements_ref:
+                raise ValueError("imported architecture has no task-source binding")
+            if request_requirements_ref != manifest_requirements_ref:
+                raise ValueError(
+                    "cannot recover architecture review: workflow and skeleton task sources differ"
+                )
+            resolution_payload.update(
+                {
+                    "requirements_ref": manifest_requirements_ref,
+                    "triage_repair": "restored_imported_architecture_requirements_binding",
+                }
+            )
+        result = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="RESOLVE_TRIAGE",
+                workflow_id=workflow_id,
+                aggregate_type=selected.aggregate_type,
+                aggregate_id=selected.aggregate_id,
+                actor=actor,
+                source_channel=source_channel,
+                expected_version=selected.version,
+                idempotency_key=f"manual-resolve-triage:{selected.aggregate_id}:{selected.version}",
+                payload=resolution_payload,
+            )
+        )
+        return {
+            "status": "triage_resolved",
+            "workflow_id": workflow_id,
+            "subject": _triage_subject(selected),
+            "state": result.snapshot.state,
+            "resolution": summary,
+        }
+
+    def _triage_candidates(self, workflow_id: str) -> tuple[AggregateSnapshot, ...]:
+        return tuple(
+            sorted(
+                (
+                    item
+                    for item in self.repository.list_workflow_snapshots(workflow_id)
+                    if item.state == "TRIAGE_REQUIRED"
+                    and "RESOLVE_TRIAGE"
+                    in self.repository.engine.legal_actions(item.aggregate_type, item.state)
+                ),
+                key=lambda item: (_triage_subject(item).casefold(), item.aggregate_type.value),
+            )
+        )
 
     def triage_orphaned_work_aggregates(
         self,
@@ -903,12 +1039,31 @@ class MinionV2WorkflowService:
     def submit_human_decision(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
         decision = str(data.get("decision") or "").strip().lower()
-        if decision not in {"accept", "edit", "reject", "clarify"}:
-            raise ValueError("human decision must be accept, edit, reject, or clarify")
-        if decision == "edit" and not str(data.get("edit_instruction") or "").strip():
-            raise ValueError("edit decision requires edit_instruction")
-        if decision == "clarify" and not str(data.get("clarification_response") or "").strip():
-            raise ValueError("clarify decision requires clarification_response")
+        if decision not in {"accept", "edit", "reject"}:
+            raise ValueError("human decision must be accept, edit, or reject")
+        edit_scope = str(data.get("edit_scope") or "architecture").strip().lower()
+        source_files = data.get("source_files")
+        if source_files is not None and not isinstance(source_files, (list, tuple)):
+            raise ValueError("source_files must be an array")
+        if any(
+            not isinstance(item, str) or not item.strip()
+            for item in list(source_files or [])
+        ):
+            raise ValueError("source_files must contain non-empty workspace-relative paths")
+        amendment = str(data.get("amendment") or "")
+        has_amendment = bool(amendment.strip() or list(source_files or []))
+        if decision == "edit":
+            if edit_scope not in {"architecture", "requirements"}:
+                raise ValueError("edit_scope must be architecture or requirements")
+            if edit_scope == "architecture":
+                if not str(data.get("edit_instruction") or "").strip():
+                    raise ValueError("architecture edit requires edit_instruction")
+                if has_amendment:
+                    raise ValueError("architecture edit cannot amend the task source")
+            elif not has_amendment:
+                raise ValueError("requirements edit requires amendment prose or source_files")
+        elif data.get("edit_scope") or has_amendment:
+            raise ValueError("edit_scope and task-source amendments are valid only for decision=edit")
         self._rebind_human_decision_channel(data)
         token = str(data.get("decision_token") or "")
         if not token:
@@ -931,42 +1086,6 @@ class MinionV2WorkflowService:
         record = self.repository.read_artifact_record(manifest_sha)
         if record is None:
             raise ValueError("human decision artifact does not exist")
-        if str(record.get("artifact_type") or "") == "ClarificationRequestArtifact":
-            if decision != "clarify":
-                raise ValueError("clarification token requires decision=clarify")
-            response = str(data.get("clarification_response") or "").strip()
-            if not response:
-                raise ValueError("clarify decision requires clarification_response")
-            clarification_ref = _artifact_ref_from_record(record).to_dict()
-            response_ref = self.artifacts.put_json(
-                {"response": response, "clarification_request_sha": manifest_sha},
-                artifact_type="ClarificationResponseArtifact",
-                provenance={"actor": data.get("actor"), "source_channel": data.get("source_channel")},
-                child_refs=((manifest_sha, "answers"),),
-            )
-            result = self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="CLARIFICATION_PROVIDED",
-                    workflow_id=workflow_id,
-                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                    aggregate_id=revision_id,
-                    actor=str(data.get("actor") or ""),
-                    source_channel=str(data.get("source_channel") or ""),
-                    expected_version=revision.version,
-                    idempotency_key=f"human-clarification:{token}",
-                    payload={
-                        "decision_token": token,
-                        "clarification_ref": clarification_ref,
-                        "clarification_response_ref": response_ref.to_dict(),
-                    },
-                )
-            )
-            return {
-                "status": "accepted",
-                "workflow_id": workflow_id,
-                "revision_id": revision_id,
-                "state": result.snapshot.state,
-            }
         action_types = {"accept": "HUMAN_ACCEPT", "edit": "HUMAN_EDIT", "reject": "HUMAN_REJECT"}
         if decision not in action_types:
             raise ValueError("architecture decision must be accept, edit, or reject")
@@ -977,15 +1096,57 @@ class MinionV2WorkflowService:
         }
         if decision == "edit":
             instruction = str(data.get("edit_instruction") or "").strip()
-            if not instruction:
-                raise ValueError("edit decision requires edit_instruction")
+            revised_requirements_ref: dict[str, Any] = {}
+            if edit_scope == "requirements":
+                workflow = self._workflow_snapshot(workflow_id)
+                workflow_request = workflow_request_from_snapshot(self, workflow)
+                current_manifest = dict(self.artifacts.read_json(manifest_ref))
+                current_requirements_ref = dict(
+                    current_manifest.get("requirements_ref")
+                    or revision.payload.get("requirements_ref")
+                    or {}
+                )
+                revised_requirements_ref = self.task_sources.append_amendment(
+                    base_ref=current_requirements_ref,
+                    amendment_text=amendment,
+                    workspace=dict(workflow_request.get("workspace") or {}),
+                    source_files=[str(item) for item in list(source_files or [])],
+                    actor=str(data.get("actor") or "pal"),
+                    source_channel=str(data.get("source_channel") or "local"),
+                ).to_dict()
+                instruction = instruction or (
+                    "Revise the existing architecture skeleton and topology against the amended immutable task sources."
+                )
             edit_ref = self.artifacts.put_json(
-                {"instruction": instruction, "manifest_sha": manifest_sha},
-                artifact_type="ArchitectureEditInstructionArtifact",
+                {
+                    "instruction": instruction,
+                    "edit_scope": edit_scope,
+                    "manifest_sha": manifest_sha,
+                    **(
+                        {"revised_requirements_ref": revised_requirements_ref}
+                        if revised_requirements_ref
+                        else {}
+                    ),
+                },
+                artifact_type=(
+                    "RequirementsEditInstructionArtifact"
+                    if edit_scope == "requirements"
+                    else "ArchitectureEditInstructionArtifact"
+                ),
                 provenance={"actor": data.get("actor"), "source_channel": data.get("source_channel")},
-                child_refs=((manifest_sha, "revises"),),
+                child_refs=(
+                    (manifest_sha, "revises"),
+                    *(
+                        ((str(revised_requirements_ref["sha256"]), "replacement_requirements"),)
+                        if revised_requirements_ref
+                        else ()
+                    ),
+                ),
             )
             payload["edit_instruction_ref"] = edit_ref.to_dict()
+            payload["edit_scope"] = edit_scope
+            if revised_requirements_ref:
+                payload["revised_requirements_ref"] = revised_requirements_ref
         result = self.repository.dispatch(
             ActionEnvelope(
                 action_type=action_types[decision],
@@ -999,7 +1160,18 @@ class MinionV2WorkflowService:
                 payload=payload,
             )
         )
-        return {"status": "accepted", "workflow_id": workflow_id, "revision_id": revision_id, "state": result.snapshot.state}
+        return {
+            "status": "accepted",
+            "workflow_id": workflow_id,
+            "revision_id": revision_id,
+            "state": result.snapshot.state,
+            **({"edit_scope": edit_scope} if decision == "edit" else {}),
+            **(
+                {"revised_requirements_ref": payload["revised_requirements_ref"]}
+                if payload.get("revised_requirements_ref")
+                else {}
+            ),
+        }
 
     def _rebind_human_decision_channel(self, data: Mapping[str, Any]) -> None:
         workflow_id = str(data.get("workflow_id") or "")
@@ -1060,6 +1232,53 @@ class MinionV2WorkflowService:
         if workflow is None:
             raise ValueError(f"workflow not found: {workflow_id}")
         return workflow
+
+    def _accepted_architecture_revision_for_restart(
+        self,
+        workflow: AggregateSnapshot,
+    ) -> AggregateSnapshot:
+        snapshots = self.repository.list_workflow_snapshots(workflow.workflow_id)
+        accepted = tuple(
+            item
+            for item in snapshots
+            if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+            and item.state == "ACCEPTED"
+            and item.payload.get("architecture_manifest_ref")
+        )
+        preferred_id = str(workflow.payload.get("architecture_revision_id") or "")
+        preferred = next(
+            (item for item in accepted if item.aggregate_id == preferred_id),
+            None,
+        )
+        if preferred is not None:
+            return preferred
+        epoch_id = str(workflow.payload.get("execution_epoch_id") or "")
+        epoch = (
+            self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+            if epoch_id
+            else None
+        )
+        epoch_manifest_sha = str(
+            dict((epoch.payload if epoch is not None else {}).get("architecture_manifest_ref") or {}).get(
+                "sha256"
+            )
+            or ""
+        )
+        matching_epoch = tuple(
+            item
+            for item in accepted
+            if str(dict(item.payload.get("architecture_manifest_ref") or {}).get("sha256") or "")
+            == epoch_manifest_sha
+        )
+        if len(matching_epoch) == 1:
+            return matching_epoch[0]
+        if len(accepted) == 1:
+            return accepted[0]
+        if not accepted:
+            raise ValueError("workflow has no accepted architecture to restart from")
+        raise ValueError(
+            "workflow has several accepted architecture revisions and no unique active revision"
+        )
 
     def _validate_external_architecture_ref(
         self,
@@ -1131,7 +1350,7 @@ def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
     if workspace is not None and not isinstance(workspace, Mapping):
         raise ValueError("workflow workspace must be an object")
     for field_name in (
-        "requirements",
+        "source_files",
         "constraints",
         "approved_evidence",
         "references",
@@ -1139,23 +1358,21 @@ def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
         value = data.get(field_name)
         if value is not None and not isinstance(value, (list, tuple)):
             raise ValueError(f"workflow {field_name} must be an array")
-    for field_name in ("sections", "strengths", "control_route"):
+    forbidden = {"sections", "requirements", "strengths", "requirement_files"}.intersection(data)
+    if forbidden:
+        raise ValueError(
+            "V2 workflow input no longer accepts normalized Requirements fields: "
+            + ", ".join(sorted(forbidden))
+        )
+    for field_name in ("control_route",):
         value = data.get(field_name)
         if value is not None and not isinstance(value, Mapping):
             raise ValueError(f"workflow {field_name} must be an object")
-    sections = data.get("sections")
-    if isinstance(sections, Mapping):
-        for section, statements in sections.items():
-            if not str(section or "").strip():
-                raise ValueError("workflow Requirement section names cannot be empty")
-            if not isinstance(statements, (list, tuple)):
-                raise ValueError(
-                    f"workflow Requirement section {section!r} must contain an array of strings"
-                )
-            if any(not isinstance(statement, str) for statement in statements):
-                raise ValueError(
-                    f"workflow Requirement section {section!r} must contain only strings"
-                )
+    source_files = data.get("source_files")
+    if isinstance(source_files, (list, tuple)) and any(
+        not isinstance(item, str) or not item.strip() for item in source_files
+    ):
+        raise ValueError("workflow source_files must contain non-empty strings")
 
 
 def _normalize_workspace(value: Any) -> dict[str, Any]:
@@ -1230,12 +1447,76 @@ def _artifact_ref_from_record(record: Mapping[str, Any]) -> ArtifactRef:
 def _public_next_actions(workflow_state: str, active_state: str) -> list[str]:
     if workflow_state in {"COMPLETED", "REJECTED", "CANCELLED"}:
         return ["archive_workflow"]
+    if workflow_state == "RESTARTING":
+        return ["wait_for_replacement_workflow", "control_workflow:cancel"]
     if workflow_state == "PAUSED":
         return ["resume_workflow", "control_workflow:cancel"]
     if workflow_state in {"PAUSE_REQUESTED", "CANCEL_REQUESTED"}:
         return ["wait_for_safe_point"]
     if workflow_state == "TRIAGE_REQUIRED" or active_state == "TRIAGE_REQUIRED":
-        return ["operator_triage", "control_workflow:cancel"]
-    if active_state in {"HUMAN_REVIEW", "CLARIFICATION_PENDING"}:
+        return ["resolve_triage", "control_workflow:cancel"]
+    if active_state == "HUMAN_REVIEW":
         return ["submit_human_decision", "control_workflow:cancel"]
     return ["control_workflow:pause", "control_workflow:cancel"]
+
+
+def _triage_subject(snapshot: AggregateSnapshot) -> str:
+    payload = dict(snapshot.payload or {})
+    if snapshot.aggregate_type == AggregateType.DAG_NODE_RUN:
+        return str(
+            payload.get("module_name")
+            or payload.get("verification_name")
+            or payload.get("unit_id")
+            or "DAG node"
+        )
+    return {
+        AggregateType.WORKFLOW: "workflow",
+        AggregateType.ARCHITECTURE_REVISION: "architecture",
+        AggregateType.EXECUTION_EPOCH: "execution",
+        AggregateType.STANDALONE_REVIEW: "standalone review",
+        AggregateType.TASK: "task",
+    }.get(snapshot.aggregate_type, snapshot.aggregate_type.value.replace("_", " "))
+
+
+def _public_triage_candidate(snapshot: AggregateSnapshot) -> dict[str, Any]:
+    blocker = dict(snapshot.payload.get("blocker") or {})
+    return {
+        "subject": _triage_subject(snapshot),
+        "kind": snapshot.aggregate_type.value.replace("_", " "),
+        "blocker": blocker,
+        "resume_state": str(snapshot.payload.get("triage_resume_state") or ""),
+    }
+
+
+def _select_triage_candidate(
+    candidates: tuple[AggregateSnapshot, ...],
+    *,
+    subject: str,
+) -> AggregateSnapshot:
+    query = " ".join(str(subject or "").split()).casefold()
+    if not query:
+        if len(candidates) == 1:
+            return candidates[0]
+        names = ", ".join(_triage_subject(item) for item in candidates)
+        raise ValueError(
+            "multiple TRIAGE_REQUIRED items exist; select one with subject. "
+            f"Available subjects: {names}"
+        )
+    exact = tuple(
+        item
+        for item in candidates
+        if _triage_subject(item).casefold() == query
+    )
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        kinds = ", ".join(
+            sorted(item.aggregate_type.value.replace("_", " ") for item in exact)
+        )
+        raise ValueError(
+            f"triage subject {subject!r} is ambiguous across: {kinds}"
+        )
+    names = ", ".join(_triage_subject(item) for item in candidates)
+    raise ValueError(
+        f"no TRIAGE_REQUIRED item matches subject {subject!r}. Available subjects: {names}"
+    )

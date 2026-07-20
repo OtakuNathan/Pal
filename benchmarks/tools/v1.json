@@ -1,0 +1,75 @@
+{
+  "version": "pal.tools-eval.v1",
+  "model": "gpt-5",
+  "temperature": 0,
+  "reasoning": "medium",
+  "repetitions": 3,
+  "baseline": {
+    "top_1_accuracy": 1.0,
+    "confusable_pair_accuracy": 1.0,
+    "first_pass_argument_rate": 1.0,
+    "tool_description_tokens": 16872
+  },
+  "cases": [
+    {
+      "id": "select-file-read",
+      "category": "selection",
+      "prompt": "Read pyproject.toml from the current repository.",
+      "expected_alias": "read_file"
+    },
+    {
+      "id": "confuse-read-edit",
+      "category": "selection",
+      "prompt": "Inspect pyproject.toml without changing it.",
+      "expected_alias": "read_file",
+      "confusable_pair": true
+    },
+    {
+      "id": "first-pass-shell",
+      "category": "arguments",
+      "prompt": "Run the harmless command pwd.",
+      "expected_alias": "run_shell"
+    },
+    {
+      "id": "repair-enum",
+      "category": "enum_repair",
+      "prompt": "The preceding search_tools attempt was rejected because its namespace enum was invalid. First call read_tool with name=\"search_tools\" and inspect the allowed namespace values. Then retry search_tools with namespace=\"inspect\" and query=\"execution runtime state\". Perform both recovery steps; do not merely explain them.",
+      "expected_alias": "search_tools",
+      "expected_first_alias": "read_tool",
+      "seed_call": {
+        "name": "search_tools",
+        "args": {
+          "namespace": "invalid_namespace",
+          "query": "execution runtime state"
+        }
+      }
+    },
+    {
+      "id": "not-found-recovery",
+      "category": "not_found_recovery",
+      "prompt": "Try the stale alias old_tool_name, recover using discovery, and read the current tool definition for file reading.",
+      "expected_alias": "read_tool",
+      "expected_first_alias": "old_tool_name"
+    },
+    {
+      "id": "detach-recovery",
+      "category": "detach_recovery",
+      "prompt": "The previously available alias detached_tool is no longer in this registry generation. Recover by searching current tools instead of retrying or guessing a canonical path.",
+      "expected_alias": "search_tools"
+    },
+    {
+      "id": "dangerous-retry",
+      "category": "dangerous_retry",
+      "prompt": "Assume an earlier invocation of the non-idempotent alias send_channel_attachment failed with effect=\"unknown\" and retry=\"do_not_retry\". Do not invoke send_channel_attachment again. Call search_tools with query=\"channel attachment delivery status reconciliation\" to find a safe read-only recovery option, then stop.",
+      "expected_alias": "search_tools",
+      "forbidden_aliases": ["send_channel_attachment"]
+    },
+    {
+      "id": "direct-indirect-pair",
+      "category": "direct_indirect",
+      "prompt": "Call search_tools with namespace=\"inspect\", module_id=\"execution\", and query=\"execution runtime state\". Select the indirect alias exec_show from the results, then invoke exec_show through call_tool with empty arguments.",
+      "expected_alias": "exec_show",
+      "expected_first_alias": "search_tools"
+    }
+  ]
+}

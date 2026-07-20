@@ -5,22 +5,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from pal.execution.contracts import CapabilityCall
 from pal.lsp.ipc import LspManagerClient
-from pal.lsp.plugin import LspManagerPluginProvider
 from pal.minion.utils import string_list as _string_list
-from pal.shared import RuntimeStatus
 
 
-ProviderFactory = Callable[..., LspManagerPluginProvider]
-DEFAULT_LSP_PREWARM_TIMEOUT_SECONDS = 15.0
+ClientFactory = Callable[..., LspManagerClient]
+DEFAULT_LSP_PREWARM_TIMEOUT_SECONDS = 180.0
 LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class LspPrewarmPlan:
     workspace_root: Path
-    server_ids: tuple[str, ...]
+    primary_language: str
     languages: tuple[str, ...]
 
 
@@ -28,83 +25,72 @@ def prewarm_workspace_lsp(
     *,
     runtime_root: Path,
     workspace: dict[str, Any],
-    provider_factory: ProviderFactory = LspManagerPluginProvider,
+    client_factory: ClientFactory = LspManagerClient,
     request_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     plan = lsp_prewarm_plan(workspace)
     if plan is None:
-        return {"status": "skipped", "reason": "no_lsp_servers_for_workspace"}
+        return {"status": "skipped", "reason": "workspace_language_unknown"}
 
-    provider = provider_factory(runtime_root=Path(runtime_root))
-    _apply_provider_timeout(
-        provider,
+    client = client_factory(
         runtime_root=Path(runtime_root),
-        timeout_seconds=request_timeout_seconds if request_timeout_seconds is not None else _prewarm_timeout_seconds(workspace),
+        request_timeout_seconds=(
+            request_timeout_seconds
+            if request_timeout_seconds is not None
+            else _prewarm_timeout_seconds(workspace)
+        ),
     )
-    results: list[dict[str, Any]] = []
-    for server_id in plan.server_ids:
-        args: dict[str, Any] = {
-            "server_id": server_id,
-            "workspace_root": str(plan.workspace_root),
-        }
-        if plan.languages:
-            args["workspace_languages"] = list(plan.languages)
-        try:
-            result = provider.doctor(CapabilityCall(name="op_lsp_doctor", args=args))
-        except Exception as exc:
-            results.append(
-                {
-                    "server_id": server_id,
-                    "status": RuntimeStatus.ERROR,
-                    "ok": False,
-                    "error": f"{exc.__class__.__name__}: {exc}",
-                }
-            )
-            continue
-        structured = dict(result.structured or {})
-        status = str(structured.get("status") or result.status or "")
-        results.append(
-            {
-                "server_id": server_id,
-                "status": status,
-                "ok": result.status == RuntimeStatus.OK and status == "ok",
-                **(
-                    {"reason": str(structured.get("reason") or "")}
-                    if str(structured.get("reason") or "").strip()
-                    else {}
-                ),
-            }
-        )
-
-    ok_count = len([item for item in results if item.get("ok")])
-    status = "ok" if ok_count == len(results) else "partial" if ok_count else "unavailable"
-    _log_prewarm_result(plan=plan, status=status, ok_count=ok_count, results=results)
-    return {
-        "status": status,
+    params: dict[str, Any] = {
         "workspace_root": str(plan.workspace_root),
-        "servers": results,
-        "ok_count": ok_count,
+        "primary_language": plan.primary_language,
+        "languages": list(plan.languages),
+        "prewarm": True,
     }
+    for key in (
+        "compile_commands_path",
+        "include_paths",
+        "stub_include_paths",
+        "cpp_standard",
+        "lsp_compile_flags",
+    ):
+        value = workspace.get(key)
+        if value not in (None, "", [], {}):
+            params[key] = value
+    try:
+        result = client.prepare_workspace_sync(params)
+    except Exception as exc:
+        result = {
+            "status": "unavailable",
+            "workspace_root": str(plan.workspace_root),
+            "error": f"{exc.__class__.__name__}: {exc}",
+            "servers": [],
+        }
+    servers = list(result.get("servers") or [])
+    ok_count = len([item for item in servers if item.get("status") == "ok"])
+    _log_prewarm_result(
+        plan=plan,
+        status=str(result.get("status") or "unavailable"),
+        ok_count=ok_count,
+        results=servers,
+    )
+    return result
 
 
 def lsp_prewarm_plan(workspace: dict[str, Any]) -> LspPrewarmPlan | None:
     root = _workspace_root(workspace)
     if root is None:
         return None
-    lsp_setup = workspace.get("lsp_setup")
-    if not isinstance(lsp_setup, dict):
+    languages = tuple(_dedupe(_string_list(workspace.get("languages"))))
+    primary_language = str(workspace.get("primary_language") or "").strip()
+    if not primary_language and languages:
+        primary_language = languages[0]
+    if not primary_language:
         return None
-    server_ids = tuple(_dedupe(_string_list(lsp_setup.get("servers"))))
-    if not server_ids:
-        return None
-    languages = tuple(_dedupe(_string_list(lsp_setup.get("languages") or workspace.get("languages"))))
-    return LspPrewarmPlan(workspace_root=root, server_ids=server_ids, languages=languages)
-
-
-def _apply_provider_timeout(provider: Any, *, runtime_root: Path, timeout_seconds: float) -> None:
-    if not isinstance(provider, LspManagerPluginProvider):
-        return
-    provider.client = LspManagerClient(runtime_root=runtime_root, request_timeout_seconds=timeout_seconds)
+    return LspPrewarmPlan(
+        workspace_root=root,
+        primary_language=primary_language,
+        languages=languages or (primary_language,),
+    )
 
 
 def _prewarm_timeout_seconds(workspace: dict[str, Any]) -> float:

@@ -4,16 +4,14 @@ import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 import json
+import logging
 import queue
 import random
-import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
-from uuid import uuid4
 
 from pal.llm.adapters import LLMProviderRegistry, build_runtime_provider_registry, _think_level_to_completion_reasoning_effort
 from pal.llm.llm_adaptor.base import OPENAI_RESPONSES_SHAPE
@@ -50,8 +48,11 @@ from pal.memory.compact import (
     COMPACTION_SCHEMA_PAL_V2,
 )
 from pal.memory.contracts import CompactionProfile
-from pal.shared import LLMFinishReason, LLMPreflightStatus, LLMStreamEventKind, llm_tool_name
+from pal.shared import LLMFinishReason, LLMPreflightStatus, LLMStreamEventKind
 from pal.stream_events import NormalizedLLMStreamEvent
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -72,19 +73,6 @@ _ENDPOINT_FALLBACK_DISABLED_POLICIES = {
     "no_fallback",
 }
 _STRICT_ENDPOINT_PREFERRED_SOURCES = {"profile"}
-_AUDIT_REDACTED_KEYS = {
-    "api_key",
-    "apikey",
-    "authorization",
-    "auth",
-    "bearer",
-    "credential",
-    "credential_ref",
-    "password",
-    "secret",
-    "token",
-}
-_AUDIT_MAX_STRING_CHARS = 48_000
 _SCOPED_LLM_EVENT_SINK: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
     "pal_llm_event_sink",
     default=None,
@@ -138,7 +126,6 @@ def _classify_retry_error(exc: Exception) -> str:
     """
     message = str(exc).lower()
     error_type = type(exc).__name__.lower()
-    print(f"[llm retry] error_type={error_type} message={message[:200]}")
 
     if _is_stale_connection(message):
         return "stale_connection"
@@ -195,13 +182,6 @@ def _next_endpoint_id(endpoints: list[LLMEndpointModel], index: int) -> str:
     return ""
 
 
-def _short_error_text(exc: Exception, limit: int = 500) -> str:
-    text = " ".join(str(exc or "").replace("\r", " ").replace("\n", " ").split())
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 3)].rstrip() + "..."
-
-
 def _compute_retry_delay(
     attempt: int,
     *,
@@ -244,7 +224,8 @@ class _EndpointInvocationResult:
     effective_request: CanonicalLLMRequest | None = None
     target_input_budget: int | None = None
     reserved_output_tokens: int | None = None
-    error_message: str = ""
+    error_kind: str = ""
+    error_type: str = ""
 
 
 @dataclass
@@ -1347,6 +1328,7 @@ class LLMRuntime(LLMRuntimePort):
     def __post_init__(self) -> None:
         if self.endpoint_invoker is None:
             self.endpoint_invoker = build_default_endpoint_invoker()
+        _purge_legacy_llm_failure_audits(self.config)
         self.refresh_runtime_settings()
         if self.config is not None:
             self.endpoint_retry_attempts = self.config.llm_endpoint_retry_attempts
@@ -1392,62 +1374,6 @@ class LLMRuntime(LLMRuntimePort):
 
     def _timeout_seconds_for_request(self, request: CanonicalLLMRequest) -> float:
         return self._timeout_seconds_for_metadata(dict(request.metadata))
-
-    def _llm_audit_dir(self) -> Path | None:
-        root = getattr(self.config, "runtime_root", None) if self.config is not None else None
-        if root is None:
-            return None
-        try:
-            return Path(root) / "data" / "llm" / "audit"
-        except TypeError:
-            return None
-
-    def _write_llm_failure_audit(
-        self,
-        *,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-        endpoint_index: int,
-        endpoint_count: int,
-        attempt: int,
-        attempt_count: int,
-        error_kind: str,
-        exc: Exception,
-        timeout_seconds: float,
-    ) -> str:
-        audit_dir = self._llm_audit_dir()
-        if audit_dir is None:
-            return ""
-        created_at = datetime.now(timezone.utc).isoformat()
-        audit_id = f"llm_failure_{created_at.replace(':', '').replace('+', 'Z')}_{uuid4().hex[:12]}"
-        payload = {
-            "audit_id": audit_id,
-            "created_at": created_at,
-            "error": {
-                "kind": error_kind,
-                "type": type(exc).__name__,
-                "message": _short_error_text(exc),
-                "empty_response": _is_empty_response_error(exc),
-            },
-            "endpoint": _endpoint_audit_payload(endpoint),
-            "attempt": {
-                "attempt": attempt,
-                "max_attempts": attempt_count,
-                "endpoint_index": endpoint_index,
-                "endpoint_count": endpoint_count,
-                "timeout_seconds": timeout_seconds,
-            },
-            "request_summary": _summarize_request_for_audit(request),
-            "canonical_request": _canonical_request_for_audit(request),
-            "provider_payload_summary": _last_provider_payload_summary_for_audit(self.endpoint_invoker),
-        }
-        path = audit_dir / f"{audit_id}.json"
-        try:
-            audit_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        except Exception:
-            return ""
-        return str(path)
 
     def refresh_runtime_settings(self) -> None:
         self.think_level = self.settings_repository.get_think_level()
@@ -1632,6 +1558,8 @@ class LLMRuntime(LLMRuntimePort):
             return _EndpointInvocationResult(kind="no_endpoints")
 
         last_error: Exception | None = None
+        last_error_kind = "unknown"
+        last_error_type = ""
         had_stale_connection = False
         failed_connection_domains: set[tuple[str, str]] = set()
         for endpoint_index, endpoint in enumerate(enabled):
@@ -1711,16 +1639,20 @@ class LLMRuntime(LLMRuntimePort):
                 except Exception as exc:
                     last_error = exc
                     error_kind = _classify_retry_error(exc)
-                    audit_path = self._write_llm_failure_audit(
-                        endpoint=endpoint,
-                        request=effective_request,
-                        endpoint_index=endpoint_index,
-                        endpoint_count=len(enabled),
-                        attempt=attempt + 1,
-                        attempt_count=attempt_count,
-                        error_kind=error_kind,
-                        exc=exc,
-                        timeout_seconds=timeout_seconds,
+                    last_error_kind = error_kind
+                    last_error_type = type(exc).__name__
+                    _LOGGER.warning(
+                        "LLM endpoint attempt failed endpoint_id=%s model_id=%s provider=%s "
+                        "attempt=%d/%d endpoint_index=%d/%d error_kind=%s error_type=%s",
+                        endpoint.endpoint_id,
+                        endpoint.model_id,
+                        endpoint.provider,
+                        attempt + 1,
+                        attempt_count,
+                        endpoint_index + 1,
+                        len(enabled),
+                        error_kind,
+                        type(exc).__name__,
                     )
                     attempt_failed_payload = {
                         "endpoint_index": endpoint_index,
@@ -1728,11 +1660,9 @@ class LLMRuntime(LLMRuntimePort):
                         "attempt": attempt + 1,
                         "max_attempts": attempt_count,
                         "error_kind": error_kind,
-                        "error_message": _short_error_text(exc),
+                        "error_type": type(exc).__name__,
                         "next_endpoint_id": _next_endpoint_id(enabled, endpoint_index),
                     }
-                    if audit_path:
-                        attempt_failed_payload["audit_path"] = audit_path
                     self._emit_llm_progress("llm_endpoint_attempt_failed", endpoint=endpoint, **attempt_failed_payload)
                     if error_kind == "stale_connection":
                         if endpoint_domain is not None:
@@ -1812,8 +1742,13 @@ class LLMRuntime(LLMRuntimePort):
 
         self.last_endpoint_id = None
         self.last_model_id = None
-        reason = str(last_error) if last_error is not None else "unknown endpoint invocation error"
-        return _EndpointInvocationResult(kind="error", error_message=reason)
+        if last_error is not None and not last_error_type:
+            last_error_type = type(last_error).__name__
+        return _EndpointInvocationResult(
+            kind="error",
+            error_kind=last_error_kind,
+            error_type=last_error_type or "UnknownEndpointError",
+        )
 
     def _emit_llm_progress(self, phase: str, *, endpoint: LLMEndpointModel, **payload: Any) -> None:
         sink = _SCOPED_LLM_EVENT_SINK.get() or self.event_sink
@@ -1854,7 +1789,10 @@ class LLMRuntime(LLMRuntimePort):
         msg = (
             "LLM generation failed: no enabled endpoints are configured."
             if result.kind == "no_endpoints"
-            else f"LLM generation failed after exhausting all configured endpoints: {result.error_message}"
+            else (
+                "LLM generation failed after exhausting all configured endpoints "
+                f"(kind={result.error_kind or 'unknown'}, type={result.error_type or 'UnknownEndpointError'})."
+            )
         )
         return CanonicalLLMOutcome(
             text=msg,
@@ -1889,7 +1827,10 @@ class LLMRuntime(LLMRuntimePort):
         msg = (
             "LLM generation failed: no enabled endpoints are configured."
             if result.kind == "no_endpoints"
-            else f"LLM generation failed after exhausting all configured endpoints: {result.error_message}"
+            else (
+                "LLM generation failed after exhausting all configured endpoints "
+                f"(kind={result.error_kind or 'unknown'}, type={result.error_type or 'UnknownEndpointError'})."
+            )
         )
         return [
             NormalizedLLMStreamEvent(
@@ -2270,7 +2211,7 @@ def _build_tool_name_aliases(tools: list[dict[str, Any]]) -> dict[str, str]:
         name = str((function or {}).get("name") or tool.get("name") or "").strip()
         if not name:
             continue
-        aliases[name] = re.sub(r"[^a-zA-Z0-9_-]+", "_", llm_tool_name(name)).strip("_") or "tool"
+        aliases[name] = name
     return aliases
 
 
@@ -2477,148 +2418,28 @@ def _summarize_provider_payload(
     }
 
 
-def _endpoint_audit_payload(endpoint: LLMEndpointModel) -> dict[str, Any]:
-    return {
-        "endpoint_id": endpoint.endpoint_id,
-        "model_id": endpoint.model_id,
-        "provider": endpoint.provider,
-        "api_mode": getattr(endpoint, "api_mode", ""),
-        "base_url": _redact_for_audit(getattr(endpoint, "base_url", "")),
-        "supports_streaming": bool(getattr(endpoint, "supports_streaming", False)),
-        "supports_vision": bool(getattr(endpoint, "supports_vision", False)),
-    }
-
-
-def _canonical_request_for_audit(request: CanonicalLLMRequest) -> dict[str, Any]:
-    return {
-        "messages": _redact_for_audit(list(request.messages or [])),
-        "max_output_tokens": request.max_output_tokens,
-        "model_hint": request.model_hint,
-        "temperature": request.temperature,
-        "tools": _redact_for_audit(list(request.tools or [])),
-        "metadata": _redact_for_audit(dict(request.metadata or {})),
-    }
-
-
-def _summarize_request_for_audit(request: CanonicalLLMRequest) -> dict[str, Any]:
-    messages = list(request.messages or [])
-    roles = [str(message.get("role") or "") for message in messages if isinstance(message, dict)]
-    adjacent_same_roles: list[dict[str, Any]] = []
-    for index in range(1, len(roles)):
-        if roles[index] == roles[index - 1]:
-            adjacent_same_roles.append({"index": index, "role": roles[index]})
-    role_counts: dict[str, int] = {}
-    message_summaries: list[dict[str, Any]] = []
-    for index, message in enumerate(messages):
-        if not isinstance(message, dict):
-            message_summaries.append({"index": index, "type": type(message).__name__})
+def _purge_legacy_llm_failure_audits(config: Any) -> None:
+    runtime_root = getattr(config, "runtime_root", None) if config is not None else None
+    if runtime_root is None:
+        return
+    audit_dir = Path(runtime_root) / "data" / "llm" / "audit"
+    removed = 0
+    try:
+        candidates = tuple(audit_dir.glob("llm_failure_*.json"))
+    except OSError:
+        return
+    for path in candidates:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
             continue
-        role = str(message.get("role") or "")
-        role_counts[role] = role_counts.get(role, 0) + 1
-        tool_calls = list(message.get("tool_calls") or []) if isinstance(message.get("tool_calls"), list) else []
-        message_summaries.append(
-            {
-                "index": index,
-                "role": role,
-                "content": _summarize_content_for_audit(message.get("content")),
-                "tool_call_count": len(tool_calls),
-                "tool_call_ids": [
-                    str(tool_call.get("id") or "")
-                    for tool_call in tool_calls
-                    if isinstance(tool_call, dict) and str(tool_call.get("id") or "").strip()
-                ],
-                "tool_call_id": str(message.get("tool_call_id") or ""),
-            }
-        )
-    return {
-        "message_count": len(messages),
-        "roles": roles,
-        "role_counts": role_counts,
-        "adjacent_same_roles": adjacent_same_roles,
-        "tool_count": len(request.tools or []),
-        "tool_names": [_tool_name_for_audit(tool) for tool in list(request.tools or [])],
-        "message_summaries": message_summaries,
-        "metadata": _redact_for_audit(dict(request.metadata or {})),
-        "max_output_tokens": request.max_output_tokens,
-        "model_hint": request.model_hint,
-    }
-
-
-def _summarize_content_for_audit(content: Any) -> dict[str, Any]:
-    if isinstance(content, str):
-        return {"type": "text", "chars": len(content), "blank": not bool(content.strip())}
-    if isinstance(content, list):
-        part_types: list[str] = []
-        text_chars = 0
-        for part in content:
-            if isinstance(part, dict):
-                part_type = str(part.get("type") or "")
-                part_types.append(part_type)
-                if part_type == "text":
-                    text_chars += len(str(part.get("text") or ""))
-            else:
-                part_types.append(type(part).__name__)
-        return {"type": "parts", "part_count": len(content), "part_types": part_types, "text_chars": text_chars}
-    if content is None:
-        return {"type": "none", "chars": 0}
-    return {"type": type(content).__name__, "chars": len(str(content))}
-
-
-def _tool_name_for_audit(tool: Any) -> str:
-    if not isinstance(tool, dict):
-        return type(tool).__name__
-    function = tool.get("function")
-    if isinstance(function, dict):
-        name = str(function.get("name") or "").strip()
-        if name:
-            return name
-    return str(tool.get("name") or tool.get("type") or "").strip()
-
-
-def _last_provider_payload_summary_for_audit(invoker: Any) -> Any:
-    summary = getattr(invoker, "last_payload_summary", None)
-    if summary:
-        return _redact_for_audit(summary)
-    return {}
-
-
-def _is_empty_response_error(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return "no assistant content or tool calls" in message or "without assistant content or tool calls" in message
-
-
-def _redact_for_audit(value: Any, *, _depth: int = 0) -> Any:
-    if _depth > 16:
-        return "<max-depth>"
-    if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if _audit_key_is_sensitive(key_text):
-                result[key_text] = "<redacted>"
-            else:
-                result[key_text] = _redact_for_audit(item, _depth=_depth + 1)
-        return result
-    if isinstance(value, list):
-        return [_redact_for_audit(item, _depth=_depth + 1) for item in value]
-    if isinstance(value, tuple):
-        return [_redact_for_audit(item, _depth=_depth + 1) for item in value]
-    if isinstance(value, str):
-        return _redact_audit_text(value)
-    return value
-
-
-def _audit_key_is_sensitive(key: str) -> bool:
-    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
-    return normalized in _AUDIT_REDACTED_KEYS or any(marker in normalized for marker in ("apikey", "credential", "password", "secret", "token"))
-
-
-def _redact_audit_text(text: str) -> str:
-    redacted = re.sub(r"(?i)(bearer\s+)[a-z0-9._\-+/=]{8,}", r"\1<redacted>", text)
-    redacted = re.sub(r"(?i)(api[-_ ]?key[\"'=:\s]+)[^,\s\"']{8,}", r"\1<redacted>", redacted)
-    if len(redacted) <= _AUDIT_MAX_STRING_CHARS:
-        return redacted
-    return f"{redacted[:_AUDIT_MAX_STRING_CHARS]}<truncated {len(redacted) - _AUDIT_MAX_STRING_CHARS} chars>"
+    try:
+        audit_dir.rmdir()
+    except OSError:
+        pass
+    if removed:
+        _LOGGER.info("Removed %d legacy LLM failure audit files containing request payloads", removed)
 
 
 def _message_text(message: dict[str, Any]) -> str:

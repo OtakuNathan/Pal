@@ -25,7 +25,7 @@ SHELL_EXEC_DESCRIPTION = (
     "Pal runtime, module, capability, minion state: use search_tools/read_tool/call_tool or the visible Pal tool before shell. "
     "When visible, use op_tree for structured directory listings; "
     "op_search for repository text search; op_file_read for reading text files; op_file_edit for precise in-place edits after reading; "
-    "op_file_write for creating, overwriting, or appending UTF-8 text files; op_path_delete for deleting files or directories; "
+    "op_file_write for creating or overwriting complete UTF-8 text files; op_path_delete for deleting files or directories; "
     "op_git for git status, diff, log, show, and audited git restore/revert. "
     "Do not use shell commands such as cat/head/tail for file inspection, grep/rg for repository search, sed/awk for edits, "
     "tee/echo/printf redirection for writes, or rm/unlink/rmdir/git rm/find -delete for deletion when the matching capability is visible. "
@@ -315,7 +315,7 @@ class ShellExecCapabilityMixin:
         family="exec",
         action_name="shell",
         description=SHELL_EXEC_DESCRIPTION,
-        aliases=("shell_exec", "op_exec_run"),
+        aliases=(),
         args_schema={
             "type": "object",
             "properties": {
@@ -340,7 +340,7 @@ class ShellExecCapabilityMixin:
         },
     )
     def shell(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self.runtime.execute_tool(type("ToolCall", (), {"name": "shell_exec", "args": dict(call.args)})())
+        result = self.runtime.execute_tool(type("ToolCall", (), {"name": "run_shell", "args": dict(call.args)})())
         return IntrospectionResult(
             status=RuntimeStatus.OK if result.ok else RuntimeStatus.ERROR,
             text=result.text,

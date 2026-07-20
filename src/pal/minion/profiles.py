@@ -15,18 +15,20 @@ from pal.minion.v2.contract_builder import (
     ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
     CONTRACT_BUILDER_CAPABILITIES,
     CONTRACT_SKETCH_BUILDER_CAPABILITIES,
-    REQUIREMENTS_BUILDER_CAPABILITIES,
     is_contract_builder_capability,
 )
 from pal.minion.v2.candidate_builder import (
     CANDIDATE_BUILDER_CAPABILITIES,
-    REPAIR_CHECKLIST_CAPABILITY,
 )
 from pal.minion.v2.skeleton_builder import (
     ARCHITECTURE_SKELETON_CAPABILITIES,
     SKELETON_BUILDER_CAPABILITIES,
     SKELETON_REVIEW_CAPABILITIES,
     is_skeleton_builder_capability,
+)
+from pal.minion.v2.swe_verification import (
+    SWE_VERIFICATION_CAPABILITIES,
+    is_swe_verification_capability,
 )
 from pal.minion.v2.verification_builder import (
     STANDALONE_REVIEW_BUILDER_CAPABILITIES,
@@ -381,13 +383,16 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "tool_discovery": ("op_tool_search", "op_tool_read"),
     "capability_call": ("op_tool_call",),
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
-    "v2_requirements_builder": REQUIREMENTS_BUILDER_CAPABILITIES,
     "v2_contract_sketch_builder": CONTRACT_SKETCH_BUILDER_CAPABILITIES,
     "v2_architecture_review_builder": ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
     "v2_architecture_skeleton_builder": ARCHITECTURE_SKELETON_CAPABILITIES,
     "v2_skeleton_review_builder": SKELETON_REVIEW_CAPABILITIES,
     "v2_candidate_builder": CANDIDATE_BUILDER_CAPABILITIES,
     "v2_verification_builder": VERIFICATION_BUILDER_CAPABILITIES,
+    "v2_swe_verification": (
+        *SWE_VERIFICATION_CAPABILITIES,
+        "op_minion_verification_scratch_write",
+    ),
     "v2_standalone_review_builder": STANDALONE_REVIEW_BUILDER_CAPABILITIES,
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
@@ -400,6 +405,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "web_research": ("op_web_search", "op_web_read"),
     "code_intel": (
         "op_lsp_status",
+        "op_lsp_prepare_workspace",
         "op_lsp_doctor",
         "op_lsp_hover",
         "op_lsp_definition",
@@ -413,6 +419,19 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
         "op_lsp_diagnostics",
     ),
     "verification_shell": ("op_exec_shell",),
+    "swe_verifier_workspace": (
+        "op_file_read",
+        "op_file_edit",
+        "op_file_write",
+        "op_git",
+        "op_exec_shell",
+        "op_lsp_hover",
+        "op_lsp_definition",
+        "op_lsp_references",
+        "op_lsp_document_symbols",
+        "op_lsp_workspace_symbols",
+        "op_lsp_diagnostics",
+    ),
     "code_work": (
         "op_file_read",
         "op_file_edit",
@@ -469,13 +488,12 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
     {
         "op_minion_artifact_write",
         "op_minion_artifact_edit",
-        "op_minion_input_read",
-        REPAIR_CHECKLIST_CAPABILITY,
         "op_minion_memory_candidate_write",
         *CONTRACT_BUILDER_CAPABILITIES,
         *CANDIDATE_BUILDER_CAPABILITIES,
         *SKELETON_BUILDER_CAPABILITIES,
         *VERIFICATION_TOOL_CAPABILITIES,
+        *SWE_VERIFICATION_CAPABILITIES,
     }
 )
 
@@ -517,6 +535,7 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
         or is_contract_builder_capability(capability)
         or is_skeleton_builder_capability(capability)
         or is_verification_builder_capability(capability)
+        or is_swe_verification_capability(capability)
     ):
         return False
     if (

@@ -3,9 +3,9 @@
 These specifications model the domain-independent orchestration contract before
 the Python worker spine implements it.
 
-- `ModuleLifecycle.tla` models one durable Node with long-lived Coder and
-  Verifier role coroutines. A role may yield only after Manager records and
-  settles its result receipt.
+- `ModuleLifecycle.tla` models one durable Node with a module-run Coder and a
+  fresh Verifier session for each immutable Candidate. A role may yield only
+  after Manager records and settles its result receipt.
 - `DagLifecycle.tla` models dependency readiness, graph-wide pause/cancel, and
   architecture-defect freeze/replan propagation.
 - `ArchitectureLifecycle.tla` models Architect/Reviewer ownership, human

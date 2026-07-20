@@ -34,6 +34,7 @@ ControlDeliveryKind = Literal[
     "interactive_resolve",
     "interactive_expire",
     "endpoint_status",
+    "attachment",
 ]
 
 

@@ -11,10 +11,11 @@ Try to falsify the candidate from requirements, interfaces, ownership, lifecycle
 and the changed surface. Create reproducible probes in review scratch only. FAIL reproduced defects; use UNKNOWN only under the bound policy.
 """
 output_contract_fragment = """
-Run checks through the dedicated verification tools so each result is executed and stored immediately. Record typed findings and a concise summary, then call
-verification_submit with no arguments. Never construct VerificationPlan JSON or submit verdict/status fields; the Manager owns acceptance.
+Run reproducible checks and keep adversarial probes in the bound durable review scratch. Finish with exactly one semantic outcome tool containing one
+deduplicated Markdown findings report when repair or revision is required. Never construct VerificationPlan JSON or submit verdict/status fields;
+the Manager owns acceptance and routes the outcome only after verifier quiescing and snapshotting.
 """
-capability_groups = ["generic_verifier", "v2_verification_builder"]
+capability_groups = ["generic_verifier", "v2_swe_verification"]
 
 [capability_policy]
 mode = "profile_only"
@@ -29,8 +30,8 @@ evidence = "text_deliverable"
 requires_capability_evidence = true
 
 [output_policy]
-primary_artifact = "verification_plan.json"
-allowed_output_types = ["VerificationPlanArtifact"]
+primary_artifact = "verification_submission.json"
+allowed_output_types = ["SemanticVerificationSubmissionArtifact"]
 
 [metadata]
 builtin = true

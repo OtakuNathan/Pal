@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 from pal.minion.v2 import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, MinionV2Repository
-from pal.minion.v2.architecture import ArchitectureArtifactService, ResearchMode
+from pal.minion.v2.architecture import ArchitectureArtifactService
 from pal.minion.v2.adapters import SOFTWARE_GIT_ADAPTER
 from pal.minion.v2.contracts import AggregateSnapshot, AggregateVersionConflict, StaleFencingToken
 from pal.minion.v2.execution import (
@@ -26,7 +26,9 @@ from pal.minion.v2.execution import (
     format_workspace_process_holders,
     terminate_process_group,
     workspace_process_holders,
+    _validate_skeleton_candidate_paths,
 )
+from pal.minion.v2.task_sources import TaskSourceBundleService
 
 
 class _StoppedProcessController:
@@ -60,7 +62,7 @@ def _budget() -> dict[str, int]:
     }
 
 
-def _contract(unit_id: str, requirement_id: str, evidence_id: str, owned_area: str) -> dict:
+def _contract(unit_id: str, owned_area: str) -> dict:
     return {
         "unit_id": unit_id,
         "unit_behavior_kind": "stateless",
@@ -76,7 +78,6 @@ def _contract(unit_id: str, requirement_id: str, evidence_id: str, owned_area: s
         "error_behavior": ["Invalid input fails deterministically."],
         "compatibility": ["The public output shape remains stable."],
         "dependency_constraints": [],
-        "requirement_ids": [requirement_id],
         "verification_obligations": [{"kind": "consumer_probe"}],
         "complexity_budget": _budget(),
         "split_conditions": [],
@@ -84,6 +85,34 @@ def _contract(unit_id: str, requirement_id: str, evidence_id: str, owned_area: s
 
 
 class MinionV2ExecutionTests(unittest.TestCase):
+    def test_contract_enforcement_modes_distinguish_frozen_and_guarded_files(self) -> None:
+        policy = {
+            "contract_paths": ["src/router.py"],
+            "reference_only": [],
+            "implementation_scopes": [{"kind": "file", "path": "src/router.py"}],
+            "test_scopes": [],
+        }
+        with self.assertRaisesRegex(ValueError, "frozen architecture contracts"):
+            _validate_skeleton_candidate_paths(
+                ["src/router.py"],
+                {**policy, "contract_mode": "file_frozen"},
+            )
+
+        _validate_skeleton_candidate_paths(
+            ["src/router.py"],
+            {**policy, "contract_mode": "review_guarded"},
+        )
+
+        with self.assertRaisesRegex(ValueError, "outside"):
+            _validate_skeleton_candidate_paths(
+                ["src/router.py"],
+                {
+                    **policy,
+                    "contract_mode": "review_guarded",
+                    "implementation_scopes": [],
+                },
+            )
+
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_minion_v2_exec_"))
         self.repository = MinionV2Repository(self.runtime_root)
@@ -134,26 +163,15 @@ class MinionV2ExecutionTests(unittest.TestCase):
         self.assertIn('"write_paths":["held.txt"]', rendered)
 
     def _manifest(self):
-        requirements = self.architecture.publish_requirements(
-            {
-                "requirements": [
-                    {"requirement_id": "R-A", "statement": "Implement A", "strength": "hard"},
-                    {"requirement_id": "R-B", "statement": "Implement B", "strength": "hard"},
-                ]
-            }
+        requirements = TaskSourceBundleService(self.runtime_root, self.store).publish(
+            title="A and B",
+            request_text="Implement A, then implement B using A.\n",
+            workspace={},
+            actor="test",
+            source_channel="test",
         )
-        evidence = self.architecture.publish_evidence_catalog(
-            {
-                "evidence": [
-                    {"evidence_id": "E-A", "location": "ref.patch:1", "summary": "A reference", "supports_requirement_ids": ["R-A"], "content_sha256": "a" * 64},
-                    {"evidence_id": "E-B", "location": "ref.patch:2", "summary": "B reference", "supports_requirement_ids": ["R-B"], "content_sha256": "b" * 64},
-                ]
-            },
-            requirements_ref=requirements,
-            research_mode=ResearchMode.LOCAL_ONLY,
-        )
-        module_a = self.architecture.publish_unit_contract(_contract("a", "R-A", "E-A", "src/a/**"))
-        module_b = self.architecture.publish_unit_contract(_contract("b", "R-B", "E-B", "src/b/**"))
+        module_a = self.architecture.publish_unit_contract(_contract("a", "src/a/**"))
+        module_b = self.architecture.publish_unit_contract(_contract("b", "src/b/**"))
         constraints = self.architecture.publish_fragment([], artifact_type="GlobalConstraintsArtifact")
         decisions = self.architecture.publish_fragment([], artifact_type="DesignDecisionsArtifact")
         gates = self.architecture.publish_fragment([], artifact_type="ArchitectureGateChecksArtifact")
@@ -231,6 +249,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             *,
             state: str,
             candidate_digest: str = "",
+            candidate_base: str = "",
             dependencies: tuple[str, ...] = (),
         ) -> AggregateSnapshot:
             return AggregateSnapshot(
@@ -243,6 +262,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
                     "workspace_path": str(worktree),
                     "execution_adapter": SOFTWARE_GIT_ADAPTER,
                     "dependency_node_ids": list(dependencies),
+                    "base_sha": candidate_base or base_sha,
                     "candidate_digest": candidate_digest,
                     "candidate_ref": {"sha256": candidate_digest},
                     "output_hashes": {"surface": node_id},
@@ -256,6 +276,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             "drawing",
             state="ACCEPTED",
             candidate_digest=drawing_sha,
+            candidate_base=foundation_sha,
             dependencies=(foundation.aggregate_id,),
         )
         window = node("window", state="BLOCKED_BY_DEPS", dependencies=(drawing.aggregate_id,))
@@ -274,6 +295,153 @@ class MinionV2ExecutionTests(unittest.TestCase):
         )
         self.assertEqual((worktree / "foundation.txt").read_text(encoding="utf-8"), "foundation\n")
         self.assertEqual((worktree / "drawing.txt").read_text(encoding="utf-8"), "drawing\n")
+
+    def test_node_baseline_applies_every_commit_in_an_accepted_candidate(self) -> None:
+        worktree = self.runtime_root / "candidate_chain_repo"
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+        (worktree / "module.cpp").write_text("// skeleton\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=worktree, check=True)
+        base_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        (worktree / "module.cpp").write_text("int value() { return 1; }\n", encoding="utf-8")
+        subprocess.run(["git", "add", "module.cpp"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "implementation"], cwd=worktree, check=True)
+        (worktree / "module_test.cpp").write_text("// verifier test\n", encoding="utf-8")
+        subprocess.run(["git", "add", "module_test.cpp"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "promote verifier test"], cwd=worktree, check=True)
+        accepted_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        subprocess.run(["git", "reset", "--hard", base_sha], cwd=worktree, check=True)
+
+        dependency = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="dependency",
+            workflow_id="wf-chain",
+            state="ACCEPTED",
+            version=1,
+            payload={
+                "base_sha": base_sha,
+                "candidate_digest": accepted_sha,
+                "candidate_ref": {"sha256": "candidate"},
+                "dependency_node_ids": [],
+                "output_hashes": {},
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        consumer = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="consumer",
+            workflow_id="wf-chain",
+            state="BLOCKED_BY_DEPS",
+            version=1,
+            payload={
+                "workspace_path": str(worktree),
+                "execution_adapter": SOFTWARE_GIT_ADAPTER,
+                "base_sha": base_sha,
+                "dependency_node_ids": [dependency.aggregate_id],
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        prepare_node_dependency_baseline(
+            consumer,
+            {dependency.aggregate_id: dependency, consumer.aggregate_id: consumer},
+        )
+
+        self.assertEqual(
+            (worktree / "module.cpp").read_text(encoding="utf-8"),
+            "int value() { return 1; }\n",
+        )
+        self.assertTrue((worktree / "module_test.cpp").is_file())
+
+    def test_dependency_baseline_rolls_back_the_whole_attempt_on_conflict(self) -> None:
+        worktree = self.runtime_root / "dependency_rollback_repo"
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+        shared = worktree / "shared.txt"
+        shared.write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=worktree, check=True)
+        base_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        candidates: list[str] = []
+        for value in ("first\n", "second\n"):
+            subprocess.run(["git", "reset", "--hard", base_sha], cwd=worktree, check=True)
+            shared.write_text(value, encoding="utf-8")
+            subprocess.run(["git", "add", "shared.txt"], cwd=worktree, check=True)
+            subprocess.run(["git", "commit", "-qm", value.strip()], cwd=worktree, check=True)
+            candidates.append(
+                subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+                ).strip()
+            )
+        subprocess.run(["git", "reset", "--hard", base_sha], cwd=worktree, check=True)
+
+        dependencies: dict[str, AggregateSnapshot] = {}
+        for index, candidate_sha in enumerate(candidates):
+            dependency = AggregateSnapshot(
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=f"dependency-{index}",
+                workflow_id="wf-rollback",
+                state="ACCEPTED",
+                version=1,
+                payload={
+                    "base_sha": base_sha,
+                    "candidate_digest": candidate_sha,
+                    "candidate_ref": {"sha256": candidate_sha},
+                    "dependency_node_ids": [],
+                    "output_hashes": {},
+                },
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+            )
+            dependencies[dependency.aggregate_id] = dependency
+        consumer = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="consumer",
+            workflow_id="wf-rollback",
+            state="BLOCKED_BY_DEPS",
+            version=1,
+            payload={
+                "workspace_path": str(worktree),
+                "execution_adapter": SOFTWARE_GIT_ADAPTER,
+                "base_sha": base_sha,
+                "dependency_node_ids": sorted(dependencies),
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            prepare_node_dependency_baseline(
+                consumer,
+                {**dependencies, consumer.aggregate_id: consumer},
+            )
+
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+            ).strip(),
+            base_sha,
+        )
+        self.assertEqual(shared.read_text(encoding="utf-8"), "base\n")
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=worktree, text=True
+            ),
+            "",
+        )
 
     def test_scheduler_queues_independent_nodes_in_the_same_tick(self) -> None:
         manifest = self._manifest()
@@ -380,7 +548,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             "BLOCKED_BY_DEPS",
         )
 
-    def test_unit_work_view_preserves_bound_requirements_without_architect_evidence(self) -> None:
+    def test_unit_work_view_contains_only_module_local_semantics(self) -> None:
         manifest = self._manifest()
         compilation = ExecutionCompiler(self.repository, self.architecture).compile_epoch(
             workflow_id="wf_view",
@@ -391,7 +559,9 @@ class MinionV2ExecutionTests(unittest.TestCase):
         view_ref = UnitWorkViewBuilder(self.architecture).build(node, dependency_outputs={})
         view = self.store.read_json(view_ref)
         self.assertNotIn("evidence", view)
-        self.assertEqual([item["requirement_id"] for item in view["requirements"]], ["R-A"])
+        self.assertNotIn("requirements", view)
+        self.assertEqual(view["unit_contract"]["name"], "a")
+        self.assertNotIn("unit_id", view["unit_contract"])
 
     def test_verification_uses_disposable_detached_worktree(self) -> None:
         manifest = self._manifest()
@@ -842,6 +1012,19 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 },
             ),
             ("START_REVIEW", {"fencing_token": 2}),
+            (
+                "SUBMIT_SEMANTIC_VERIFICATION",
+                {"pending_verification_ref": dummy.to_dict()},
+            ),
+            (
+                "VERIFIER_QUIESCED",
+                {
+                    "fencing_token": 2,
+                    "process_group_reaped": True,
+                    "exclusive_workspace_lock": True,
+                    "workspace_fingerprint": "review-tree",
+                },
+            ),
             ("REVIEW_PASSED", {"verification_artifact_ref": dummy.to_dict()}),
         ]
         for action_type, payload in sequence:

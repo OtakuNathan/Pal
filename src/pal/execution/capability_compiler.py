@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import re
 from typing import Any, Iterable
 
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
@@ -200,7 +201,10 @@ def _descriptor_name(
         base_name = f"{module_id}_{scope}_{action_blueprint.action_name}"
     else:
         base_name = llm_tool_name(canonical_path)
-    return f"{base_name}::{target.target_id}"
+    target_alias = re.sub(r"[^A-Za-z0-9_-]+", "_", target.target_id).strip("_")
+    if not target_alias:
+        raise ValueError(f"target id cannot produce a tool alias: {target.target_id!r}")
+    return f"{base_name}__{target_alias}"
 
 
 def _aliases(

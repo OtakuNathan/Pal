@@ -8,12 +8,9 @@ from typing import Any, Mapping
 
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.architecture import (
-    ComplexityBudgetPolicy,
     contract_revision_changes,
     normalize_revision_targets,
     revision_target_allows,
-    validate_requirements_artifact,
-    validate_unit_contract,
 )
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
@@ -24,14 +21,6 @@ from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_ar
 from pal.shared import RuntimeStatus
 
 
-REQUIREMENTS_BUILDER_CAPABILITIES = (
-    "op_minion_requirement_upsert",
-    "op_minion_requirement_remove",
-    "op_minion_requirement_add_clarification",
-    "op_minion_requirement_add_source_coverage",
-    "op_minion_requirements_submit",
-)
-
 CONTRACT_SKETCH_BUILDER_CAPABILITIES = (
     "op_minion_contract_unit_upsert",
     "op_minion_contract_unit_add_interface",
@@ -39,8 +28,6 @@ CONTRACT_SKETCH_BUILDER_CAPABILITIES = (
     "op_minion_contract_unit_set_lifecycle",
     "op_minion_contract_unit_set_state",
     "op_minion_contract_unit_add_rule",
-    "op_minion_contract_unit_set_complexity",
-    "op_minion_contract_unit_cover_requirement",
     "op_minion_contract_unit_remove",
     "op_minion_contract_add_constraint",
     "op_minion_contract_add_design_decision",
@@ -58,7 +45,6 @@ ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES = (
     "op_minion_architecture_review_submit",
 )
 CONTRACT_BUILDER_CAPABILITIES = (
-    *REQUIREMENTS_BUILDER_CAPABILITIES,
     *CONTRACT_SKETCH_BUILDER_CAPABILITIES,
     *ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
 )
@@ -78,25 +64,6 @@ def _schema(properties: Mapping[str, Any], *, required: tuple[str, ...] = ()) ->
 
 _STRING_ARRAY = {"type": "array", "items": {"type": "string"}}
 _NO_ARGS = _schema({})
-_REQUIREMENT_UPSERT = _schema(
-    {
-        "section": {"type": "string", "minLength": 1},
-        "statement": {"type": "string", "minLength": 1},
-        "strength": {"type": "string", "enum": ["hard", "soft"]},
-        "source_refs": _STRING_ARRAY,
-        "acceptance_semantics": {"type": "string"},
-        "ambiguities": _STRING_ARRAY,
-    },
-    required=("section", "statement", "strength"),
-)
-_REQUIREMENT_REF = _schema(
-    {
-        "section": {"type": "string", "minLength": 1},
-        "requirement": {"type": "string", "minLength": 1},
-    },
-    required=("section", "requirement"),
-)
-_TEXT = _schema({"text": {"type": "string", "minLength": 1}}, required=("text",))
 _UNIT_UPSERT = _schema(
     {
         "name": {"type": "string", "minLength": 1},
@@ -150,44 +117,12 @@ _RULE = _schema(
     },
     required=("unit", "kind", "statement"),
 )
-_COMPLEXITY = _schema(
-    {
-        "unit": {"type": "string", "minLength": 1},
-        "target_file_count": {"type": "integer", "minimum": 0},
-        "estimated_context_tokens": {"type": "integer", "minimum": 0},
-        "public_interface_count": {"type": "integer", "minimum": 0},
-        "cross_unit_contract_count": {"type": "integer", "minimum": 0},
-        "stateful_resource_count": {"type": "integer", "minimum": 0},
-        "expected_candidate_cycles": {"type": "integer", "minimum": 0},
-        "platform_dependency_level": {"type": "integer", "minimum": 0},
-    },
-    required=(
-        "unit",
-        "target_file_count",
-        "estimated_context_tokens",
-        "public_interface_count",
-        "cross_unit_contract_count",
-        "stateful_resource_count",
-        "expected_candidate_cycles",
-        "platform_dependency_level",
-    ),
-)
-_UNIT_REQUIREMENT = _schema(
-    {
-        "unit": {"type": "string", "minLength": 1},
-        "section": {"type": "string", "minLength": 1},
-        "requirement": {"type": "string", "minLength": 1},
-    },
-    required=("unit", "section", "requirement"),
-)
 _NAME = _schema({"name": {"type": "string", "minLength": 1}}, required=("name",))
 _CONSTRAINT = _schema(
     {
         "name": {"type": "string", "minLength": 1},
         "constraint": {"type": "string", "minLength": 1},
         "rationale": {"type": "string"},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
     },
     required=("name", "constraint"),
 )
@@ -197,8 +132,6 @@ _DECISION = _schema(
         "decision": {"type": "string", "minLength": 1},
         "rationale": {"type": "string", "minLength": 1},
         "downstream_impact": {"type": "string"},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
     },
     required=("name", "decision", "rationale"),
 )
@@ -207,8 +140,6 @@ _GATE = _schema(
         "name": {"type": "string", "minLength": 1},
         "check": {"type": "string", "minLength": 1},
         "scope": {"type": "string"},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
     },
     required=("name", "check"),
 )
@@ -223,8 +154,6 @@ _CROSS = _schema(
         "lifecycle_handoff": {"type": "string"},
         "compatibility": {"type": "string"},
         "error_behavior": {"type": "string"},
-        "requirement_section": {"type": "string"},
-        "requirement": {"type": "string"},
     },
     required=("producer", "consumer", "interface"),
 )
@@ -264,32 +193,24 @@ _REVIEW_FINDING = _schema(
         "severity": {"type": "string", "enum": ["error", "warning"]},
         "target_section": {
             "type": "string",
-            "enum": ["requirements", "constraint", "design_decision", "gate_check", "unit", "cross_unit_contract", "topology", "integration_contract", "assumption_ledger", "risk_ledger"],
+            "enum": ["task_source", "constraint", "design_decision", "gate_check", "unit", "cross_unit_contract", "topology", "integration_contract", "assumption_ledger", "risk_ledger"],
         },
         "target_name": {"type": "string", "minLength": 1},
-        "target_requirement_section": {"type": "string"},
         "fields": _STRING_ARRAY,
         "operation": {"type": "string", "enum": ["create", "update", "delete"]},
-        "refs": _STRING_ARRAY,
+        "related_names": _STRING_ARRAY,
     },
     required=("finding_kind", "summary", "severity", "target_section", "target_name", "operation"),
 )
 
 
 CONTRACT_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
-    "op_minion_requirement_upsert": {"name": "op_requirement_upsert", "description": "Create or replace one exact natural-language Requirement. Identity is section plus statement. strength is hard or soft; source_refs, acceptance_semantics, and ambiguities are optional.", "parameters_schema": _REQUIREMENT_UPSERT},
-    "op_minion_requirement_remove": {"name": "op_requirement_remove", "description": "Remove one Requirement by exact section and statement.", "parameters_schema": _REQUIREMENT_REF},
-    "op_minion_requirement_add_clarification": {"name": "op_requirement_add_clarification", "description": "Add one unresolved clarification without rewriting the Requirement.", "parameters_schema": _TEXT},
-    "op_minion_requirement_add_source_coverage": {"name": "op_requirement_add_source_coverage", "description": "Record one covered user/source input in natural language.", "parameters_schema": _TEXT},
-    "op_minion_requirements_submit": {"name": "op_requirements_submit", "description": "Submit the current Requirements Draft. Takes no arguments.", "parameters_schema": _NO_ARGS},
     "op_minion_contract_unit_upsert": {"name": "op_contract_unit_upsert", "description": "Create or update one semantic unit shell and its construction dependencies. behavior_kind is stateless, resource_owner, service, workflow, or adapter. owned_area names this unit's boundary; reference_only_paths are readable truth sources. Do not include implementation steps.", "parameters_schema": _UNIT_UPSERT},
     "op_minion_contract_unit_add_interface": {"name": "op_contract_unit_add_interface", "description": "Add one provided or consumed interface contract to one unit. direction is provided or consumed; data_shape, valid_when, lifetime, ownership, error_behavior, and compatibility describe the boundary.", "parameters_schema": _INTERFACE},
     "op_minion_contract_unit_set_ownership": {"name": "op_contract_unit_set_ownership", "description": "Set one unit's ownership rule as a semantic statement.", "parameters_schema": _UNIT_STATEMENT},
     "op_minion_contract_unit_set_lifecycle": {"name": "op_contract_unit_set_lifecycle", "description": "Set one unit's lifecycle model. Stateless units may state process/import lifetime.", "parameters_schema": _LIFECYCLE},
     "op_minion_contract_unit_set_state": {"name": "op_contract_unit_set_state", "description": "Set one unit's state model. Stateless units must use description=stateless.", "parameters_schema": _LIFECYCLE},
     "op_minion_contract_unit_add_rule": {"name": "op_contract_unit_add_rule", "description": "Add one rule. kind is invariant, error_behavior, compatibility, dependency_constraint, verification_obligation, or split_condition; statement is required and condition/expected are optional.", "parameters_schema": _RULE},
-    "op_minion_contract_unit_set_complexity": {"name": "op_contract_unit_set_complexity", "description": "Set the checkable one-Candidate complexity budget for one unit.", "parameters_schema": _COMPLEXITY},
-    "op_minion_contract_unit_cover_requirement": {"name": "op_contract_unit_cover_requirement", "description": "Bind one exact Requirement to one unit. Manager resolves the hidden Requirement identity.", "parameters_schema": _UNIT_REQUIREMENT},
     "op_minion_contract_unit_remove": {"name": "op_contract_unit_remove", "description": "Remove one semantic unit during a scoped revision.", "parameters_schema": _NAME},
     "op_minion_contract_add_constraint": {"name": "op_contract_add_constraint", "description": "Add or replace one named global constraint.", "parameters_schema": _CONSTRAINT},
     "op_minion_contract_add_design_decision": {"name": "op_contract_add_design_decision", "description": "Add or replace one named architecture decision.", "parameters_schema": _DECISION},
@@ -298,8 +219,8 @@ CONTRACT_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_contract_set_integration": {"name": "op_contract_set_integration", "description": "Set the real end-to-end delivery entrypoint, dataflow, completion, and failure behavior.", "parameters_schema": _INTEGRATION},
     "op_minion_contract_add_assumption": {"name": "op_contract_add_assumption", "description": "Add or replace one named assumption with owner, impact, and verification plan.", "parameters_schema": _ASSUMPTION},
     "op_minion_contract_add_risk": {"name": "op_contract_add_risk", "description": "Add or replace one named risk and mitigation. severity is low, medium, high, or critical.", "parameters_schema": _RISK},
-    "op_minion_contract_submit": {"name": "op_contract_submit", "description": "Submit the current Architecture Contract Draft. Takes no arguments; Manager compiles hidden IDs and topology.", "parameters_schema": _NO_ARGS},
-    "op_minion_contract_review_finding": {"name": "op_architecture_review_finding", "description": "Record one requirements_defect, contract_defect, or architecture_defect. severity is error or warning. target_section is requirements, constraint, design_decision, gate_check, unit, cross_unit_contract, topology, integration_contract, assumption_ledger, or risk_ledger. target_name is semantic text/name; target_requirement_section disambiguates duplicate Requirement text; operation is create, update, or delete. Manager resolves hidden revision identity.", "parameters_schema": _REVIEW_FINDING},
+    "op_minion_contract_submit": {"name": "op_contract_submit", "description": "Submit the current Architecture Contract Draft. Takes no arguments; Manager checks only names, topology, and structural safety.", "parameters_schema": _NO_ARGS},
+    "op_minion_contract_review_finding": {"name": "op_architecture_review_finding", "description": "Record one requirements_defect, contract_defect, or architecture_defect. severity is error or warning. target_section is task_source, constraint, design_decision, gate_check, unit, cross_unit_contract, topology, integration_contract, assumption_ledger, or risk_ledger; target_name is its readable semantic name. operation is create, update, or delete.", "parameters_schema": _REVIEW_FINDING},
     "op_minion_architecture_review_submit": {"name": "op_architecture_review_submit", "description": "Submit the review. Takes no arguments; verdict is PASS with no findings and FAIL otherwise.", "parameters_schema": _NO_ARGS},
 }
 
@@ -319,17 +240,12 @@ def contract_builder_tool_result(
     try:
         stage = _stage(workspace)
         name = str(call.name or "")
-        if name == "op_minion_requirements_submit":
-            output, version = _compile_requirements(call, workspace)
-            return _publish(call, workspace, produced_artifacts, output, version=version, draft_kind="requirements", filename="requirements.json")
         if name == "op_minion_contract_submit":
             output, version = _compile_contract(call, workspace)
             return _publish(call, workspace, produced_artifacts, output, version=version, draft_kind="contract", filename="architecture_bundle.json")
         if name == "op_minion_architecture_review_submit":
             output, version = _compile_review(call, workspace)
             return _publish(call, workspace, produced_artifacts, output, version=version, draft_kind="architecture_review", filename="architecture_review.json")
-        if stage == "requirements":
-            return _mutate_requirements(call, workspace)
         if stage in {"architect", "architect_planning", "contract"}:
             return _mutate_contract(call, workspace)
         if stage == "architecture_review":
@@ -346,64 +262,6 @@ def contract_builder_tool_result(
             call_id=call.call_id,
             status=RuntimeStatus.INVALID,
         )
-
-
-def _mutate_requirements(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> CanonicalToolResult:
-    name = str(call.name or "")
-    if name not in REQUIREMENTS_BUILDER_CAPABILITIES[:-1]:
-        raise ValueError(f"unknown Requirements authoring capability: {name}")
-    args = dict(call.args or {})
-    context, store = _store(workspace, "requirements")
-
-    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-        definitions = dict(payload.get("definitions") or {})
-        requirements = [dict(item) for item in list(definitions.get("requirements") or [])]
-        if name == "op_minion_requirement_upsert":
-            incoming = {
-                "section": str(args.get("section") or "").strip(),
-                "statement": str(args.get("statement") or "").strip(),
-                "strength": str(args.get("strength") or "hard"),
-                "source_refs": _strings(args.get("source_refs") or [], "source_refs"),
-                "acceptance_semantics": str(args.get("acceptance_semantics") or ""),
-                "ambiguities": _strings(args.get("ambiguities") or [], "ambiguities"),
-            }
-            key = _requirement_key(incoming["section"], incoming["statement"])
-            requirements = [item for item in requirements if _requirement_key(item.get("section"), item.get("statement")) != key]
-            requirements.append(incoming)
-        elif name == "op_minion_requirement_remove":
-            key = _requirement_key(args.get("section"), args.get("requirement"))
-            before = len(requirements)
-            requirements = [item for item in requirements if _requirement_key(item.get("section"), item.get("statement")) != key]
-            if len(requirements) == before:
-                raise ValueError("unknown exact Requirement")
-        else:
-            field = "open_clarifications" if name == "op_minion_requirement_add_clarification" else "source_coverage"
-            values = list(definitions.get(field) or [])
-            text = str(args.get("text") or "").strip()
-            if text and text not in values:
-                values.append(text)
-            definitions[field] = values
-        definitions["requirements"] = requirements
-        payload["definitions"] = definitions
-        return payload, {"updated": True, "requirement_count": len(requirements)}
-
-    result = store.mutate(context, operation_key=_op_key(call), request=args, reducer=reducer, seed=_requirements_seed())
-    return _ok(call, "Requirements Draft updated", result)
-
-
-def _compile_requirements(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> tuple[dict[str, Any], int]:
-    _require_no_args(call)
-    context, store = _store(workspace, "requirements")
-    snapshot = store.read(context, seed=_requirements_seed())
-    definitions = dict(snapshot.payload.get("definitions") or {})
-    output = validate_requirements_artifact(
-        {
-            "requirements": list(definitions.get("requirements") or []),
-            "open_clarifications": list(definitions.get("open_clarifications") or []),
-            "source_coverage": list(definitions.get("source_coverage") or []),
-        }
-    )
-    return output, snapshot.version
 
 
 def _mutate_contract(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> CanonicalToolResult:
@@ -504,14 +362,6 @@ def _apply_contract_operation(contract: dict[str, Any], name: str, args: Mapping
                     },
                     semantic_key="statement",
                 )
-        elif name == "op_minion_contract_unit_set_complexity":
-            unit["complexity_budget"] = {key: int(value) for key, value in args.items() if key != "unit"}
-        elif name == "op_minion_contract_unit_cover_requirement":
-            requirement_id = _resolve_requirement_id(workspace, args.get("section"), args.get("requirement"))
-            values = list(unit.get("requirement_ids") or [])
-            if requirement_id not in values:
-                values.append(requirement_id)
-            unit["requirement_ids"] = values
         _replace_named(units, unit, id_field="unit_id")
     elif name in {"op_minion_contract_add_constraint", "op_minion_contract_add_design_decision", "op_minion_contract_add_gate_check"}:
         field, prefix, text_fields = {
@@ -524,7 +374,6 @@ def _apply_contract_operation(contract: dict[str, Any], name: str, args: Mapping
             "id": _manager_id(prefix, semantic_name),
             "semantic_name": semantic_name,
             **{key: str(args.get(key) or "") for key in text_fields},
-            "requirement_ids": _optional_requirement_ids(workspace, args),
         }
         _replace_named(contract[field], item, id_field="id")
     elif name == "op_minion_contract_add_cross_unit_contract":
@@ -535,8 +384,7 @@ def _apply_contract_operation(contract: dict[str, Any], name: str, args: Mapping
         item = {
             "id": _manager_id("X", semantic_name),
             "semantic_name": semantic_name,
-            **{key: value for key, value in args.items() if key not in {"requirement_section", "requirement"}},
-            "requirement_ids": _optional_requirement_ids(workspace, args),
+            **dict(args),
         }
         _replace_named(contract["cross_unit_contracts"], item, id_field="id")
     elif name == "op_minion_contract_set_integration":
@@ -582,7 +430,11 @@ def _mutate_review(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> Can
         "finding_kind": str(args.get("finding_kind") or ""),
         "summary": str(args.get("summary") or "").strip(),
         "severity": str(args.get("severity") or "error"),
-        "refs": _strings(args.get("refs") or [], "refs"),
+        # The worker authors semantic names. The Manager maps them into the
+        # existing internal review record without exposing that storage field.
+        "refs": _strings(
+            args.get("related_names") or [], "related_names"
+        ),
         "revision_targets": [target],
     }
     context, store = _store(workspace, "architecture_review")
@@ -642,7 +494,7 @@ def _publish(
             expected_version=version,
             submission_payload=dict(output),
         )
-    return _ok(call, f"{draft_kind} submitted. Stop now.", {"submitted": True, "artifact": artifact})
+    return _ok(call, f"{draft_kind} submitted. Stop now.", {"submitted": True})
 
 
 def seed_contract_builder_draft(
@@ -667,10 +519,13 @@ def seed_contract_builder_draft(
 
 
 def _validate_contract(payload: Mapping[str, Any]) -> None:
-    units = [validate_unit_contract(dict(item), complexity_policy=ComplexityBudgetPolicy()) for item in list(payload.get("units") or [])]
+    units = [dict(item) for item in list(payload.get("units") or []) if isinstance(item, Mapping)]
     if not units:
         raise ValueError("Architecture Contract requires at least one unit")
-    names = {str(item["unit_id"]) for item in units}
+    unit_names = [str(item.get("unit_id") or "").strip() for item in units]
+    if any(not name for name in unit_names):
+        raise ValueError("Architecture Contract unit names must not be empty")
+    names = set(unit_names)
     if len(names) != len(units):
         raise ValueError("Architecture Contract has duplicate unit names")
     depends_on = {str(key): [str(item) for item in list(value or [])] for key, value in dict(dict(payload.get("topology") or {}).get("depends_on") or {}).items()}
@@ -692,13 +547,9 @@ def _validate_contract(payload: Mapping[str, Any]) -> None:
         if producer == consumer:
             raise ValueError(f"cross-unit contract cannot connect {producer} to itself")
     integration = dict(payload.get("integration_contract") or {})
-    if not str(integration.get("entrypoint") or "").strip() or not str(integration.get("completion_condition") or "").strip():
-        raise ValueError("integration contract requires a real entrypoint and completion condition")
     integration_unknown = set(str(item) for item in list(integration.get("depends_on") or [])) - names
     if integration_unknown:
         raise ValueError("integration contract references unknown units: " + ", ".join(sorted(integration_unknown)))
-    if not str(integration.get("failure_behavior") or "").strip():
-        raise ValueError("integration contract requires deterministic failure behavior")
     _reject_implementation_fields(payload)
 
 
@@ -708,14 +559,8 @@ def _resolve_revision_target(workspace: Mapping[str, Any], args: Mapping[str, An
     target_name = str(args.get("target_name") or "").strip()
     operation = str(args.get("operation") or "update")
     fields = _strings(args.get("fields") or [], "fields")
-    if section == "requirements":
-        requirement_section = str(args.get("target_requirement_section") or "").strip()
-        target_id = _resolve_requirement_id(
-            workspace,
-            requirement_section,
-            target_name,
-            allow_any_section=not requirement_section,
-        )
+    if section == "task_source":
+        target_id = target_name
     elif section in {"unit", "topology"}:
         known_units = {str(item.get("unit_id")) for item in list(contract.get("units") or [])}
         if operation != "create" and target_name not in known_units:
@@ -744,48 +589,6 @@ def _resolve_revision_target(workspace: Mapping[str, Any], args: Mapping[str, An
     target = {"section": section, "id": target_id, "fields": fields, "operation": operation}
     normalize_revision_targets([target])
     return target
-
-
-def _resolve_requirement_id(
-    workspace: Mapping[str, Any],
-    section: Any,
-    requirement: Any,
-    *,
-    allow_any_section: bool = False,
-) -> str:
-    payload = _bound_requirements(workspace)
-    normalized_section = " ".join(str(section or "").split()).casefold()
-    normalized_requirement = " ".join(str(requirement or "").split()).casefold()
-    matches = [
-        dict(item)
-        for item in list(payload.get("requirements") or [])
-        if " ".join(str(dict(item).get("statement") or "").split()).casefold() == normalized_requirement
-        and (allow_any_section or " ".join(str(dict(item).get("section") or "").split()).casefold() == normalized_section)
-    ]
-    if len(matches) != 1:
-        raise ValueError("Requirement reference is unknown or ambiguous; use exact section and text")
-    return str(matches[0]["requirement_id"])
-
-
-def _bound_requirements(workspace: Mapping[str, Any]) -> dict[str, Any]:
-    hidden = workspace.get("contract_review_requirements_payload")
-    if isinstance(hidden, Mapping):
-        return validate_requirements_artifact(dict(hidden))
-    for item in list(workspace.get("reference_paths") or []):
-        reference = dict(item or {})
-        if str(reference.get("name") or "") == "requirements":
-            path = Path(str(reference.get("path") or ""))
-            if path.is_file():
-                return validate_requirements_artifact(json.loads(path.read_text(encoding="utf-8")))
-    raise ValueError("bound RequirementsArtifact is unavailable")
-
-
-def _optional_requirement_ids(workspace: Mapping[str, Any], args: Mapping[str, Any]) -> list[str]:
-    section = str(args.get("requirement_section") or "").strip()
-    requirement = str(args.get("requirement") or "").strip()
-    if bool(section) != bool(requirement):
-        raise ValueError("requirement_section and requirement must be provided together")
-    return [_resolve_requirement_id(workspace, section, requirement)] if section else []
 
 
 def _assert_revision_scope(workspace: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
@@ -833,15 +636,9 @@ def _empty_unit(name: str) -> dict[str, Any]:
         "error_behavior": [],
         "compatibility": [],
         "dependency_constraints": [],
-        "requirement_ids": [],
         "verification_obligations": [],
-        "complexity_budget": {},
         "split_conditions": [],
     }
-
-
-def _requirements_seed() -> dict[str, Any]:
-    return {"definitions": {"requirements": [], "open_clarifications": [], "source_coverage": []}, "evidence": {}, "findings": [], "summary": {}}
 
 
 def _contract_seed(workspace: Mapping[str, Any]) -> dict[str, Any]:
@@ -856,7 +653,7 @@ def _review_seed() -> dict[str, Any]:
 
 def _stage(workspace: Mapping[str, Any]) -> str:
     value = str(workspace.get("contract_builder_stage") or "").strip()
-    if value not in {"architect", "architect_planning", "requirements", "contract", "architecture_review"}:
+    if value not in {"architect", "architect_planning", "contract", "architecture_review"}:
         raise ValueError("contract_builder_stage is not bound")
     return value
 
@@ -884,8 +681,8 @@ def _append_unique(owner: dict[str, Any], field: str, incoming: Mapping[str, Any
 
 
 def _manager_id(prefix: str, semantic_name: str) -> str:
-    digest = hashlib.sha256(f"{prefix}\0{semantic_name}".encode("utf-8")).hexdigest()[:12]
-    return f"{prefix}-{digest}"
+    del prefix
+    return semantic_name
 
 
 def _semantic_name(value: Any) -> str:
@@ -904,10 +701,6 @@ def _strings(value: Any, owner: str) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise ValueError(f"{owner} must be a string array")
     return [str(item) for item in value]
-
-
-def _requirement_key(section: Any, statement: Any) -> tuple[str, str]:
-    return " ".join(str(section or "").split()).casefold(), " ".join(str(statement or "").split()).casefold()
 
 
 def _op_key(call: CanonicalToolCall) -> str:

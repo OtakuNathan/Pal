@@ -37,7 +37,7 @@ class MinionV2ReplanTests(unittest.TestCase):
                     }
                 ]
             },
-            artifact_type="RequirementsArtifact",
+            artifact_type="TaskSourceBundleArtifact",
         )
         self.manifest_ref = self.artifacts.put_json(
             {"requirements_ref": self.requirements_ref.to_dict()},
@@ -102,7 +102,7 @@ class MinionV2ReplanTests(unittest.TestCase):
         self.assertEqual(epoch.state, "REPLAN_COLLECTING")
         self.assertEqual(
             self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, "node_b").state,
-            "REVIEWING",
+            "REVIEW_SNAPSHOTTING",
         )
         self.assertEqual(
             self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, "node_c").state,
@@ -351,10 +351,10 @@ class MinionV2ReplanTests(unittest.TestCase):
     def test_divergent_requirement_patches_enter_triage(self) -> None:
         self._create_reviewing_node("node_a", "module_a")
         self._create_reviewing_node("node_b", "module_b")
-        patch_a = self.artifacts.put_json({"patch": "a"}, artifact_type="RequirementPatchArtifact")
-        patch_b = self.artifacts.put_json({"patch": "b"}, artifact_type="RequirementPatchArtifact")
-        revised_a = self.artifacts.put_json({"requirements": ["a"]}, artifact_type="RequirementsArtifact")
-        revised_b = self.artifacts.put_json({"requirements": ["b"]}, artifact_type="RequirementsArtifact")
+        patch_a = self.artifacts.put_json({"amendment": "a"}, artifact_type="TaskSourceAmendmentArtifact")
+        patch_b = self.artifacts.put_json({"amendment": "b"}, artifact_type="TaskSourceAmendmentArtifact")
+        revised_a = self.artifacts.put_json({"task_sources": ["a"]}, artifact_type="TaskSourceBundleArtifact")
+        revised_b = self.artifacts.put_json({"task_sources": ["b"]}, artifact_type="TaskSourceBundleArtifact")
         for node_id, module, fingerprint, patch, revised in (
             ("node_a", "module_a", "a", patch_a, revised_a),
             ("node_b", "module_b", "b", patch_b, revised_b),
@@ -459,6 +459,19 @@ class MinionV2ReplanTests(unittest.TestCase):
                 },
             ),
             ("START_REVIEW", {"fencing_token": 2, "active_worker_id": worker}),
+            (
+                "SUBMIT_SEMANTIC_VERIFICATION",
+                {"pending_verification_ref": self.contract_ref.to_dict()},
+            ),
+            (
+                "VERIFIER_QUIESCED",
+                {
+                    "fencing_token": 2,
+                    "process_group_reaped": True,
+                    "exclusive_workspace_lock": True,
+                    "workspace_fingerprint": f"review-tree-{node_id}",
+                },
+            ),
         ):
             self._dispatch(AggregateType.DAG_NODE_RUN, node_id, action_type, payload)
 

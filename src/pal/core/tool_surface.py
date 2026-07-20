@@ -50,24 +50,26 @@ class ToolSurface:
         }
 
     def build_llm_tool_contracts(self) -> list[dict[str, object]]:
-        return self.build_tool_contracts_from_descriptors(self.select_llm_descriptors())
+        generation = self.context.execution_runtime.registry_generation
+        return [dict(generation.provider_specs[alias]) for alias in sorted(generation.provider_specs)]
 
     def build_tool_contracts_from_descriptors(self, descriptors: list[Any]) -> list[dict[str, object]]:
         contracts: list[dict[str, object]] = []
+        generation = self.context.execution_runtime.registry_generation
         for descriptor in sorted(descriptors, key=lambda item: item.name):
-            canonical_name = descriptor.canonical_path or descriptor.name
-            contracts.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": llm_tool_name(canonical_name),
-                        "description": replace_internal_tool_names(descriptor.description or descriptor.name),
-                        "parameters": replace_internal_tool_names_in_value(
-                            dict(descriptor.parameters_schema or {"type": "object", "properties": {}})
-                        ),
-                    },
-                }
+            record = next(
+                (
+                    item
+                    for item in generation.direct_aliases.values()
+                    if item.descriptor_name == descriptor.name
+                ),
+                None,
             )
+            if record is None:
+                continue
+            contract = generation.provider_specs.get(record.alias)
+            if contract is not None:
+                contracts.append(dict(contract))
         return contracts
 
     def select_llm_descriptors(self) -> list[Any]:

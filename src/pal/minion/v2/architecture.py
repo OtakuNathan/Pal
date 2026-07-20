@@ -2,36 +2,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-import hashlib
 import re
 from typing import Any, Mapping
 from datetime import datetime, timezone
 
-from pal.foundation.persistence import utc_now
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType, DispatchResult
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.task_sources import validate_task_source_bundle
 
 
 class ResearchMode(StrEnum):
     NONE = "none"
     LOCAL_ONLY = "local_only"
     EXTERNAL_ALLOWED = "external_allowed"
-
-
-EVIDENCE_SOURCE_KINDS = frozenset(
-    {"local", "external", "approved", "user_supplied", "input_artifact", "verification", "review"}
-)
-
-
-class RequirementStrength(StrEnum):
-    HARD = "hard"
-    SOFT = "soft"
-
-
-REQUIREMENT_PATCH_KINDS = frozenset(
-    {"clarification", "derived_constraint", "regression_obligation", "human_edit"}
-)
 
 
 class UnitBehaviorKind(StrEnum):
@@ -50,7 +34,7 @@ class ArchitectureFindingKind(StrEnum):
 
 REVISION_TARGET_SECTIONS = frozenset(
     {
-        "requirements",
+        "task_source",
         "constraint",
         "design_decision",
         "gate_check",
@@ -69,9 +53,9 @@ REVISION_TARGET_OPERATIONS = frozenset({"create", "update", "delete"})
 class ArchitectureRevisionTarget:
     """A stable semantic location that a revision may change.
 
-    The target deliberately contains no artifact handle or JSON pointer. IDs and
-    field names survive content-addressed artifact replacement; the manager
-    resolves them against the current manifest before binding the revision.
+    The target deliberately contains no artifact handle or JSON pointer. The
+    target name is the same semantic name shown to the worker; the manager
+    resolves it against the current manifest before binding the revision.
     """
 
     section: str
@@ -103,7 +87,7 @@ def normalize_revision_targets(values: Any) -> tuple[ArchitectureRevisionTarget,
         if section not in REVISION_TARGET_SECTIONS:
             raise ValueError(f"invalid revision target section: {section or '<empty>'}")
         if not target_id:
-            raise ValueError(f"revision target {section} requires a stable id")
+            raise ValueError(f"revision target {section} requires a semantic name")
         if operation not in REVISION_TARGET_OPERATIONS:
             raise ValueError(f"invalid revision target operation: {operation}")
         target = ArchitectureRevisionTarget(section, target_id, fields, operation)
@@ -261,158 +245,6 @@ class ArchitectureArtifactService:
     artifacts: ContentAddressedArtifactStore
     repository: MinionV2Repository
     complexity_policy: ComplexityBudgetPolicy = field(default_factory=ComplexityBudgetPolicy)
-
-    def publish_requirements(
-        self,
-        payload: Mapping[str, Any],
-        *,
-        provenance: Mapping[str, Any] | None = None,
-    ) -> ArtifactRef:
-        normalized = validate_requirements_artifact(payload)
-        return self.artifacts.put_json(
-            normalized,
-            artifact_type="RequirementsArtifact",
-            provenance=provenance,
-        )
-
-    def publish_requirement_patch(
-        self,
-        *,
-        base_requirements_ref: ArtifactRef | Mapping[str, Any],
-        proposal: Mapping[str, Any],
-        source: Mapping[str, Any],
-        source_artifact_ref: ArtifactRef | Mapping[str, Any] | None = None,
-        provenance: Mapping[str, Any] | None = None,
-    ) -> tuple[ArtifactRef, ArtifactRef]:
-        base_ref = (
-            base_requirements_ref
-            if isinstance(base_requirements_ref, ArtifactRef)
-            else ArtifactRef.from_mapping(base_requirements_ref)
-        )
-        raw_base = dict(self.artifacts.read_json(base_ref))
-        base = validate_requirements_artifact(raw_base)
-        patch = _normalize_requirement_patch(proposal)
-        normalized_existing = {
-            _normalized_requirement_key(
-                str(item.get("section") or "Requirements"),
-                str(item.get("statement") or ""),
-            )
-            for item in list(base.get("requirements") or [])
-        }
-        patch_key = _normalized_requirement_key(patch["section"], patch["requirement"])
-        if patch_key in normalized_existing:
-            raise ValueError("RequirementPatch must add new product semantics, not repeat an existing Requirement")
-        now = utc_now()
-        source_ref = (
-            source_artifact_ref
-            if isinstance(source_artifact_ref, ArtifactRef)
-            else ArtifactRef.from_mapping(source_artifact_ref)
-            if source_artifact_ref
-            else None
-        )
-        patch_payload = {
-            "schema_version": "1",
-            **patch,
-            "source": _normalize_requirement_patch_source(source),
-            "observed_at": now,
-            "proposed_at": now,
-            "base_requirements_ref": base_ref.to_dict(),
-            **({"source_artifact_ref": source_ref.to_dict()} if source_ref else {}),
-        }
-        patch_children = [(base_ref.sha256, "base_requirements")]
-        if source_ref is not None:
-            patch_children.append((source_ref.sha256, "source_finding"))
-        patch_ref = self.artifacts.put_json(
-            patch_payload,
-            artifact_type="RequirementPatchArtifact",
-            provenance=provenance,
-            child_refs=tuple(patch_children),
-        )
-        revised_input = {
-            **base,
-            "requirements": [
-                *list(base.get("requirements") or []),
-                {
-                    "section": patch["section"],
-                    "statement": patch["requirement"],
-                    "strength": patch["strength"],
-                    "source_refs": [f"requirement_patch:{patch_ref.sha256}"],
-                    "acceptance_semantics": patch["reason"],
-                },
-            ],
-        }
-        revised = validate_requirements_artifact(revised_input)
-        prior_patch_refs = [
-            dict(item)
-            for item in list(raw_base.get("requirement_patch_refs") or [])
-            if isinstance(item, Mapping) and item.get("sha256")
-        ]
-        prior_ledger = [
-            dict(item)
-            for item in list(raw_base.get("patch_ledger") or [])
-            if isinstance(item, Mapping)
-        ]
-        revised.update(
-            {
-                "schema_version": "2",
-                "parent_requirements_ref": base_ref.to_dict(),
-                "requirement_patch_refs": [*prior_patch_refs, patch_ref.to_dict()],
-                "patch_ledger": [
-                    *prior_ledger,
-                    {
-                        "patch_kind": patch["patch_kind"],
-                        "section": patch["section"],
-                        "requirement": patch["requirement"],
-                        "strength": patch["strength"],
-                        "reason": patch["reason"],
-                        "affected_modules": list(patch["affected_modules"]),
-                        "affected_contracts": list(patch["affected_contracts"]),
-                        "source": patch_payload["source"],
-                        "observed_at": now,
-                    },
-                ],
-            }
-        )
-        revised_ref = self.artifacts.put_json(
-            revised,
-            artifact_type="RequirementsArtifact",
-            provenance={**dict(provenance or {}), "revision_kind": "requirement_patch"},
-            child_refs=((base_ref.sha256, "parent_requirements"), (patch_ref.sha256, "requirement_patch")),
-        )
-        return patch_ref, revised_ref
-
-    def publish_evidence_catalog(
-        self,
-        payload: Mapping[str, Any],
-        *,
-        requirements_ref: ArtifactRef,
-        research_mode: ResearchMode,
-        provenance: Mapping[str, Any] | None = None,
-    ) -> ArtifactRef:
-        normalized = validate_evidence_catalog(payload, research_mode=research_mode)
-        requirements = validate_requirements_artifact(self.artifacts.read_json(requirements_ref))
-        _validate_evidence_requirement_coverage(requirements, normalized)
-        normalized["requirements_ref"] = requirements_ref.to_dict()
-        return self.artifacts.put_json(
-            normalized,
-            artifact_type="EvidenceCatalogArtifact",
-            provenance=provenance,
-            child_refs=((requirements_ref.sha256, "requirements"),),
-        )
-
-    def validate_evidence_coverage(
-        self,
-        *,
-        requirements_ref: ArtifactRef | Mapping[str, Any],
-        evidence_ref: ArtifactRef | Mapping[str, Any],
-    ) -> None:
-        requirements = validate_requirements_artifact(self.artifacts.read_json(requirements_ref))
-        evidence_payload = dict(self.artifacts.read_json(evidence_ref))
-        evidence = validate_evidence_catalog(
-            evidence_payload,
-            research_mode=ResearchMode(str(evidence_payload.get("research_mode") or "local_only")),
-        )
-        _validate_evidence_requirement_coverage(requirements, evidence)
 
     def publish_unit_contract(
         self,
@@ -646,219 +478,12 @@ class ArchitectureArtifactService:
         return True
 
 
-def validate_requirements_artifact(payload: Mapping[str, Any]) -> dict[str, Any]:
-    requirements = list(payload.get("requirements") or [])
-    if not requirements and isinstance(payload.get("sections"), Mapping):
-        strengths = dict(payload.get("strengths") or {})
-        requirements = [
-            {
-                "section": str(section),
-                "statement": str(statement),
-                "strength": str(strengths.get(str(statement)) or "hard"),
-            }
-            for section, statements in dict(payload.get("sections") or {}).items()
-            for statement in list(statements or [])
-        ]
-    if not requirements:
-        raise ValueError("requirements artifact must contain at least one requirement")
-    seen: set[str] = set()
-    normalized: list[dict[str, Any]] = []
-    for item in requirements:
-        if not isinstance(item, Mapping):
-            raise ValueError("requirement entries must be objects")
-        section = str(item.get("section") or "Requirements").strip()
-        statement = str(item.get("statement") or item.get("text") or "").strip()
-        requirement_id = str(item.get("requirement_id") or item.get("id") or "").strip()
-        if not requirement_id and section and statement:
-            requirement_id = "req_" + hashlib.sha256(f"{section}\0{statement}".encode("utf-8")).hexdigest()[:16]
-        strength = str(item.get("strength") or "hard").strip().lower()
-        if not requirement_id or not statement:
-            raise ValueError("each requirement needs requirement_id and statement")
-        if requirement_id in seen:
-            raise ValueError(f"duplicate requirement id: {requirement_id}")
-        if strength not in {item.value for item in RequirementStrength}:
-            raise ValueError(f"invalid requirement strength: {strength}")
-        seen.add(requirement_id)
-        normalized.append(
-            {
-                "requirement_id": requirement_id,
-                "section": section,
-                "statement": statement,
-                "strength": strength,
-                "source_refs": _text_list(item.get("source_refs")),
-                "acceptance_semantics": str(item.get("acceptance_semantics") or "").strip(),
-                "ambiguities": _text_list(item.get("ambiguities")),
-            }
-        )
-    sections: dict[str, list[str]] = {}
-    for item in normalized:
-        sections.setdefault(str(item["section"]), []).append(str(item["statement"]))
-    return {
-        "schema_version": "1",
-        "title": str(payload.get("title") or "Requirements").strip(),
-        "sections": sections,
-        "requirements": normalized,
-        "open_clarifications": list(payload.get("open_clarifications") or []),
-        "source_coverage": list(payload.get("source_coverage") or []),
-    }
-
-
-def _normalize_requirement_patch(value: Mapping[str, Any]) -> dict[str, Any]:
-    allowed = {
-        "patch_kind",
-        "section",
-        "requirement",
-        "strength",
-        "reason",
-        "affected_modules",
-        "affected_contracts",
-    }
-    unknown = set(value) - allowed
-    if unknown:
-        raise ValueError(
-            "RequirementPatch proposal contains Manager-owned or unsupported fields: "
-            + ", ".join(sorted(unknown))
-        )
-    patch_kind = str(value.get("patch_kind") or "").strip()
-    section = str(value.get("section") or "").strip()
-    requirement = str(value.get("requirement") or "").strip()
-    strength = str(value.get("strength") or "hard").strip().lower()
-    reason = str(value.get("reason") or "").strip()
-    if patch_kind not in REQUIREMENT_PATCH_KINDS:
-        raise ValueError("RequirementPatch patch_kind is invalid")
-    if not section or not requirement or not reason:
-        raise ValueError("RequirementPatch requires section, requirement, and reason")
-    if strength not in {item.value for item in RequirementStrength}:
-        raise ValueError("RequirementPatch strength must be hard or soft")
-    affected_modules = _text_list(value.get("affected_modules"))
-    if not affected_modules:
-        raise ValueError("RequirementPatch requires at least one affected semantic module name")
-    affected_contracts: list[dict[str, str]] = []
-    for raw in list(value.get("affected_contracts") or []):
-        if not isinstance(raw, Mapping):
-            raise ValueError("RequirementPatch affected_contracts entries must be objects")
-        module = str(raw.get("module") or "").strip()
-        path = str(raw.get("path") or "").strip()
-        symbol = str(raw.get("symbol") or "").strip()
-        if not module or not path:
-            raise ValueError("RequirementPatch contract references require module and path")
-        affected_contracts.append(
-            {"module": module, "path": path, **({"symbol": symbol} if symbol else {})}
-        )
-    return {
-        "patch_kind": patch_kind,
-        "section": section,
-        "requirement": requirement,
-        "strength": strength,
-        "reason": reason,
-        "affected_modules": affected_modules,
-        "affected_contracts": affected_contracts,
-    }
-
-
-def _normalize_requirement_patch_source(value: Mapping[str, Any]) -> dict[str, str]:
-    allowed = {"role", "stage", "case", "finding_summary"}
-    unknown = set(value) - allowed
-    if unknown:
-        raise ValueError("RequirementPatch source contains unsupported fields: " + ", ".join(sorted(unknown)))
-    role = str(value.get("role") or "").strip()
-    stage = str(value.get("stage") or "").strip()
-    if not role or not stage:
-        raise ValueError("RequirementPatch source requires role and stage")
-    return {
-        "role": role,
-        "stage": stage,
-        **({"case": str(value.get("case") or "").strip()} if value.get("case") else {}),
-        **(
-            {"finding_summary": str(value.get("finding_summary") or "").strip()}
-            if value.get("finding_summary")
-            else {}
-        ),
-    }
-
-
-def _normalized_requirement_key(section: str, requirement: str) -> tuple[str, str]:
-    normalize = lambda text: " ".join(str(text).split()).casefold()
-    return normalize(section), normalize(requirement)
-
-
-def validate_evidence_catalog(payload: Mapping[str, Any], *, research_mode: ResearchMode) -> dict[str, Any]:
-    evidence = list(payload.get("evidence") or [])
-    seen: set[str] = set()
-    normalized: list[dict[str, Any]] = []
-    for item in evidence:
-        if not isinstance(item, Mapping):
-            raise ValueError("evidence entries must be objects")
-        evidence_id = str(item.get("evidence_id") or item.get("id") or "").strip()
-        location = str(item.get("location") or "").strip()
-        summary = str(item.get("summary") or "").strip()
-        if not evidence_id or not location or not summary:
-            raise ValueError("each evidence entry needs evidence_id, location, and summary")
-        if evidence_id in seen:
-            raise ValueError(f"duplicate evidence id: {evidence_id}")
-        source_kind = str(item.get("source_kind") or "local").strip()
-        if source_kind not in EVIDENCE_SOURCE_KINDS:
-            raise ValueError(f"invalid evidence source_kind: {source_kind}")
-        if research_mode == ResearchMode.LOCAL_ONLY and source_kind == "external":
-            raise ValueError("research_mode=local_only cannot publish external evidence")
-        line_start = _optional_non_negative_int(item.get("line_start"))
-        line_end = _optional_non_negative_int(item.get("line_end"))
-        content_sha = str(item.get("content_sha256") or "").strip()
-        if content_sha and (len(content_sha) != 64 or any(character not in "0123456789abcdefABCDEF" for character in content_sha)):
-            raise ValueError("evidence content_sha256 must be a 64-character hexadecimal digest")
-        if (line_start is None) != (line_end is None):
-            raise ValueError("evidence line_start and line_end must be provided together")
-        if line_start is not None and line_end is not None and line_end < line_start:
-            raise ValueError("evidence line_end must not precede line_start")
-        if source_kind == "local" and line_start is None and not content_sha:
-            raise ValueError("local evidence requires a precise line range or content_sha256")
-        supports_requirement_ids = _text_list(item.get("supports_requirement_ids"))
-        if not supports_requirement_ids:
-            raise ValueError(f"evidence {evidence_id} must support at least one requirement")
-        seen.add(evidence_id)
-        normalized.append(
-            {
-                "evidence_id": evidence_id,
-                "source_kind": source_kind,
-                "location": location,
-                "line_start": line_start,
-                "line_end": line_end,
-                "summary": summary,
-                "supports_requirement_ids": supports_requirement_ids,
-                "content_sha256": content_sha,
-            }
-        )
-    if research_mode == ResearchMode.NONE and any(
-        str(item.get("source_kind") or "") not in {"approved", "user_supplied", "input_artifact"}
-        for item in normalized
-    ):
-        raise ValueError("research_mode=none may carry approved input evidence but cannot publish newly gathered evidence")
-    return {"schema_version": "1", "research_mode": research_mode.value, "evidence": normalized}
-
-
-def _validate_evidence_requirement_coverage(
-    requirements: Mapping[str, Any],
-    evidence: Mapping[str, Any],
-) -> None:
-    requirement_ids = {str(item["requirement_id"]) for item in list(requirements.get("requirements") or [])}
-    supported_ids = {
-        requirement_id
-        for item in list(evidence.get("evidence") or [])
-        for requirement_id in list(item.get("supports_requirement_ids") or [])
-    }
-    unknown_ids = supported_ids - requirement_ids
-    if unknown_ids:
-        raise ValueError("evidence references unknown requirements: " + ", ".join(sorted(unknown_ids)))
-    missing_ids = requirement_ids - supported_ids
-    if missing_ids:
-        raise ValueError("requirements lack supporting evidence: " + ", ".join(sorted(missing_ids)))
-
-
 def validate_unit_contract(
     payload: Mapping[str, Any],
     *,
     complexity_policy: ComplexityBudgetPolicy,
 ) -> dict[str, Any]:
+    del complexity_policy
     if "evidence_ids" in payload:
         raise ValueError("unit contracts must not contain architect evidence_ids")
     forbidden = {
@@ -885,36 +510,7 @@ def validate_unit_contract(
     state_model = payload.get("state_model")
     lifecycle = payload.get("lifecycle")
     invariants = list(payload.get("invariants") or [])
-    if behavior_kind == UnitBehaviorKind.STATELESS:
-        state_text = str(state_model or "").strip().lower()
-        if state_text not in {"stateless", "n/a", "none"}:
-            raise ValueError("stateless module must declare state_model=stateless")
-        if lifecycle in (None, "", {}, []):
-            raise ValueError("stateless module must explicitly declare its process/import lifecycle")
-    else:
-        if lifecycle in (None, "", {}, []) or state_model in (None, "", {}, []):
-            raise ValueError("stateful module needs explicit lifecycle and state_model")
-    if not invariants:
-        raise ValueError("unit contract needs at least one explicit invariant")
     ownership = dict(payload.get("ownership") or {})
-    if not str(ownership.get("rule") or "").strip():
-        raise ValueError("unit contract needs an explicit ownership rule")
-    if not list(payload.get("provided_interfaces") or []):
-        raise ValueError("unit contract needs at least one provided interface")
-    if not list(payload.get("error_behavior") or []):
-        raise ValueError("unit contract needs explicit error behavior")
-    if not list(payload.get("compatibility") or []):
-        raise ValueError("unit contract needs explicit compatibility behavior")
-    if not _text_list(payload.get("requirement_ids")):
-        raise ValueError("unit contract must cover at least one Requirement")
-    budget = dict(payload.get("complexity_budget") or {})
-    if not budget:
-        raise ValueError("unit contract needs a structured complexity_budget")
-    violations = complexity_policy.violations(budget)
-    split_conditions = _text_list(payload.get("split_conditions"))
-    waiver_ref = payload.get("complexity_waiver_ref")
-    if violations and not (split_conditions or waiver_ref):
-        raise ValueError("module exceeds complexity policy without split_conditions or waiver: " + "; ".join(violations))
     normalized = dict(payload)
     normalized.update(
         {
@@ -933,13 +529,14 @@ def validate_unit_contract(
             "error_behavior": list(payload.get("error_behavior") or []),
             "compatibility": list(payload.get("compatibility") or []),
             "dependency_constraints": list(payload.get("dependency_constraints") or []),
-            "requirement_ids": _text_list(payload.get("requirement_ids")),
             "verification_obligations": list(payload.get("verification_obligations") or []),
-            "complexity_budget": budget,
-            "split_conditions": split_conditions,
-            "complexity_policy_violations": list(violations),
+            "split_conditions": _text_list(payload.get("split_conditions")),
         }
     )
+    normalized.pop("requirement_ids", None)
+    normalized.pop("complexity_budget", None)
+    normalized.pop("complexity_waiver_ref", None)
+    normalized.pop("complexity_policy_violations", None)
     return normalized
 
 
@@ -997,69 +594,24 @@ def review_architecture_contract(
 ) -> ArchitectureReviewResult:
     _ = manifest
     findings: list[ArchitectureFinding] = []
-    try:
-        requirements = validate_requirements_artifact(dict(fragments.get("requirements") or {}))
-    except ValueError as exc:
-        findings.append(ArchitectureFinding(ArchitectureFindingKind.REQUIREMENTS_DEFECT, str(exc)))
-        requirements = {"requirements": []}
     modules: list[dict[str, Any]] = []
     for raw_module in list(fragments.get("unit_contract") or []):
-        try:
-            modules.append(validate_unit_contract(raw_module, complexity_policy=complexity_policy))
-        except ValueError as exc:
-            unit_id = str(dict(raw_module or {}).get("unit_id") or "unknown")
+        module = dict(raw_module or {})
+        unit_id = str(module.get("unit_id") or "").strip()
+        if not unit_id:
             findings.append(
                 ArchitectureFinding(
                     ArchitectureFindingKind.CONTRACT_DEFECT,
-                    str(exc),
-                    (unit_id,),
-                    revision_targets=(ArchitectureRevisionTarget("unit", unit_id, (), "update"),),
+                    "unit contract has no semantic name",
                 )
             )
-    requirement_ids = {str(item["requirement_id"]) for item in requirements["requirements"]}
-    covered_requirements = {requirement_id for module in modules for requirement_id in module["requirement_ids"]}
-    unknown_requirement_refs = covered_requirements - requirement_ids
-    if unknown_requirement_refs:
-        affected_units = [
-            str(module["unit_id"])
-            for module in modules
-            if set(module["requirement_ids"]) & unknown_requirement_refs
-        ]
-        findings.append(
-            ArchitectureFinding(
-                ArchitectureFindingKind.CONTRACT_DEFECT,
-                "unit contracts reference unknown requirements",
-                tuple(sorted(unknown_requirement_refs)),
-                revision_targets=tuple(
-                    ArchitectureRevisionTarget("unit", unit_id, ("requirement_ids",), "update")
-                    for unit_id in sorted(affected_units)
-                ),
-            )
-        )
-    missing_coverage = requirement_ids - covered_requirements
-    if missing_coverage:
-        findings.append(
-            ArchitectureFinding(
-                ArchitectureFindingKind.CONTRACT_DEFECT,
-                "requirements are not owned by any unit contract",
-                tuple(sorted(missing_coverage)),
-                revision_targets=tuple(
-                    ArchitectureRevisionTarget("unit", str(module["unit_id"]), ("requirement_ids",), "update")
-                    for module in modules
-                ),
-            )
-        )
+            continue
+        modules.append(module)
     topology = dict(fragments.get("topology") or {})
     unit_ids = {str(module["unit_id"]) for module in modules}
     topology_findings = _validate_topology(topology, unit_ids)
     findings.extend(topology_findings)
-    findings.extend(_review_complexity_budget(modules))
-    findings.extend(
-        _review_declared_interface_handoffs(
-            modules,
-            [dict(item or {}) for item in list(fragments.get("cross_unit_contract") or [])],
-        )
-    )
+    del complexity_policy
     verdict = "PASS" if not findings else "FAIL"
     return ArchitectureReviewResult(verdict=verdict, findings=tuple(findings))
 
@@ -1196,14 +748,15 @@ def _interface_names_compatible(expected: str, actual: str) -> bool:
 
 
 def compile_architecture_markdown(manifest: Mapping[str, Any], fragments: Mapping[str, Any]) -> str:
-    requirements = list(dict(fragments.get("requirements") or {}).get("requirements") or [])
+    del manifest
+    task_sources = validate_task_source_bundle(dict(fragments.get("requirements") or {}))
     modules = list(fragments.get("unit_contract") or [])
     topology = dict(fragments.get("topology") or {})
     assumptions = dict(fragments.get("assumption_ledger") or {})
     risks = dict(fragments.get("risk_ledger") or {})
-    lines = ["# Architecture Contract", "", f"Manifest: `{_manifest_digest_hint(manifest)}`", "", "## Requirements", ""]
-    for item in requirements:
-        lines.append(f"- **{item.get('requirement_id')}** [{item.get('strength', 'hard')}] {item.get('statement', '')}")
+    lines = ["# Architecture Contract", "", "## Task Sources", ""]
+    for item in [*list(task_sources.get("documents") or []), *list(task_sources.get("amendments") or [])]:
+        lines.append(f"- `{item.get('name', '')}` ({item.get('origin', 'source')})")
     lines.extend(["", "## Module Topology", ""])
     dependency_map = dict(topology.get("depends_on") or {})
     for module in modules:
@@ -1218,7 +771,6 @@ def compile_architecture_markdown(manifest: Mapping[str, Any], fragments: Mappin
                 f"- Behavior: `{module.get('unit_behavior_kind', '')}`",
                 f"- Starts after: {dependencies}",
                 f"- Owns: {', '.join(_text_list(module.get('owned_area'))) or 'none'}",
-                f"- Requirements: {', '.join(_text_list(module.get('requirement_ids'))) or 'none'}",
                 "- Invariants:",
             ]
         )
@@ -1323,12 +875,6 @@ def _non_negative_int(value: Any, field_name: str) -> int:
     if parsed < 0:
         raise ValueError(f"complexity_budget.{field_name} must be non-negative")
     return parsed
-
-
-def _optional_non_negative_int(value: Any) -> int | None:
-    if value in (None, ""):
-        return None
-    return _non_negative_int(value, "line")
 
 
 def _manifest_digest_hint(manifest: Mapping[str, Any]) -> str:

@@ -124,8 +124,8 @@ class WebScreenshotToolTests(unittest.TestCase):
         result = asyncio.run(
             runtime.execute_tool_async(
                 CanonicalToolCall(
-                    name="op_tool_call",
-                    args={"name": "op_web_screenshot", "args": {"url": "https://example.com"}},
+                    name="call_tool",
+                    args={"name": "screenshot_web", "args": {"url": "https://example.com"}},
                 ),
                 turn_id=self.turn_id,
             )

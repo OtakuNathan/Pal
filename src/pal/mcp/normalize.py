@@ -23,6 +23,7 @@ def normalize_tool_payload(payload: dict[str, Any]) -> McpToolSpec:
         name=str(payload.get("name") or "").strip(),
         description=str(payload.get("description") or "").strip(),
         input_schema=payload.get("inputSchema"),
+        output_schema=payload.get("outputSchema"),
         annotations=dict(payload.get("annotations") or {}),
         raw=dict(payload),
     )

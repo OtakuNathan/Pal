@@ -4,6 +4,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from pal.execution.tool_facade import Tool
+
 
 @dataclass(frozen=True)
 class CapabilityDescriptor:
@@ -62,23 +64,6 @@ class ToolCallBudget:
     timeout_ms: int | None = None
 
 
-class Tool(Protocol):
-    name: str
-    description: str
-    args_schema: dict[str, Any]
-    result_schema: dict[str, Any]
-    display_name: str
-    family: str
-    tags: tuple[str, ...]
-    keywords: tuple[str, ...]
-
-    def invoke(self, args: dict[str, Any]) -> CapabilityResult:
-        ...
-
-    async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
-        ...
-
-
 class Plugin(Protocol):
     def register(self, runtime: "ExecutionRuntimePort") -> None:
         ...
@@ -98,6 +83,9 @@ class ExecutionRuntimePort(Protocol):
         ...
 
     def register_tool(self, tool: Tool) -> None:
+        ...
+
+    def unregister_tool(self, name: str) -> None:
         ...
 
     def has_registered_capability(self, name: str) -> bool:

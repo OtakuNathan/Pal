@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
+import os
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,7 +17,12 @@ from pal.foundation import utc_now
 from pal.foundation.sidecar import dispatch_sidecar_request, handle_sidecar_client
 from pal.lsp.config import LspServerFileConfig, load_builtin_lsp_templates, load_lsp_server_file, lsp_config_root
 from pal.lsp.connector import AsyncLspConnector, LspProtocolError
-from pal.lsp.ipc import cleanup_manager_endpoint, start_manager_server
+from pal.lsp.environment import (
+    detect_workspace_languages,
+    normalize_lsp_language,
+    prepare_workspace_lsp_environment,
+)
+from pal.lsp.ipc import cleanup_manager_endpoint, lsp_runtime_dir, start_manager_server
 
 
 @dataclass
@@ -58,11 +67,13 @@ class LspManager:
     started_at: str = field(default_factory=utc_now)
     last_rescan_at: str = ""
     last_error: str = ""
+    workspace_environments: dict[str, dict[str, Any]] = field(default_factory=dict)
     attach_failure_cooldown_seconds: float = 60.0
     idle_session_timeout_seconds: float = 30 * 60.0
     idle_eviction_interval_seconds: float = 60.0
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     _manager_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _environment_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def run(self) -> None:
         self.server, self.endpoint_info = await start_manager_server(self.runtime_root, self._handle_client)
@@ -104,6 +115,8 @@ class LspManager:
             return await self.rescan()
         if method == "doctor":
             return await self.doctor(dict(params or {}))
+        if method == "prepare_workspace":
+            return await self.prepare_workspace(dict(params or {}))
         if method == "release_workspace":
             return await self.release_workspace(dict(params or {}))
         if method in {
@@ -132,6 +145,7 @@ class LspManager:
             "last_error": self.last_error,
             "server_count": len(self.states),
             "attached_count": sum(_attached_session_count(state) for state in self.states.values()),
+            "prepared_workspace_count": len(self.workspace_environments),
             "idle_session_timeout_seconds": self.idle_session_timeout_seconds,
             "config_root": str(lsp_config_root(self.runtime_root)),
             **dict(self.endpoint_info),
@@ -184,8 +198,9 @@ class LspManager:
                 "servers": [self._server_summary(state) for state in sorted(self.states.values(), key=lambda item: item.server_id)],
                 **self.health(),
             }
-        state = self._select_state(params)
         workspace_root = self._workspace_root(params)
+        params = self._with_prepared_environment(params, workspace_root)
+        state = self._select_state(params)
         binary = shutil.which(state.file_config.config.command[0])
         checks = [
             {"name": "enabled", "status": "ok" if state.file_config.enabled else "disabled"},
@@ -196,15 +211,36 @@ class LspManager:
         for marker in state.file_config.config.workspace_markers:
             marker_checks.append({"marker": marker, "present": (workspace_root / marker).exists()})
         checks.append({"name": "workspace_markers", "status": "ok" if any(item["present"] for item in marker_checks) or not marker_checks else "warning", "items": marker_checks})
+        project_context = _project_context_for(state, params)
+        if project_context:
+            checks.append(
+                {
+                    "name": "project_context",
+                    "status": str(project_context.get("status") or "unavailable"),
+                    "context": project_context,
+                }
+            )
         if not state.file_config.enabled or not binary or not workspace_root.exists():
             return {"status": "unavailable", "server": self._server_summary(state), "checks": checks}
+        context_reason = _project_context_unavailable_reason(state, params, workspace_root)
+        if context_reason:
+            return {
+                "status": "unavailable",
+                "reason": context_reason,
+                "server": self._server_summary(state),
+                "checks": checks,
+            }
         async with state.lock:
             recent_failure = self._recent_attach_failure_reason(state, workspace_root)
             if recent_failure:
                 checks.append({"name": "initialize", "status": "skipped_recent_failure", "reason": recent_failure})
                 return {"status": "unavailable", "reason": recent_failure, "server": self._server_summary(state), "checks": checks}
             try:
-                await self._ensure_attached(state, workspace_root)
+                extra_args = _project_context_session_args(state, params)
+                if extra_args:
+                    await self._ensure_attached(state, workspace_root, extra_args=extra_args)
+                else:
+                    await self._ensure_attached(state, workspace_root)
                 connector = self._connector_for_workspace(state, workspace_root)
                 checks.append({"name": "initialize", "status": "ok", "server_info": connector.server_info if connector else {}})
                 return {"status": "ok", "server": self._server_summary(state), "checks": checks}
@@ -212,64 +248,269 @@ class LspManager:
                 checks.append({"name": "initialize", "status": "error", "error": state.last_error or f"{exc.__class__.__name__}: {exc}"})
                 return {"status": "error", "server": self._server_summary(state), "checks": checks}
 
+    async def prepare_workspace(self, params: dict[str, Any]) -> dict[str, Any]:
+        raw_workspace = str(params.get("workspace_root") or params.get("repo_path") or "").strip()
+        if not raw_workspace:
+            raise ValueError("prepare_workspace requires workspace_root")
+        workspace_root = Path(raw_workspace).expanduser().resolve()
+        if not workspace_root.is_dir():
+            return {
+                "status": "unavailable",
+                "reason": "missing_workspace_root",
+                "workspace_root": str(workspace_root),
+            }
+
+        declared_languages = [
+            normalize_lsp_language(value)
+            for value in _language_tokens(
+                params.get("languages")
+                or params.get("workspace_languages")
+                or params.get("language")
+            )
+        ]
+        primary_language = normalize_lsp_language(str(params.get("primary_language") or ""))
+        detected_languages, scanned_files = detect_workspace_languages(workspace_root)
+        languages = _dedupe_strings(
+            [primary_language, *declared_languages, *detected_languages]
+        )
+        if not primary_language and languages:
+            primary_language = languages[0]
+        if not primary_language:
+            return {
+                "status": "unavailable",
+                "reason": "workspace_language_unknown",
+                "workspace_root": str(workspace_root),
+                "scanned_files": scanned_files,
+            }
+
+        preparation_request = {
+            "primary_language": primary_language,
+            "languages": languages,
+            "lsp_secondary_languages": [
+                language for language in languages if language != primary_language
+            ],
+            **{
+                key: params[key]
+                for key in (
+                    "compile_commands_path",
+                    "include_paths",
+                    "stub_include_paths",
+                    "cpp_standard",
+                    "lsp_compile_flags",
+                )
+                if params.get(key) not in (None, "", [], {})
+            },
+        }
+        setup, unavailable = prepare_workspace_lsp_environment(
+            workspace_root=workspace_root,
+            primary_language=primary_language,
+            context_root=lsp_runtime_dir(self.runtime_root) / "contexts",
+            workspace=preparation_request,
+        )
+        fingerprint_payload = {
+            "workspace_root": str(workspace_root),
+            "setup": setup,
+            "unavailable": unavailable,
+        }
+        fingerprint = _stable_fingerprint(fingerprint_payload)
+        key = _workspace_session_key(workspace_root)
+        async with self._environment_lock:
+            previous = self._workspace_environment(workspace_root)
+            changed = str(previous.get("fingerprint") or "") != fingerprint
+            record = {
+                "schema_version": "1",
+                "workspace_root": str(workspace_root),
+                "primary_language": primary_language,
+                "languages": languages,
+                "scanned_files": scanned_files,
+                "setup": setup,
+                "unavailable": unavailable,
+                "fingerprint": fingerprint,
+                "prepared_at": utc_now(),
+            }
+            self.workspace_environments[key] = record
+            _write_workspace_environment(self.runtime_root, workspace_root, record)
+            if changed:
+                await self.release_workspace({"workspace_root": str(workspace_root)})
+                for state in self.states.values():
+                    state.attach_failures.pop(key, None)
+                    if state.last_attach_failed_workspace_root == str(workspace_root):
+                        state.last_attach_failed_at = 0.0
+                        state.last_attach_failed_workspace_root = ""
+
+        prewarm_results: list[dict[str, Any]] = []
+        if bool(params.get("prewarm", True)):
+            for server_id in list(setup.get("servers") or []):
+                if server_id not in self.states:
+                    prewarm_results.append(
+                        {
+                            "server_id": server_id,
+                            "status": "unavailable",
+                            "reason": "server_not_configured",
+                        }
+                    )
+                    continue
+                result = await self.doctor(
+                    {
+                        "server_id": server_id,
+                        "workspace_root": str(workspace_root),
+                    }
+                )
+                prewarm_results.append(
+                    {
+                        "server_id": server_id,
+                        "status": str(result.get("status") or "unavailable"),
+                        **(
+                            {"reason": str(result.get("reason") or "")}
+                            if str(result.get("reason") or "").strip()
+                            else {}
+                        ),
+                    }
+                )
+
+        ready_count = len(
+            [result for result in prewarm_results if result.get("status") == "ok"]
+        )
+        if not bool(params.get("prewarm", True)):
+            status = "ok" if str(setup.get("status") or "") == "ready" else "unavailable"
+        elif prewarm_results and ready_count == len(prewarm_results):
+            status = "ok"
+        elif ready_count:
+            status = "partial"
+        else:
+            status = "unavailable"
+        return {
+            "status": status,
+            "workspace_root": str(workspace_root),
+            "primary_language": primary_language,
+            "languages": languages,
+            "scanned_files": scanned_files,
+            "environment_fingerprint": fingerprint,
+            "environment_changed": changed,
+            "prepared_at": record["prepared_at"],
+            "servers": prewarm_results,
+            "unavailable": unavailable,
+        }
+
     async def run_lsp_operation(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
-        state = self._select_state(params)
         file_path = self._file_path(params, required=operation != "workspace_symbols")
         workspace_root = self._workspace_root(params, file_path=file_path)
-        unavailable = self._unavailable_reason(state, workspace_root)
+        params = self._with_prepared_environment(params, workspace_root)
+        state = self._select_state(params)
+        unavailable = self._unavailable_reason(state, workspace_root, params)
         if unavailable:
             return self._unavailable_payload(operation, unavailable, state, workspace_root)
         async with state.lock:
-            unavailable = self._unavailable_reason(state, workspace_root)
+            unavailable = self._unavailable_reason(state, workspace_root, params)
             if unavailable:
                 return self._unavailable_payload(operation, unavailable, state, workspace_root)
-            try:
-                await self._ensure_attached(state, workspace_root)
-            except Exception as exc:
-                detail = state.last_error or f"{exc.__class__.__name__}: {exc}"
-                reason = f"attach_failed:{detail}"
-                return self._unavailable_payload(operation, reason, state, workspace_root)
-            connector = self._connector_for_workspace(state, workspace_root)
-            if connector is None:
-                return self._unavailable_payload(operation, "attach_failed:no_connector_for_workspace", state, workspace_root)
-            if operation == "workspace_symbols":
-                query = str(params.get("query") or "")
-                result = await connector.request("workspace/symbol", {"query": query})
-                return self._evidence(operation, state, workspace_root, None, params, result.get("value", result))
-            language_id = self._language_id(state, file_path, params)
-            document = await connector.ensure_document_open(file_path, language_id=language_id)
-            text_document = {"uri": document["uri"]}
-            if operation == "diagnostics":
-                result = await connector.diagnostics(file_path, language_id=language_id)
-                return self._evidence(operation, state, workspace_root, file_path, params, result, file_sha256=str(document["file_sha256"]))
-            if operation == "prepare_call_hierarchy":
-                result = await connector.request(
-                    "textDocument/prepareCallHierarchy",
-                    {"textDocument": text_document, "position": _position(params)},
-                )
-                return self._evidence(operation, state, workspace_root, file_path, params, result.get("value", result), file_sha256=str(document["file_sha256"]))
-            if operation in {"incoming_calls", "outgoing_calls"}:
-                result = await self._call_hierarchy_calls(
-                    connector,
-                    operation=operation,
-                    text_document=text_document,
-                    params=params,
-                )
-                return self._evidence(operation, state, workspace_root, file_path, params, result, file_sha256=str(document["file_sha256"]))
-            lsp_method = {
-                "hover": "textDocument/hover",
-                "definition": "textDocument/definition",
-                "implementation": "textDocument/implementation",
-                "references": "textDocument/references",
-                "document_symbols": "textDocument/documentSymbol",
-            }[operation]
-            request_params: dict[str, Any] = {"textDocument": text_document}
-            if operation != "document_symbols":
-                request_params["position"] = _position(params)
-            if operation == "references":
-                request_params["context"] = {"includeDeclaration": bool(params.get("include_declaration", True))}
-            result = await connector.request(lsp_method, request_params)
+            for attempt in range(2):
+                try:
+                    extra_args = _project_context_session_args(state, params)
+                    if extra_args:
+                        await self._ensure_attached(state, workspace_root, extra_args=extra_args)
+                    else:
+                        await self._ensure_attached(state, workspace_root)
+                except Exception as exc:
+                    detail = state.last_error or f"{exc.__class__.__name__}: {exc}"
+                    if attempt == 0:
+                        await self._discard_workspace_session_locked(state, workspace_root)
+                        state.attach_failures.pop(_workspace_session_key(workspace_root), None)
+                        continue
+                    return self._unavailable_payload(
+                        operation,
+                        f"attach_failed_after_retry:{detail}",
+                        state,
+                        workspace_root,
+                    )
+                connector = self._connector_for_workspace(state, workspace_root)
+                if connector is None:
+                    detail = "LspProtocolError: no connector for prepared workspace"
+                    await self._discard_workspace_session_locked(state, workspace_root)
+                    if attempt == 0:
+                        continue
+                    return self._unavailable_payload(
+                        operation,
+                        f"request_failed_after_restart:{detail}",
+                        state,
+                        workspace_root,
+                    )
+                try:
+                    return await self._run_lsp_operation_with_connector(
+                        operation,
+                        params,
+                        state=state,
+                        connector=connector,
+                        workspace_root=workspace_root,
+                        file_path=file_path,
+                    )
+                except (LspProtocolError, asyncio.TimeoutError, BrokenPipeError, ConnectionError) as exc:
+                    detail = f"{exc.__class__.__name__}: {exc}"
+                    state.last_error = detail
+                    await self._discard_workspace_session_locked(state, workspace_root)
+                    if attempt == 0:
+                        continue
+                    return self._unavailable_payload(
+                        operation,
+                        f"request_failed_after_restart:{detail}",
+                        state,
+                        workspace_root,
+                    )
+        return self._unavailable_payload(
+            operation,
+            "lsp_operation_exhausted",
+            state,
+            workspace_root,
+        )
+
+    async def _run_lsp_operation_with_connector(
+        self,
+        operation: str,
+        params: dict[str, Any],
+        *,
+        state: LspServerState,
+        connector: AsyncLspConnector,
+        workspace_root: Path,
+        file_path: Path,
+    ) -> dict[str, Any]:
+        if operation == "workspace_symbols":
+            query = str(params.get("query") or "")
+            result = await connector.request("workspace/symbol", {"query": query})
+            return self._evidence(operation, state, workspace_root, None, params, result.get("value", result))
+        language_id = self._language_id(state, file_path, params)
+        document = await connector.ensure_document_open(file_path, language_id=language_id)
+        text_document = {"uri": document["uri"]}
+        if operation == "diagnostics":
+            result = await connector.diagnostics(file_path, language_id=language_id)
+            return self._evidence(operation, state, workspace_root, file_path, params, result, file_sha256=str(document["file_sha256"]))
+        if operation == "prepare_call_hierarchy":
+            result = await connector.request(
+                "textDocument/prepareCallHierarchy",
+                {"textDocument": text_document, "position": _position(params)},
+            )
             return self._evidence(operation, state, workspace_root, file_path, params, result.get("value", result), file_sha256=str(document["file_sha256"]))
+        if operation in {"incoming_calls", "outgoing_calls"}:
+            result = await self._call_hierarchy_calls(
+                connector,
+                operation=operation,
+                text_document=text_document,
+                params=params,
+            )
+            return self._evidence(operation, state, workspace_root, file_path, params, result, file_sha256=str(document["file_sha256"]))
+        lsp_method = {
+            "hover": "textDocument/hover",
+            "definition": "textDocument/definition",
+            "implementation": "textDocument/implementation",
+            "references": "textDocument/references",
+            "document_symbols": "textDocument/documentSymbol",
+        }[operation]
+        request_params: dict[str, Any] = {"textDocument": text_document}
+        if operation != "document_symbols":
+            request_params["position"] = _position(params)
+        if operation == "references":
+            request_params["context"] = {"includeDeclaration": bool(params.get("include_declaration", True))}
+        result = await connector.request(lsp_method, request_params)
+        return self._evidence(operation, state, workspace_root, file_path, params, result.get("value", result), file_sha256=str(document["file_sha256"]))
 
     async def _call_hierarchy_calls(
         self,
@@ -374,16 +615,35 @@ class LspManager:
             except Exception:
                 self.logger.exception("failed to evict idle LSP sessions")
 
-    async def _ensure_attached(self, state: LspServerState, workspace_root: Path) -> None:
+    async def _ensure_attached(
+        self,
+        state: LspServerState,
+        workspace_root: Path,
+        *,
+        extra_args: tuple[str, ...] = (),
+    ) -> None:
         key = _workspace_session_key(workspace_root)
         session = state.sessions.get(key)
-        if session is not None and session.connector.workspace_root == workspace_root:
+        if (
+            session is not None
+            and bool(getattr(session.connector, "healthy", True))
+            and session.connector.workspace_root == workspace_root
+            and tuple(getattr(session.connector, "extra_args", ())) == tuple(extra_args)
+        ):
             session.touch()
             state.connector = session.connector
             state.attached = True
             state.last_attached_at = session.attached_at
             return
-        if state.connector is not None and state.attached and state.connector.workspace_root == workspace_root:
+        if session is not None:
+            await self._discard_workspace_session_locked(state, workspace_root)
+        if (
+            state.connector is not None
+            and state.attached
+            and bool(getattr(state.connector, "healthy", True))
+            and state.connector.workspace_root == workspace_root
+            and tuple(getattr(state.connector, "extra_args", ())) == tuple(extra_args)
+        ):
             state.sessions[key] = LspWorkspaceSession(
                 workspace_root=workspace_root,
                 connector=state.connector,
@@ -391,7 +651,18 @@ class LspManager:
             )
             state.sessions[key].touch()
             return
-        connector = AsyncLspConnector(state.file_config.config, workspace_root=workspace_root)
+        connector = (
+            AsyncLspConnector(
+                state.file_config.config,
+                workspace_root=workspace_root,
+                extra_args=tuple(extra_args),
+            )
+            if extra_args
+            else AsyncLspConnector(
+                state.file_config.config,
+                workspace_root=workspace_root,
+            )
+        )
         try:
             await connector.initialize()
         except Exception as exc:
@@ -414,6 +685,24 @@ class LspManager:
         state.last_attach_failed_at = 0.0
         state.last_attach_failed_workspace_root = ""
         state.attach_failures.pop(key, None)
+
+    async def _discard_workspace_session_locked(
+        self,
+        state: LspServerState,
+        workspace_root: Path,
+    ) -> None:
+        key = _workspace_session_key(workspace_root)
+        session = state.sessions.pop(key, None)
+        connector = session.connector if session is not None else None
+        if connector is None and state.connector is not None and state.connector.workspace_root == workspace_root:
+            connector = state.connector
+        if connector is not None and state.connector is connector:
+            state.connector = None
+        if connector is not None and not any(
+            candidate.connector is connector for candidate in state.sessions.values()
+        ):
+            await connector.close()
+        _refresh_state_attachment(state)
 
     async def _detach_state(self, state: LspServerState) -> None:
         connectors: list[AsyncLspConnector] = []
@@ -470,6 +759,35 @@ class LspManager:
             return _detect_workspace_root(file_path)
         return self.runtime_root
 
+    def _workspace_environment(self, workspace_root: Path) -> dict[str, Any]:
+        key = _workspace_session_key(workspace_root)
+        cached = self.workspace_environments.get(key)
+        if cached is not None:
+            return dict(cached)
+        loaded = _read_workspace_environment(self.runtime_root, workspace_root)
+        if loaded:
+            self.workspace_environments[key] = loaded
+        return dict(loaded)
+
+    def _with_prepared_environment(
+        self,
+        params: dict[str, Any],
+        workspace_root: Path,
+    ) -> dict[str, Any]:
+        effective = dict(params)
+        prepared = self._workspace_environment(workspace_root)
+        setup = prepared.get("setup")
+        if not isinstance(setup, dict):
+            return effective
+        effective["_prepared_lsp_environment"] = dict(setup)
+        languages = list(prepared.get("languages") or [])
+        if languages:
+            effective["workspace_languages"] = languages
+        primary_language = str(prepared.get("primary_language") or "").strip()
+        if primary_language:
+            effective["primary_language"] = primary_language
+        return effective
+
     def _file_path(self, params: dict[str, Any], *, required: bool) -> Path:
         raw = str(params.get("file") or params.get("path") or "").strip()
         if not raw:
@@ -486,13 +804,25 @@ class LspManager:
             raise FileNotFoundError(f"LSP file not found: {path}")
         return path
 
-    def _unavailable_reason(self, state: LspServerState, workspace_root: Path) -> str:
+    def _unavailable_reason(
+        self,
+        state: LspServerState,
+        workspace_root: Path,
+        params: dict[str, Any] | None = None,
+    ) -> str:
         if not state.file_config.enabled:
             return "disabled"
         if not shutil.which(state.file_config.config.command[0]):
             return "missing_binary"
         if not workspace_root.exists():
             return "missing_workspace_root"
+        context_reason = _project_context_unavailable_reason(
+            state,
+            dict(params or {}),
+            workspace_root,
+        )
+        if context_reason:
+            return context_reason
         recent_failure = self._recent_attach_failure_reason(state, workspace_root)
         if recent_failure:
             return recent_failure
@@ -558,6 +888,7 @@ class LspManager:
                 "workspace_root": str(session.workspace_root),
                 "attached_at": session.attached_at,
                 "last_used_at": session.last_used_timestamp,
+                "extra_args": list(getattr(session.connector, "extra_args", ())),
             }
             for session in sorted(state.sessions.values(), key=lambda item: str(item.workspace_root))
         ]
@@ -618,9 +949,78 @@ class LspManager:
             else {},
             "timestamp": utc_now(),
             "freshness": "fresh" if file_sha256 else "workspace",
+            "environment_fingerprint": str(
+                self._workspace_environment(workspace_root).get("fingerprint") or ""
+            ),
             "result": result,
         }
         return {"status": "ok", "operation": operation, "evidence": evidence, "result": result, "server": self._server_summary(state)}
+
+
+def _workspace_environment_path(runtime_root: Path, workspace_root: Path) -> Path:
+    key = hashlib.sha256(
+        str(Path(workspace_root).expanduser().resolve()).encode("utf-8")
+    ).hexdigest()
+    return lsp_runtime_dir(runtime_root) / "workspaces" / f"{key}.json"
+
+
+def _write_workspace_environment(
+    runtime_root: Path,
+    workspace_root: Path,
+    record: dict[str, Any],
+) -> None:
+    path = _workspace_environment_path(runtime_root, workspace_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _read_workspace_environment(
+    runtime_root: Path,
+    workspace_root: Path,
+) -> dict[str, Any]:
+    path = _workspace_environment_path(runtime_root, workspace_root)
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    expected_root = str(Path(workspace_root).expanduser().resolve())
+    if str(value.get("workspace_root") or "") != expected_root:
+        return {}
+    return dict(value)
+
+
+def _stable_fingerprint(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        normalized = str(value or "").strip()
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return result
 
 
 def _workspace_session_key(workspace_root: Path) -> str:
@@ -656,6 +1056,73 @@ def _result_list(value: Any) -> list[Any]:
 
 def _position(params: dict[str, Any]) -> dict[str, int]:
     return {"line": _int(params.get("line"), 0), "character": _int(params.get("character"), 0)}
+
+
+_PROJECT_CONTEXT_SESSION_ARG_PREFIXES = {
+    "clangd": ("--compile-commands-dir=",),
+}
+
+
+def _project_context_for(state: LspServerState, params: dict[str, Any]) -> dict[str, Any]:
+    setup = params.get("_prepared_lsp_environment")
+    if not isinstance(setup, dict):
+        return {}
+    contexts = setup.get("project_contexts")
+    if isinstance(contexts, dict) and isinstance(contexts.get(state.server_id), dict):
+        return dict(contexts[state.server_id])
+    environments = setup.get("environments")
+    if isinstance(environments, dict) and isinstance(environments.get(state.server_id), dict):
+        context = dict(environments[state.server_id]).get("project_context")
+        if isinstance(context, dict):
+            return dict(context)
+    return {}
+
+
+def _project_context_unavailable_reason(
+    state: LspServerState,
+    params: dict[str, Any],
+    workspace_root: Path,
+) -> str:
+    setup = params.get("_prepared_lsp_environment")
+    if not isinstance(setup, dict) or not bool(setup.get("require_project_context")):
+        return ""
+    context = _project_context_for(state, params)
+    if str(context.get("status") or "") != "ready":
+        return f"project_context_unavailable:{context.get('reason') or 'missing'}"
+    bound_root = str(context.get("workspace_root") or "").strip()
+    if bound_root and Path(bound_root).expanduser().resolve() != workspace_root.resolve():
+        return "project_context_workspace_mismatch"
+    source_path = str(context.get("source_path") or "").strip()
+    if source_path and not Path(source_path).expanduser().is_file():
+        return "project_context_source_missing"
+    try:
+        _project_context_session_args(state, params)
+    except ValueError as exc:
+        return f"invalid_project_context:{exc}"
+    return ""
+
+
+def _project_context_session_args(
+    state: LspServerState,
+    params: dict[str, Any],
+) -> tuple[str, ...]:
+    context = _project_context_for(state, params)
+    raw_args = context.get("session_args")
+    if raw_args is None:
+        return ()
+    if not isinstance(raw_args, list):
+        raise ValueError("session_args must be an array")
+    allowed_prefixes = _PROJECT_CONTEXT_SESSION_ARG_PREFIXES.get(state.server_id, ())
+    result: list[str] = []
+    for raw in raw_args:
+        value = str(raw or "").strip()
+        if not value or "\0" in value or "\n" in value or "\r" in value:
+            raise ValueError("session_args contains an invalid value")
+        if not any(value.startswith(prefix) for prefix in allowed_prefixes):
+            raise ValueError(f"session argument is not allowed for {state.server_id}: {value}")
+        if value not in result:
+            result.append(value)
+    return tuple(result)
 
 
 _LANGUAGE_ALIASES = {
@@ -734,9 +1201,9 @@ def _workspace_languages(params: dict[str, Any]) -> list[str]:
         params.get("language"),
         params.get("primary_language"),
     ]
-    lsp_setup = params.get("lsp_setup")
-    if isinstance(lsp_setup, dict):
-        raw_values.append(lsp_setup.get("languages"))
+    prepared_environment = params.get("_prepared_lsp_environment")
+    if isinstance(prepared_environment, dict):
+        raw_values.append(prepared_environment.get("languages"))
     result: list[str] = []
     for raw in raw_values:
         for item in _language_tokens(raw):

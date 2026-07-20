@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pal.control import ControlAction, ControlRoute
+from pal.control import ControlAction, ControlDelivery, ControlRoute
 from pal.control.interactions import delivery_for_reply
 from pal.core.events import EventHandler, EventSource
 from pal.foundation import EventEnvelope
@@ -66,7 +66,32 @@ class MinionControlEventHandler(EventHandler):
             action_kind = "route_reply"
         if delivery is None:
             return []
-        return [
+        deliveries = []
+        if event.event_kind == EventKind.MINION_ARCHITECTURE_REVIEW_PENDING:
+            for attachment in list(payload.get("attachments") or []):
+                item = dict(attachment or {})
+                if not str(item.get("path") or "").strip():
+                    continue
+                deliveries.append(
+                    EventEnvelope(
+                        event_kind=EventKind.CONTROL_ACTION,
+                        source_kind=SourceKind.CONTROL,
+                        payload=ControlAction(
+                            action_kind="route_attachment",
+                            target_scope="channel",
+                            target_id=str(payload.get("workflow_id") or ""),
+                            route=route,
+                            delivery=ControlDelivery(
+                                delivery_kind="attachment",
+                                route=route,
+                                payload=item,
+                            ),
+                            notes="minion V2 human review attachment",
+                        ),
+                        correlation_id=event.correlation_id,
+                    )
+                )
+        deliveries.append(
             EventEnvelope(
                 event_kind=EventKind.CONTROL_ACTION,
                 source_kind=SourceKind.CONTROL,
@@ -80,7 +105,8 @@ class MinionControlEventHandler(EventHandler):
                 ),
                 correlation_id=event.correlation_id,
             )
-        ]
+        )
+        return deliveries
 
 
 def _event_kind(kind: str) -> str:
