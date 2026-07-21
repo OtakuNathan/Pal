@@ -629,7 +629,8 @@ The LLM-facing difference is:
 
 - use `tool_search` to discover available capability inventory.
 - use `behavior_advise` to ask which route fits a scenario.
-- use `skill_inject` to fetch a manual after advice returns a `skill_ref`.
+- use `skill_inject` to fetch a manual only when the user or selected workflow
+  explicitly requests it; a returned `skill_ref` does not trigger injection by itself.
 
 See [pal_behavior_contract.md](pal_behavior_contract.md).
 

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from pal.behavior.decorators import affordance
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityCall
+from pal.execution.tool_semantics import INDIRECT_LOCAL_READ
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -253,6 +254,7 @@ class SkillIntrospectionProvider:
         description="Search normalized Pal skills for the current scenario or explicit skill name. Does not inject manuals.",
         InputModel=SkillCapabilitiesSkillIntrospectionProviderSearchInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderSearchOutput,
+        execution=INDIRECT_LOCAL_READ,
     )
     def search(self, call: CapabilityCall):
         return SkillSearchTool(service=self.service).invoke(call.args)
@@ -265,6 +267,7 @@ class SkillIntrospectionProvider:
         description="Read normalized Pal skill metadata, optionally including manual text.",
         InputModel=SkillCapabilitiesSkillIntrospectionProviderReadInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderReadOutput,
+        execution=INDIRECT_LOCAL_READ,
     )
     def read(self, call: CapabilityCall):
         return SkillReadTool(service=self.service).invoke(call.args)
@@ -277,6 +280,7 @@ class SkillIntrospectionProvider:
         description="Inject a registered active skill manual as a tool observation without executing capabilities.",
         InputModel=SkillCapabilitiesSkillIntrospectionProviderInjectInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderInjectOutput,
+        execution=INDIRECT_LOCAL_READ,
     )
     def inject(self, call: CapabilityCall):
         return SkillInjectTool(service=self.service).invoke(call.args)

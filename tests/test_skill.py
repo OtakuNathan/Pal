@@ -18,7 +18,9 @@ from pal.behavior import (
 )
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
+from pal.execution.tool_facade import CompleteResult, EffectKind, RetryPolicy
 from pal.foundation import PalV2Database
+from pal.llm.contracts import CanonicalToolCall
 from pal.llm import CanonicalLLMOutcome
 from pal.lsp import build_lsp_plugin
 from pal.minion import register_with_core as register_minion_with_core
@@ -339,6 +341,39 @@ Run the workflow.
 
         descriptors = core.context.capability_registry.descriptors
         self.assertEqual(descriptors["skill_inject"].module_id, "skill")
+
+    def test_skill_inject_validates_through_facade_as_an_idempotent_read(self) -> None:
+        self.skill_repository.upsert_skill(
+            SkillDescriptor(
+                skill_id="safe.workflow",
+                module_id="test",
+                title="Safe workflow",
+                summary="Follow the safe workflow.",
+                manual_text="Inspect, execute, and verify.",
+            )
+        )
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        register_skill_with_core(core.context, self.service)
+        core.publish_module_capabilities("execution")
+        core.publish_module_capabilities("skill")
+
+        result = core.context.execution_runtime.execute_tool(
+            CanonicalToolCall(
+                name="call_tool",
+                args={"name": "skill_inject", "args": {"skill_id": "safe.workflow"}},
+            )
+        )
+
+        self.assertTrue(result.ok, result.llm_text)
+        self.assertIsInstance(result.invocation_result, CompleteResult)
+        self.assertEqual(result.structured["status"], SKILL_STATUS_ACTIVE)
+        record = core.context.execution_runtime.registry_generation.indirect_aliases[
+            "skill_inject"
+        ]
+        self.assertEqual(record.execution.effect_kind, EffectKind.LOCAL_READ)
+        self.assertEqual(record.execution.retry_policy, RetryPolicy.AUTOMATIC)
 
     def test_skill_module_declares_internal_plugin_development_skill(self) -> None:
         core = PalCore()

@@ -286,7 +286,8 @@ Advice may return `capability_refs`, but those are pointers only. It does not be
 Behavior contributes a small prompt fragment:
 
 - use `behavior_advise` when Pal intends to act and needs route advice.
-- use `skill_inject` when advice returns a `skill_ref`.
+- treat returned `skill_ref` values as optional routes; call `skill_inject` only
+  when the user or the selected workflow explicitly requests that manual.
 - use `behavior_save` only for recurring behavior rules.
 - keep affordance hints thin; multi-step procedures belong in skills.
 

@@ -1369,6 +1369,7 @@ SkillCapabilitiesSkillIntrospectionProviderInjectOutput = _strict_model(
         'skill_id': (str, Field(None)),
         'title': (str, Field(None)),
         'summary': (str, Field(None)),
+        'status': (str, Field(None)),
         'use_when': (str, Field(None)),
         'avoid_when': (str, Field(None)),
         'applicability_star': (dict[str, Any], Field(None)),
