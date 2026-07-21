@@ -177,6 +177,7 @@ class SkillIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show skill management state",
+        aliases=("skill_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -206,6 +207,7 @@ class SkillIntrospectionProvider:
         InputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateOutput,
         metadata={"async_required": True},
+        aliases=("skill_assimilate",),
     )
     async def assimilate(self, call: CapabilityCall):
         return await SkillAssimilateTool(service=self.service).ainvoke(call.args)
@@ -218,6 +220,7 @@ class SkillIntrospectionProvider:
         description="Commit a sanitized skill candidate and its thin affordance.",
         InputModel=SkillCapabilitiesSkillIntrospectionProviderCommitInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderCommitOutput,
+        aliases=("skill_commit",),
     )
     def commit(self, call: CapabilityCall):
         return SkillCommitTool(service=self.service).invoke(call.args)
@@ -230,6 +233,7 @@ class SkillIntrospectionProvider:
         description="Update a normalized skill and refresh its thin affordance.",
         InputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateOutput,
+        aliases=("skill_update",),
     )
     def update(self, call: CapabilityCall):
         return SkillUpdateTool(service=self.service).invoke(call.args)
@@ -242,6 +246,7 @@ class SkillIntrospectionProvider:
         description="Disable a normalized skill without deleting history.",
         InputModel=SkillCapabilitiesSkillIntrospectionProviderDisableInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderDisableOutput,
+        aliases=("skill_disable",),
     )
     def disable(self, call: CapabilityCall):
         return SkillDisableTool(service=self.service).invoke(call.args)
@@ -255,6 +260,7 @@ class SkillIntrospectionProvider:
         InputModel=SkillCapabilitiesSkillIntrospectionProviderSearchInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderSearchOutput,
         execution=INDIRECT_LOCAL_READ,
+        aliases=("skill_search",),
     )
     def search(self, call: CapabilityCall):
         return SkillSearchTool(service=self.service).invoke(call.args)
@@ -268,6 +274,7 @@ class SkillIntrospectionProvider:
         InputModel=SkillCapabilitiesSkillIntrospectionProviderReadInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderReadOutput,
         execution=INDIRECT_LOCAL_READ,
+        aliases=("skill_read",),
     )
     def read(self, call: CapabilityCall):
         return SkillReadTool(service=self.service).invoke(call.args)
@@ -281,6 +288,7 @@ class SkillIntrospectionProvider:
         InputModel=SkillCapabilitiesSkillIntrospectionProviderInjectInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderInjectOutput,
         execution=INDIRECT_LOCAL_READ,
+        aliases=("skill_inject",),
     )
     def inject(self, call: CapabilityCall):
         return SkillInjectTool(service=self.service).invoke(call.args)
@@ -289,6 +297,7 @@ class SkillIntrospectionProvider:
 def register_with_core(context: "MainContext", service: SkillService) -> ModuleHandle:
     from pal.skill.prompt import SkillPromptFragmentProvider
 
+    service.execution_runtime = service.execution_runtime or context.execution_runtime
     provider = SkillIntrospectionProvider(service=service)
     prompt_provider = SkillPromptFragmentProvider()
     handle = ModuleHandle(

@@ -55,7 +55,7 @@ class ControlIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show control module status",
-        aliases=("introspection_module_control_observe",),
+        aliases=("control_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -67,7 +67,7 @@ class ControlIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Control snapshot", snapshot.__dict__),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Re-attach control module")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Re-attach control module", aliases=("control_attach",))
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -79,7 +79,7 @@ class ControlIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Control re-attached", {"mounted": True, "degraded": False}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Degrade control module")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Degrade control module", aliases=("control_detach",))
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False

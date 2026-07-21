@@ -41,10 +41,8 @@ def resolve_minion_tool_call(
     name = str(resolve_name(call.name) or "").strip()
     args = dict(call.args or {})
     if name == "op_tool_call":
-        for key in ("name", "capability", "tool"):
-            if str(args.get(key) or "").strip():
-                args[key] = str(resolve_name(args.get(key)) or "").strip()
-                break
+        if str(args.get("name") or "").strip():
+            args["name"] = str(resolve_name(args["name"]) or "").strip()
     if name == call.name and args == dict(call.args or {}):
         return call
     return CanonicalToolCall(name=name, args=args, call_id=call.call_id)
@@ -53,7 +51,7 @@ def resolve_minion_tool_call(
 def effective_minion_capability_name(call: CanonicalToolCall) -> str:
     if call.name == "op_tool_call":
         args = dict(call.args or {})
-        return str(args.get("name") or args.get("capability") or args.get("tool") or call.name).strip()
+        return str(args.get("name") or call.name).strip()
     return call.name
 
 

@@ -348,7 +348,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         assert spec is not None
         self.assertEqual(spec["name"], "verification_submit")
         self.assertEqual(
-            scoped.resolve_llm_tool_name("verification_submit"),
+            scoped.resolve_capability_address("verification_submit"),
             "op_minion_verification_submit",
         )
         self.assertEqual(
@@ -409,7 +409,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 self.assertIsNotNone(spec)
                 assert spec is not None
                 self.assertEqual(spec["name"], public_name)
-                self.assertEqual(scoped.resolve_llm_tool_name(public_name), canonical)
+                self.assertEqual(scoped.resolve_capability_address(public_name), canonical)
                 self.assertNotIn("minion_", spec["description"])
 
     def test_architect_has_no_external_research_surface(self) -> None:

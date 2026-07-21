@@ -27,8 +27,9 @@ from pal.shared import (
     MountedSubtreeHandle,
     RuntimeStatus,
     SINGLETON_TARGET,
-    llm_tool_name,
 )
+
+_TOOL_ALIAS_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 _CANONICAL_NAMESPACE_ABBREVIATIONS = {
     "operation": "op",
@@ -88,13 +89,7 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                     action_blueprint=action_blueprint,
                     node_blueprint=node_blueprint,
                 )
-                descriptor_name = _descriptor_name(
-                    canonical_path=canonical_path,
-                    module_id=node_blueprint.path_module_id or module_id,
-                    action_blueprint=action_blueprint,
-                    node_blueprint=node_blueprint,
-                    target=target,
-                )
+                descriptor_name = _bound_alias(action_blueprint, target)
                 descriptor = CapabilityDescriptor(
                     name=descriptor_name,
                     canonical_path=canonical_path,
@@ -102,7 +97,7 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                     description=action_blueprint.description or f"{action_blueprint.action_name} {module_id} {node_blueprint.scope}",
                     source=node_blueprint.source,
                     display_name=descriptor_name,
-                    aliases=_aliases(module_id, action_blueprint, node_blueprint, target),
+                    aliases=(descriptor_name,),
                     target_kind=node.target_kind,
                     target_id=target.target_id,
                     target_label=target.target_label,
@@ -204,47 +199,34 @@ def _underscore_canonical_path(
     return f"{namespace}_{canonical_module_id}_{family}_{action_blueprint.action_name}"
 
 
-def _descriptor_name(
-    *,
-    canonical_path: str,
-    module_id: str,
-    action_blueprint: CapabilityActionBlueprint,
-    node_blueprint: CapabilityNodeBlueprint,
-    target: HydrationTarget,
-) -> str:
+def _bound_alias(action_blueprint: CapabilityActionBlueprint, target: HydrationTarget) -> str:
+    aliases = tuple(str(value or "").strip() for value in action_blueprint.aliases)
+    if len(aliases) != 1 or not aliases[0]:
+        raise ValueError(
+            f"capability {action_blueprint.handler_name!r} must declare exactly one non-empty alias"
+        )
+    base_name = aliases[0]
+    _validate_alias(base_name, capability=action_blueprint.handler_name)
     if target.target_id == SINGLETON_TARGET:
-        return llm_tool_name(canonical_path)
-    scope = str(node_blueprint.scope or "").strip()
-    if scope and scope not in {"module", module_id}:
-        base_name = f"{module_id}_{scope}_{action_blueprint.action_name}"
-    else:
-        base_name = llm_tool_name(canonical_path)
+        return base_name
     target_alias = re.sub(r"[^A-Za-z0-9_-]+", "_", target.target_id).strip("_")
     if not target_alias:
         raise ValueError(f"target id cannot produce a tool alias: {target.target_id!r}")
-    return f"{base_name}__{target_alias}"
+    bound_alias = f"{base_name}__{target_alias}"
+    _validate_alias(bound_alias, capability=action_blueprint.handler_name)
+    return bound_alias
 
 
-def _aliases(
-    module_id: str,
-    action_blueprint: CapabilityActionBlueprint,
-    node_blueprint: CapabilityNodeBlueprint,
-    target: HydrationTarget,
-) -> tuple[str, ...]:
-    aliases = list(action_blueprint.aliases)
-    if action_blueprint.namespace == "introspection" and node_blueprint.scope == "module":
-        aliases.append(f"{module_id}_introspection_{action_blueprint.action_name}")
-    if action_blueprint.namespace == "operation":
-        family = action_blueprint.family or "operation"
-        aliases.append(f"{module_id}_{family}_{action_blueprint.action_name}")
-    if target.target_id != SINGLETON_TARGET:
-        aliases.extend(
-            [
-                f"{action_blueprint.action_name} {target.target_label}",
-                f"{module_id} {target.target_label} {action_blueprint.action_name}",
-            ]
+def _validate_alias(alias: str, *, capability: str) -> None:
+    if _TOOL_ALIAS_RE.fullmatch(alias) is None:
+        raise ValueError(
+            f"capability {capability!r} declares invalid alias {alias!r}; "
+            "expected 1-64 characters from [A-Za-z0-9_-]"
         )
-    return tuple(dict.fromkeys(alias for alias in aliases if alias))
+    if alias.startswith(("op_", "intro_")):
+        raise ValueError(
+            f"capability {capability!r} alias {alias!r} uses the reserved canonical-path namespace"
+        )
 
 
 def _abbreviate_canonical_namespace(value: str) -> str:

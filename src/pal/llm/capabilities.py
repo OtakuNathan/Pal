@@ -108,6 +108,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="list",
         description="List enabled llm models ordered by priority. Use model_id with llm show.",
+        aliases=("llm_list",),
     )
     def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -134,6 +135,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="active",
         description="Show the current active llm model metadata",
+        aliases=("llm_active",),
     )
     def active(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -151,6 +153,7 @@ class LLMIntrospectionProvider:
         action_name="show",
         description="Show public metadata for one enabled llm model by model_id",
         InputModel=LlmCapabilitiesLLMIntrospectionProviderShowInput,
+        aliases=("llm_show",),
     )
     def show_model(self, call: IntrospectionCall) -> IntrospectionResult:
         model_id = str(call.args.get("model_id") or "").strip()
@@ -181,6 +184,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="think_level",
         description="Show the current persisted and effective llm think level",
+        aliases=("llm_think_level",),
     )
     def think_level(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -203,6 +207,7 @@ class LLMIntrospectionProvider:
         action_name="set_active_endpoint",
         description="Switch the active llm endpoint used for future requests",
         InputModel=LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
+        aliases=("llm_set_active_endpoint",),
     )
     def set_active_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
         endpoint_id = str(call.args.get("active_endpoint_id") or "").strip()

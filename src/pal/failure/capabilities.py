@@ -27,7 +27,7 @@ class FailureIntrospectionProvider:
     runtime: FailureRuntime
     module_id: str = "failure"
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show failure runtime summary")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show failure runtime summary", aliases=("failure_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         summary = self.runtime.show_summary()
@@ -43,6 +43,7 @@ class FailureIntrospectionProvider:
         scope="module",
         action_name="recent_reports",
         description="List recent structured failure reports",
+        aliases=("failure_recent_reports",),
     )
     def recent_reports(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call

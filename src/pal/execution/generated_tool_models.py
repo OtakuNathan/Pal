@@ -459,7 +459,7 @@ ExecutionGitCapabilitiesGitCapabilityMixinGitOutput = _strict_model(
 ExecutionShellExecShellExecCapabilityMixinShellInput = _strict_model(
     'ExecutionShellExecShellExecCapabilityMixinShellInput',
     {
-        'cmd': (str, Field(..., description='Shell command to execute. Use only for command execution, tests, builds, scripts, process probes, and package commands. Use bounded `tree -a -L 3 --filelimit 200 --noreport` listings (or `find -maxdepth 3 -print | head -n 500` when tree is unavailable). If visible, prefer op_search for text search, op_file_read for file reads, op_file_edit for edits, op_file_write for writes, op_path_delete for deletion, and op_git for git status/diff/log/show. Avoid cat/head/tail/grep/rg/sed/awk/tee/echo/printf redirection/rm/unlink/rmdir/git rm/find -delete for repo file operations when the matching capability is visible. For Pal runtime/module/minion/capability state or actions, use built-in Pal tools before shell. In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing; use the dedicated checkpoint commit capability instead.')),
+        'cmd': (str, Field(..., description='Shell command to execute. Use only for command execution, tests, builds, scripts, process probes, and package commands. Use bounded `tree -a -L 3 --filelimit 200 --noreport` listings (or `find -maxdepth 3 -print | head -n 500` when tree is unavailable). If visible, prefer search for text search, read_file for file reads, edit_file for edits, write_file for writes, delete_path for deletion, and git for git status/diff/log/show. Avoid cat/head/tail/grep/rg/sed/awk/tee/echo/printf redirection/rm/unlink/rmdir/git rm/find -delete for repo file operations when the matching capability is visible. For Pal runtime/module/minion/capability state or actions, use built-in Pal tools before shell. In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing; use the dedicated checkpoint commit capability instead.')),
         'cwd': (str, Field(None, description='Optional working directory.')),
         'timeout_ms': (int, Field(None, description='Optional timeout in milliseconds.', ge=1)),
     },
@@ -932,7 +932,7 @@ MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput = _strict_model(
         'approved_evidence': (list[Any], Field(None, description='Already-approved evidence entries used when research_mode=none; source_kind must be approved, user_supplied, or input_artifact.')),
         'references': (list[Any], Field(None)),
         'research_mode': (Literal['none', 'local_only', 'external_allowed'], Field('local_only')),
-        'artifact': (str, Field(None, description='Natural-language name previously given to op_minion_submit_artifact.')),
+        'artifact': (str, Field(None, description='Natural-language name previously given to minion_submit_artifact.')),
     },
 )
 
@@ -1997,7 +1997,7 @@ MinionWorkspaceFileToolsOpPathDeleteInput = _strict_model(
     'MinionWorkspaceFileToolsOpPathDeleteInput',
     {
         'path': (str, Field(..., description='Repo-relative path to delete.')),
-        'expected_sha256': (str, Field(None, description='Optional current SHA-256 digest for regular files. If supplied, a prior op_file_read snapshot is not required.')),
+        'expected_sha256': (str, Field(None, description='Optional current SHA-256 digest for regular files. If supplied, a prior read_file snapshot is not required.')),
         'recursive': (bool, Field(False, description='Required for directory deletion. Regular file deletion does not require this.')),
     },
 )

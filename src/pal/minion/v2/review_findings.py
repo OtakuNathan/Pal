@@ -67,7 +67,7 @@ ADD_FINDING_EXAMPLES = (
 )
 
 ADD_FINDING_TOOL_SPEC: dict[str, Any] = {
-    "name": "op_add_finding",
+    "alias": "add_finding",
     "alias": "add_finding",
     "description": (
         "Record or replace one actionable review finding in the current fenced Draft. "

@@ -6,9 +6,6 @@ from typing import Any
 
 from pal.shared import (
     SINGLETON_TARGET,
-    llm_tool_name,
-    replace_internal_tool_names,
-    replace_internal_tool_names_in_value,
 )
 
 _CONFIG_PATH = Path(__file__).parent / "tool_surface.toml"

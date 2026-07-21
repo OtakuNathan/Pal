@@ -773,7 +773,7 @@ def _plugin_disabled_result(plugin_id: str) -> dict[str, Any]:
         "plugin_id": plugin_id,
         "reason": "plugin_disabled",
         "summary": f"plugin is disabled: {plugin_id}",
-        "next_action": "op_plugin_mgmt_enable",
+        "next_action": "plugin_enable",
         "recoverable": True,
-        "hint": f"Call op_plugin_mgmt_enable with plugin_id={plugin_id} to enable and attach it.",
+        "hint": f"Call plugin_enable with plugin_id={plugin_id} to enable and attach it.",
     }

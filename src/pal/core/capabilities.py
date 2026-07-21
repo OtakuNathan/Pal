@@ -45,6 +45,7 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="observe",
         description="Observe module-level state for core",
+        aliases=("core_observe",),
     )
     def observe(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -62,6 +63,7 @@ class CoreIntrospectionProvider:
         action_name="configure",
         description="Configure module-level state for core",
         InputModel=CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
+        aliases=("core_configure",),
     )
     def configure(self, call: IntrospectionCall) -> IntrospectionResult:
         mode = call.args.get("mode")

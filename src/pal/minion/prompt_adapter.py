@@ -15,7 +15,6 @@ from pal.shared import (
     ResponseHandle,
     SourceKind,
     MinionInvocationPack,
-    replace_internal_tool_names,
 )
 from pal.shared.payloads import extract_text_from_payload
 
@@ -43,7 +42,7 @@ class MinionPromptFragmentProvider(PromptFragmentProvider):
         fragments: list[PromptFragment] = []
 
         def add(section: str, title: str, content: str, priority: int) -> None:
-            text = replace_internal_tool_names(str(content or "").strip())
+            text = str(content or "").strip()
             if text:
                 fragments.append(PromptFragment(section=section, title=title, content=text, priority=priority))
 
@@ -147,7 +146,7 @@ def _render_bound_invocation(scaffold: dict[str, Any]) -> str:
 
 
 def _render_execution_rules(scaffold: dict[str, Any]) -> str:
-    allowed = [str(item) for item in list(scaffold.get("allowed_capabilities") or [])]
+    allowed = [str(item) for item in list(scaffold.get("visible_capabilities") or [])]
     return "\n".join(
         (
             "- Work only on the bound role invocation.",

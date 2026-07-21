@@ -183,7 +183,7 @@ class ChannelIntrospectionProvider:
         scope="module",
         action_name="list",
         description="List configured channel endpoints",
-        aliases=("introspection_module_channel_observe", "channel_introspection_observe"),
+        aliases=("channel_list",),
     )
     def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -211,7 +211,7 @@ class ChannelIntrospectionProvider:
         family="channel",
         action_name="send_attachment",
         description="Send a local file attachment back to the channel that started the current turn.",
-        aliases=("send_attachment",),
+        aliases=("send_channel_attachment",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput,
         OutputModel=ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentOutput,
         execution=INDIRECT_EXTERNAL_WRITE,
@@ -235,6 +235,7 @@ class ChannelIntrospectionProvider:
         action_name="enable",
         description="Enable a channel endpoint",
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderEnableInput,
+        aliases=("channel_enable",),
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=True)
@@ -246,6 +247,7 @@ class ChannelIntrospectionProvider:
         action_name="disable",
         description="Disable a channel endpoint",
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderDisableInput,
+        aliases=("channel_disable",),
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=False)
@@ -257,6 +259,7 @@ class ChannelIntrospectionProvider:
         action_name="attach",
         description="Attach a channel endpoint",
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderAttachInput,
+        aliases=("channel_attach",),
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._attach_endpoint_provider(str(call.args.get("target_id") or "").strip())
@@ -268,6 +271,7 @@ class ChannelIntrospectionProvider:
         action_name="detach",
         description="Detach a channel endpoint",
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderDetachInput,
+        aliases=("channel_detach",),
     )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_attached(call, attached=False)
@@ -278,7 +282,7 @@ class ChannelIntrospectionProvider:
         family="provider",
         action_name="rescan",
         description="Rescan channel providers and update the channel provider registry.",
-        aliases=("channel_provider_rescan", "refresh_channel_providers"),
+        aliases=("channel_provider_rescan",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderRescanInput,
     )
     def rescan_providers(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -301,7 +305,7 @@ class ChannelIntrospectionProvider:
             "Restart one channel endpoint runtime instance through its provider. "
             "Use channel provider rescan to discover newly available providers."
         ),
-        aliases=("channel_reload_endpoint", "reload_channel_provider"),
+        aliases=("channel_reload_provider",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput,
     )
     def reload_provider(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -312,7 +316,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="inspect",
         description="Inspect channel endpoint state",
-        aliases=("introspection_endpoint_channel_observe",),
+        aliases=("channel_endpoint_inspect",),
     )
     def inspect_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
@@ -329,6 +333,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="auth_state",
         description="Inspect endpoint authorization state",
+        aliases=("channel_endpoint_auth_state",),
     )
     def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
@@ -347,6 +352,7 @@ class ChannelIntrospectionProvider:
         action_name="set_auth_material",
         description="Apply endpoint authorization material without exposing secrets",
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderSetAuthMaterialInput,
+        aliases=("channel_endpoint_set_auth_material",),
     )
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
@@ -370,6 +376,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="backlog",
         description="Inspect endpoint backlog state",
+        aliases=("channel_endpoint_backlog",),
     )
     def backlog(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
@@ -386,6 +393,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="health",
         description="Inspect endpoint network and delivery health",
+        aliases=("channel_endpoint_health",),
     )
     def health(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)

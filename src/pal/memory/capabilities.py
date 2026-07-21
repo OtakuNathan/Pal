@@ -158,7 +158,7 @@ class MemoryIntrospectionProvider:
         suffix = f"; {skipped} skipped" if skipped else ""
         return f"Memory candidates accepted ({len(memory_candidates)} reviewed; {committed} committed{suffix})."
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show memory runtime state")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show memory runtime state", aliases=("memory_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_memory(self)
@@ -174,6 +174,7 @@ class MemoryIntrospectionProvider:
         scope="module",
         action_name="list_providers",
         description="List registered L3 providers",
+        aliases=("memory_list_providers",),
     )
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -199,6 +200,7 @@ class MemoryIntrospectionProvider:
         scope="module",
         action_name="active_provider",
         description="Show the current active memory provider used by recall_memory, remember_memory, update_memory, and forget_memory",
+        aliases=("memory_active_provider",),
     )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -242,6 +244,7 @@ class MemoryIntrospectionProvider:
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderRecallInput,
         execution=DIRECT_EXTERNAL_READ,
+        aliases=("recall_memory",),
     )
     def recall(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self.service.l3_selector.resolve()
@@ -285,6 +288,7 @@ class MemoryIntrospectionProvider:
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderWriteInput,
         execution=DIRECT_EXTERNAL_WRITE,
+        aliases=("remember_memory",),
     )
     def write(self, call: IntrospectionCall) -> IntrospectionResult:
         kind = str(call.args.get("kind") or "").strip()
@@ -358,6 +362,7 @@ class MemoryIntrospectionProvider:
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
         execution=DIRECT_EXTERNAL_WRITE,
+        aliases=("update_memory",),
     )
     def update(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
@@ -412,6 +417,7 @@ class MemoryIntrospectionProvider:
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
         execution=DIRECT_EXTERNAL_WRITE,
+        aliases=("forget_memory",),
     )
     def delete(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
@@ -432,6 +438,7 @@ class MemoryIntrospectionProvider:
         action_name="set_active_provider",
         description="Switch the active L3 provider for memory recall",
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,
+        aliases=("memory_set_active_provider",),
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("active_provider_id") or "").strip()

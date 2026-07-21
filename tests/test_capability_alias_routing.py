@@ -4,6 +4,7 @@ import unittest
 
 from pal.core import PalCore as _PalCoreBootstrap
 from pal.execution.contracts import CapabilityCall, CapabilityResult
+from pal.execution.capability_compiler import compile_provider_subtree
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import (
     CompleteResult,
@@ -19,7 +20,13 @@ from pal.execution.tool_facade import (
     ToolGuidance,
 )
 from pal.llm.contracts import CanonicalToolCall
-from pal.shared import RuntimeStatus, SINGLETON_TARGET
+from pal.shared import (
+    OPERATION_NAMESPACE,
+    RuntimeStatus,
+    SINGLETON_TARGET,
+    capability_action,
+    capability_node,
+)
 
 
 class EchoInput(StrictToolModel):
@@ -73,6 +80,50 @@ def echo_handler(value: EchoInput) -> CapabilityResult:
 
 
 class CapabilityAliasRoutingTests(unittest.TestCase):
+    def test_provider_capability_requires_exactly_one_declared_alias(self) -> None:
+        @capability_node(
+            namespace=OPERATION_NAMESPACE,
+            scope="test",
+            kind="module",
+            source="test",
+            target_kind="module",
+        )
+        class MissingAliasProvider:
+            @capability_action(
+                namespace=OPERATION_NAMESPACE,
+                scope="test",
+                action_name="ping",
+            )
+            def ping(self, call: CapabilityCall) -> CapabilityResult:
+                return echo_handler(EchoInput(value=str(call.args.get("value") or "")))
+
+        @capability_node(
+            namespace=OPERATION_NAMESPACE,
+            scope="test",
+            kind="module",
+            source="test",
+            target_kind="module",
+        )
+        class MultipleAliasProvider:
+            @capability_action(
+                namespace=OPERATION_NAMESPACE,
+                scope="test",
+                action_name="ping",
+                aliases=("ping", "legacy_ping"),
+            )
+            def ping(self, call: CapabilityCall) -> CapabilityResult:
+                return echo_handler(EchoInput(value=str(call.args.get("value") or "")))
+
+        for provider in (MissingAliasProvider(), MultipleAliasProvider()):
+            with self.subTest(provider=provider.__class__.__name__):
+                with self.assertRaisesRegex(ValueError, "exactly one non-empty alias"):
+                    compile_provider_subtree(
+                        provider,
+                        module_id="test",
+                        lifecycle_scope="runtime",
+                        detachable=False,
+                    )
+
     def test_only_exact_alias_is_public_and_canonical_stays_manager_internal(self) -> None:
         runtime = ExecutionRuntime()
         runtime.register_tool(echo_tool())
@@ -95,6 +146,20 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
             self.assertEqual(canonical.error_code, "unknown_tool")
             self.assertEqual(manager.status, RuntimeStatus.OK)
             self.assertEqual(manager.structured, {"echo": "internal"})
+        finally:
+            runtime.shutdown()
+
+    def test_generation_projects_only_known_aliases_and_never_guesses_unknown_names(self) -> None:
+        runtime = ExecutionRuntime()
+        runtime.register_tool(echo_tool())
+        try:
+            descriptor = runtime.registry_generation.indirect_aliases["echo"].binding.descriptor
+            self.assertEqual(descriptor.aliases, ("echo",))
+            self.assertEqual(runtime.project_llm_text("Call op_test_echo now."), "Call echo now.")
+            self.assertEqual(
+                runtime.project_llm_text("Call op_missing_legacy now."),
+                "Call [unavailable tool reference] now.",
+            )
         finally:
             runtime.shutdown()
 

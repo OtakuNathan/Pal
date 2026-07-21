@@ -61,12 +61,12 @@ Pal sidecars already prepare PATH for common Node/nvm installs. Do not shell-wra
 
 ## Workflow
 
-1. Inspect existing templates with `op_lsp_status`, source, or file reads.
+1. Inspect existing templates with `lsp_status`, source, or file reads.
 2. Choose the canonical `language_id` the LSP template should advertise.
 3. Write the LSP runtime template to `<runtime_root>/plugins/lsp/servers/<server_id>.toml`.
 4. Validate the LSP template with `pal.lsp.config.load_lsp_server_file` or an isolated unit test.
-5. Run LSP rescan through `op_lsp_mgmt_rescan` when the running Pal runtime should see the new LSP template.
-6. Verify with `op_lsp_status`, `op_lsp_doctor`, and a representative diagnostics/hover request when a sample file exists.
+5. Run LSP rescan through `lsp_rescan` when the running Pal runtime should see the new LSP template.
+6. Verify with `lsp_status`, `lsp_doctor`, and a representative diagnostics/hover request when a sample file exists.
 
 ## Safety
 
@@ -81,8 +81,8 @@ Before calling the language support done:
 
 1. Runtime template file exists at `<runtime_root>/plugins/lsp/servers/<server_id>.toml`.
 2. `load_lsp_server_file` parses it and preserves command, args, extensions, language_ids, markers, and timeouts.
-3. `op_lsp_mgmt_rescan` succeeds when the user wants the running runtime refreshed.
-4. `op_lsp_doctor` reports ok, missing_binary, disabled, or another structured status instead of failing unstructured.
+3. `lsp_rescan` succeeds when the user wants the running runtime refreshed.
+4. `lsp_doctor` reports ok, missing_binary, disabled, or another structured status instead of failing unstructured.
 5. The handoff lists the template path, server id, language id, any code changes, tests run, and any dependency still missing.
 """
 
@@ -103,14 +103,14 @@ def lsp_declared_skills(*, module_id: str = "lsp") -> tuple[SkillDescriptor, ...
                 "lsp server",
                 "plugins/lsp/servers",
                 "language_ids",
-                "op_lsp_mgmt_rescan",
+                "lsp_rescan",
                 "language server",
             ),
             capability_refs=(
-                "op_lsp_mgmt_rescan",
-                "op_lsp_status",
-                "op_lsp_doctor",
-                "op_lsp_diagnostics",
+                "lsp_rescan",
+                "lsp_status",
+                "lsp_doctor",
+                "lsp_diagnostics",
             ),
             applicability_star=SkillApplicabilitySTAR(
                 situation="Pal needs to add or repair LSP support for a programming language.",

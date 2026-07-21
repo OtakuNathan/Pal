@@ -241,7 +241,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return None
 
     def has_registered_capability(self, name: str) -> bool:
-        canonical_path = self.resolve_llm_tool_name(name)
+        canonical_path = self.resolve_capability_address(name)
         return bool(self.compiled_capability_index.by_canonical.get(canonical_path))
 
     def _first_descriptor_match(self, name: str) -> CapabilityDescriptor | None:
@@ -249,7 +249,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         direct = self.compiled_capability_index.records.get(raw)
         if direct is not None:
             return direct
-        canonical_path = self.resolve_llm_tool_name(raw)
+        canonical_path = self.resolve_capability_address(raw)
         for record_id in self.compiled_capability_index.by_canonical.get(canonical_path, []):
             descriptor = self.compiled_capability_index.records.get(record_id)
             if descriptor is not None:
@@ -1324,7 +1324,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         direct = self.compiled_capability_index.records.get(raw)
         if direct is not None:
             return direct
-        canonical_path = self.resolve_llm_tool_name(raw)
+        canonical_path = self.resolve_capability_address(raw)
         if target_id != SINGLETON_TARGET:
             targeted_name = f"{raw}__{target_id}"
             targeted = self.compiled_capability_index.records.get(targeted_name)
@@ -1371,8 +1371,16 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return _target_id_required_result(name=name, available_target_ids=instance_targets)
         return None
 
-    def resolve_llm_tool_name(self, name: object) -> str:
+    def resolve_capability_address(self, name: object) -> str:
         return self.compiled_capability_index.canonical_path_for(str(name or "").strip())
+
+    def project_llm_text(self, value: object) -> str:
+        generation = self.registry_generation
+        return generation.project_llm_text(value)
+
+    def project_llm_value(self, value: Any) -> Any:
+        generation = self.registry_generation
+        return generation.project_llm_value(value)
 
     def execute(self, call: CapabilityCall) -> CapabilityResult:
         try:

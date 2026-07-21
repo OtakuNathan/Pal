@@ -92,7 +92,7 @@ class McpManagerPluginProvider:
     def __post_init__(self) -> None:
         self.client = McpManagerClient(runtime_root=self.runtime_root)
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show MCP manager status")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show MCP manager status", aliases=("mcp_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self._status_payload()
@@ -103,7 +103,7 @@ class McpManagerPluginProvider:
             llm_text=render_titled_structured_for_llm("MCP manager status", payload),
         )
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="mcp_server", action_name="list", description="List configured MCP servers")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="mcp_server", action_name="list", description="List configured MCP servers", aliases=("mcp_server_list",))
     def list_servers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         result = self._request_or_error("list_servers")
@@ -115,12 +115,13 @@ class McpManagerPluginProvider:
         action_name="read",
         description="Read one MCP server metadata and discovery snapshot",
         InputModel=McpPluginMcpManagerPluginProviderReadInput,
+        aliases=("mcp_server_read",),
     )
     def read_server(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self._request_or_error("read_server", {"server_id": str(call.args.get("server_id") or "")})
         return _introspection_from_rpc("MCP server", result)
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="attach", description="Attach MCP manager")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="attach", description="Attach MCP manager", aliases=("mcp_attach",))
     def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         try:
@@ -144,7 +145,7 @@ class McpManagerPluginProvider:
             llm_text=render_titled_structured_for_llm(text, payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="detach", description="Detach MCP manager")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="detach", description="Detach MCP manager", aliases=("mcp_detach",))
     def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         self._stop_manager()
@@ -158,7 +159,7 @@ class McpManagerPluginProvider:
             llm_text=render_titled_structured_for_llm("MCP manager detached", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan MCP server configs and refresh projection")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan MCP server configs and refresh projection", aliases=("mcp_rescan",))
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         try:
@@ -177,6 +178,7 @@ class McpManagerPluginProvider:
         action_name="attach",
         description="Attach one configured MCP server inside the manager",
         InputModel=McpPluginMcpManagerPluginProviderAttachInput,
+        aliases=("mcp_server_attach",),
     )
     def attach_server(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -195,6 +197,7 @@ class McpManagerPluginProvider:
         action_name="detach",
         description="Detach one MCP server inside the manager",
         InputModel=McpPluginMcpManagerPluginProviderDetachInput,
+        aliases=("mcp_server_detach",),
     )
     def detach_server(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -212,6 +215,7 @@ class McpManagerPluginProvider:
         action_name="image_prepare",
         description="Prepare an image artifact/path/url for external MCP tool arguments as URL, local path, or base64 data",
         InputModel=McpPluginMcpManagerPluginProviderImagePrepareInput,
+        aliases=("mcp_image_prepare",),
     )
     def image_prepare(self, call: CapabilityCall) -> CapabilityResult:
         try:

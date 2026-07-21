@@ -44,7 +44,7 @@ class PluginsIntrospectionProvider:
     host: PluginHost
     module_id: str = "plugins"
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show plugin host summary")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show plugin host summary", aliases=("plugins_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         summary = self.host.show_summary()
@@ -55,7 +55,7 @@ class PluginsIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Plugin host summary", summary),
         )
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list", description="List known first-party and third-party plugins")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list", description="List known first-party and third-party plugins", aliases=("plugins_list",))
     def list_plugins(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         items = self.host.list_plugins()
@@ -75,7 +75,7 @@ class PluginsIntrospectionProvider:
             "Attach a plugin to the current runtime. First-party plugins that are disabled by default can be attached "
             "temporarily; if the result is forbidden with reason=plugin_disabled, call plugin_enable for that plugin_id."
         ),
-        aliases=("attach plugin", "load enabled plugin"),
+        aliases=("plugin_attach",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -94,6 +94,7 @@ class PluginsIntrospectionProvider:
         action_name="detach",
         description="Detach a plugin from the current runtime",
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDetachInput,
+        aliases=("plugin_detach",),
     )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.detach(str(call.args.get("plugin_id") or ""))
@@ -110,7 +111,7 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="enable",
         description="Enable and attach a plugin that is currently disabled, including disabled first-party plugins such as mcp.",
-        aliases=("enable plugin", "turn on plugin", "enable mcp plugin", "turn on mcp"),
+        aliases=("plugin_enable",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderEnableInput,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -129,6 +130,7 @@ class PluginsIntrospectionProvider:
         action_name="disable",
         description="Disable a plugin",
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDisableInput,
+        aliases=("plugin_disable",),
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.disable(str(call.args.get("plugin_id") or ""))
@@ -139,7 +141,7 @@ class PluginsIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Plugin disable result", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan plugin directories")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan plugin directories", aliases=("plugin_rescan",))
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         result = self.host.rescan()
@@ -156,6 +158,7 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="rescan_and_attach_new_first_party",
         description="Rescan plugin directories and attach newly discovered enabled first-party plugins",
+        aliases=("plugin_rescan_and_attach_new_first_party",),
     )
     def rescan_and_attach_new_first_party(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call

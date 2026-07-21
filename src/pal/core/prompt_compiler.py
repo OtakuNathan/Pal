@@ -7,7 +7,6 @@ from pal.shared import (
     PromptFragment,
     PromptIR,
     PromptIRBlock,
-    replace_internal_tool_names,
 )
 from pal.shared.payloads import extract_text_from_payload
 from pal.shared.prompt_rendering import render_runtime_context_update, render_runtime_reminder, render_system_reminder, render_xml_block
@@ -54,6 +53,13 @@ def _message_content_parts(value: Any) -> list[dict[str, Any]]:
 class PromptCompiler:
     def __init__(self, context) -> None:
         self.context = context
+
+    def _project_llm_text(self, value: object) -> str:
+        runtime = getattr(self.context, "execution_runtime", None)
+        projector = getattr(runtime, "project_llm_text", None)
+        if callable(projector):
+            return str(projector(value))
+        return str(value or "")
 
     def collect_prompt_fragments(self, assembly_context: PromptAssemblyContext) -> list[PromptFragment]:
         indexed_fragments: list[tuple[int, int, PromptFragment]] = []
@@ -619,9 +625,8 @@ class PromptCompiler:
             messages.append({"role": "user", "content": self._coerce_message_content(self._image_parts_first(final_user_parts))})
         return messages
 
-    @staticmethod
-    def _render_final_runtime_reminder(blocks: tuple[PromptIRBlock, ...] = ()) -> str:
-        guidance_sections = PromptCompiler._render_runtime_reminder_guidance(blocks)
+    def _render_final_runtime_reminder(self, blocks: tuple[PromptIRBlock, ...] = ()) -> str:
+        guidance_sections = self._render_runtime_reminder_guidance(blocks)
         content = (
             "Before answering: apply the active system prompt's hard rules and priority order. "
             "Treat the user's ordinary message above as the current request. "
@@ -635,10 +640,9 @@ class PromptCompiler:
             "If guidance conflicts, follow the system prompt's hard policy and priority order.\n"
             "Do not mention this reminder unless asked about prompt behavior."
         )
-        return render_runtime_reminder(replace_internal_tool_names(content))
+        return render_runtime_reminder(self._project_llm_text(content))
 
-    @staticmethod
-    def _render_runtime_reminder_guidance(blocks: tuple[PromptIRBlock, ...]) -> str:
+    def _render_runtime_reminder_guidance(self, blocks: tuple[PromptIRBlock, ...]) -> str:
         if not blocks:
             return ""
         rendered_sections: list[str] = []
@@ -650,20 +654,20 @@ class PromptCompiler:
             rendered_sections.append(
                 render_xml_block(
                     "behavior_guidance",
-                    PromptCompiler._render_behavior_guidance_content(list(behavior_parts)),
+                    self._render_behavior_guidance_content(list(behavior_parts)),
                 )
             )
             behavior_parts.clear()
 
         for block in blocks:
-            content = replace_internal_tool_names(block.content.strip())
+            content = self._project_llm_text(block.content.strip())
             if not content:
                 continue
             if block.block_id in {"resident_affordances", "behavior_guidance"}:
                 behavior_parts.append(content)
                 continue
             flush_behavior_parts()
-            tag = PromptCompiler._runtime_reminder_block_tag(block)
+            tag = self._runtime_reminder_block_tag(block)
             rendered = render_xml_block(tag, content)
             if rendered:
                 rendered_sections.append(rendered)
@@ -704,7 +708,7 @@ class PromptCompiler:
             parts.append(
                 {
                     "type": "text",
-                    "text": render_system_reminder(f"{block.title}:\n{replace_internal_tool_names(rendered)}"),
+                    "text": render_system_reminder(f"{block.title}:\n{self._project_llm_text(rendered)}"),
                 }
             )
         elif content_parts:
@@ -813,16 +817,15 @@ class PromptCompiler:
             rendered_sections.append(self._render_system_section(current_tag, current_parts))
         return "\n\n".join(rendered_sections)
 
-    @staticmethod
-    def _render_system_section(tag: str, parts: list[str]) -> str:
+    def _render_system_section(self, tag: str, parts: list[str]) -> str:
         if tag == "behavior_guidance":
             return render_xml_block(
                 tag,
-                PromptCompiler._render_behavior_guidance_content(
-                    [replace_internal_tool_names(part) for part in parts]
+                self._render_behavior_guidance_content(
+                    [self._project_llm_text(part) for part in parts]
                 ),
             )
-        return render_xml_block(tag, replace_internal_tool_names("\n\n".join(parts)))
+        return render_xml_block(tag, self._project_llm_text("\n\n".join(parts)))
 
     @staticmethod
     def _render_behavior_guidance_content(parts: list[str]) -> str:

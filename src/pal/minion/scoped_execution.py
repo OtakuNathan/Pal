@@ -88,9 +88,6 @@ from pal.shared import (
     MountedSubtreeHandle,
     RuntimeStatus,
     default_tool_result_text,
-    llm_tool_name,
-    replace_internal_tool_names,
-    replace_internal_tool_names_in_value,
 )
 
 
@@ -143,17 +140,17 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
 
 _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_search": {
-        "name": "op_search",
+        "alias": "search",
         "description": "Search text in the project or a declared read-only truth-source reference.",
         "InputModel": MinionScopedExecutionOpSearchInput,
     },
     "op_minion_artifact_write": {
-        "name": "op_minion_artifact_write",
+        "alias": "artifact_write",
         "description": "Write the profile-declared structured output artifact. Architecture roles must use their bound Contract Builder instead.",
         "InputModel": MinionScopedExecutionOpMinionArtifactWriteInput,
     },
     "op_minion_artifact_edit": {
-        "name": "op_minion_artifact_edit",
+        "alias": "artifact_edit",
         "description": "Edit an existing profile output artifact by exact text replacement.",
         "InputModel": MinionScopedExecutionOpMinionArtifactEditInput,
     },
@@ -216,12 +213,9 @@ def _immutable_workflow_tool(*, name: str, spec: dict[str, Any], handler: Any) -
     input_model = spec.get("InputModel")
     if not isinstance(input_model, type) or not issubclass(input_model, StrictToolModel):
         raise TypeError(f"workflow tool {name!r} requires a strict Pydantic InputModel")
-    configured_alias = str(spec.get("alias") or "").strip()
-    alias = configured_alias or llm_tool_name(name)
-    if alias.startswith("minion_"):
-        alias = alias.removeprefix("minion_")
-    if alias == name:
-        alias = f"workflow_{re.sub(r'[^A-Za-z0-9_-]+', '_', name).strip('_')}"
+    alias = str(spec.get("alias") or "").strip()
+    if not alias:
+        raise ValueError(f"workflow tool {name!r} must declare exactly one non-empty alias")
     purpose = str(spec.get("description") or name).strip()
     effect_kind = _workflow_effect_kind(name)
     mutating = effect_kind in {EffectKind.LOCAL_WRITE, EffectKind.EXTERNAL_WRITE, EffectKind.CONTROL}
@@ -392,12 +386,12 @@ class _ExecutionOverlay:
             raise TypeError("scoped execution accepts only immutable Tool registrations")
         self.runtime.register_tool(tool)
 
-    def resolve_llm_tool_name(self, name: object) -> str:
+    def resolve_capability_address(self, name: object) -> str:
         raw = str(name or "")
-        local = self.runtime.resolve_llm_tool_name(raw)
+        local = self.runtime.resolve_capability_address(raw)
         if local != raw or self.runtime.has_registered_capability(local):
             return local
-        resolver = getattr(self.delegate, "resolve_llm_tool_name", None)
+        resolver = getattr(self.delegate, "resolve_capability_address", None)
         return str(resolver(raw) if callable(resolver) else raw)
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
@@ -408,7 +402,7 @@ class _ExecutionOverlay:
         return dict(value) if isinstance(value, dict) else None
 
     async def execute_tool_async(self, call: CanonicalToolCall, **kwargs: Any) -> CanonicalToolResult:
-        canonical = self.runtime.resolve_llm_tool_name(call.name)
+        canonical = self.runtime.resolve_capability_address(call.name)
         if self.runtime.compiled_capability_index.by_canonical.get(canonical):
             facade_call = _manager_call_to_facade(
                 self.runtime,
@@ -491,6 +485,12 @@ class MinionScopedExecutionRuntime:
     def registry_generation(self):
         return self.base_runtime.runtime.registry_generation
 
+    def project_llm_text(self, value: object) -> str:
+        return self.registry_generation.project_llm_text(value)
+
+    def project_llm_value(self, value: Any) -> Any:
+        return self.registry_generation.project_llm_value(value)
+
     def build_llm_tool_contracts(self) -> list[dict[str, Any]]:
         generation = self.registry_generation
         return [dict(generation.provider_specs[alias]) for alias in sorted(generation.provider_specs)]
@@ -557,8 +557,8 @@ class MinionScopedExecutionRuntime:
     def read_tool_result_page(self, **kwargs: Any) -> Any:
         return self.base_runtime.read_tool_result_page(**kwargs)
 
-    def resolve_llm_tool_name(self, name: object) -> str:
-        return self.base_runtime.resolve_llm_tool_name(name)
+    def resolve_capability_address(self, name: object) -> str:
+        return self.base_runtime.resolve_capability_address(name)
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
         allowed = set(self.allowed_capabilities)
@@ -576,7 +576,7 @@ class MinionScopedExecutionRuntime:
         return result
 
     def get_capability_spec(self, name: str) -> dict[str, Any] | None:
-        canonical = self.resolve_llm_tool_name(name)
+        canonical = self.resolve_capability_address(name)
         if canonical not in set(self.allowed_capabilities) or is_minion_capability_denied(canonical):
             return None
         spec = self.base_runtime.get_capability_spec(canonical)
@@ -608,7 +608,7 @@ class MinionScopedExecutionRuntime:
         admission = admit_minion_tool_call(
             call,
             self.allowed_capabilities,
-            resolve_name=self.resolve_llm_tool_name,
+            resolve_name=self.resolve_capability_address,
             require_effective_target=False,
         )
         if not admission.ok:
@@ -738,14 +738,7 @@ def _scrub_spec(
     value["canonical_path"] = canonical
     value["name"] = str(value.get("name") or canonical).strip()
     override = str(dict(description_overrides or {}).get(canonical) or "").strip()
-    value["description"] = replace_internal_tool_names(
-        _replace_worker_internal_tool_names(override or value.get("description") or canonical)
-    )
-    for key in ("input_schema", "output_schema"):
-        if key in value:
-            value[key] = replace_internal_tool_names_in_value(
-                _replace_worker_internal_tool_names_in_value(dict(value.get(key) or {}))
-            )
+    value["description"] = override or str(value.get("description") or "").strip()
     role = str(dict((workspace or {}).get("minion_v2") or {}).get("role") or "")
     if role == "verifier":
         schema = dict(value.get("input_schema") or {})
@@ -764,28 +757,6 @@ def _scrub_spec(
                     item for item in list(schema.get("required") or []) if item not in hidden
                 ]
             value["input_schema"] = schema
-    return value
-
-
-_WORKER_INTERNAL_TOOL_RE = re.compile(r"\bop_minion_([A-Za-z0-9_]+)\b")
-
-
-def _replace_worker_internal_tool_names(value: object) -> str:
-    return _WORKER_INTERNAL_TOOL_RE.sub(
-        lambda match: llm_tool_name(f"op_{match.group(1)}"),
-        str(value or ""),
-    )
-
-
-def _replace_worker_internal_tool_names_in_value(value: object) -> object:
-    if isinstance(value, str):
-        return _replace_worker_internal_tool_names(value)
-    if isinstance(value, dict):
-        return {key: _replace_worker_internal_tool_names_in_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_replace_worker_internal_tool_names_in_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_replace_worker_internal_tool_names_in_value(item) for item in value)
     return value
 
 

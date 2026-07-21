@@ -67,6 +67,7 @@ class BehaviorIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show behavior routing state",
+        aliases=("behavior_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -95,6 +96,7 @@ class BehaviorIntrospectionProvider:
         OutputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseOutput,
         execution=DIRECT_LOCAL_READ,
         metadata={"async_required": True},
+        aliases=("advise_behavior",),
     )
     async def advise(self, call: CapabilityCall) -> CapabilityResult:
         return await BehaviorAdviceTool(service=self.service).ainvoke(call.args)
@@ -109,6 +111,7 @@ class BehaviorIntrospectionProvider:
         OutputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitOutput,
         execution=DIRECT_UNSAFE_LOCAL_WRITE,
         metadata={"canonical_path": "op_behavior_save"},
+        aliases=("learn_behavior",),
     )
     def submit_affordance(self, call: CapabilityCall) -> CapabilityResult:
         return AffordanceSubmitTool(service=self.service).invoke(call.args)
@@ -122,6 +125,7 @@ class BehaviorIntrospectionProvider:
         InputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateInput,
         OutputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateOutput,
         execution=DIRECT_UNSAFE_LOCAL_WRITE,
+        aliases=("update_behavior",),
     )
     def update_affordance(self, call: CapabilityCall) -> CapabilityResult:
         return AffordanceUpdateTool(service=self.service).invoke(call.args)
@@ -135,6 +139,7 @@ class BehaviorIntrospectionProvider:
         InputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteInput,
         OutputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteOutput,
         execution=DIRECT_UNSAFE_LOCAL_WRITE,
+        aliases=("forget_behavior",),
     )
     def delete_affordance(self, call: CapabilityCall) -> CapabilityResult:
         return AffordanceDeleteTool(service=self.service).invoke(call.args)

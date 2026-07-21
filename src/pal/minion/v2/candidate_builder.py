@@ -104,42 +104,42 @@ _NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": F
 
 CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_developer_note": {
-        "name": "op_developer_note",
+        "alias": "developer_note",
         "description": "Record one durable local progress item. kind is micro_plan, completed, file_inspected, open_question, or known_failure.",
         "InputModel": MinionV2CandidateBuilderOpMinionDeveloperNoteInput,
     },
     "op_minion_developer_test": {
-        "name": "op_developer_test",
+        "alias": "developer_test",
         "description": "Run and durably record one focused developer test. Provide a shell command, not a nested test report.",
         "InputModel": MinionV2CandidateBuilderOpMinionDeveloperTestInput,
     },
     "op_minion_developer_compile_check": {
-        "name": "op_developer_compile_check",
+        "alias": "developer_compile_check",
         "description": "Run and durably record one compile or warning-clean check. The command is executed inside the bound module sandbox.",
         "InputModel": MinionV2CandidateBuilderOpMinionDeveloperCompileCheckInput,
     },
     "op_minion_developer_lsp_check": {
-        "name": "op_developer_lsp_check",
+        "alias": "developer_lsp_check",
         "description": "Run and durably record LSP diagnostics for one changed source file when a matching server is available.",
         "InputModel": MinionV2CandidateBuilderOpMinionDeveloperLspCheckInput,
     },
     "op_minion_developer_check_unavailable": {
-        "name": "op_developer_check_unavailable",
+        "alias": "developer_check_unavailable",
         "description": "Record why focused_tests, compile, warning_clean, or lsp cannot run in this environment. This records UNKNOWN, not PASS.",
         "InputModel": MinionV2CandidateBuilderOpMinionDeveloperCheckUnavailableInput,
     },
     "op_minion_candidate_submit": {
-        "name": "op_candidate_submit",
+        "alias": "candidate_submit",
         "description": "Submit the current module Candidate after all developer checks pass. Takes no arguments; Manager derives Git delta and journal fields.",
         "InputModel": MinionV2CandidateBuilderOpMinionCandidateSubmitInput,
     },
     "op_minion_candidate_report_architecture_defect": {
-        "name": "op_candidate_report_architecture_defect",
+        "alias": "candidate_report_architecture_defect",
         "description": "Terminally report that the frozen architecture contract cannot satisfy the task. Explain the semantic conflict and optionally cite a task source filename or code location.",
         "InputModel": MinionV2CandidateBuilderOpMinionCandidateReportArchitectureDefectInput,
     },
     "op_minion_candidate_request_module_split": {
-        "name": "op_candidate_request_module_split",
+        "alias": "candidate_request_module_split",
         "description": "Terminally request an architecture-owned module split when the bound module cannot fit one Candidate cycle.",
         "InputModel": MinionV2CandidateBuilderOpMinionCandidateRequestModuleSplitInput,
     },

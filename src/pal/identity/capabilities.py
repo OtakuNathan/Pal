@@ -44,6 +44,7 @@ class IdentityIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show identity state for read-only lookup",
+        aliases=("identity_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call

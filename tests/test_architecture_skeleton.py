@@ -386,7 +386,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(hasattr(shared, "IntrospectionResult"))
         self.assertTrue(hasattr(shared, "IntrospectionPort"))
         self.assertTrue(hasattr(shared, "LifecycleIntrospectionPort"))
-        self.assertTrue(hasattr(shared, "standard_descriptors"))
+        self.assertFalse(hasattr(shared, "standard_descriptors"))
         self.assertTrue(hasattr(shared, "PromptFragment"))
         self.assertTrue(hasattr(shared, "PromptAssemblyContext"))
         self.assertTrue(hasattr(shared, "PromptFragmentProvider"))
@@ -1776,8 +1776,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(descriptor.target_kind, "module")
         self.assertEqual(descriptor.target_id, SINGLETON_TARGET)
         self.assertEqual(descriptor.target_label, "channel")
-        self.assertIn("channel_introspection_list", descriptor.aliases)
-        self.assertIn("introspection_module_channel_observe", descriptor.aliases)
+        self.assertEqual(descriptor.aliases, ("channel_list",))
 
     def test_identity_is_always_on_and_query_only(self) -> None:
         runtime_root, database = self._create_database()

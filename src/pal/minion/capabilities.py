@@ -112,9 +112,9 @@ class MinionManagerProvider:
         if action.action_kind == "minion_v2_human_decision":
             decision = str(action.args.get("decision") or "").strip().lower()
             if decision == "edit" and not str(action.args.get("edit_instruction") or "").strip():
-                return "Reply with the exact architecture edit instruction, then submit it with op_minion_submit_human_decision."
+                return "Reply with the exact architecture edit instruction, then submit it with minion_submit_human_decision."
             if decision == "clarify" and not str(action.args.get("clarification_response") or "").strip():
-                return "Reply with the requested clarification, then submit it with op_minion_submit_human_decision."
+                return "Reply with the requested clarification, then submit it with minion_submit_human_decision."
             try:
                 result = await asyncio.to_thread(
                     MinionV2WorkflowService(self.runtime_root).submit_human_decision,

@@ -494,7 +494,7 @@ class McpPluginSidecarTests(unittest.TestCase):
 
         self.assertEqual(attached["status"], RuntimeStatus.FORBIDDEN)
         self.assertEqual(attached["reason"], "plugin_disabled")
-        self.assertEqual(attached["next_action"], "op_plugin_mgmt_enable")
+        self.assertEqual(attached["next_action"], "plugin_enable")
 
 
 if __name__ == "__main__":

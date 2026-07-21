@@ -19,7 +19,7 @@ from pal.minion.ipc import (
     minion_role_socket_path,
 )
 from pal.minion.workspace_tools import _normalized_reference_paths
-from pal.shared import RUN_SHELL_SCOPE_HINT, MinionInvocationPack, format_dedicated_tool_route_hints
+from pal.shared import MinionInvocationPack
 
 
 PAL_MINION_SANDBOX_SCRATCH_ROOT_ENV = "PAL_MINION_SANDBOX_SCRATCH_ROOT"
@@ -919,11 +919,19 @@ def _falsey(value: Any) -> bool:
 
 
 def _deny_wrapper_text(command: str) -> str:
-    capability_hint = f"Use Pal resident capabilities when available: {format_dedicated_tool_route_hints()}."
+    capability_hint = (
+        "Use Pal resident capabilities when available: search for repository text search; "
+        "read_file for reading repo text files; edit_file for precise repo text edits; "
+        "write_file for creating or overwriting complete repo text files; "
+        "delete_path for deleting repo paths; git for Git inspection."
+    )
+    shell_hint = (
+        "Keep run_shell for tests, builds, scripts, process probes, package commands, and process inspection."
+    )
     return (
         "#!/bin/sh\n"
         f"echo \"pal minion sandbox blocked command '{command}'. This command is outside the sandboxed minion authority.\" >&2\n"
         f"echo \"{capability_hint}\" >&2\n"
-        f"echo \"{RUN_SHELL_SCOPE_HINT}\" >&2\n"
+        f"echo \"{shell_hint}\" >&2\n"
         "exit 126\n"
     )

@@ -72,6 +72,7 @@ class ArtifactIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show artifact manager state.",
+        aliases=("artifact_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -96,6 +97,7 @@ class ArtifactIntrospectionProvider:
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListOutput,
         metadata={"async_required": True},
+        aliases=("list_artifacts",),
     )
     async def list_artifacts(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactListTool(service=self.service).ainvoke(
@@ -111,6 +113,7 @@ class ArtifactIntrospectionProvider:
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoOutput,
         metadata={"async_required": True},
+        aliases=("artifact_info",),
     )
     async def info(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactInfoTool(service=self.service).ainvoke(
@@ -126,6 +129,7 @@ class ArtifactIntrospectionProvider:
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput,
         metadata={"async_required": True},
+        aliases=("read_artifact",),
     )
     async def read(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactReadTool(service=self.service).ainvoke(
@@ -141,6 +145,7 @@ class ArtifactIntrospectionProvider:
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput,
         metadata={"async_required": True},
+        aliases=("search_artifacts",),
     )
     async def search(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactSearchTool(service=self.service).ainvoke(
@@ -156,6 +161,7 @@ class ArtifactIntrospectionProvider:
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput,
         metadata={"async_required": True},
+        aliases=("artifact_select",),
     )
     async def select(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactSelectTool(service=self.service).ainvoke(
@@ -174,6 +180,7 @@ class ArtifactIntrospectionProvider:
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput,
         metadata={"async_required": True},
+        aliases=("artifact_grep",),
     )
     async def content_search(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactContentSearchTool(service=self.service).ainvoke(
@@ -189,6 +196,7 @@ class ArtifactIntrospectionProvider:
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput,
         metadata={"async_required": True},
+        aliases=("artifact_transcribe",),
     )
     async def transcribe(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactTranscribeTool(service=self.service).ainvoke(

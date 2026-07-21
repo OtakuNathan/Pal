@@ -209,13 +209,13 @@ _DEFECT_PRECEDENCE = {
 
 VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_scratch_write": {
-        "name": "op_verification_scratch_write",
+        "alias": "verification_scratch_write",
         "description": "Write one verifier-owned test/probe file under the bound scratch directory. This cannot modify product source.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationScratchWriteInput,
     },
     **{
         name: {
-            "name": "op_" + name.removeprefix("op_minion_"),
+            "alias": name.removeprefix("op_minion_"),
             "description": (
                 "Run and durably register one semantic verification case. Use a readable case name and put any source citation in the description or path; "
                 "the Manager owns stdout/stderr Artifacts and does not ask you to construct a report object."
@@ -225,52 +225,52 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         for name in _RUN_TO_KIND_TAG
     },
     "op_minion_verification_run_lsp_check": {
-        "name": "op_verification_run_lsp_check",
+        "alias": "verification_run_lsp_check",
         "description": "Run and durably register LSP diagnostics for one source file when a matching server is available.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput,
     },
     "op_minion_verification_check_unavailable": {
-        "name": "op_verification_check_unavailable",
+        "alias": "verification_check_unavailable",
         "description": "Record focused_tests, warning_clean, consumer_probe, public_surface_dogfood, lsp, historical_regressions, or platform_probe as UNKNOWN with a concrete environmental reason. This never manufactures PASS evidence.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput,
     },
     "op_minion_verification_set_summary": {
-        "name": "op_verification_set_summary",
+        "alias": "verification_set_summary",
         "description": "Set the concise verifier summary after running cases.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationSetSummaryInput,
     },
     "op_minion_verification_draft_status": {
-        "name": "op_verification_draft_status",
+        "alias": "verification_draft_status",
         "description": "Read a compact status of the current verification Draft, including case names, statuses, active findings, and remaining policy obligations.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationDraftStatusInput,
     },
     "op_minion_verification_remove_case": {
-        "name": "op_verification_remove_case",
+        "alias": "verification_remove_case",
         "description": "Explicitly withdraw one recorded case by semantic name and give an audit reason. All findings attached to it are withdrawn with it. Do not use this to hide a failing case; rerun the case after a real fix instead.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput,
     },
     "op_minion_verification_remove_finding": {
-        "name": "op_verification_remove_finding",
+        "alias": "verification_remove_finding",
         "description": "Explicitly withdraw one finding by finding_key with an audit reason. Do not withdraw a finding merely to make submission pass.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationRemoveFindingInput,
     },
     "op_minion_verification_submit": {
-        "name": "op_verification_submit",
+        "alias": "verification_submit",
         "description": "Submit recorded verification evidence and findings. Takes no arguments; Manager infers verdict and routing from immutable results.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationSubmitInput,
     },
     "op_minion_review_surface": {
-        "name": "op_review_surface",
+        "alias": "review_surface",
         "description": "Record one standalone-review surface. kind is reviewed, test_gap, unreviewed, or residual_risk.",
         "InputModel": MinionV2VerificationBuilderOpMinionReviewSurfaceInput,
     },
     "op_minion_review_conclusion": {
-        "name": "op_review_conclusion",
+        "alias": "review_conclusion",
         "description": "Set the standalone review conclusion. verdict is approved, changes_requested, or blocked.",
         "InputModel": MinionV2VerificationBuilderOpMinionReviewConclusionInput,
     },
     "op_minion_standalone_review_submit": {
-        "name": "op_review_submit",
+        "alias": "review_submit",
         "description": "Submit the standalone review. Takes no arguments; Manager compiles recorded cases, findings, surfaces, and conclusion.",
         "InputModel": MinionV2VerificationBuilderOpMinionStandaloneReviewSubmitInput,
     },

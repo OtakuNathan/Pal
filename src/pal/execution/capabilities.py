@@ -74,7 +74,7 @@ class ExecutionIntrospectionProvider(
         scope="module",
         action_name="show",
         description="Show execution runtime state",
-        aliases=("introspection_module_execution_observe", "execution_introspection_observe"),
+        aliases=("exec_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call

@@ -176,6 +176,14 @@ class ToolRegistryGeneration:
         normalized = str(alias or "").strip()
         return self.direct_aliases.get(normalized) or self.indirect_aliases.get(normalized)
 
+    def project_llm_text(self, value: object) -> str:
+        translations = _unambiguous_alias_translations(self.capability_index.aliases)
+        return _project_llm_text(str(value or ""), translations, unknown="redact")
+
+    def project_llm_value(self, value: Any) -> Any:
+        translations = _unambiguous_alias_translations(self.capability_index.aliases)
+        return _project_llm_value(value, translations, unknown="redact")
+
 
 def compile_registry_generation(
     *,
@@ -260,15 +268,19 @@ def compile_registry_generation(
     # Descriptors are compiled before the generation-wide alias table exists.
     # Once it is complete, remove every canonical path from all LLM-facing
     # prose and schema descriptions in one deterministic projection pass.
-    translations = sorted(alias_to_canonical.items(), key=lambda item: len(item[1]), reverse=True)
     for table in (direct_aliases, indirect_aliases):
         for alias, record in tuple(table.items()):
+            translations = _unambiguous_alias_translations(
+                alias_to_canonical,
+                preferred=(record.alias, record.canonical_path),
+            )
+            unknown = "preserve" if record.is_mcp else "raise"
             table[alias] = replace(
                 record,
-                description=_project_llm_text(record.description, translations),
-                search_text=_project_llm_text(record.search_text, translations),
-                input_schema=_deep_freeze(_project_llm_value(record.input_schema, translations)),
-                output_schema=_deep_freeze(_project_llm_value(record.output_schema, translations)),
+                description=_project_llm_text(record.description, translations, unknown=unknown),
+                search_text=_project_llm_text(record.search_text, translations, unknown=unknown),
+                input_schema=_deep_freeze(_project_llm_value(record.input_schema, translations, unknown=unknown)),
+                output_schema=_deep_freeze(_project_llm_value(record.output_schema, translations, unknown=unknown)),
             )
     search_records.clear()
     provider_specs.clear()
@@ -376,6 +388,7 @@ def subtree_for_tool(tool: Tool) -> MountedSubtreeHandle:
         description=tool.guidance.purpose,
         source=tool.source,
         display_name=tool.alias,
+        aliases=(tool.alias,),
         target_id=tool.target_id,
         InputModel=tool.InputModel,
         OutputModel=tool.OutputModel,
@@ -416,13 +429,16 @@ def _compile_record(
 ) -> CompiledToolRecord:
     metadata = dict(descriptor.metadata or {})
     facade_tool = implementation if isinstance(implementation, Tool) else None
-    alias = str(
-        metadata.get("alias")
-        or (facade_tool.alias if facade_tool is not None else "")
-        or descriptor.name
-    ).strip()
-    if not alias:
-        raise ValueError(f"tool alias is required for {descriptor.canonical_path or descriptor.name}")
+    declared_aliases = tuple(str(value or "").strip() for value in descriptor.aliases)
+    if len(declared_aliases) != 1 or not declared_aliases[0]:
+        raise ValueError(
+            f"tool {descriptor.canonical_path or descriptor.name!r} must declare exactly one non-empty alias"
+        )
+    alias = declared_aliases[0]
+    if facade_tool is not None and facade_tool.alias != alias:
+        raise ValueError(
+            f"tool {descriptor.canonical_path!r} alias mismatch: descriptor={alias!r}, facade={facade_tool.alias!r}"
+        )
     if len(alias) > 64 or re.fullmatch(r"[A-Za-z0-9_-]+", alias) is None:
         raise ValueError(f"invalid tool alias {alias!r}; expected 1-64 characters from [A-Za-z0-9_-]")
     if alias.startswith(("op_", "intro_")):
@@ -720,25 +736,64 @@ def _deep_thaw(value: Any) -> Any:
     return value
 
 
-def _project_llm_text(value: str, translations: list[tuple[str, str]]) -> str:
+def _project_llm_text(
+    value: str,
+    translations: list[tuple[str, str]],
+    *,
+    unknown: str = "raise",
+) -> str:
     rendered = str(value or "")
     for alias, canonical in translations:
-        rendered = rendered.replace(canonical, alias)
-    rendered = re.sub(
-        r"\b(?:op|intro)_[A-Za-z0-9_]+\b",
-        lambda match: match.group(0).split("_", 1)[1],
-        rendered,
-    )
+        rendered = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(canonical)}(?![A-Za-z0-9_])",
+            alias,
+            rendered,
+        )
+    unresolved = re.search(r"\b(?:op|intro)_[A-Za-z0-9_]+\b", rendered)
+    if unresolved is not None:
+        if unknown == "preserve":
+            return rendered
+        if unknown == "redact":
+            return re.sub(
+                r"\b(?:op|intro)_[A-Za-z0-9_]+\b",
+                "[unavailable tool reference]",
+                rendered,
+            )
+        raise ValueError(f"LLM-facing tool text contains unknown canonical path: {unresolved.group(0)}")
     return rendered
 
 
-def _project_llm_value(value: Any, translations: list[tuple[str, str]]) -> Any:
+def _unambiguous_alias_translations(
+    alias_to_canonical: Mapping[str, str],
+    *,
+    preferred: tuple[str, str] | None = None,
+) -> list[tuple[str, str]]:
+    aliases_by_canonical: dict[str, list[str]] = {}
+    for alias, canonical in alias_to_canonical.items():
+        aliases_by_canonical.setdefault(str(canonical), []).append(str(alias))
+    translations = [
+        (aliases[0], canonical)
+        for canonical, aliases in aliases_by_canonical.items()
+        if len(aliases) == 1
+    ]
+    if preferred is not None:
+        translations = [item for item in translations if item[1] != preferred[1]]
+        translations.append(preferred)
+    return sorted(translations, key=lambda item: len(item[1]), reverse=True)
+
+
+def _project_llm_value(
+    value: Any,
+    translations: list[tuple[str, str]],
+    *,
+    unknown: str = "raise",
+) -> Any:
     if isinstance(value, str):
-        return _project_llm_text(value, translations)
+        return _project_llm_text(value, translations, unknown=unknown)
     if isinstance(value, dict):
-        return {key: _project_llm_value(item, translations) for key, item in value.items()}
+        return {key: _project_llm_value(item, translations, unknown=unknown) for key, item in value.items()}
     if isinstance(value, list):
-        return [_project_llm_value(item, translations) for item in value]
+        return [_project_llm_value(item, translations, unknown=unknown) for item in value]
     return value
 
 

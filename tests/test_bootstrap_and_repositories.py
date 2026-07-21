@@ -53,7 +53,7 @@ from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3Pro
 from pal.plugins.l3 import SQLiteVecL3Plugin
 from pal.plugins import PluginBundleRepository
 from pal.proactive import ProactiveDefinition, ProactiveRepository
-from pal.shared import LLMFinishReason, LLMStreamEventKind, SINGLETON_TARGET, llm_tool_name
+from pal.shared import LLMFinishReason, LLMStreamEventKind, SINGLETON_TARGET
 from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
 from pal.web_fetch import DEFAULT_WEB_FETCH_USER_AGENT, BrowserServiceManager, WebFetchProviderRepository, plain_http_fetch
@@ -2236,9 +2236,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(
             any(name.startswith("web_fetch_provider_set_config") for name in handle.core.context.capability_registry.descriptors)
         )
-        self.assertIn(llm_tool_name("op_web_search"), tool_names)
-        self.assertIn(llm_tool_name("op_web_read"), tool_names)
-        self.assertNotIn(llm_tool_name("op_web_screenshot"), tool_names)
+        self.assertIn("search_web", tool_names)
+        self.assertIn("read_web", tool_names)
+        self.assertNotIn("screenshot_web", tool_names)
 
     def test_compose_runtime_loads_minion_as_first_party_builtin_plugin(self) -> None:
         if not _local_sidecar_bind_available():
@@ -3880,7 +3880,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(handle.core.context.module_registry.get("memory"))
         self.assertIsNotNone(handle.core.context.module_registry.get("identity"))
         execution_runtime = handle.core.context.execution_runtime
-        channel_list_path = execution_runtime.resolve_llm_tool_name("channel_list")
+        channel_list_path = execution_runtime.resolve_capability_address("channel_list")
         self.assertIsNotNone(execution_runtime.bound_action_index.get(channel_list_path, SINGLETON_TARGET))
 
     def test_compose_runtime_registers_seeded_socket_endpoint(self) -> None:

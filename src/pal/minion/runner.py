@@ -428,6 +428,12 @@ class _MinionExecutionRuntimeAdapter:
         self._state = state
         self._continuation = continuation
 
+    def project_llm_text(self, value: object) -> str:
+        return self._state.execution_runtime.project_llm_text(value)
+
+    def project_llm_value(self, value: Any) -> Any:
+        return self._state.execution_runtime.project_llm_value(value)
+
     async def execute_tool_async(
         self,
         call: CanonicalToolCall,
@@ -573,6 +579,7 @@ class MinionRunner:
     _cancel_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _restart_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _agent_session_checkpoint: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _visible_capability_aliases: list[str] = field(default_factory=list, init=False, repr=False)
     _observed_tool_call_count: int = field(default=0, init=False, repr=False)
     _manager_submission_receipt_observed: bool = field(default=False, init=False, repr=False)
 
@@ -760,6 +767,11 @@ class MinionRunner:
             },
             request_user_clarification=self._request_architecture_clarification,
         )
+        self._visible_capability_aliases = [
+            str(dict(spec.get("function") or {}).get("name") or "").strip()
+            for spec in execution_runtime.build_llm_tool_contracts()
+            if str(dict(spec.get("function") or {}).get("name") or "").strip()
+        ]
         session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
         session_id = str(session_metadata.get("session_id") or "").strip()
         restored = self._load_agent_session_checkpoint(workspace, session_id=session_id)
@@ -1339,7 +1351,7 @@ class MinionRunner:
             if str(item).strip()
         ]
         allowed_items = filter_minion_allowed_capabilities(allowed_items)
-        resolve_name = getattr(execution_runtime, "resolve_llm_tool_name", None)
+        resolve_name = getattr(execution_runtime, "resolve_capability_address", None)
         if not callable(resolve_name):
             resolve_name = lambda name: str(name or "").strip()
         provider_call = tool_call
@@ -1503,12 +1515,12 @@ class MinionRunner:
         cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
         if _shell_invokes_command(cmd, {"rm", "unlink", "rmdir"}) or _shell_invokes_find_delete(cmd):
             return (
-                "Shell path deletion is trapped in minion workspaces. Use op_path_delete so the resolved path is "
+                "Shell path deletion is trapped in minion workspaces. Use delete_path so the resolved path is "
                 "confined to the assigned workspace."
             )
         if _shell_invokes_command(cmd, {"git"}):
             return (
-                "Shell Git is trapped. Use op_git only for read-only status/diff/log/show; the manager owns "
+                "Shell Git is trapped. Use git only for read-only status/diff/log/show; the manager owns "
                 "candidate snapshots and integration."
             )
         return ""
@@ -1586,7 +1598,7 @@ class MinionRunner:
             "repo_path": repo_path,
             "before": before_snapshot,
             "after": after_snapshot,
-            "summary": "op_exec_shell changed an audited workspace; reviewer must rerun from a clean workspace before closing the invocation.",
+            "summary": "run_shell changed an audited workspace; reviewer must rerun from a clean workspace before closing the invocation.",
         }
         self.shell_mutation_violations.append(violation)
         self._append_debug_log("shell_mutation_violation", violation)
@@ -1974,6 +1986,7 @@ class MinionRunner:
             "continuity": dict(self.pack.continuity),
             "unit_scope": unit_scope,
             "allowed_capabilities": list(self.pack.allowed_capabilities),
+            "visible_capabilities": list(self._visible_capability_aliases),
             "skill_manual_context": list((self.pack.metadata or {}).get("skill_manual_context") or []),
             "output_contract": str(profile.get("output_contract_fragment") or ""),
             "workspace_policy": self._workspace_policy(),
@@ -2430,11 +2443,9 @@ def _provider_call_with_effective_args(
     args = dict(effective_call.args or {})
     if effective_call.name == "op_tool_call":
         provider_args = dict(provider_call.args or {})
-        for key in ("name", "capability", "tool"):
-            provider_target = str(provider_args.get(key) or "").strip()
-            if provider_target:
-                args[key] = provider_target
-                break
+        provider_target = str(provider_args.get("name") or "").strip()
+        if provider_target:
+            args["name"] = provider_target
     return CanonicalToolCall(
         name=provider_call.name,
         args=args,
@@ -2716,7 +2727,7 @@ def _max_output_tokens_from_context_window(context_window: int, llm_runtime: Any
 
 
 def _is_shell_capability_name(name: object) -> bool:
-    return str(name or "").strip() in {"op_exec_shell", "run_shell", "shell"}
+    return str(name or "").strip() in {"op_exec_shell", "run_shell"}
 
 
 def _shell_invokes_command(command: str, names: set[str]) -> bool:
@@ -2759,18 +2770,18 @@ def _is_git_capability_name(name: object) -> bool:
 
 def _web_research_capability_name(name: object) -> str | None:
     normalized = str(name or "").strip()
-    if normalized in {"op_web_search", "search_web", "web_search"}:
+    if normalized in {"op_web_search", "search_web"}:
         return "op_web_search"
-    if normalized in {"op_web_read", "read_web", "web_read"}:
+    if normalized in {"op_web_read", "read_web"}:
         return "op_web_read"
     return None
 
 
 def _web_research_budget_keys(canonical_name: str) -> tuple[str, ...]:
     if canonical_name == "op_web_search":
-        return ("op_web_search", "search_web", "web_search", "search")
+        return ("op_web_search", "search_web")
     if canonical_name == "op_web_read":
-        return ("op_web_read", "read_web", "web_read", "read")
+        return ("op_web_read", "read_web")
     return (canonical_name,)
 
 

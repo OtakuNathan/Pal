@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
-from pal.shared import RuntimeStatus, replace_internal_tool_names, replace_internal_tool_names_in_value
+from pal.shared import RuntimeStatus
 from pal.shared.prompt_rendering import render_system_reminder
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.skill.service import SkillService
@@ -55,7 +55,7 @@ class SkillAssimilateTool:
             status=RuntimeStatus.INVALID,
             text="skill_assimilate requires an active async turn context.",
             structured=structured,
-            llm_text=_render_skill_tool_payload("Skill assimilation unavailable", structured),
+            llm_text=_render_skill_tool_payload(self.service, "Skill assimilation unavailable", structured),
         )
 
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
@@ -68,14 +68,14 @@ class SkillAssimilateTool:
                 status=RuntimeStatus.INVALID,
                 text="skill assimilation failed",
                 structured=structured,
-                llm_text=_render_skill_tool_payload("Skill assimilation failed", structured),
+                llm_text=_render_skill_tool_payload(self.service, "Skill assimilation failed", structured),
             )
         structured = candidate.to_dict()
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="skill candidate created",
             structured=structured,
-            llm_text=_render_skill_tool_payload("Skill candidate", structured),
+            llm_text=_render_skill_tool_payload(self.service, "Skill candidate", structured),
         )
 
 
@@ -92,7 +92,7 @@ class SkillCommitTool:
                 status=RuntimeStatus.INVALID,
                 text="skill commit failed",
                 structured=structured,
-                llm_text=_render_skill_tool_payload("Skill commit failed", structured),
+                llm_text=_render_skill_tool_payload(self.service, "Skill commit failed", structured),
             )
         except Exception as exc:
             structured = {"reason": "commit_failed", "error": f"{exc.__class__.__name__}: {exc}"}
@@ -100,13 +100,13 @@ class SkillCommitTool:
                 status=RuntimeStatus.ERROR,
                 text="skill commit failed",
                 structured=structured,
-                llm_text=_render_skill_tool_payload("Skill commit failed", structured),
+                llm_text=_render_skill_tool_payload(self.service, "Skill commit failed", structured),
             )
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="skill committed",
             structured=structured,
-            llm_text=_render_skill_tool_payload("Skill committed", structured),
+            llm_text=_render_skill_tool_payload(self.service, "Skill committed", structured),
         )
 
 
@@ -123,14 +123,14 @@ class SkillUpdateTool:
                 status=RuntimeStatus.INVALID,
                 text="skill update failed",
                 structured=structured,
-                llm_text=_render_skill_tool_payload("Skill update failed", structured),
+                llm_text=_render_skill_tool_payload(self.service, "Skill update failed", structured),
             )
         structured = {"skill": skill.to_dict()}
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="skill updated",
             structured=structured,
-            llm_text=_render_skill_tool_payload("Skill updated", structured),
+            llm_text=_render_skill_tool_payload(self.service, "Skill updated", structured),
         )
 
 
@@ -147,14 +147,14 @@ class SkillDisableTool:
                 status=RuntimeStatus.NOT_FOUND,
                 text="skill not found",
                 structured=structured,
-                llm_text=_render_skill_tool_payload("Skill disable failed", structured),
+                llm_text=_render_skill_tool_payload(self.service, "Skill disable failed", structured),
             )
         structured = {"skill": skill.to_dict()}
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="skill disabled",
             structured=structured,
-            llm_text=_render_skill_tool_payload("Skill disabled", structured),
+            llm_text=_render_skill_tool_payload(self.service, "Skill disabled", structured),
         )
 
 
@@ -170,7 +170,7 @@ class SkillSearchTool:
                 status=RuntimeStatus.INVALID,
                 text="query is required",
                 structured=structured,
-                llm_text=_render_skill_tool_payload("Skill search failed", structured),
+                llm_text=_render_skill_tool_payload(self.service, "Skill search failed", structured),
             )
         status_filter = str(args.get("status") or "active").strip()
         top_k = max(1, int(args.get("top_k") or 5))
@@ -198,7 +198,7 @@ class SkillSearchTool:
         has_injectable_hit = any(bool(hit.get("injectable")) for hit in hits)
         if has_injectable_hit:
             structured["next_action"] = "To use a matched active skill, call skill_inject with its skill_id before answering from it."
-        llm_text = _render_skill_tool_payload("Skill search", structured)
+        llm_text = _render_skill_tool_payload(self.service, "Skill search", structured)
         if has_injectable_hit:
             llm_text = (
                 "Skill search found an injectable active skill. "
@@ -228,14 +228,14 @@ class SkillReadTool:
                 status=RuntimeStatus.NOT_FOUND,
                 text="skill not found",
                 structured=structured,
-                llm_text=_render_skill_tool_payload("Skill read failed", structured),
+                llm_text=_render_skill_tool_payload(self.service, "Skill read failed", structured),
             )
         structured = {"skill": skill_read_dict(skill, include_manual=include_manual)}
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="skill read",
             structured=structured,
-            llm_text=_render_skill_tool_payload("Skill read", structured),
+            llm_text=_render_skill_tool_payload(self.service, "Skill read", structured),
         )
 
 
@@ -258,7 +258,7 @@ class SkillInjectTool:
                 status=RuntimeStatus.INVALID,
                 text="skill_id is required",
                 structured=structured,
-                llm_text=_render_skill_tool_payload("Skill injection failed", structured),
+                llm_text=_render_skill_tool_payload(self.service, "Skill injection failed", structured),
             )
         skill = self.service.inject_skill(skill_id)
         if skill is None:
@@ -267,7 +267,7 @@ class SkillInjectTool:
                 status=RuntimeStatus.NOT_FOUND,
                 text="skill not found or inactive",
                 structured=structured,
-                llm_text=_render_skill_tool_payload("Skill injection failed", structured),
+                llm_text=_render_skill_tool_payload(self.service, "Skill injection failed", structured),
             )
         structured = {
             "skill_id": skill.skill_id,
@@ -284,7 +284,7 @@ class SkillInjectTool:
             status=RuntimeStatus.OK,
             text=skill.manual_text,
             structured=structured,
-            llm_text=render_system_reminder(replace_internal_tool_names(_render_injected_skill_for_llm(structured))),
+            llm_text=render_system_reminder(_project_skill_text(self.service, _render_injected_skill_for_llm(structured))),
         )
 
 
@@ -314,8 +314,17 @@ def _render_injected_skill_for_llm(payload: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def _render_skill_tool_payload(title: str, structured: Any) -> str:
-    return render_titled_structured_for_llm(title, replace_internal_tool_names_in_value(structured))
+def _render_skill_tool_payload(service: SkillService, title: str, structured: Any) -> str:
+    runtime = service.execution_runtime
+    projector = getattr(runtime, "project_llm_value", None)
+    llm_value = projector(structured) if callable(projector) else structured
+    return render_titled_structured_for_llm(title, llm_value)
+
+
+def _project_skill_text(service: SkillService, value: object) -> str:
+    runtime = service.execution_runtime
+    projector = getattr(runtime, "project_llm_text", None)
+    return str(projector(value)) if callable(projector) else str(value or "")
 
 
 def _skill_search_score(skill, query: str) -> tuple[float, str, bool]:

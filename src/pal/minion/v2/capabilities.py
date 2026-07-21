@@ -166,6 +166,7 @@ class MinionV2PublicProvider:
             "user overrides are marked separately. Use semantic names such as software_engineering.v2_coder; no runtime files or Manager IDs are exposed."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderReadInput,
+        aliases=("minion_catalog_read",),
     )
     def read_catalog(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -194,6 +195,7 @@ class MinionV2PublicProvider:
             "effective value and null removes an optional field. Existing Tasks keep their pinned FamilyBindingArtifact, so this affects only future Tasks."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInput,
+        aliases=("minion_catalog_set_profile_override",),
     )
     def set_profile_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -212,6 +214,7 @@ class MinionV2PublicProvider:
         action_name="reset_profile_override",
         description="Remove one explicit profile override in the sidecar and restore the current package builtin when one exists.",
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResetProfileOverrideInput,
+        aliases=("minion_catalog_reset_profile_override",),
     )
     def reset_profile_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -233,6 +236,7 @@ class MinionV2PublicProvider:
             "are validated before the override becomes visible to future Tasks."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput,
+        aliases=("minion_catalog_set_family_override",),
     )
     def set_family_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -251,6 +255,7 @@ class MinionV2PublicProvider:
         action_name="reset_family_override",
         description="Remove one explicit family override in the sidecar and restore the current package builtin when one exists.",
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResetFamilyOverrideInput,
+        aliases=("minion_catalog_reset_family_override",),
     )
     def reset_family_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -272,6 +277,7 @@ class MinionV2PublicProvider:
             "new effective catalog generation. The Pal process does not read or modify Minion catalog files."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderRefreshInput,
+        aliases=("minion_catalog_refresh",),
     )
     def refresh_catalog(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -293,6 +299,7 @@ class MinionV2PublicProvider:
             "standalone_review for review-only, and review_and_repair for bounded repair. Never inspect or implement the target in the foreground first."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
+        aliases=("minion_start_workflow",),
     )
     def start_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -332,6 +339,7 @@ class MinionV2PublicProvider:
             "Later workflow calls refer to this name; the Manager owns its content hash and internal identity."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput,
+        aliases=("minion_submit_artifact",),
     )
     def submit_artifact(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -360,6 +368,7 @@ class MinionV2PublicProvider:
             "without exposing Manager identities. An empty query lists the most recently updated Tasks."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSearchInput,
+        aliases=("minion_task_search",),
     )
     def search_tasks(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -409,6 +418,7 @@ class MinionV2PublicProvider:
             "is true, call this same tool with view=human_review to read the durable Architecture Markdown, reviewer verdict/findings, and available actions."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderStatusInput,
+        aliases=("minion_workflow_status",),
     )
     def workflow_status(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -435,6 +445,7 @@ class MinionV2PublicProvider:
             "reported blocker has actually been addressed."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput,
+        aliases=("minion_resume_workflow",),
     )
     def resume_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -465,6 +476,7 @@ class MinionV2PublicProvider:
             "Coder behavior changed but the accepted architecture remains the intended baseline."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput,
+        aliases=("minion_restart_execution",),
     )
     def restart_execution(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -496,6 +508,7 @@ class MinionV2PublicProvider:
             "When several items need triage, select exactly one by its semantic module or phase name, such as ohos_font or architecture."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput,
+        aliases=("minion_resolve_triage",),
     )
     def resolve_triage(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -526,6 +539,7 @@ class MinionV2PublicProvider:
             "atomically validates its actor, channel, revision, and content before acting. Use this manual path when an inline card expired."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
+        aliases=("minion_submit_human_decision",),
     )
     def submit_human_decision(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -559,6 +573,7 @@ class MinionV2PublicProvider:
             "the answer through its existing tool call."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput,
+        aliases=("minion_answer_question",),
     )
     def answer_question(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -587,6 +602,7 @@ class MinionV2PublicProvider:
         action_name="control_workflow",
         description="Request asynchronous pause or cancel for a V2 workflow. Child aggregates stop at safe points before the workflow settles.",
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput,
+        aliases=("minion_control_workflow",),
     )
     def control_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -614,6 +630,7 @@ class MinionV2PublicProvider:
         action_name="archive_workflow",
         description="Archive a terminal V2 workflow. Active workflows must be cancelled and settled first.",
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput,
+        aliases=("minion_archive_workflow",),
     )
     def archive_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:

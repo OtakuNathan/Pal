@@ -23,6 +23,8 @@ class CapabilityDescriptor:
     source: str
     canonical_path: str = ""
     display_name: str | None = None
+    # Exactly one LLM-facing alias is required when the descriptor is compiled.
+    # canonical_path remains manager-only addressing metadata.
     aliases: tuple[str, ...] = ()
     target_kind: str = ""
     target_id: str = ""
@@ -39,6 +41,14 @@ class CapabilityDescriptor:
     lifecycle_scope: str = "runtime"
     module_id: str = ""
     detachable: bool = False
+
+    def __post_init__(self) -> None:
+        declared = tuple(str(value or "").strip() for value in self.aliases)
+        if len(declared) != 1 or not declared[0]:
+            raise ValueError(
+                f"capability descriptor {self.canonical_path or self.name!r} must declare exactly one non-empty alias"
+            )
+        object.__setattr__(self, "aliases", declared)
 
 
 @dataclass(frozen=True)
@@ -97,7 +107,7 @@ class ExecutionRuntimePort(Protocol):
     def has_registered_capability(self, name: str) -> bool:
         ...
 
-    def resolve_llm_tool_name(self, name: object) -> str:
+    def resolve_capability_address(self, name: object) -> str:
         ...
 
     def execute_tool(self, call: Any, *, allow_tools: bool = True, budget: ToolCallBudget | None = None) -> Any:

@@ -389,7 +389,7 @@ Run the workflow.
         self.assertEqual(skill.module_id, "skill")
         self.assertTrue(skill.active)
         self.assertIn("build_plugin", skill.manual_text)
-        self.assertIn("op_plugin_mgmt_attach", skill.capability_refs)
+        self.assertIn("plugin_attach", skill.capability_refs)
 
         search = SkillSearchTool(service=self.service).invoke({"query": "create plugin capability extension", "top_k": 3})
         self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.plugin.development")
@@ -443,7 +443,7 @@ Run the workflow.
         self.assertIn("<runtime_root>/channel/providers/<provider_id>/", skill.manual_text)
         self.assertIn("provider.toml", skill.manual_text)
         self.assertIn("build_channel_provider", skill.manual_text)
-        self.assertIn("op_channel_provider_rescan", skill.capability_refs)
+        self.assertIn("channel_provider_rescan", skill.capability_refs)
 
         search = SkillSearchTool(service=self.service).invoke({"query": "add channel provider provider.toml slash command", "top_k": 3})
         self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.channel.provider.development")
@@ -475,7 +475,7 @@ Run the workflow.
             self.assertNotIn("<runtime_root>/plugins/minion/workspace_environment/<preparer_id>.toml", skill.manual_text)
             self.assertNotIn("WorkspaceEnvironmentPreparer", skill.manual_text)
             self.assertNotIn("workspace_environment.py", skill.manual_text)
-            self.assertIn("op_lsp_mgmt_rescan", skill.capability_refs)
+            self.assertIn("lsp_rescan", skill.capability_refs)
             self.assertTrue(skill.metadata["may_require_code_changes"])
 
             search = SkillSearchTool(service=self.service).invoke({"query": "add new language lsp template language server", "top_k": 4})

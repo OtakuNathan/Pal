@@ -33,7 +33,7 @@ class ExecutionToolSearchMixin:
         scope="module",
         action_name="tools",
         description="List registered execution tools with descriptions and input schemas",
-        aliases=("execution_tools",),
+        aliases=("exec_tools",),
     )
     def tools(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -56,7 +56,7 @@ class ExecutionDiscoveryCapabilityMixin:
             "Invoke one indirect capability by its exact alias. Direct tools must be invoked directly and are rejected "
             "here. Use search_tools/read_tool to discover the alias and inspect its argument schema."
         ),
-        aliases=("capability_call",),
+        aliases=("call_tool",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput,
         execution=DIRECT_NONE,
         metadata={"canonical_path": "op_tool_call"},
@@ -83,7 +83,7 @@ class ExecutionDiscoveryCapabilityMixin:
             "Search execution capabilities by query text. Use namespace='inspect' for inspect/list/show capabilities "
             "and namespace='action' for capabilities that mutate, execute, or call external services. Set facets=true only for broad searches that need narrowing statistics."
         ),
-        aliases=("tool_search",),
+        aliases=("search_tools",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput,
         OutputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput,
         execution=DIRECT_NONE,
@@ -104,7 +104,7 @@ class ExecutionDiscoveryCapabilityMixin:
         family="discovery",
         action_name="read",
         description="Read the full capability contract for an execution capability by exact alias.",
-        aliases=("tool_read",),
+        aliases=("read_tool",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadInput,
         OutputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadOutput,
         execution=DIRECT_NONE,
@@ -143,7 +143,7 @@ class ExecutionDiscoveryCapabilityMixin:
             "Read a page of a prior large tool result. Use anchor='head' for normal forward pages or anchor='tail' "
             "to inspect the newest/end of log-like output. Pass the original tool_call_id as result_ref."
         ),
-        aliases=("tool_result_page",),
+        aliases=("read_tool_result",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageInput,
         OutputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageOutput,
         execution=DIRECT_NONE,

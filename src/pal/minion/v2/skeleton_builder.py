@@ -121,42 +121,42 @@ _NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": F
 
 SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_architecture_module_upsert": {
-        "name": "op_architecture_module_upsert",
+        "alias": "architecture_module_upsert",
         "description": "Create or fully replace one semantic module. contract_dependencies describe the acyclic production/protocol consumption graph; they do not delay Coder startup. implementation modules default to review_guarded when contract_mode is omitted. Use file_frozen only for a physically separate protocol/interface/schema file. Contract paths may never be owned by test scopes. contract_only modules are already complete in the Skeleton, are automatically file_frozen, and have no writable scopes. Product semantics live in the Skeleton source and are reviewed independently.",
         "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureModuleUpsertInput,
     },
     "op_minion_architecture_module_remove": {
-        "name": "op_architecture_module_remove",
+        "alias": "architecture_module_remove",
         "description": "Remove one semantic module during a scoped revision. Dependencies must be corrected before submit.",
         "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureModuleRemoveInput,
     },
     "op_minion_architecture_scenario_upsert": {
-        "name": "op_architecture_scenario_upsert",
+        "alias": "architecture_scenario_upsert",
         "description": "Create or fully replace one required end-to-end scenario. Name the exact implementation modules used by a real product entrypoint, the externally observable behavior it proves, and the execution environment. This is a semantic verification scenario, not a synthetic all-module join and not a test-case implementation.",
         "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureScenarioUpsertInput,
     },
     "op_minion_architecture_scenario_remove": {
-        "name": "op_architecture_scenario_remove",
+        "alias": "architecture_scenario_remove",
         "description": "Remove one end-to-end scenario by semantic name during architecture revision.",
         "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureScenarioRemoveInput,
     },
     "op_minion_architecture_ask_user": {
-        "name": "op_architecture_ask_user",
+        "alias": "architecture_ask_user",
         "description": "Ask one material Requirement, preference, or high-impact architecture question without ending the Architect invocation. Supply a short title, a precise question, and three option strings; each option must contain a readable choice and its impact/tradeoff. The channel also permits a custom free-text answer. Omit timeout_seconds to wait until answer, pause, or cancel. The answer becomes an immutable task-source amendment shared with Reviewer, Coder, and Verifier.",
         "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureAskUserInput,
     },
     "op_minion_architecture_submit": {
-        "name": "op_architecture_submit",
+        "alias": "architecture_submit",
         "description": "Preflight and submit the current code skeleton, semantic Contract Dependency Graph, and end-to-end scenarios. Takes no arguments. Manager checks only deterministic structure, path safety, Git state, and snapshot stability; Architecture Reviewer owns all semantic review.",
         "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureSubmitInput,
     },
     "op_minion_architecture_review_pass": {
-        "name": "op_architecture_review_pass",
+        "alias": "architecture_review_pass",
         "description": "Submit PASS only after one breadth-first review of every immutable task source, module contract, semantic dependency, and end-to-end scenario finds no material defect.",
         "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureReviewPassInput,
     },
     "op_minion_architecture_review_fail": {
-        "name": "op_architecture_review_fail",
+        "alias": "architecture_review_fail",
         "description": "Submit FAIL after every material defect has been recorded with add_finding. Takes no arguments.",
         "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureReviewFailInput,
     },

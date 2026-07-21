@@ -30,7 +30,7 @@ from pal.minion.workspace_tools import (
 
 WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_file_read": {
-        "name": "op_file_read",
+        "alias": "read_file",
         "description": (
             "Use this instead of shell cat/head/tail for repo or reference files. "
             + FILE_READ_DESCRIPTION
@@ -40,7 +40,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": MinionWorkspaceFileToolsOpFileReadInput,
     },
     "op_file_edit": {
-        "name": "op_file_edit",
+        "alias": "edit_file",
         "description": (
             "Use this instead of shell sed/awk or one-off rewrite scripts for repo files. "
             + FILE_EDIT_DESCRIPTION
@@ -48,7 +48,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": MinionWorkspaceFileToolsOpFileEditInput,
     },
     "op_file_write": {
-        "name": "op_file_write",
+        "alias": "write_file",
         "description": (
             "Use this instead of shell redirection for project repo files. "
             + FILE_WRITE_DESCRIPTION
@@ -56,20 +56,20 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": MinionWorkspaceFileToolsOpFileWriteInput,
     },
     "op_path_delete": {
-        "name": "op_path_delete",
+        "alias": "delete_path",
         "description": (
-            "Use this first for deleting a file or directory under the current project repo; do not use op_exec_shell with rm/unlink/rmdir/git rm/find -delete when this tool is visible. "
-            "Regular files must first be read with op_file_read, "
+            "Use this first for deleting a file or directory under the current project repo; do not use run_shell with rm/unlink/rmdir/git rm/find -delete when this tool is visible. "
+            "Regular files must first be read with read_file, "
             "or expected_sha256 must match the current file bytes. Directories require recursive=true."
         ),
         "InputModel": MinionWorkspaceFileToolsOpPathDeleteInput,
     },
     "op_file_state": {
-        "name": "op_file_state",
+        "alias": "file_state",
         "description": (
             "Use this first when you need to check read-before-edit state for a repo-relative file. "
-            "Inspect whether a repo-relative file has a current cached read snapshot for safe op_file_edit, "
-            "op_file_write, or op_path_delete use. This does not return cached file contents."
+            "Inspect whether a repo-relative file has a current cached read snapshot for safe edit_file, "
+            "write_file, or delete_path use. This does not return cached file contents."
         ),
         "InputModel": MinionWorkspaceFileToolsOpFileStateInput,
     },
@@ -88,7 +88,7 @@ async def workspace_file_tool_result(
     try:
         root, root_info = _workspace_root_with_info(workspace, call.args)
         if str(root_info.get("root_kind") or "") == "reference" and call.name != "op_file_read":
-            raise ValueError("reference roots are read-only; use op_file_read, op_search, or run_shell for reference inspection")
+            raise ValueError("reference roots are read-only; use read_file, search, or run_shell for reference inspection")
         relative, absolute = _workspace_file_path(root, call.args)
         if not _workspace_path_allowed_by_reference(absolute, root, root_info):
             raise ValueError("path is outside the declared immutable input include set")

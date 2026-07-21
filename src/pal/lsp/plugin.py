@@ -151,7 +151,7 @@ def _position_schema() -> dict[str, Any]:
         "symbol-aware language-server information."
     ),
     prompt_hint=(
-        "After selecting a project or worktree, call op_lsp_prepare_workspace once before using LSP code "
+        "After selecting a project or worktree, call lsp_prepare_workspace once before using LSP code "
         "intelligence; call it again only when compile commands, include paths, SDK stubs, or language settings "
         "change. Then use LSP capabilities for symbol-aware navigation and verification: "
         "use lsp_document_symbols/workspace_symbols to map code, lsp_definition/references/hover/call hierarchy "
@@ -176,19 +176,19 @@ def _position_schema() -> dict[str, Any]:
         "诊断",
     ),
     capability_refs=(
-        "op_lsp_status",
-        "op_lsp_prepare_workspace",
-        "op_lsp_doctor",
-        "op_lsp_diagnostics",
-        "op_lsp_hover",
-        "op_lsp_definition",
-        "op_lsp_implementation",
-        "op_lsp_references",
-        "op_lsp_prepare_call_hierarchy",
-        "op_lsp_incoming_calls",
-        "op_lsp_outgoing_calls",
-        "op_lsp_document_symbols",
-        "op_lsp_workspace_symbols",
+        "lsp_status",
+        "lsp_prepare_workspace",
+        "lsp_doctor",
+        "lsp_diagnostics",
+        "lsp_hover",
+        "lsp_definition",
+        "lsp_implementation",
+        "lsp_references",
+        "lsp_prepare_call_hierarchy",
+        "lsp_incoming_calls",
+        "lsp_outgoing_calls",
+        "lsp_document_symbols",
+        "lsp_workspace_symbols",
     ),
     priority=75,
     activation_threshold=0.15,
@@ -238,13 +238,13 @@ class LspManagerPluginProvider:
     def declared_skills(self):
         return lsp_declared_skills(module_id="lsp")
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show LSP provider status")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show LSP provider status", aliases=("lsp_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self._status_payload()
         return IntrospectionResult(status=RuntimeStatus.OK, text="lsp status", structured=payload, llm_text=render_titled_structured_for_llm("LSP status", payload))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="status", description="List configured LSP servers and provider health")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="status", description="List configured LSP servers and provider health", aliases=("lsp_status",))
     def status(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
         return _capability_from_rpc("LSP status", self._request_or_error("status"))
@@ -260,6 +260,7 @@ class LspManagerPluginProvider:
             "or language settings change. Later LSP tools reuse the manager-owned environment by workspace_root."
         ),
         InputModel=LspPluginLspManagerPluginProviderPrepareWorkspaceInput,
+        aliases=("lsp_prepare_workspace",),
     )
     def prepare_workspace(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc(
@@ -267,51 +268,51 @@ class LspManagerPluginProvider:
             self._request_or_error("prepare_workspace", dict(call.args or {})),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor", description="Check one selected LSP server's binary, workspace, initialize, and diagnostics readiness", InputModel=LspPluginLspManagerPluginProviderDoctorInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor", description="Check one selected LSP server's binary, workspace, initialize, and diagnostics readiness", InputModel=LspPluginLspManagerPluginProviderDoctorInput, aliases=("lsp_doctor",))
     def doctor(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP doctor", self._request_or_error("doctor", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="diagnostics", description="Read diagnostics for a file from the selected LSP server", InputModel=LspPluginLspManagerPluginProviderDiagnosticsInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="diagnostics", description="Read diagnostics for a file from the selected LSP server", InputModel=LspPluginLspManagerPluginProviderDiagnosticsInput, aliases=("lsp_diagnostics",))
     def diagnostics(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP diagnostics", self._request_or_error("diagnostics", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="hover", description="Read hover information at a file position", InputModel=LspPluginLspManagerPluginProviderHoverInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="hover", description="Read hover information at a file position", InputModel=LspPluginLspManagerPluginProviderHoverInput, aliases=("lsp_hover",))
     def hover(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP hover", self._request_or_error("hover", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="definition", description="Find definitions at a file position", InputModel=LspPluginLspManagerPluginProviderDefinitionInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="definition", description="Find definitions at a file position", InputModel=LspPluginLspManagerPluginProviderDefinitionInput, aliases=("lsp_definition",))
     def definition(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP definition", self._request_or_error("definition", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="implementation", description="Find implementations at a file position", InputModel=LspPluginLspManagerPluginProviderImplementationInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="implementation", description="Find implementations at a file position", InputModel=LspPluginLspManagerPluginProviderImplementationInput, aliases=("lsp_implementation",))
     def implementation(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP implementation", self._request_or_error("implementation", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="references", description="Find references at a file position", InputModel=LspPluginLspManagerPluginProviderReferencesInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="references", description="Find references at a file position", InputModel=LspPluginLspManagerPluginProviderReferencesInput, aliases=("lsp_references",))
     def references(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP references", self._request_or_error("references", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="prepare_call_hierarchy", description="Prepare call hierarchy items at a file position", InputModel=LspPluginLspManagerPluginProviderPrepareCallHierarchyInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="prepare_call_hierarchy", description="Prepare call hierarchy items at a file position", InputModel=LspPluginLspManagerPluginProviderPrepareCallHierarchyInput, aliases=("lsp_prepare_call_hierarchy",))
     def prepare_call_hierarchy(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP prepare call hierarchy", self._request_or_error("prepare_call_hierarchy", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="incoming_calls", description="Find callers for the symbol at a file position using LSP call hierarchy", InputModel=LspPluginLspManagerPluginProviderIncomingCallsInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="incoming_calls", description="Find callers for the symbol at a file position using LSP call hierarchy", InputModel=LspPluginLspManagerPluginProviderIncomingCallsInput, aliases=("lsp_incoming_calls",))
     def incoming_calls(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP incoming calls", self._request_or_error("incoming_calls", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="outgoing_calls", description="Find callees for the symbol at a file position using LSP call hierarchy", InputModel=LspPluginLspManagerPluginProviderOutgoingCallsInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="outgoing_calls", description="Find callees for the symbol at a file position using LSP call hierarchy", InputModel=LspPluginLspManagerPluginProviderOutgoingCallsInput, aliases=("lsp_outgoing_calls",))
     def outgoing_calls(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP outgoing calls", self._request_or_error("outgoing_calls", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="document_symbols", description="List document symbols for a file", InputModel=LspPluginLspManagerPluginProviderDocumentSymbolsInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="document_symbols", description="List document symbols for a file", InputModel=LspPluginLspManagerPluginProviderDocumentSymbolsInput, aliases=("lsp_document_symbols",))
     def document_symbols(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP document symbols", self._request_or_error("document_symbols", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="workspace_symbols", description="Search workspace symbols", InputModel=LspPluginLspManagerPluginProviderWorkspaceSymbolsInput)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="workspace_symbols", description="Search workspace symbols", InputModel=LspPluginLspManagerPluginProviderWorkspaceSymbolsInput, aliases=("lsp_workspace_symbols",))
     def workspace_symbols(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP workspace symbols", self._request_or_error("workspace_symbols", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="attach", description="Attach LSP manager")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="attach", description="Attach LSP manager", aliases=("lsp_attach",))
     def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         try:
@@ -324,14 +325,14 @@ class LspManagerPluginProvider:
         payload = self._status_payload()
         return IntrospectionResult(status=RuntimeStatus.OK, text="lsp manager attached", structured=payload, llm_text=render_titled_structured_for_llm("LSP manager attached", payload))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="detach", description="Detach LSP manager")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="detach", description="Detach LSP manager", aliases=("lsp_detach",))
     def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         self._stop_manager()
         payload = self._status_payload()
         return IntrospectionResult(status=RuntimeStatus.OK, text="lsp manager detached", structured=payload, llm_text=render_titled_structured_for_llm("LSP manager detached", payload))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="rescan", description="Rescan LSP configs")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="rescan", description="Rescan LSP configs", aliases=("lsp_rescan",))
     def rescan(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         try:

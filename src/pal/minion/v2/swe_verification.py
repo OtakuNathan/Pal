@@ -72,7 +72,7 @@ SWE_VERIFICATION_CAPABILITIES = (
 
 SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_pass": {
-        "name": "op_verification_pass",
+        "alias": "verification_pass",
         "description": (
             "Submit PASS only after historical verifier regressions pass and you have added or materially strengthened "
             "adversarial tests for this exact candidate. The Manager validates test-scope changes and recorded tool evidence."
@@ -80,12 +80,12 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": MinionV2SweVerificationOpMinionVerificationPassInput,
     },
     "op_minion_verification_request_module_repair": {
-        "name": "op_verification_request_module_repair",
+        "alias": "verification_request_module_repair",
         "description": "Submit module repair after every reproduced defect has been recorded with add_finding. Takes no arguments.",
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestModuleRepairInput,
     },
     "op_minion_verification_request_dependency_repairs": {
-        "name": "op_verification_request_dependency_repairs",
+        "alias": "verification_request_dependency_repairs",
         "description": (
             "Submit reproduced defects owned by one or more named upstream modules after recording each with add_finding. "
             "Names must come from the bound dependency closure."
@@ -93,17 +93,17 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestDependencyRepairsInput,
     },
     "op_minion_verification_request_contract_revision": {
-        "name": "op_verification_request_contract_revision",
+        "alias": "verification_request_contract_revision",
         "description": "Submit a frozen public contract or lifecycle/state-model defect already recorded with add_finding.",
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestContractRevisionInput,
     },
     "op_minion_verification_request_architecture_revision": {
-        "name": "op_verification_request_architecture_revision",
+        "alias": "verification_request_architecture_revision",
         "description": "Submit an add_finding-recorded module-boundary, ownership, hidden-coupling, dependency, or scenario-topology defect requiring architecture revision.",
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestArchitectureRevisionInput,
     },
     "op_minion_verification_request_requirements_revision": {
-        "name": "op_verification_request_requirements_revision",
+        "alias": "verification_request_requirements_revision",
         "description": (
             "Submit a conflict or material omission in the original Requirements after recording it with add_finding. "
             "Do not author replacement requirement records here."
@@ -111,7 +111,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestRequirementsRevisionInput,
     },
     "op_minion_verification_unknown": {
-        "name": "op_verification_unknown",
+        "alias": "verification_unknown",
         "description": (
             "Submit UNKNOWN only when a required platform or environment cannot be exercised. Manager policy decides whether it blocks."
         ),

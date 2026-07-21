@@ -233,7 +233,7 @@ class SQLiteVecL3Plugin:
         )
         return inventory
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show", description="Show sqlite-backed memory provider state")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show", description="Show sqlite-backed memory provider state", aliases=("memory_provider_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
@@ -244,7 +244,7 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("SQLite vec memory provider", payload),
         )
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory", description="Inspect sqlite-backed memory inventory")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory", description="Inspect sqlite-backed memory inventory", aliases=("memory_provider_inventory",))
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
@@ -268,6 +268,7 @@ class SQLiteVecL3Plugin:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginRecallInput,
+        aliases=("memory_provider_recall",),
     )
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
         task_id = _read_task_id(call.args)
@@ -313,6 +314,7 @@ class SQLiteVecL3Plugin:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginWriteInput,
+        aliases=("memory_provider_write",),
     )
     def commit_write(self, call: IntrospectionCall) -> IntrospectionResult:
         kind = str(call.args.get("kind") or "").strip()
@@ -378,6 +380,7 @@ class SQLiteVecL3Plugin:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginUpdateInput,
+        aliases=("memory_provider_update",),
     )
     def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
@@ -425,6 +428,7 @@ class SQLiteVecL3Plugin:
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginDeleteInput,
+        aliases=("memory_provider_delete",),
     )
     def delete_memory(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
@@ -442,7 +446,7 @@ class SQLiteVecL3Plugin:
             llm_text=render_mutation_result_for_llm("delete", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider", aliases=("memory_provider_attach",))
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -453,7 +457,7 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("Memory provider attached", {"mounted": True}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider", aliases=("memory_provider_detach",))
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
@@ -472,6 +476,7 @@ class SQLiteVecL3Plugin:
         description="Refresh provider indexes and embedding state",
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginRefreshIndexesInput,
+        aliases=("memory_provider_refresh_indexes",),
     )
     def refresh_indexes_action(self, call: IntrospectionCall) -> IntrospectionResult:
         limit = int(call.args.get("limit") or 8)

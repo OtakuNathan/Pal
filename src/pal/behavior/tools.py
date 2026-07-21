@@ -6,7 +6,7 @@ from typing import Any
 from pal.behavior.contracts import AFFORDANCE_VISIBILITY_DISCOVERABLE, AFFORDANCE_VISIBILITY_RESIDENT, BehaviorAdviceRequest
 from pal.behavior.service import BehaviorLearnConflict, BehaviorService
 from pal.execution.contracts import CapabilityResult
-from pal.shared import RuntimeStatus, replace_internal_tool_names_in_value
+from pal.shared import RuntimeStatus
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
@@ -51,7 +51,7 @@ class BehaviorAdviceTool:
             status=RuntimeStatus.INVALID,
             text="behavior_advise requires an active async turn context.",
             structured=structured,
-            llm_text=_render_behavior_tool_payload("Behavior advice unavailable", structured),
+            llm_text=_render_behavior_tool_payload(self.service, "Behavior advice unavailable", structured),
         )
 
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
@@ -64,7 +64,7 @@ class BehaviorAdviceTool:
             status=RuntimeStatus.OK,
             text=f"behavior advice returned {len(result.candidates)} candidate(s)",
             structured=structured,
-            llm_text=_render_behavior_tool_payload("Behavior advice", llm_payload),
+            llm_text=_render_behavior_tool_payload(self.service, "Behavior advice", llm_payload),
         )
 
 
@@ -89,7 +89,7 @@ class AffordanceSubmitTool:
                 status=RuntimeStatus.INVALID,
                 text="behavior learning needs user decision",
                 structured=structured,
-                llm_text=_render_behavior_tool_payload("Behavior learning needs user decision", structured),
+                llm_text=_render_behavior_tool_payload(self.service, "Behavior learning needs user decision", structured),
             )
         except ValueError as exc:
             structured = {"reason": "invalid_request", "error": str(exc)}
@@ -97,7 +97,7 @@ class AffordanceSubmitTool:
                 status=RuntimeStatus.INVALID,
                 text="behavior learning failed",
                 structured=structured,
-                llm_text=_render_behavior_tool_payload("Behavior learning failed", structured),
+                llm_text=_render_behavior_tool_payload(self.service, "Behavior learning failed", structured),
             )
         learn_result = str((descriptor.metadata or {}).get("_learn_behavior_result") or "learned")
         structured = {
@@ -117,6 +117,7 @@ class AffordanceSubmitTool:
             text="behavior guidance unchanged" if learn_result == "skipped" else "behavior guidance learned",
             structured=structured,
             llm_text=_render_behavior_tool_payload(
+                self.service,
                 "Behavior guidance unchanged" if learn_result == "skipped" else "Behavior guidance learned",
                 structured,
             ),
@@ -144,7 +145,7 @@ class AffordanceUpdateTool:
                 status=RuntimeStatus.INVALID,
                 text="behavior guidance update failed",
                 structured=structured,
-                llm_text=_render_behavior_tool_payload("Behavior guidance update failed", structured),
+                llm_text=_render_behavior_tool_payload(self.service, "Behavior guidance update failed", structured),
             )
         updated_fields = [k for k in payload if k not in {"affordance", "affordance_id"} and payload[k] is not None]
         structured = {
@@ -160,7 +161,7 @@ class AffordanceUpdateTool:
             status=RuntimeStatus.OK,
             text="behavior guidance updated",
             structured=structured,
-            llm_text=_render_behavior_tool_payload("Behavior guidance updated", structured),
+            llm_text=_render_behavior_tool_payload(self.service, "Behavior guidance updated", structured),
         )
 
 
@@ -184,7 +185,7 @@ class AffordanceDeleteTool:
                 status=RuntimeStatus.INVALID,
                 text="behavior forgetting failed",
                 structured=structured,
-                llm_text=_render_behavior_tool_payload("Behavior forgetting failed", structured),
+                llm_text=_render_behavior_tool_payload(self.service, "Behavior forgetting failed", structured),
             )
         structured = {
             "affordance_id": descriptor.affordance_id,
@@ -197,7 +198,7 @@ class AffordanceDeleteTool:
             status=RuntimeStatus.OK,
             text="behavior guidance forgotten",
             structured=structured,
-            llm_text=_render_behavior_tool_payload("Behavior guidance forgotten", structured),
+            llm_text=_render_behavior_tool_payload(self.service, "Behavior guidance forgotten", structured),
         )
 
 
@@ -250,8 +251,11 @@ def _advice_llm_payload(structured: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _render_behavior_tool_payload(title: str, structured: Any) -> str:
-    return render_titled_structured_for_llm(title, replace_internal_tool_names_in_value(structured))
+def _render_behavior_tool_payload(service: BehaviorService, title: str, structured: Any) -> str:
+    runtime = service.execution_runtime
+    projector = getattr(runtime, "project_llm_value", None)
+    llm_value = projector(structured) if callable(projector) else structured
+    return render_titled_structured_for_llm(title, llm_value)
 
 
 def _string_list(value: object) -> list[str]:

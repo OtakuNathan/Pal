@@ -42,6 +42,7 @@ class SkillService:
     repository: SkillRepository = field(default_factory=SkillRepository)
     behavior_repository: BehaviorRepository | None = None
     llm_runtime: Any | None = None
+    execution_runtime: Any | None = None
     runtime_root: Path | None = None
     inject_manual_char_budget: int = SKILL_INJECT_MANUAL_CHAR_BUDGET
     admission_manual_char_budget: int = SKILL_ADMISSION_MANUAL_CHAR_BUDGET

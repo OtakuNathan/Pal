@@ -50,7 +50,7 @@ class FileCapabilityMixin:
         family="file",
         action_name="read",
         description=FILE_READ_DESCRIPTION,
-        aliases=("file_read",),
+        aliases=("read_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinReadInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinReadOutput,
         execution=DIRECT_LOCAL_READ,
@@ -65,7 +65,7 @@ class FileCapabilityMixin:
         family="file",
         action_name="edit",
         description=FILE_EDIT_DESCRIPTION,
-        aliases=("file_edit",),
+        aliases=("edit_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditOutput,
         execution=DIRECT_LOCAL_WRITE,
@@ -80,7 +80,7 @@ class FileCapabilityMixin:
         family="file",
         action_name="write",
         description=FILE_WRITE_DESCRIPTION,
-        aliases=("file_write",),
+        aliases=("write_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinWriteInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinWriteOutput,
         execution=DIRECT_LOCAL_WRITE,
@@ -95,10 +95,10 @@ class FileCapabilityMixin:
         family="path",
         action_name="delete",
         description=(
-            "Delete a file or directory. Regular files must first be read with op_file_read so Pal can detect stale deletes, "
+            "Delete a file or directory. Regular files must first be read with read_file so Pal can detect stale deletes, "
             "or expected_sha256 must match the current file bytes. Directories require recursive=true."
         ),
-        aliases=("path_delete",),
+        aliases=("delete_path",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinDeleteOutput,
         execution=INDIRECT_LOCAL_WRITE,
@@ -114,7 +114,7 @@ class FileCapabilityMixin:
         action_name="state",
         description=(
             "Inspect the read-before-edit file cache. "
-            "Use this to check whether a file has a current cached read snapshot before op_file_edit."
+            "Use this to check whether a file has a current cached read snapshot before edit_file."
         ),
         aliases=("file_state",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinStateInput,

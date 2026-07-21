@@ -826,7 +826,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             )
 
             class AliasExecution:
-                def resolve_llm_tool_name(self, name):
+                def resolve_capability_address(self, name):
                     return {"search": "op_search"}.get(str(name), str(name))
 
                 async def execute_tool_async(self, call, **kwargs):

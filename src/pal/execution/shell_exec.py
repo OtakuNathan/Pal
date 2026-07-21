@@ -30,9 +30,9 @@ SHELL_EXEC_DESCRIPTION = (
     "Use for tests, builds, scripts, process probes, and package commands. "
     "Pal runtime, module, capability, minion state: use search_tools/read_tool/call_tool or the visible Pal tool before shell. "
     "For bounded directory listings use `tree -a -L 3 --filelimit 200 --noreport <path>`; if tree is unavailable use `find <path> -maxdepth 3 -print | head -n 500`. "
-    "op_search for repository text search; op_file_read for reading text files; op_file_edit for precise in-place edits after reading; "
-    "op_file_write for creating or overwriting complete UTF-8 text files; op_path_delete for deleting files or directories; "
-    "op_git for git status, diff, log, show, and audited git restore/revert. "
+    "search for repository text search; read_file for reading text files; edit_file for precise in-place edits after reading; "
+    "write_file for creating or overwriting complete UTF-8 text files; delete_path for deleting files or directories; "
+    "git for git status, diff, log, show, and audited git restore/revert. "
     "Do not use shell commands such as cat/head/tail for file inspection, grep/rg for repository search, sed/awk for edits, "
     "tee/echo/printf redirection for writes, or rm/unlink/rmdir/git rm/find -delete for deletion when the matching capability is visible. "
     "Piping command output through head/tail to shorten stdout or stderr is fine. "
@@ -42,8 +42,8 @@ SHELL_EXEC_DESCRIPTION = (
 SHELL_EXEC_CMD_DESCRIPTION = (
     "Shell command to execute. Use only for command execution, tests, builds, scripts, process probes, and package commands. "
     "Use bounded `tree -a -L 3 --filelimit 200 --noreport` listings (or `find -maxdepth 3 -print | head -n 500` when tree is unavailable). "
-    "If visible, prefer op_search for text search, op_file_read for file reads, op_file_edit for edits, "
-    "op_file_write for writes, op_path_delete for deletion, and op_git for git status/diff/log/show. "
+    "If visible, prefer search for text search, read_file for file reads, edit_file for edits, "
+    "write_file for writes, delete_path for deletion, and git for git status/diff/log/show. "
     "Avoid cat/head/tail/grep/rg/sed/awk/tee/echo/printf redirection/rm/unlink/rmdir/git rm/find -delete for repo file operations when the matching capability is visible. "
     "For Pal runtime/module/minion/capability state or actions, use built-in Pal tools before shell. "
     "In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing; use the dedicated checkpoint commit capability instead."
@@ -290,7 +290,7 @@ class ShellExecCapabilityMixin:
         family="exec",
         action_name="shell",
         description=SHELL_EXEC_DESCRIPTION,
-        aliases=(),
+        aliases=("run_shell",),
         InputModel=ExecutionShellExecShellExecCapabilityMixinShellInput,
         OutputModel=ExecutionShellExecShellExecCapabilityMixinShellOutput,
         execution=DIRECT_CONTROL,

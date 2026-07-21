@@ -151,7 +151,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
                 title="Ask behavior advice",
                 scenario_text="need advice",
                 prompt_hint="Call behavior advice again",
-                capability_refs=("op_behavior_advise",),
+                capability_refs=("advise_behavior",),
                 activation_terms=("advice",),
                 activation_threshold=0.0,
             )
@@ -1518,6 +1518,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
                     description="Show demo module state",
                     source="builtin:demo",
                     display_name="demo show",
+                    aliases=("demo_show",),
                     module_id="demo",
                 ),
                 CapabilityDescriptor(
@@ -1527,6 +1528,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
                     description="Run demo operation",
                     source="builtin:demo",
                     display_name="demo run",
+                    aliases=("demo_run",),
                     module_id="demo",
                 ),
             ],
