@@ -373,10 +373,16 @@ def scratch_fingerprint(workspace: Mapping[str, Any]) -> str:
         digest.update(b"<missing>")
         return digest.hexdigest()
     for path in sorted(item for item in root.rglob("*") if item.is_file() and not item.is_symlink()):
+        try:
+            content = path.read_bytes()
+        except FileNotFoundError:
+            # Scratch or database sidecar files may be removed between discovery
+            # and reading. They were never stable evidence for this snapshot.
+            continue
         relative = path.relative_to(root).as_posix()
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        digest.update(content)
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -438,10 +444,17 @@ def execution_workspace_fingerprint(workspace: Mapping[str, Any]) -> str:
             for raw_path in sorted(item for item in untracked.stdout.split(b"\0") if item):
                 relative = raw_path.decode("utf-8", errors="surrogateescape")
                 path = root / relative
+                try:
+                    content = (
+                        path.read_bytes()
+                        if path.is_file() and not path.is_symlink()
+                        else b""
+                    )
+                except FileNotFoundError:
+                    continue
                 digest.update(raw_path)
                 digest.update(b"\0")
-                if path.is_file() and not path.is_symlink():
-                    digest.update(path.read_bytes())
+                digest.update(content)
                 digest.update(b"\0")
             return digest.hexdigest()
     for path in sorted(
@@ -449,23 +462,30 @@ def execution_workspace_fingerprint(workspace: Mapping[str, Any]) -> str:
         for item in root.rglob("*")
         if item.is_file() and not item.is_symlink() and ".git" not in item.parts
     ):
+        try:
+            content = path.read_bytes()
+        except FileNotFoundError:
+            # Runtime roots commonly contain transient SQLite WAL/SHM files.
+            # A file that disappears before it can be read is outside the
+            # observable workspace snapshot and should not fail verification.
+            continue
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        digest.update(content)
         digest.update(b"\0")
     return digest.hexdigest()
 
 
 def _artifact_store(workspace: Mapping[str, Any]) -> Any:
     root = _runtime_root(workspace)
-    from pal.minion.v2.worker_gateway import (
-        WorkerGatewayArtifactStore,
-        worker_gateway_client_from_env,
+    from pal.minion.v2.role_gateway import (
+        RoleGatewayArtifactStore,
+        role_gateway_client_from_env,
     )
 
-    gateway = worker_gateway_client_from_env(root)
+    gateway = role_gateway_client_from_env(root)
     if gateway is not None:
-        return WorkerGatewayArtifactStore(gateway)
+        return RoleGatewayArtifactStore(gateway)
     repository = MinionV2Repository(root)
     repository.ensure_schema()
     return ContentAddressedArtifactStore(root, repository)

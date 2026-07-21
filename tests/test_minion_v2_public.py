@@ -25,25 +25,26 @@ from pal.minion.v2.contract_builder import ARCHITECT_BUILDER_CAPABILITIES
 from pal.minion.v2.execution import WorkspaceProcessHolder
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor, reconcile_control_requests
 from pal.minion.v2.service import MinionV2WorkflowService
+from pal.minion.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.minion.v2.sessions import architect_session_id, coder_session_id, verifier_session_id
-from pal.minion.v2.workers import (
-    MinionV2SemanticWorker,
-    _assignment_worker_input_refs,
+from pal.minion.v2.semantic_orchestration.orchestrator import (
+    SemanticOrchestrator,
+    _assignment_role_input_refs,
     _architecture_submit_idempotency_key,
     _candidate_tree_fingerprint,
     _durable_workspace_preparation,
     _named_json_output,
     _prepare_role_workspace_before_environment,
-    _producer_action_idempotency_key,
+    _implementation_action_idempotency_key,
     _raise_if_workspace_held,
     _role_uses_bound_durable_workspace,
-    _semantic_worker_input_refs,
+    _semantic_role_input_refs,
     _skeleton_architecture_review_view,
     _skeleton_architect_instruction,
     apply_v2_revision_scope_capability_policy,
     apply_v2_role_capability_policy,
 )
-from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
+from pal.minion.v2.role_protocol import RoleAssignmentRequest
 from pal.minion.v2.skeleton import ArchitectureWorkspace
 from pal.minion.v2 import ActionEnvelope, AggregateType
 from pal.minion.v2.contracts import DeferredEffectError, StaleFencingToken, SubmissionInvariantError
@@ -74,7 +75,7 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
         )
 
         with patch(
-            "pal.minion.v2.workers.workspace_process_holders",
+            "pal.minion.v2.semantic_orchestration.orchestrator.workspace_process_holders",
             return_value=(manager_lock,),
         ):
             _raise_if_workspace_held(
@@ -109,7 +110,7 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
         }
         for label, holder in unexpected_holders.items():
             with self.subTest(label=label), patch(
-                "pal.minion.v2.workers.workspace_process_holders",
+                "pal.minion.v2.semantic_orchestration.orchestrator.workspace_process_holders",
                 return_value=(holder,),
             ):
                 with self.assertRaisesRegex(RuntimeError, "workspace is held"):
@@ -119,12 +120,12 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
                         manager_snapshot_lock=lock_path,
                     )
 
-    def test_durable_receipt_replay_does_not_record_a_fake_worker_turn(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(Path(tempfile.mkdtemp())))
+    def test_durable_receipt_replay_does_not_record_a_fake_role_turn(self) -> None:
+        worker = SemanticOrchestrator(MinionV2WorkflowService(Path(tempfile.mkdtemp())))
         recorded: list[dict[str, object]] = []
-        worker.repository.record_worker_turn = lambda **kwargs: recorded.append(kwargs)
+        worker.repository.record_role_turn = lambda **kwargs: recorded.append(kwargs)
 
-        worker._record_worker_turn(
+        worker._record_role_turn(
             terminal={"payload": {"durable_receipt_replay": True}},
             invocation_id="inv-replay",
             fencing_token=2,
@@ -142,10 +143,10 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
             "workspace_policy": {"mode": "read_only_repo"},
         }
 
-        for role in ("architect", "producer", "repair"):
+        for role in ("architect", "implementation"):
             self.assertTrue(_role_uses_bound_durable_workspace(role, writable), role)
             self.assertFalse(_role_uses_bound_durable_workspace(role, read_only), role)
-        for role in ("architecture_reviewer", "verifier", "reviewer"):
+        for role in ("reviewer", "verifier"):
             self.assertFalse(_role_uses_bound_durable_workspace(role, writable), role)
 
     def test_read_only_role_workspace_is_prepared_before_lsp_environment(self) -> None:
@@ -192,7 +193,7 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
 
     def test_semantic_worker_inputs_exclude_ephemeral_workspace_preparation(self) -> None:
         self.assertEqual(
-            _semantic_worker_input_refs(
+            _semantic_role_input_refs(
                 {
                     "requirements": {"sha256": "requirements-sha"},
                     "workspace_preparation": {"sha256": "temporary-worktree-sha"},
@@ -201,7 +202,7 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
             {"requirements": {"sha256": "requirements-sha"}},
         )
         self.assertEqual(
-            _semantic_worker_input_refs(
+            _semantic_role_input_refs(
                 {
                     "candidate_diff": {"sha256": "candidate-sha"},
                     "workspace_preparation": {"sha256": "verification-environment-sha"},
@@ -214,17 +215,18 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            _semantic_worker_input_refs(
+            _semantic_role_input_refs(
                 {
                     "architecture_index": {"sha256": "architecture-sha"},
                     "workspace_preparation": {"sha256": "review-environment-sha"},
                 },
-                role="architecture_reviewer",
+                role="reviewer",
+                mode="architecture",
             ),
             {"architecture_index": {"sha256": "architecture-sha"}},
         )
         self.assertEqual(
-            _assignment_worker_input_refs(
+            _assignment_role_input_refs(
                 {
                     "requirements": {"sha256": "requirements-sha"},
                     "workspace_preparation": {"sha256": "attempt-worktree-sha"},
@@ -309,16 +311,16 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
         self.assertNotEqual(first, next_cycle)
 
     def test_producer_dedup_key_distinguishes_candidate_cycles(self) -> None:
-        first = _producer_action_idempotency_key("submit", "node-1", 2, "report")
-        replay = _producer_action_idempotency_key("submit", "node-1", 2, "report")
-        next_cycle = _producer_action_idempotency_key("submit", "node-1", 3, "report")
+        first = _implementation_action_idempotency_key("submit", "node-1", 2, "report")
+        replay = _implementation_action_idempotency_key("submit", "node-1", 2, "report")
+        next_cycle = _implementation_action_idempotency_key("submit", "node-1", 3, "report")
 
         self.assertEqual(first, replay)
         self.assertNotEqual(first, next_cycle)
 
     def test_node_recovery_resumes_quiesce_and_snapshot_mechanical_steps(self) -> None:
         async def scenario() -> None:
-            worker = MinionV2SemanticWorker(
+            worker = SemanticOrchestrator(
                 MinionV2WorkflowService(Path(tempfile.mkdtemp()))
             )
             state = {"value": "QUIESCING"}
@@ -336,7 +338,7 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
                 return {"status": "snapshotted"}
 
             worker._quiesce_node = quiesce
-            worker._snapshot_candidate = snapshot
+            worker._snapshot_implementation_result = snapshot
 
             self.assertEqual(
                 (await worker._resume_node({}))["status"],
@@ -357,7 +359,7 @@ class _ControlSemanticEffects:
         self.service = service
 
     async def execute_semantic_effect(self, effect):
-        if effect.get("effect_type") == "pause_aggregate_work":
+        if effect.get("effect_type") == "pause_role":
             aggregate_type = AggregateType(str(effect["aggregate_type"]))
             snapshot = self.service.repository.read_snapshot(aggregate_type, str(effect["aggregate_id"]))
             self.service.repository.dispatch(
@@ -380,7 +382,7 @@ class _SlowSemanticEffects:
         self.release = asyncio.Event()
 
     async def execute_semantic_effect(self, effect):
-        if effect.get("effect_type") == "enqueue_architecture_stage":
+        if effect.get("effect_type") == "admit_architect_role":
             self.started.set()
             await self.release.wait()
         return {}
@@ -458,7 +460,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_background_effect_returns_after_durable_assignment_is_ready(self) -> None:
         async def scenario() -> None:
-            worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+            worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
             release = asyncio.Event()
             effect = {
                 "effect_id": "effect-background",
@@ -483,18 +485,19 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_reusable_assignment_matches_semantic_inputs_across_worktrees(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
-        worker.repository.list_worker_assignments = lambda **_kwargs: (
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
+        worker.repository.list_role_assignments = lambda **_kwargs: (
             {
                 "assignment_id": "accepted-review-assignment",
                 "workflow_id": "workflow-review",
                 "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
                 "aggregate_id": "architecture-review",
-                "role": "architecture_reviewer",
+                "role": "reviewer",
+                "mode": "architecture",
                 "submission_kind": "architecture_review",
                 "state": "settled",
                 "submission_artifact_ref": {
-                    "artifact_type": "ArchitectureReviewWorkerSubmissionArtifact",
+                    "artifact_type": "ArchitectureReviewRoleSubmissionArtifact",
                     "sha256": "review-sha",
                 },
                 "input_refs": {
@@ -504,11 +507,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             },
         )
 
-        reusable = worker._reusable_worker_assignment(
+        reusable = worker._reusable_role_assignment(
             workflow_id="workflow-review",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
             aggregate_id="architecture-review",
-            role="architecture_reviewer",
+            role="reviewer",
+            mode="architecture",
             submission_kind="architecture_review",
             input_refs={
                 "requirements": {"sha256": "requirements-sha"},
@@ -521,7 +525,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_durable_submission_reuses_the_attempt_prompt_workspace_binding(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
-        worker = MinionV2SemanticWorker(service)
+        worker = SemanticOrchestrator(service)
         prompt_ref = service.artifacts.put_json(
             {
                 "workspace": {
@@ -529,9 +533,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                     "v2_role_workspace": True,
                 }
             },
-            artifact_type="WorkerPromptPackArtifact",
+            artifact_type="RolePromptPackArtifact",
         )
-        worker.repository.read_worker_attempt = lambda _attempt_id: {
+        worker.repository.read_role_attempt = lambda _attempt_id: {
             "prompt_pack_ref": prompt_ref.to_dict()
         }
 
@@ -542,8 +546,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(resolved, prompt_ref)
 
     def test_verifier_assignment_is_not_reused_across_verification_environments(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
-        worker.repository.list_worker_assignments = lambda **_kwargs: (
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
+        worker.repository.list_role_assignments = lambda **_kwargs: (
             {
                 "assignment_id": "old-verification-assignment",
                 "workflow_id": "workflow-verification",
@@ -553,7 +557,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "submission_kind": "verification",
                 "state": "settled",
                 "submission_artifact_ref": {
-                    "artifact_type": "VerifierSubmissionArtifact",
+                    "artifact_type": "VerifierRoleSubmissionArtifact",
                     "sha256": "verification-sha",
                 },
                 "input_refs": {
@@ -563,11 +567,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             },
         )
 
-        reusable = worker._reusable_worker_assignment(
+        reusable = worker._reusable_role_assignment(
             workflow_id="workflow-verification",
             aggregate_type=AggregateType.DAG_NODE_RUN.value,
             aggregate_id="drawing-node",
             role="verifier",
+            mode="module",
             submission_kind="verification",
             input_refs={
                 "candidate_diff": {"sha256": "candidate-sha"},
@@ -577,19 +582,20 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         self.assertIsNone(reusable)
 
-    def test_failure_artifact_is_never_reused_as_worker_submission(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
-        worker.repository.list_worker_assignments = lambda **_kwargs: (
+    def test_failure_artifact_is_never_reused_as_role_submission(self) -> None:
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
+        worker.repository.list_role_assignments = lambda **_kwargs: (
             {
                 "assignment_id": "failed-producer-assignment",
                 "workflow_id": "workflow-producer",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                 "aggregate_id": "node-producer",
-                "role": "producer",
+                "role": "implementation",
+                "mode": "produce",
                 "submission_kind": "candidate",
                 "state": "settled",
                 "submission_artifact_ref": {
-                    "artifact_type": "WorkerAssignmentFailureArtifact",
+                    "artifact_type": "RoleAssignmentFailureArtifact",
                     "sha256": "failure-sha",
                 },
                 "input_refs": {
@@ -598,11 +604,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             },
         )
 
-        reusable = worker._reusable_worker_assignment(
+        reusable = worker._reusable_role_assignment(
             workflow_id="workflow-producer",
             aggregate_type=AggregateType.DAG_NODE_RUN.value,
             aggregate_id="node-producer",
-            role="producer",
+            role="implementation",
+            mode="produce",
             submission_kind="candidate",
             input_refs={"module_work_view": {"sha256": "module-sha"}},
         )
@@ -611,7 +618,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_background_worker_supervisor_enforces_global_slot_limit(self) -> None:
         async def scenario() -> None:
-            worker = MinionV2SemanticWorker(
+            worker = SemanticOrchestrator(
                 MinionV2WorkflowService(self.runtime_root),
                 max_parallel_workers=1,
             )
@@ -642,7 +649,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_stopping_before_assignment_keeps_effect_deferred(self) -> None:
         async def scenario() -> None:
-            worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+            worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
             worker.request_stop()
 
             async def runner(_effect):
@@ -661,9 +668,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_post_settlement_telemetry_failure_does_not_reopen_business_work(self) -> None:
         async def scenario() -> None:
-            worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+            worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
             worker._assignment_ids_by_effect["effect-key-settled"] = "assignment-settled"
-            worker.repository.read_worker_assignment = lambda _assignment_id: {
+            worker.repository.read_role_assignment = lambda _assignment_id: {
                 "assignment_id": "assignment-settled",
                 "state": "settled",
             }
@@ -684,21 +691,22 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_settled_receipt_is_replayed_while_aggregate_awaits_business_action(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
             SimpleNamespace(state="PRODUCING")
         )
-        worker.repository.list_worker_assignments = lambda **_kwargs: ()
+        worker.repository.list_role_assignments = lambda **_kwargs: ()
 
-        disposition = worker._worker_assignment_disposition(
-            {"effect_type": "spawn_producer_worker"},
+        disposition = worker._role_assignment_disposition(
+            {"effect_type": "run_implementation_role"},
             {
                 "assignment_id": "assignment-settled",
                 "state": "settled",
                 "workflow_id": "workflow-reconcile",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                 "aggregate_id": "node-reconcile",
-                "role": "producer",
+                "role": "implementation",
+                "mode": "produce",
                 "submission_kind": "candidate",
                 "input_refs": {},
             },
@@ -708,28 +716,29 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_settled_receipt_reconciliation_retries_without_reinvoking_worker(self) -> None:
         async def scenario() -> None:
-            worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+            worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
             effect = {
                 "effect_id": "effect-settled-reconcile",
                 "effect_key": "effect-key-settled-reconcile",
-                "effect_type": "spawn_producer_worker",
+                "effect_type": "run_implementation_role",
             }
             worker._assignment_ids_by_effect[effect["effect_key"]] = "assignment-settled"
-            worker.repository.read_worker_assignment = lambda _assignment_id: {
+            worker.repository.read_role_assignment = lambda _assignment_id: {
                 "assignment_id": "assignment-settled",
                 "state": "settled",
                 "workflow_id": "workflow-reconcile",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                 "aggregate_id": "node-reconcile",
-                "role": "producer",
+                "role": "implementation",
+                "mode": "produce",
                 "submission_kind": "candidate",
                 "input_refs": {},
             }
             worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="PRODUCING")
             )
-            worker.repository.list_worker_assignments = lambda **_kwargs: ()
-            worker.repository.list_worker_attempts = lambda _assignment_id: []
+            worker.repository.list_role_assignments = lambda **_kwargs: ()
+            worker.repository.list_role_attempts = lambda _assignment_id: []
             calls = 0
 
             async def runner(_effect):
@@ -742,7 +751,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             async def no_wait(_seconds):
                 return None
 
-            with patch("pal.minion.v2.workers.asyncio.sleep", new=no_wait):
+            with patch("pal.minion.v2.semantic_orchestration.orchestrator.asyncio.sleep", new=no_wait):
                 result = await worker._background_worker_loop(effect, runner)
 
             self.assertEqual(calls, 2)
@@ -752,11 +761,11 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_exhausted_settled_receipt_reconciliation_routes_failure(self) -> None:
         async def scenario() -> None:
-            worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+            worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
             effect = {
                 "effect_id": "effect-settled-failure",
                 "effect_key": "effect-key-settled-failure",
-                "effect_type": "spawn_producer_worker",
+                "effect_type": "run_implementation_role",
             }
             worker._assignment_ids_by_effect[effect["effect_key"]] = "assignment-settled"
             assignment = {
@@ -765,18 +774,19 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "workflow_id": "workflow-reconcile",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                 "aggregate_id": "node-reconcile",
-                "role": "producer",
+                "role": "implementation",
+                "mode": "produce",
                 "submission_kind": "candidate",
                 "input_refs": {},
             }
-            worker.repository.read_worker_assignment = lambda _assignment_id: dict(assignment)
+            worker.repository.read_role_assignment = lambda _assignment_id: dict(assignment)
             worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="PRODUCING")
             )
-            worker.repository.list_worker_assignments = lambda **_kwargs: ()
-            worker.repository.list_worker_attempts = lambda _assignment_id: []
+            worker.repository.list_role_assignments = lambda **_kwargs: ()
+            worker.repository.list_role_attempts = lambda _assignment_id: []
             routed: list[dict[str, object]] = []
-            worker._settle_background_worker_failure = (
+            worker._settle_background_role_failure = (
                 lambda received_effect, received_assignment, error, *, exhausted: (
                     routed.append(
                         {
@@ -799,7 +809,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             async def no_wait(_seconds):
                 return None
 
-            with patch("pal.minion.v2.workers.asyncio.sleep", new=no_wait):
+            with patch("pal.minion.v2.semantic_orchestration.orchestrator.asyncio.sleep", new=no_wait):
                 result = await worker._background_worker_loop(effect, runner)
 
             self.assertEqual(calls, 3)
@@ -811,7 +821,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_recorded_submission_replays_business_action_before_triage(self) -> None:
         async def scenario() -> None:
-            worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+            worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
             effect = {
                 "effect_id": "effect-reconcile",
                 "effect_key": "effect-key-reconcile",
@@ -822,13 +832,13 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             assignment_state = {"value": "result_recorded"}
             calls = 0
 
-            worker.repository.read_worker_assignment = lambda _assignment_id: {
+            worker.repository.read_role_assignment = lambda _assignment_id: {
                 "assignment_id": "assignment-reconcile",
                 "state": assignment_state["value"],
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                 "aggregate_id": "node-reconcile",
             }
-            worker.repository.list_worker_attempts = lambda _assignment_id: [
+            worker.repository.list_role_attempts = lambda _assignment_id: [
                 {"attempt_id": "attempt-reconcile"}
             ]
             worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
@@ -846,7 +856,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             async def no_wait(_seconds):
                 return None
 
-            with patch("pal.minion.v2.workers.asyncio.sleep", new=no_wait):
+            with patch("pal.minion.v2.semantic_orchestration.orchestrator.asyncio.sleep", new=no_wait):
                 result = await worker._background_worker_loop(effect, runner)
 
             self.assertEqual(calls, 2)
@@ -858,36 +868,42 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_recovery_restarts_a_durable_queued_assignment(self) -> None:
         async def scenario() -> None:
             service = MinionV2WorkflowService(self.runtime_root)
-            service.repository.ensure_worker_session(
+            service.repository.ensure_role_session(
                 session_id="session-recovery",
                 workflow_id="workflow-recovery",
                 aggregate_type=AggregateType.DAG_NODE_RUN,
                 aggregate_id="node-recovery",
-                role="producer",
+                role="implementation",
+                mode="produce",
+                executor_profile_id="software_engineering.v2_coder",
+                family_binding_sha="binding",
             )
-            assignment = service.repository.create_worker_assignment(
-                WorkerAssignmentRequest(
+            assignment = service.repository.create_role_assignment(
+                RoleAssignmentRequest(
                     assignment_key="recovery-assignment",
                     session_id="session-recovery",
                     workflow_id="workflow-recovery",
                     aggregate_type=AggregateType.DAG_NODE_RUN.value,
                     aggregate_id="node-recovery",
-                    role="producer",
+                    role="implementation",
+                    mode="produce",
+                    executor_profile_id="software_engineering.v2_coder",
+                    family_binding_sha="binding",
                     input_fingerprint="input-recovery",
                     required_inputs=(),
                     input_refs={},
                     execution_spec={
-                        "effect_type": "spawn_producer_worker",
+                        "effect_type": "run_implementation_role",
                         "effect_key": "effect-key-recovery",
                         "workflow_id": "workflow-recovery",
                         "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                         "aggregate_id": "node-recovery",
-                        "payload": {},
+                        "payload": {"role_mode": "produce"},
                     },
                     submission_kind="candidate",
                 )
             )
-            worker = MinionV2SemanticWorker(service)
+            worker = SemanticOrchestrator(service)
             started = asyncio.Event()
             release = asyncio.Event()
             worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
@@ -913,39 +929,45 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_recovery_does_not_duplicate_a_live_worker_attempt(self) -> None:
+    def test_recovery_does_not_duplicate_a_live_role_attempt(self) -> None:
         async def scenario() -> None:
             service = MinionV2WorkflowService(self.runtime_root)
-            service.repository.ensure_worker_session(
+            service.repository.ensure_role_session(
                 session_id="session-live-recovery",
                 workflow_id="workflow-live-recovery",
                 aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                 aggregate_id="architecture-live-recovery",
-                role="architecture_reviewer",
+                role="reviewer",
+                mode="architecture",
+                executor_profile_id="software_engineering.v2_reviewer",
+                family_binding_sha="binding",
             )
-            assignment = service.repository.create_worker_assignment(
-                WorkerAssignmentRequest(
+            assignment = service.repository.create_role_assignment(
+                RoleAssignmentRequest(
                     assignment_key="live-recovery-assignment",
                     session_id="session-live-recovery",
                     workflow_id="workflow-live-recovery",
                     aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
                     aggregate_id="architecture-live-recovery",
-                    role="architecture_reviewer",
+                    role="reviewer",
+                    mode="architecture",
+                    executor_profile_id="software_engineering.v2_reviewer",
+                    family_binding_sha="binding",
                     input_fingerprint="live-recovery-input",
                     required_inputs=(),
                     input_refs={},
                     execution_spec={
-                        "effect_type": "reconcile_architecture_revision",
+                        "effect_type": "run_reviewer_role",
                         "effect_key": "effect-key-live-recovery",
                         "workflow_id": "workflow-live-recovery",
                         "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
                         "aggregate_id": "architecture-live-recovery",
-                        "payload": {},
+                        "payload": {"role_mode": "architecture"},
                     },
                     submission_kind="architecture_review",
                 )
             )
-            attempt = service.repository.claim_worker_assignment(
+            attempt = service.repository.claim_role_assignment(
                 str(assignment["assignment_id"])
             )
             lease_resource = f"assignment:{assignment['assignment_id']}"
@@ -955,10 +977,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 ttl_seconds=120,
             )
             prompt_ref = service.artifacts.put_json(
-                {"role": "architecture_reviewer"},
-                artifact_type="WorkerPromptPackArtifact",
+                {"role": "reviewer", "mode": "architecture"},
+                artifact_type="RolePromptPackArtifact",
             )
-            service.repository.start_worker_attempt(
+            service.repository.start_role_attempt(
                 assignment_id=str(assignment["assignment_id"]),
                 attempt_id_value=str(attempt["attempt_id"]),
                 lease_resource_key=lease_resource,
@@ -967,9 +989,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             )
             submission_ref = service.artifacts.put_json(
                 {"verdict": "PASS"},
-                artifact_type="ArchitectureReviewWorkerSubmissionArtifact",
+                artifact_type="ArchitectureReviewRoleSubmissionArtifact",
             )
-            service.repository.record_worker_submission(
+            service.repository.record_role_submission(
                 assignment_id=str(assignment["assignment_id"]),
                 attempt_id_value=str(attempt["attempt_id"]),
                 fencing_token=lease.fencing_token,
@@ -981,7 +1003,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                     "aggregate_id": "architecture-live-recovery",
                 },
             )
-            worker = MinionV2SemanticWorker(service)
+            worker = SemanticOrchestrator(service)
             worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="REVIEWING")
             )
@@ -991,7 +1013,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             self.assertEqual(count, 0)
             self.assertEqual(worker.active_background_count, 0)
             self.assertEqual(
-                service.repository.read_worker_assignment(assignment["assignment_id"])[
+                service.repository.read_role_assignment(assignment["assignment_id"])[
                     "state"
                 ],
                 "result_recorded",
@@ -1002,36 +1024,42 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_recovery_cancels_assignment_for_a_paused_aggregate(self) -> None:
         async def scenario() -> None:
             service = MinionV2WorkflowService(self.runtime_root)
-            service.repository.ensure_worker_session(
+            service.repository.ensure_role_session(
                 session_id="session-paused",
                 workflow_id="workflow-paused",
                 aggregate_type=AggregateType.DAG_NODE_RUN,
                 aggregate_id="node-paused",
-                role="producer",
+                role="implementation",
+                mode="produce",
+                executor_profile_id="software_engineering.v2_coder",
+                family_binding_sha="binding",
             )
-            assignment = service.repository.create_worker_assignment(
-                WorkerAssignmentRequest(
+            assignment = service.repository.create_role_assignment(
+                RoleAssignmentRequest(
                     assignment_key="paused-assignment",
                     session_id="session-paused",
                     workflow_id="workflow-paused",
                     aggregate_type=AggregateType.DAG_NODE_RUN.value,
                     aggregate_id="node-paused",
-                    role="producer",
+                    role="implementation",
+                    mode="produce",
+                    executor_profile_id="software_engineering.v2_coder",
+                    family_binding_sha="binding",
                     input_fingerprint="input-paused",
                     required_inputs=(),
                     input_refs={},
                     execution_spec={
-                        "effect_type": "spawn_producer_worker",
+                        "effect_type": "run_implementation_role",
                         "effect_key": "effect-key-paused",
                         "workflow_id": "workflow-paused",
                         "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                         "aggregate_id": "node-paused",
-                        "payload": {},
+                        "payload": {"role_mode": "produce"},
                     },
                     submission_kind="candidate",
                 )
             )
-            worker = MinionV2SemanticWorker(service)
+            worker = SemanticOrchestrator(service)
             worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
                 SimpleNamespace(state="PAUSED")
             )
@@ -1040,7 +1068,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
             self.assertEqual(count, 0)
             self.assertEqual(
-                service.repository.read_worker_assignment(assignment["assignment_id"])[
+                service.repository.read_role_assignment(assignment["assignment_id"])[
                     "state"
                 ],
                 "cancelled",
@@ -1062,21 +1090,27 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 {"workspace_root": "/tmp/ephemeral"},
                 artifact_type="WorkspacePreparationArtifact",
             )
-            service.repository.ensure_worker_session(
+            service.repository.ensure_role_session(
                 session_id="session-duplicate-review",
                 workflow_id="workflow-duplicate-review",
                 aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                 aggregate_id="architecture-duplicate-review",
-                role="architecture_reviewer",
+                role="reviewer",
+                mode="architecture",
+                executor_profile_id="software_engineering.v2_reviewer",
+                family_binding_sha="binding",
             )
-            assignment = service.repository.create_worker_assignment(
-                WorkerAssignmentRequest(
+            assignment = service.repository.create_role_assignment(
+                RoleAssignmentRequest(
                     assignment_key="duplicate-review-assignment",
                     session_id="session-duplicate-review",
                     workflow_id="workflow-duplicate-review",
                     aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
                     aggregate_id="architecture-duplicate-review",
-                    role="architecture_reviewer",
+                    role="reviewer",
+                    mode="architecture",
+                    executor_profile_id="software_engineering.v2_reviewer",
+                    family_binding_sha="binding",
                     input_fingerprint="duplicate-review-input",
                     required_inputs=("requirements", "workspace_preparation"),
                     input_refs={
@@ -1084,18 +1118,18 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                         "workspace_preparation": preparation_ref.to_dict(),
                     },
                     execution_spec={
-                        "effect_type": "reconcile_architecture_revision",
+                        "effect_type": "run_reviewer_role",
                         "effect_key": "duplicate-review-effect",
                         "workflow_id": "workflow-duplicate-review",
                         "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
                         "aggregate_id": "architecture-duplicate-review",
-                        "payload": {},
+                        "payload": {"role_mode": "architecture"},
                     },
                     submission_kind="architecture_review",
                 )
             )
-            worker = MinionV2SemanticWorker(service)
-            worker._reusable_worker_assignment = lambda **_kwargs: {
+            worker = SemanticOrchestrator(service)
+            worker._reusable_role_assignment = lambda **_kwargs: {
                 "assignment_id": "accepted-review-assignment"
             }
 
@@ -1103,7 +1137,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
             self.assertEqual(count, 0)
             self.assertEqual(
-                service.repository.read_worker_assignment(assignment["assignment_id"])[
+                service.repository.read_role_assignment(assignment["assignment_id"])[
                     "state"
                 ],
                 "cancelled",
@@ -1120,7 +1154,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             ],
         )
 
-        initial = apply_v2_role_capability_policy(pack, role="architect")
+        initial = apply_v2_role_capability_policy(
+            pack,
+            activation=RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
+        )
         self.assertNotIn("op_minion_contract_revision_read", initial.allowed_capabilities)
         self.assertNotIn("op_minion_contract_read", initial.allowed_capabilities)
         self.assertIn("op_minion_contract_unit_upsert", initial.allowed_capabilities)
@@ -1148,7 +1185,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         processor._effect_snapshot = lambda _effect: previous
         completed: list[str] = []
-        processor.repository.complete_worker_session = lambda invocation_id, **_kwargs: completed.append(
+        processor.repository.complete_role_session = lambda invocation_id, **_kwargs: completed.append(
             invocation_id
         ) or True
         actions: list[ActionEnvelope] = []
@@ -1454,8 +1491,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertIn("repair every affected module in the same candidate", scoped)
 
     def test_architecture_stage_resolves_snapshot_before_profile(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
-        worker._effect_snapshot = lambda _effect: SimpleNamespace(workflow_id="wf-order")
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
+        worker._effect_snapshot = lambda _effect: SimpleNamespace(
+            workflow_id="wf-order", payload={}
+        )
 
         def stop_after_profile(workflow_id: str, role: str) -> str:
             self.assertEqual((workflow_id, role), ("wf-order", "architect"))
@@ -1466,7 +1505,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             asyncio.run(worker._run_architecture_stage({"payload": {"stage": "architect"}}))
 
     def test_resume_does_not_reclaim_a_live_architecture_stage(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         worker._effect_snapshot = lambda _effect: SimpleNamespace(
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch-live",
@@ -1482,7 +1521,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(result, {"status": "already_running", "active_worker_id": "inv-live"})
 
     def test_architecture_enqueue_does_not_reclaim_a_live_stage(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         worker._effect_snapshot = lambda _effect: SimpleNamespace(
             workflow_id="wf-live",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -1506,7 +1545,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(result, {"status": "already_running", "active_worker_id": "inv-live"})
 
     def test_architect_stage_uses_prepared_read_only_workspace(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         revision = SimpleNamespace(
             workflow_id="wf-requirements-scope",
             aggregate_id="arch-requirements-scope",
@@ -1553,7 +1592,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(dispatched, ["REBIND_ARCHITECT"])
 
     def test_producer_and_repair_admission_reuse_one_coder_session(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         claims: list[str] = []
         actions: list[ActionEnvelope] = []
 
@@ -1586,12 +1625,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker._admit_node_worker(
             {"effect_key": "producer"},
             action_type="START_PRODUCING",
-            role="producer",
+            activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
         )
         worker._admit_node_worker(
             {"effect_key": "repair"},
             action_type="START_REPAIR",
-            role="repair",
+            activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR),
         )
 
         expected = coder_session_id("node-coder-session")
@@ -1599,7 +1638,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual([item.payload["active_worker_id"] for item in actions], [expected, expected])
 
     def test_repeated_review_cycles_use_candidate_scoped_verifier_sessions(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         claims: list[str] = []
         actions: list[ActionEnvelope] = []
 
@@ -1632,12 +1671,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker._admit_node_worker(
             {"effect_key": "review-first"},
             action_type="START_REVIEW",
-            role="verifier",
+            activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
         )
         worker._admit_node_worker(
             {"effect_key": "review-after-repair"},
             action_type="START_REVIEW",
-            role="verifier",
+            activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
         )
 
         expected = [
@@ -1663,7 +1702,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         processor._effect_snapshot = lambda _effect: node
         completed: list[str] = []
-        processor.repository.complete_worker_session = lambda invocation_id, **_kwargs: completed.append(
+        processor.repository.complete_role_session = lambda invocation_id, **_kwargs: completed.append(
             invocation_id
         ) or True
         processor.repository.list_workflow_snapshots = lambda _workflow_id: []
@@ -1677,7 +1716,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
 
     def test_snapshot_effect_rebinds_expired_lease_and_reacquires_workspace_lock(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         workspace = self.runtime_root / "snapshot-worktree"
         workspace.mkdir()
         node = SimpleNamespace(
@@ -1716,12 +1755,14 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             return SimpleNamespace(snapshot=rebound)
 
         worker.repository.dispatch = dispatch
-        with patch("pal.minion.v2.workers.workspace_process_holders", return_value=()):
+        with patch("pal.minion.v2.semantic_orchestration.orchestrator.workspace_process_holders", return_value=()):
             rebound = asyncio.run(
                 worker._ensure_node_effect_lease(
                     node,
                     action_type="REBIND_SNAPSHOTTER",
-                    role="producer",
+                    activation=RoleActivation(
+                        OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE
+                    ),
                 )
             )
 
@@ -1731,7 +1772,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker._worktree_locks.release("node-rebind")
 
     def test_snapshot_effect_reuses_live_lease_and_reacquires_workspace_lock(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         workspace = self.runtime_root / "live-snapshot-worktree"
         workspace.mkdir()
         node = SimpleNamespace(
@@ -1759,12 +1800,14 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.renew_lease = lambda *_args, **_kwargs: None
         worker._workspace_fingerprint = lambda *_args: "stable-tree"
 
-        with patch("pal.minion.v2.workers.workspace_process_holders", return_value=()):
+        with patch("pal.minion.v2.semantic_orchestration.orchestrator.workspace_process_holders", return_value=()):
             rebound = asyncio.run(
                 worker._ensure_node_effect_lease(
                     node,
                     action_type="REBIND_SNAPSHOTTER",
-                    role="producer",
+                    activation=RoleActivation(
+                        OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE
+                    ),
                 )
             )
 
@@ -1773,7 +1816,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker._worktree_locks.release("node-live-snapshot")
 
     def test_fresh_effect_lease_is_renewed_before_worker_spawn(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         renewals: list[tuple[str, str, int, int]] = []
         worker.repository.assert_fencing_token = lambda *_args: None
         worker.repository.read_lease = lambda _key: {
@@ -1798,7 +1841,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(renewals, [("node:review:fresh", "inv-fresh", 4, 120)])
 
     def test_live_unmanaged_worker_is_reaped_and_rebound_with_new_fence(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         workspace = self.runtime_root / "review-restart"
         workspace.mkdir()
         verifier_id = verifier_session_id(
@@ -1856,12 +1899,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             self.assertEqual(timeout_seconds, 5.0)
             return True
 
-        with patch("pal.minion.v2.workers.terminate_process_group", side_effect=reaped):
+        with patch("pal.minion.v2.semantic_orchestration.orchestrator.terminate_process_group", side_effect=reaped):
             rebound = asyncio.run(
                 worker._ensure_node_effect_lease(
                     node,
                     action_type="REBIND_REVIEWER",
-                    role="reviewer",
+                    activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
                 )
             )
 
@@ -1870,7 +1913,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(rebound.payload["fencing_token"], 7)
 
     def test_architect_quiesce_releases_managed_lsp_before_holder_check(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         workspace = self.runtime_root / "architecture-worktree"
         workspace.mkdir()
         revision = SimpleNamespace(
@@ -1913,10 +1956,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.dispatch = lambda action: actions.append(action)
 
         with (
-            patch("pal.minion.v2.workers.workspace_process_holders", side_effect=holders),
-            patch("pal.minion.v2.workers.workspace_content_fingerprint", return_value="tree"),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.workspace_process_holders", side_effect=holders),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.workspace_content_fingerprint", return_value="tree"),
         ):
-            asyncio.run(worker._quiesce_architect({"effect_key": "quiesce-lsp"}))
+            asyncio.run(worker._quiesce_architect_role({"effect_key": "quiesce-lsp"}))
 
         self.assertEqual(released, [workspace])
         self.assertTrue(holder_checks)
@@ -1925,7 +1968,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker._worktree_locks.release(revision.aggregate_id)
 
     def test_paused_architecture_stage_does_not_restart_worker(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         revision = SimpleNamespace(
             workflow_id="wf-paused-stage",
             aggregate_id="arch-paused-stage",
@@ -1980,7 +2023,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_skeleton_architect_submission_hands_live_lease_to_quiescer(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
-        worker = MinionV2SemanticWorker(service)
+        worker = SemanticOrchestrator(service)
         requirements_ref = service.task_sources.publish(
             title="Routing",
             request_text="Route requests deterministically.\n",
@@ -1991,7 +2034,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         workspace_snapshot_ref = service.artifacts.put_json(
             {"snapshot_commit_sha": "base"}, artifact_type="WorkspaceSnapshotArtifact"
         )
-        prompt_ref = service.artifacts.put_json({}, artifact_type="WorkerPromptPackArtifact")
+        prompt_ref = service.artifacts.put_json({}, artifact_type="RolePromptPackArtifact")
         terminal_ref = service.artifacts.put_json({}, artifact_type="WorkerResponseArtifact")
         architecture_worktree = self.runtime_root / "architecture-worktree"
         architecture_worktree.mkdir()
@@ -2033,7 +2076,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             return SimpleNamespace(snapshot=running)
 
         worker.repository.dispatch = dispatch
-        worker.repository.record_worker_turn = lambda **_kwargs: None
+        worker.repository.record_role_turn = lambda **_kwargs: None
         released: list[tuple[object, ...]] = []
         worker.repository.release_lease = lambda *args: released.append(args)
 
@@ -2051,7 +2094,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         worker._run_profile = run_profile
         with patch(
-            "pal.minion.v2.workers.workflow_request_from_snapshot",
+            "pal.minion.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot",
             return_value={"workspace": {"kind": "existing_repo"}, "references": []},
         ):
             result = asyncio.run(
@@ -2069,7 +2112,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_skeleton_architect_failure_releases_writer_lease(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
-        worker = MinionV2SemanticWorker(service)
+        worker = SemanticOrchestrator(service)
         requirements_ref = service.task_sources.publish(
             title="Routing",
             request_text="Route requests deterministically.\n",
@@ -2116,7 +2159,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         worker._run_profile = fail_profile
         with patch(
-            "pal.minion.v2.workers.workflow_request_from_snapshot",
+            "pal.minion.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot",
             return_value={"workspace": {"kind": "existing_repo"}, "references": []},
         ):
             with self.assertRaisesRegex(RuntimeError, "architect failed"):
@@ -2139,7 +2182,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_architect_revision_handoff_binds_only_semantic_scope(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
-        worker = MinionV2SemanticWorker(service)
+        worker = SemanticOrchestrator(service)
         request_ref = service.artifacts.put_json({"goal": "research"}, artifact_type="WorkflowRequestArtifact")
         requirements_ref = service.task_sources.publish(
             title="Architecture repair",
@@ -2199,7 +2242,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         worker.repository.read_snapshot = lambda *_args: workflow
 
-        with patch("pal.minion.v2.workers.workflow_request_from_snapshot", return_value={"references": []}):
+        with patch("pal.minion.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot", return_value={"references": []}):
             instruction, refs = worker._architecture_stage_prompt("architect", revision)
 
         self.assertIn("revision_scope", refs)
@@ -2263,7 +2306,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertNotIn("input_read", prompt)
 
     def test_architect_revision_seeds_the_contract_builder_draft(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         captured: dict[str, object] = {}
         ref = worker.service.artifacts.put_json({"base": True}, artifact_type="ArchitectureContractArtifact")
         snapshot = SimpleNamespace(
@@ -2282,23 +2325,32 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         identity = lambda pack, **_kwargs: pack
         with (
-            patch("pal.minion.v2.workers.seed_contract_builder_draft") as seed,
-            patch("pal.minion.v2.workers.workflow_request_from_snapshot", return_value={"workspace": {"kind": "new_project"}}),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.seed_contract_builder_draft") as seed,
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot", return_value={"workspace": {"kind": "new_project"}}),
             patch.object(
                 worker.service.artifacts,
                 "read_json",
                 return_value={
+                    "schema_version": "3",
                     "policies": {},
-                    "profile_definitions": {"architect": {"profile_id": "v2_architect"}},
-                    "manifest": {"family_id": "software_engineering"},
+                    "role_bindings": {
+                        "architect": {
+                            "selector": "software_engineering.v2_architect",
+                            "executor_profile": {
+                                "profile_id": "v2_architect",
+                                "profile_group": "software_engineering",
+                                "canonical_profile_id": "software_engineering.v2_architect",
+                            },
+                        }
+                    },
                 },
             ),
-            patch("pal.minion.v2.workers.resolve_pinned_minion_pack", lambda pack, **_kwargs: pack),
-            patch("pal.minion.v2.workers.apply_v2_role_capability_policy", identity),
-            patch("pal.minion.v2.workers.apply_v2_research_capability_policy", identity),
-            patch("pal.minion.v2.workers.sanitize_runner_session_pack", identity),
-            patch("pal.minion.v2.workers.with_minion_sandbox_metadata", lambda _root, pack, **_kwargs: pack),
-            patch.object(worker.repository, "record_worker_invocation", side_effect=record),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.resolve_pinned_minion_pack", lambda pack, **_kwargs: pack),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_role_capability_policy", identity),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_research_capability_policy", identity),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.sanitize_runner_session_pack", identity),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.with_minion_sandbox_metadata", lambda _root, pack, **_kwargs: pack),
+            patch.object(worker.repository, "record_role_invocation", side_effect=record),
         ):
             with self.assertRaisesRegex(RuntimeError, "stop-after-seed"):
                 asyncio.run(
@@ -2309,7 +2361,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                         lease_resource="architecture:arch-seeded-revision:architect",
                         fencing_token=1,
                         profile="software_engineering.v2_architect",
-                        role_override="architect",
+                        activation=RoleActivation(
+                            OrchestrationRole.ARCHITECT,
+                            RoleMode.REVISION,
+                        ),
                         instruction="repair only the finding",
                         reference_refs={},
                         prepare_workspace=False,
@@ -2321,7 +2376,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def test_scoped_revision_reuses_unmodified_fragment_refs(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
-        worker = MinionV2SemanticWorker(service)
+        worker = SemanticOrchestrator(service)
         requirements = service.task_sources.publish(
             title="Implement the module",
             request_text="Implement the module.\n",
@@ -2397,7 +2452,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(new_manifest["unit_contract_refs"][1], old_manifest["unit_contract_refs"][1])
 
     def test_profile_worker_preserves_scheduler_lease_owner_id(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         leased_invocation_id = "inv_scheduler_owned"
         captured: dict[str, str] = {}
 
@@ -2408,7 +2463,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.read_snapshot = lambda *_args: SimpleNamespace(
             payload={"family_binding_ref": {"sha256": "binding"}}
         )
-        worker.repository.record_worker_invocation = capture_invocation
+        worker.repository.record_role_invocation = capture_invocation
         snapshot = SimpleNamespace(
             workflow_id="wf-lease-owner",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -2417,21 +2472,30 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         identity = lambda pack, **_kwargs: pack
         with (
-            patch("pal.minion.v2.workers.workflow_request_from_snapshot", return_value={"workspace": {"kind": "new_project"}}),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot", return_value={"workspace": {"kind": "new_project"}}),
             patch.object(
                 worker.service.artifacts,
                 "read_json",
                 return_value={
+                    "schema_version": "3",
                     "policies": {},
-                    "profile_definitions": {"architect": {"profile_id": "v2_architect"}},
-                    "manifest": {"family_id": "software_engineering"},
+                    "role_bindings": {
+                        "architect": {
+                            "selector": "software_engineering.v2_architect",
+                            "executor_profile": {
+                                "profile_id": "v2_architect",
+                                "profile_group": "software_engineering",
+                                "canonical_profile_id": "software_engineering.v2_architect",
+                            },
+                        }
+                    },
                 },
             ),
-            patch("pal.minion.v2.workers.resolve_pinned_minion_pack", lambda pack, **_kwargs: pack),
-            patch("pal.minion.v2.workers.apply_v2_role_capability_policy", identity),
-            patch("pal.minion.v2.workers.apply_v2_research_capability_policy", identity),
-            patch("pal.minion.v2.workers.sanitize_runner_session_pack", identity),
-            patch("pal.minion.v2.workers.with_minion_sandbox_metadata", lambda _root, pack, **_kwargs: pack),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.resolve_pinned_minion_pack", lambda pack, **_kwargs: pack),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_role_capability_policy", identity),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_research_capability_policy", identity),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.sanitize_runner_session_pack", identity),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.with_minion_sandbox_metadata", lambda _root, pack, **_kwargs: pack),
         ):
             with self.assertRaisesRegex(RuntimeError, "stop-after-invocation-record"):
                 asyncio.run(
@@ -2442,7 +2506,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                         lease_resource="architecture:arch-lease-owner:architect",
                         fencing_token=7,
                         profile="software_engineering.v2_architect",
-                        role_override="architect",
+                        activation=RoleActivation(
+                            OrchestrationRole.ARCHITECT,
+                            RoleMode.AUTHOR,
+                        ),
                         instruction="produce architecture",
                         reference_refs={},
                         prepare_workspace=False,
@@ -2458,7 +2525,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "task_id": task_id,
                 "title": suffix,
                 "objective": f"Exercise {suffix}",
-                "family_id": "software_engineering",
+                "profile": "software_engineering.v2_coder",
                 "workspace": {"kind": "new_project", "project_name": suffix},
                 "actor": "nathan",
                 "source_channel": "socket:test",
@@ -2624,7 +2691,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 meta=meta,
                 args={
                     "title": "Tiny semantic router",
-                    "family_id": "software_engineering",
+                    "profile": "software_engineering.v2_coder",
                     "goal": "Implement deterministic rule routing. Route matching must be deterministic.",
                     "workspace": {"kind": "new_project", "project_name": "tiny-router"},
                 },
@@ -2699,7 +2766,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 meta=old_meta,
                 args={
                     "title": "鸿蒙字体渲染验证",
-                    "family_id": "software_engineering",
+                    "profile": "software_engineering.v2_coder",
                     "goal": "验证 OpenHarmony 原生字体生命周期和渲染流程。原生字体必须由包装对象独占。",
                     "workspace": {"kind": "new_project", "project_name": "ohos-font-probe"},
                 },
@@ -3031,7 +3098,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         ):
             asyncio.run(processor.process_once(limit=10))
         validate.assert_called_once()
-        publish_family_binding.assert_called_once_with("software_engineering")
+        publish_family_binding.assert_not_called()
 
         source = repository.read_snapshot(AggregateType.WORKFLOW, "wf_restart_source")
         replacement_id = str(source.payload["replacement_workflow_id"])
@@ -3040,6 +3107,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(source.state, "CANCELLED")
         self.assertEqual(replacement.state, "CREATED")
         self.assertEqual(replacement.payload["task_id"], task_id)
+        task = repository.read_snapshot(AggregateType.TASK, task_id)
+        self.assertEqual(replacement.payload["family_binding_ref"], task.payload["family_binding_ref"])
         self.assertEqual(replacement_request["operation"], "review_then_execute")
         self.assertEqual(replacement_request["input_artifact_ref"], manifest_ref)
         self.assertNotIn("reuse_candidates", replacement_request)
@@ -3491,7 +3560,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "task_id": "normalized-task",
                 "title": "Normalize task inputs",
                 "objective": "Keep worker handoff canonical",
-                "family_id": "software_engineering",
+                "profile": "software_engineering.v2_coder",
                 "workspace": {"repo_root": str(repo)},
                 "references": [{"uri": f"file://{patch}", "note": "truth"}],
             }
@@ -3553,7 +3622,7 @@ framepipe encode 4869
             {
                 "workflow_id": "wf_requirement_file",
                 "title": "Framepipe",
-                "family_id": "software_engineering",
+                "profile": "software_engineering.v2_coder",
                 "operation": "new_requirement",
                 "goal": "Implement Framepipe.\nUse C++17 only.\nThe verification node must launch the built executable.",
                 "workspace": {"repo_path": str(repo), "primary_language": "cpp"},
@@ -3578,7 +3647,7 @@ framepipe encode 4869
         outside.write_text("Do not ingest me.\n", encoding="utf-8")
         base = {
             "title": "Unsafe requirement source",
-            "family_id": "software_engineering",
+            "profile": "software_engineering.v2_coder",
             "operation": "new_requirement",
             "goal": "Reject unsafe paths.",
             "workspace": {"repo_path": str(repo)},
@@ -3997,7 +4066,7 @@ framepipe encode 4869
         )
         recovery = MinionV2OutboxProcessor(
             service,
-            semantic_effects=MinionV2SemanticWorker(service),
+            semantic_effects=SemanticOrchestrator(service),
         )
         asyncio.run(recovery.process_once(limit=1))
         cancelled = service.repository.read_snapshot(
@@ -4151,7 +4220,7 @@ framepipe encode 4869
                 )
             }
         self.assertIn("pause_epoch_nodes", pending_effect_types)
-        self.assertIn("pause_node_worker", pending_effect_types)
+        self.assertIn("pause_role", pending_effect_types)
 
     def test_terminal_child_effect_failure_escalates_to_active_workflow(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
@@ -4361,7 +4430,7 @@ framepipe encode 4869
 
     def test_worker_token_cannot_borrow_another_broker_run(self) -> None:
         manager = MinionManager(self.runtime_root)
-        manager.worker_gateway.authorize = lambda _token: {
+        manager.role_gateway.authorize = lambda _token: {
             "assignment": {"session_id": "inv-owner"}
         }
         manager.runs["run-other"] = MinionRunState(
@@ -4408,7 +4477,7 @@ framepipe encode 4869
             controls.append({"run_id": run_id, "message": dict(message)})
             return True
 
-        manager.v2_semantic_worker.send_worker_control = send_control
+        manager.v2_semantic_orchestrator.send_worker_control = send_control
         result = asyncio.run(
             manager.answer_workflow_question(
                 {
@@ -4480,7 +4549,7 @@ framepipe encode 4869
                 process.returncode = 0
                 return True
 
-            manager.v2_semantic_worker.send_worker_control = send_control
+            manager.v2_semantic_orchestrator.send_worker_control = send_control
             manager.request_shutdown(
                 reason="plugin_reload",
                 timeout_seconds=1.0,

@@ -32,7 +32,7 @@ class MinionV2Recovery:
             if process_group <= 0 and str(lease.get("resource_key") or "").startswith(
                 "assignment:"
             ):
-                attempt = self.repository.read_worker_attempt(
+                attempt = self.repository.read_role_attempt(
                     str(lease.get("owner_id") or "")
                 )
                 process_group = int(dict(attempt or {}).get("process_group_id") or 0)

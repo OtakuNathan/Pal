@@ -18,9 +18,9 @@ from pal.minion.config import effective_minion_runtime_config
 from pal.minion.event_delivery import MinionEventDelivery
 from pal.minion.ipc import (
     cleanup_manager_endpoint,
-    cleanup_worker_gateway_endpoint,
+    cleanup_role_gateway_endpoint,
     start_manager_server,
-    start_worker_gateway_server,
+    start_role_gateway_server,
 )
 from pal.minion.llm_broker import (
     llm_outcome_to_payload,
@@ -33,8 +33,8 @@ from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.recovery import MinionV2Recovery
 from pal.minion.v2.service import MinionV2WorkflowService
-from pal.minion.v2.workers import MinionV2SemanticWorker
-from pal.minion.v2.worker_gateway import WorkerAssignmentGateway
+from pal.minion.v2.semantic_orchestration import SemanticOrchestrator
+from pal.minion.v2.role_gateway import RoleAssignmentGateway
 from pal.shared import MinionApprovalDecision, MinionInvocationPack
 
 
@@ -92,9 +92,9 @@ class MinionManager:
     max_parallel_modules: int | None = None
     graceful_shutdown_timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
     server: asyncio.base_events.Server | None = None
-    worker_server: asyncio.base_events.Server | None = None
+    role_server: asyncio.base_events.Server | None = None
     endpoint_info: dict[str, Any] = field(default_factory=dict)
-    worker_endpoint_info: dict[str, Any] = field(default_factory=dict)
+    role_endpoint_info: dict[str, Any] = field(default_factory=dict)
     runs: dict[str, MinionRunState] = field(default_factory=dict)
     started_at: str = field(default_factory=utc_now)
     catalog: MinionCatalogService = field(init=False)
@@ -102,8 +102,8 @@ class MinionManager:
     events: MinionEventDelivery = field(init=False)
     v2_service: MinionV2WorkflowService = field(init=False)
     v2_outbox: MinionV2OutboxProcessor = field(init=False)
-    v2_semantic_worker: MinionV2SemanticWorker = field(init=False)
-    worker_gateway: WorkerAssignmentGateway = field(init=False)
+    v2_semantic_orchestrator: SemanticOrchestrator = field(init=False)
+    role_gateway: RoleAssignmentGateway = field(init=False)
     _llm_broker_bundle: Any | None = field(default=None, init=False, repr=False)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _drain_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -121,8 +121,8 @@ class MinionManager:
         self.max_parallel_modules = max(1, int(self.max_parallel_modules or configured or _DEFAULT_MAX_PARALLEL_NODES))
         self.events = MinionEventDelivery()
         self.v2_service = MinionV2WorkflowService(Path(self.runtime_root))
-        self.worker_gateway = WorkerAssignmentGateway(self.v2_service)
-        self.v2_semantic_worker = MinionV2SemanticWorker(
+        self.role_gateway = RoleAssignmentGateway(self.v2_service)
+        self.v2_semantic_orchestrator = SemanticOrchestrator(
             self.v2_service,
             max_parallel_workers=self.max_parallel_modules,
             publish_human_review=self._publish_v2_human_review,
@@ -132,7 +132,7 @@ class MinionManager:
         )
         self.v2_outbox = MinionV2OutboxProcessor(
             self.v2_service,
-            semantic_effects=self.v2_semantic_worker,
+            semantic_effects=self.v2_semantic_orchestrator,
             max_parallel_nodes=self.max_parallel_modules,
         )
 
@@ -147,27 +147,27 @@ class MinionManager:
     async def run(self) -> None:
         recovery = await asyncio.to_thread(MinionV2Recovery(self.v2_service).recover)
         self.server, self.endpoint_info = await start_manager_server(self.runtime_root, self._handle_client)
-        self.worker_server, self.worker_endpoint_info = await start_worker_gateway_server(
+        self.role_server, self.role_endpoint_info = await start_role_gateway_server(
             self.runtime_root,
-            self._handle_worker_client,
+            self._handle_role_client,
         )
         self.logger.info(
-            "minion manager listening: %s worker_gateway=%s recovery=%s",
+            "minion manager listening: %s role_gateway=%s recovery=%s",
             self.endpoint_info,
-            self.worker_endpoint_info,
+            self.role_endpoint_info,
             recovery,
         )
         remove_signals = self._install_signal_handlers()
-        async with self.server, self.worker_server:
+        async with self.server, self.role_server:
             serve_task = asyncio.create_task(self.server.serve_forever(), name="minion-manager-serve")
-            worker_serve_task = asyncio.create_task(
-                self.worker_server.serve_forever(),
-                name="minion-worker-gateway-serve",
+            role_serve_task = asyncio.create_task(
+                self.role_server.serve_forever(),
+                name="minion-role-gateway-serve",
             )
-            recovered_assignments = await self.v2_semantic_worker.recover_background_assignments()
+            recovered_assignments = await self.v2_semantic_orchestrator.recover_background_assignments()
             if recovered_assignments:
                 self.logger.info(
-                    "recovered %s durable worker assignment(s)",
+                    "recovered %s durable role assignment(s)",
                     recovered_assignments,
                 )
             self._v2_outbox_task = asyncio.create_task(self._run_v2_outbox(), name="minion-v2-outbox")
@@ -175,7 +175,7 @@ class MinionManager:
                 await self._shutdown_event.wait()
             finally:
                 remove_signals()
-                self.v2_semantic_worker.request_stop()
+                self.v2_semantic_orchestrator.request_stop()
                 if self._v2_outbox_task is not None:
                     self._v2_outbox_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
@@ -185,18 +185,18 @@ class MinionManager:
                 # safe point and persist their final receipt or continuation.
                 await self.close_all()
                 serve_task.cancel()
-                worker_serve_task.cancel()
+                role_serve_task.cancel()
                 self.server.close()
-                self.worker_server.close()
+                self.role_server.close()
                 await self.server.wait_closed()
-                await self.worker_server.wait_closed()
+                await self.role_server.wait_closed()
                 with contextlib.suppress(asyncio.CancelledError):
                     await serve_task
                 with contextlib.suppress(asyncio.CancelledError):
-                    await worker_serve_task
+                    await role_serve_task
                 await self.events.close()
                 await cleanup_manager_endpoint(self.runtime_root)
-                await cleanup_worker_gateway_endpoint(self.runtime_root)
+                await cleanup_role_gateway_endpoint(self.runtime_root)
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -225,7 +225,7 @@ class MinionManager:
             logger=self.logger,
         )
 
-    async def _handle_worker_client(
+    async def _handle_role_client(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
@@ -241,7 +241,7 @@ class MinionManager:
                         await dispatch_sidecar_request(
                             request,
                             self._call_worker_method,
-                            error_kind=lambda _exc: "worker_gateway",
+                            error_kind=lambda _exc: "role_gateway",
                             logger=self.logger,
                         )
                     )
@@ -270,7 +270,7 @@ class MinionManager:
             payload = dict(params or {})
             token = str(payload.pop("access_token", ""))
             authenticated = await asyncio.to_thread(
-                self.worker_gateway.authorize,
+                self.role_gateway.authorize,
                 token,
             )
             run_id = str(payload.get("run_id") or "")
@@ -278,10 +278,10 @@ class MinionManager:
             assignment = dict(authenticated.get("assignment") or {})
             if run is None or run.minion_id != str(assignment.get("session_id") or ""):
                 raise PermissionError(
-                    "worker assignment token does not own the requested broker run"
+                    "role assignment token does not own the requested broker run"
                 )
             return await broker_handlers[method](payload)
-        return await asyncio.to_thread(self.worker_gateway.call, method, params)
+        return await asyncio.to_thread(self.role_gateway.call, method, params)
 
     async def _call_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         handlers = {
@@ -361,7 +361,7 @@ class MinionManager:
                 await asyncio.sleep(0.05)
                 continue
             try:
-                await self.v2_semantic_worker.recover_background_assignments()
+                await self.v2_semantic_orchestrator.recover_background_assignments()
                 if self.v2_outbox.start_available(max_concurrency=self.max_parallel_modules + 8):
                     await asyncio.sleep(0)
                     continue
@@ -383,7 +383,8 @@ class MinionManager:
                 "minion_id": "",
                 "run_id": "",
                 "workflow_id": str(payload.get("workflow_id") or ""),
-                "minion_profile": "minion_v2.verifier" if standalone else "minion_v2.architecture_reviewer",
+                "minion_profile": "minion_v2.reviewer",
+                "role_mode": "standalone" if standalone else "architecture",
                 "payload": {**dict(payload), "minion_v2": True, **({"status": "completed"} if standalone else {})},
                 "created_at": utc_now(),
             }
@@ -437,7 +438,7 @@ class MinionManager:
         )
         if state is None:
             raise KeyError(f"unknown approval target: {decision.approval_id}")
-        if not await self.v2_semantic_worker.send_worker_control(
+        if not await self.v2_semantic_orchestrator.send_worker_control(
             state.run_id,
             {"type": "decision", "decision": decision.to_dict()},
         ):
@@ -459,7 +460,7 @@ class MinionManager:
         )
         if state is None:
             raise KeyError(f"unknown clarification target: {clarification_id or run_id}")
-        if not await self.v2_semantic_worker.send_worker_control(
+        if not await self.v2_semantic_orchestrator.send_worker_control(
             state.run_id,
             {"type": "clarification", "clarification": dict(payload)},
         ):
@@ -608,7 +609,7 @@ class MinionManager:
             int(config.get("max_parallel_llm_nodes", config.get("max_parallel_modules", self.max_parallel_modules)) or self.max_parallel_modules),
         )
         self.v2_outbox.max_parallel_nodes = self.max_parallel_modules
-        self.v2_semantic_worker.max_parallel_workers = self.max_parallel_modules
+        self.v2_semantic_orchestrator.max_parallel_workers = self.max_parallel_modules
         self._v2_wake_event.set()
         return {"ok": True, "status": "ok", "config": config, "max_parallel_llm_nodes": self.max_parallel_modules}
 
@@ -622,7 +623,7 @@ class MinionManager:
         self._shutdown_reason = reason
         self._shutdown_started_at = self._shutdown_started_at or utc_now()
         self.graceful_shutdown_timeout_seconds = max(0.0, timeout_seconds)
-        self.v2_semantic_worker.request_stop()
+        self.v2_semantic_orchestrator.request_stop()
         if graceful:
             self._drain_requested.set()
             if self._drain_task is None or self._drain_task.done():
@@ -654,7 +655,7 @@ class MinionManager:
                     or process.returncode is not None
                 ):
                     continue
-                sent = await self.v2_semantic_worker.send_worker_control(
+                sent = await self.v2_semantic_orchestrator.send_worker_control(
                     run_id,
                     {
                         "type": "restart_requested",
@@ -678,7 +679,7 @@ class MinionManager:
             ]
             background_count = (
                 self.v2_outbox.active_background_count
-                + self.v2_semantic_worker.active_background_count
+                + self.v2_semantic_orchestrator.active_background_count
             )
             if not active_runs and background_count == 0:
                 break
@@ -702,7 +703,7 @@ class MinionManager:
         if waiters:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.gather(*waiters), timeout=self.graceful_shutdown_timeout_seconds)
-        await self.v2_semantic_worker.stop_background_workers(
+        await self.v2_semantic_orchestrator.stop_background_workers(
             timeout_seconds=self.graceful_shutdown_timeout_seconds,
         )
         if self._llm_broker_bundle is not None:

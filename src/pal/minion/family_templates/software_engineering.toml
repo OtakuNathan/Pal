@@ -4,13 +4,11 @@ domain = "Software design, implementation, code review, repository maintenance, 
 domain_keywords = ["code", "software", "repo", "test", "build", "review", "bug", "implementation"]
 workflow_template = "contract_dag.v2"
 
-[roles]
+[role_bindings]
 architect = "software_engineering.v2_architect"
-architecture_reviewer = "software_engineering.v2_architecture_reviewer"
-producer = "software_engineering.v2_coder"
-repair = "software_engineering.v2_coder"
-verifier = "software_engineering.v2_verifier"
 reviewer = "software_engineering.v2_reviewer"
+implementation = "$task_profile"
+verifier = "software_engineering.v2_verifier"
 
 [builders]
 contract = "skeleton_git.v2"
@@ -48,9 +46,6 @@ prewarm_lsp = true
 builtin = true
 require_primary_language = true
 uses_architecture_mode = true
-producer_role = "architect"
-producer_plan_label = "architecture sketch"
-planning_depth_policy = "explicit"
 
 [capability_groups.software_producer]
 include = ["workspace_read", "workspace_write", "code_intel", "verification_shell", "minion_artifacts"]

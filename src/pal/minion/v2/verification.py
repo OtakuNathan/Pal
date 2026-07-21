@@ -347,8 +347,8 @@ class VerificationService:
         scenario_fingerprint: str = "",
         requirement_patch_ref: ArtifactRef | None = None,
         revised_requirements_ref: ArtifactRef | None = None,
-        worker_assignment_id: str = "",
-        worker_submission_payload_hash: str = "",
+        role_assignment_id: str = "",
+        role_submission_payload_hash: str = "",
         accepted_candidate_ref: ArtifactRef | None = None,
         accepted_candidate_digest: str = "",
     ) -> DispatchResult:
@@ -516,8 +516,8 @@ class VerificationService:
                 idempotency_key=f"verdict:{node.aggregate_id}:{node.version}:{verification_ref.sha256}",
                 payload=payload,
             ),
-            worker_assignment_id=worker_assignment_id,
-            worker_submission_payload_hash=worker_submission_payload_hash,
+            role_assignment_id=role_assignment_id,
+            role_submission_payload_hash=role_submission_payload_hash,
         )
 
 

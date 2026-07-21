@@ -4,12 +4,11 @@ domain = "Generic bounded task execution when no registered domain family fits."
 domain_keywords = ["general", "generic", "task"]
 workflow_template = "contract_dag.v2"
 
-[roles]
-architect = "general.architect"
-architecture_reviewer = "general.architecture_reviewer"
-producer = "generic"
-repair = "generic"
-verifier = "general.verifier"
+[role_bindings]
+architect = "$task_profile"
+reviewer = "$task_profile"
+implementation = "$task_profile"
+verifier = "$task_profile"
 
 [builders]
 contract = "contract_sketch.v2"

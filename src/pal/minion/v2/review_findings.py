@@ -97,8 +97,10 @@ def is_review_finding_capability(name: str) -> bool:
 
 
 def review_finding_draft_kind(workspace: Mapping[str, Any]) -> str:
-    role = str(dict(workspace.get("minion_v2") or {}).get("role") or "")
-    if role == "architecture_reviewer":
+    metadata = dict(workspace.get("minion_v2") or {})
+    role = str(metadata.get("role") or "")
+    mode = str(metadata.get("mode") or "")
+    if role == "reviewer" and mode == "architecture":
         return "architecture_review"
     if role == "reviewer":
         return "standalone_review"
@@ -112,8 +114,10 @@ def add_finding_tool_result(
     try:
         args = dict(call.args or {})
         finding = normalize_finding(args)
-        role = str(dict(workspace.get("minion_v2") or {}).get("role") or "")
-        if role == "architecture_reviewer" and finding["finding_kind"] not in {
+        metadata = dict(workspace.get("minion_v2") or {})
+        role = str(metadata.get("role") or "")
+        mode = str(metadata.get("mode") or "")
+        if role == "reviewer" and mode == "architecture" and finding["finding_kind"] not in {
             "requirements_defect",
             "contract_defect",
             "architecture_defect",

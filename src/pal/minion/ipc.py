@@ -28,12 +28,12 @@ def minion_port_path(runtime_root: Path) -> Path:
     return _minion_endpoint(runtime_root).port_path
 
 
-def minion_worker_socket_path(runtime_root: Path) -> Path:
-    return _minion_worker_endpoint(runtime_root).socket_path
+def minion_role_socket_path(runtime_root: Path) -> Path:
+    return _minion_role_endpoint(runtime_root).socket_path
 
 
-def minion_worker_port_path(runtime_root: Path) -> Path:
-    return _minion_worker_endpoint(runtime_root).port_path
+def minion_role_port_path(runtime_root: Path) -> Path:
+    return _minion_role_endpoint(runtime_root).port_path
 
 
 class MinionManagerRpcError(SidecarRpcError):
@@ -169,7 +169,7 @@ class MinionManagerClient:
 
 
 @dataclass
-class MinionWorkerGatewayClient:
+class MinionRoleGatewayClient:
     runtime_root: Path
     access_token: str
     request_timeout_seconds: float = DEFAULT_MINION_MANAGER_REQUEST_TIMEOUT_SECONDS
@@ -177,15 +177,15 @@ class MinionWorkerGatewayClient:
 
     def __post_init__(self) -> None:
         if not str(self.access_token or "").strip():
-            raise ValueError("worker gateway access token is required")
+            raise ValueError("role gateway access token is required")
         self._client = SidecarRpcClient(
-            endpoint=_minion_worker_endpoint(self.runtime_root),
+            endpoint=_minion_role_endpoint(self.runtime_root),
             request_timeout_seconds=self.request_timeout_seconds,
         )
 
     @property
     def socket_path(self) -> Path:
-        return minion_worker_socket_path(self.runtime_root)
+        return minion_role_socket_path(self.runtime_root)
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = {**dict(params or {}), "access_token": str(self.access_token)}
@@ -210,22 +210,22 @@ async def cleanup_manager_endpoint(runtime_root: Path) -> None:
     await cleanup_sidecar_endpoint(_minion_endpoint(runtime_root))
 
 
-async def start_worker_gateway_server(runtime_root: Path, handler):
-    return await start_sidecar_server(_minion_worker_endpoint(runtime_root), handler)
+async def start_role_gateway_server(runtime_root: Path, handler):
+    return await start_sidecar_server(_minion_role_endpoint(runtime_root), handler)
 
 
-async def cleanup_worker_gateway_endpoint(runtime_root: Path) -> None:
-    await cleanup_sidecar_endpoint(_minion_worker_endpoint(runtime_root))
+async def cleanup_role_gateway_endpoint(runtime_root: Path) -> None:
+    await cleanup_sidecar_endpoint(_minion_role_endpoint(runtime_root))
 
 
 def _minion_endpoint(runtime_root: Path) -> SidecarEndpoint:
     return SidecarEndpoint(runtime_root=Path(runtime_root), name="minion")
 
 
-def _minion_worker_endpoint(runtime_root: Path) -> SidecarEndpoint:
+def _minion_role_endpoint(runtime_root: Path) -> SidecarEndpoint:
     return SidecarEndpoint(
         runtime_root=Path(runtime_root),
-        name="minion-worker",
-        socket_filename="worker.sock",
-        port_filename="worker.port",
+        name="minion-role",
+        socket_filename="role.sock",
+        port_filename="role.port",
     )

@@ -28,6 +28,7 @@ from pal.minion.profiles import (
     MinionProfileRegistry,
     canonical_profile_id,
 )
+from pal.minion.v2.role_contracts import TASK_PROFILE_BINDING, validate_role_bindings
 
 
 CATALOG_SCHEMA_VERSION = "1"
@@ -57,7 +58,7 @@ _FAMILY_PATCH_FIELDS = frozenset(
         "domain",
         "domain_keywords",
         "workflow_template",
-        "roles",
+        "role_bindings",
         "builders",
         "adapters",
         "policies",
@@ -65,9 +66,6 @@ _FAMILY_PATCH_FIELDS = frozenset(
         "metadata",
     }
 )
-_CONTRACT_DAG_ROLES = frozenset({"architect", "architecture_reviewer", "producer", "repair", "verifier"})
-
-
 @dataclass
 class MinionCatalogService:
     """Sidecar-owned profile/family catalog and override lifecycle."""
@@ -347,7 +345,7 @@ class MinionCatalogService:
                 "display_name": family.display_name,
                 "source": "override" if family.family_id in family_overrides else "builtin",
                 "workflow_template": family.workflow_template,
-                "roles": dict(family.roles),
+                "role_bindings": dict(family.role_bindings),
             }
             if include_definitions:
                 item["definition"] = definition
@@ -455,13 +453,32 @@ class MinionCatalogService:
 
     def _validate_family(self, family: MinionFamilyManifest) -> None:
         registry = MinionProfileRegistry(runtime_root=self.runtime_root)
-        unknown = sorted({profile for profile in family.roles.values() if registry.get(profile) is None})
+        bindings = validate_role_bindings(family.role_bindings)
+        unknown = sorted(
+            {
+                profile
+                for profile in bindings.values()
+                if profile != TASK_PROFILE_BINDING and registry.get(profile) is None
+            }
+        )
         if unknown:
             raise ValueError(f"family references unknown profiles: {', '.join(unknown)}")
+        cross_family = sorted(
+            {
+                profile
+                for profile in bindings.values()
+                if profile != TASK_PROFILE_BINDING
+                and registry.get(profile) is not None
+                and registry.get(profile).profile_group.replace("/", ".")
+                != family.family_id
+            }
+        )
+        if cross_family:
+            raise ValueError(
+                "family role bindings reference cross-family profiles: "
+                + ", ".join(cross_family)
+            )
         if family.workflow_template == "contract_dag.v2":
-            missing = sorted(_CONTRACT_DAG_ROLES - set(family.roles))
-            if missing:
-                raise ValueError(f"contract_dag family is missing roles: {', '.join(missing)}")
             from pal.minion.v2.catalog import REGISTERED_ADAPTERS, REGISTERED_BUILDERS
 
             unknown_builders = sorted(set(family.builders.values()) - REGISTERED_BUILDERS)

@@ -51,6 +51,7 @@ class ContractBuilderTests(unittest.TestCase):
                 "lease_resource_key": self.resource,
                 "fencing_token": lease.fencing_token,
                 "role": "architect",
+                "mode": "author",
                 "authoring_input_fingerprint": "contract-input-v1",
                 "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
             },
@@ -208,7 +209,9 @@ class ContractBuilderTests(unittest.TestCase):
                 "contract_review_base_payload": base,
             }
         )
-        self.workspace["minion_v2"]["role"] = "architecture_reviewer"
+        self.workspace["minion_v2"].update(
+            {"role": "reviewer", "mode": "architecture"}
+        )
         finding = self.call(
             "architecture_review",
             ADD_FINDING_CAPABILITY,
@@ -269,7 +272,9 @@ class ContractBuilderTests(unittest.TestCase):
         self.assertIsNone(scoped.get_capability_spec("op_minion_contract_add_unit_outlines_batch"))
 
     def test_add_finding_is_role_bound_and_includes_a_valid_example(self) -> None:
-        self.workspace["minion_v2"]["role"] = "architecture_reviewer"
+        self.workspace["minion_v2"].update(
+            {"role": "reviewer", "mode": "architecture"}
+        )
         scoped = MinionScopedExecutionRuntime(
             ExecutionRuntime(),
             [ADD_FINDING_CAPABILITY],

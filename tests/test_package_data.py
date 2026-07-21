@@ -25,15 +25,12 @@ def test_required_runtime_package_data_is_available() -> None:
         ("pal.minion", "family_templates/lifestyle.toml"),
         ("pal.minion", "profile_templates/generic.toml"),
         ("pal.minion", "profile_templates/general/architect.toml"),
-        ("pal.minion", "profile_templates/general/architecture_reviewer.toml"),
         ("pal.minion", "profile_templates/general/verifier.toml"),
         ("pal.minion", "profile_templates/software_engineering/v2_architect.toml"),
-        ("pal.minion", "profile_templates/software_engineering/v2_architecture_reviewer.toml"),
         ("pal.minion", "profile_templates/software_engineering/v2_coder.toml"),
         ("pal.minion", "profile_templates/software_engineering/v2_verifier.toml"),
         ("pal.minion", "profile_templates/software_engineering/v2_reviewer.toml"),
         ("pal.minion", "profile_templates/lifestyle/architect.toml"),
-        ("pal.minion", "profile_templates/lifestyle/architecture_reviewer.toml"),
         ("pal.minion", "profile_templates/lifestyle/nutrition_checkin_producer.toml"),
         ("pal.minion", "profile_templates/lifestyle/verifier.toml"),
         ("pal.plugins_builtin.lsp", "plugin.toml"),
@@ -45,3 +42,6 @@ def test_required_runtime_package_data_is_available() -> None:
         assert resources.files(package).joinpath(relative_path).is_file()
 
     assert not resources.files("pal.minion").joinpath("profile_templates/software_engineering/planner.toml").is_file()
+    assert not resources.files("pal.minion").joinpath(
+        "profile_templates/software_engineering/v2_architecture_reviewer.toml"
+    ).is_file()

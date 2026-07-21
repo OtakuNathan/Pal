@@ -4,12 +4,11 @@ domain = "Nutrition, diet, meal planning, training, recovery, sleep, and persona
 domain_keywords = ["nutrition", "diet", "meal", "training", "fitness", "weight", "sleep", "recovery", "health"]
 workflow_template = "contract_dag.v2"
 
-[roles]
-architect = "lifestyle.architect"
-architecture_reviewer = "lifestyle.architecture_reviewer"
-producer = "lifestyle.nutrition_checkin_producer"
-repair = "lifestyle.nutrition_checkin_producer"
-verifier = "lifestyle.verifier"
+[role_bindings]
+architect = "$task_profile"
+reviewer = "$task_profile"
+implementation = "$task_profile"
+verifier = "$task_profile"
 
 [builders]
 contract = "contract_sketch.v2"

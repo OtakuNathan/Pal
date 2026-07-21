@@ -844,7 +844,7 @@ def _submit(
         if reference_warnings:
             output["reference_warnings"] = list(reference_warnings)
     submission_ref: dict[str, Any] = {}
-    if store.uses_worker_gateway:
+    if store.uses_role_gateway:
         receipt = store.mark_submitted(
             context,
             expected_version=snapshot.version,
@@ -860,9 +860,9 @@ def _submit(
         local_submission_ref = submission_store.put_json(
             output,
             artifact_type=(
-                "StandaloneReviewSubmissionArtifact"
+                "StandaloneReviewRoleSubmissionArtifact"
                 if standalone
-                else "VerifierSubmissionArtifact"
+                else "VerifierRoleSubmissionArtifact"
             ),
             provenance={
                 "workflow_id": context.workflow_id,

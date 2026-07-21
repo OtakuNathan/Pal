@@ -13,7 +13,7 @@ from typing import Any
 
 from pal.foundation.log_paths import pal_log_root
 from pal.foundation.sidecar import python_subprocess_env
-from pal.minion.ipc import minion_worker_port_path, minion_worker_socket_path
+from pal.minion.ipc import minion_role_port_path, minion_role_socket_path
 from pal.minion.workspace_tools import _normalized_reference_paths
 from pal.shared import RUN_SHELL_SCOPE_HINT, MinionInvocationPack, format_dedicated_tool_route_hints
 
@@ -663,8 +663,8 @@ def _append_runtime_root_binds(
     if run_dir is not None and run_dir.is_dir():
         _append_bind_path(args, run_dir, read_only=False)
     for endpoint_path in (
-        minion_worker_socket_path(runtime_root),
-        minion_worker_port_path(runtime_root),
+        minion_role_socket_path(runtime_root),
+        minion_role_port_path(runtime_root),
     ):
         if endpoint_path.exists():
             _append_bind_path(args, endpoint_path, read_only=True)

@@ -222,7 +222,7 @@ def swe_verification_tool_result(
             "tool_receipts": receipts,
         }
         submission_ref: dict[str, Any]
-        if store.uses_worker_gateway:
+        if store.uses_role_gateway:
             receipt = store.mark_submitted(
                 context,
                 expected_version=snapshot.version,

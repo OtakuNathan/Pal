@@ -23,8 +23,9 @@ from pal.minion.v2.catalog import MinionV2Catalog
 from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.execution import ExecutionCompiler
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.minion.v2.service import MinionV2WorkflowService
-from pal.minion.v2.workers import (
+from pal.minion.v2.semantic_orchestration import (
     apply_v2_research_capability_policy,
     apply_v2_role_capability_policy,
 )
@@ -54,29 +55,44 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
 
     def test_lifestyle_binding_resolves_all_roles_and_artifact_adapters(self) -> None:
-        ref = MinionV2Catalog(self.root, self.store).publish_family_binding("lifestyle")
+        ref = MinionV2Catalog(self.root, self.store).publish_family_binding(
+            "lifestyle.nutrition_checkin_producer"
+        )
         binding = self.store.read_json(ref)
+        self.assertEqual(binding["schema_version"], "3")
         self.assertEqual(binding["workflow_template"], "contract_dag.v2")
-        self.assertTrue({"architect", "architecture_reviewer", "producer", "repair", "verifier"} <= set(binding["roles"]))
+        self.assertEqual(
+            set(binding["role_bindings"]),
+            {"architect", "reviewer", "implementation", "verifier"},
+        )
         self.assertEqual(set(binding["adapters"].values()), {"artifact_bundle.v2"})
-        self.assertEqual(set(binding["profile_hashes"]), set(binding["roles"]))
-        self.assertEqual(set(binding["profile_definitions"]), set(binding["roles"]))
+        self.assertEqual(
+            {
+                item["executor_profile"]["canonical_profile_id"]
+                for item in binding["role_bindings"].values()
+            },
+            {"lifestyle.nutrition_checkin_producer"},
+        )
         self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
         self.assertEqual(binding["policies"]["llm"]["llm_round_timeout_seconds"], 900)
 
     def test_general_family_is_a_complete_data_driven_contract_dag(self) -> None:
-        ref = MinionV2Catalog(self.root, self.store).publish_family_binding("general")
+        ref = MinionV2Catalog(self.root, self.store).publish_family_binding("generic")
         binding = self.store.read_json(ref)
         self.assertEqual(binding["workflow_template"], "contract_dag.v2")
-        self.assertTrue({"architect", "architecture_reviewer", "producer", "repair", "verifier"} <= set(binding["roles"]))
+        self.assertEqual(
+            set(binding["role_bindings"]),
+            {"architect", "reviewer", "implementation", "verifier"},
+        )
         self.assertEqual(set(binding["adapters"].values()), {"artifact_bundle.v2"})
-        self.assertEqual(set(binding["profile_hashes"]), set(binding["roles"]))
-        self.assertEqual(set(binding["profile_definitions"]), set(binding["roles"]))
+        self.assertEqual(binding["primary_profile"]["canonical_profile_id"], "generic")
 
     def test_family_binding_pins_profile_definition_across_catalog_refresh(self) -> None:
-        ref = MinionV2Catalog(self.root, self.store).publish_family_binding("software_engineering")
+        ref = MinionV2Catalog(self.root, self.store).publish_family_binding(
+            "software_engineering.v2_coder"
+        )
         binding = self.store.read_json(ref)
-        pinned = dict(binding["profile_definitions"]["producer"])
+        pinned = dict(binding["role_bindings"]["implementation"]["executor_profile"])
         original_name = str(pinned["display_name"])
 
         MinionCatalogService(self.root).set_profile_override(
@@ -93,7 +109,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 minion_profile="software_engineering.v2_coder",
             ),
             profile_payload=pinned,
-            family_payload=dict(binding["manifest"]),
+            family_payload=dict(binding),
         )
 
         self.assertEqual(current.display_name, "Future Workflow Coder")
@@ -102,7 +118,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
     def test_architect_cannot_bypass_builder_but_producer_can_write_workspace(self) -> None:
         planner = apply_v2_role_capability_policy(
             self._pack("lifestyle.architect"),
-            role="architect",
+            activation=RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
         )
         self.assertIn("op_minion_contract_submit", planner.allowed_capabilities)
         self.assertNotIn("op_file_write", planner.allowed_capabilities)
@@ -110,13 +126,25 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         producer = apply_v2_role_capability_policy(
             self._pack("lifestyle.nutrition_checkin_producer"),
-            role="producer",
+            activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
         )
         self.assertIn("op_file_write", producer.allowed_capabilities)
         self.assertIn("op_minion_artifact_write", producer.allowed_capabilities)
         self.assertIn("op_minion_candidate_submit", producer.allowed_capabilities)
         self.assertIn("op_minion_developer_test", producer.allowed_capabilities)
         self.assertNotIn("op_web_search", producer.allowed_capabilities)
+
+    def test_task_creation_requires_primary_profile_and_ignores_no_family_shortcut(self) -> None:
+        service = MinionV2WorkflowService(self.root)
+        with self.assertRaisesRegex(ValueError, "explicit primary minion profile"):
+            service.create_task(
+                {
+                    "title": "Unbound task",
+                    "objective": "Must not infer an executor from a family",
+                    "family_id": "software_engineering",
+                    "workspace": {"kind": "new_project", "project_name": "unbound"},
+                }
+            )
 
     def test_artifact_producer_cannot_fabricate_manager_submission_report(self) -> None:
         repo = self.root / "guard-repo"
@@ -176,7 +204,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
     def test_verifier_can_only_submit_through_the_schema_bound_builder(self) -> None:
         software = apply_v2_role_capability_policy(
             self._pack("software_engineering.v2_verifier"),
-            role="verifier",
+            activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
         )
         self.assertIn("op_minion_verification_pass", software.allowed_capabilities)
         self.assertIn(
@@ -192,7 +220,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         for profile in ("general.verifier", "lifestyle.verifier"):
             with self.subTest(profile=profile):
-                verifier = apply_v2_role_capability_policy(self._pack(profile), role="verifier")
+                verifier = apply_v2_role_capability_policy(
+                    self._pack(profile),
+                    activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
+                )
                 self.assertIn("op_minion_verification_pass", verifier.allowed_capabilities)
                 self.assertIn(
                     "op_minion_verification_request_module_repair",
@@ -209,19 +240,99 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         standalone = apply_v2_role_capability_policy(
             self._pack("software_engineering.v2_reviewer"),
-            role="reviewer",
+            activation=RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE),
         )
         self.assertIn("op_minion_standalone_review_submit", standalone.allowed_capabilities)
         self.assertIn("op_exec_shell", standalone.allowed_capabilities)
         self.assertNotIn("op_minion_artifact_write", standalone.allowed_capabilities)
         self.assertNotIn("op_minion_verification_submit", standalone.allowed_capabilities)
 
+        for profile in (
+            "general.generic",
+            "lifestyle.nutrition_checkin_producer",
+        ):
+            for activation in (
+                RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
+                RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE),
+                RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
+            ):
+                with self.subTest(profile=profile, activation=activation):
+                    bound = apply_v2_role_capability_policy(
+                        self._pack(profile), activation=activation
+                    )
+                    self.assertIn("op_minion_add_finding", bound.allowed_capabilities)
+
         coder = apply_v2_role_capability_policy(
             self._pack("software_engineering.v2_coder"),
-            role="producer",
+            activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
         )
         self.assertIn("op_minion_candidate_submit", coder.allowed_capabilities)
         self.assertNotIn("op_minion_artifact_write", coder.allowed_capabilities)
+
+    def test_role_binding_replaces_the_shared_profiles_output_contract(self) -> None:
+        cases = (
+            (
+                "general.generic",
+                RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
+                "architecture_bundle.json",
+                ["ArchitecturePlanningStageOutput"],
+            ),
+            (
+                "lifestyle.nutrition_checkin_producer",
+                RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
+                "architecture_review.json",
+                ["ArchitectureReviewStageOutput"],
+            ),
+            (
+                "general.generic",
+                RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE),
+                "standalone_review.json",
+                ["StandaloneReviewReport"],
+            ),
+            (
+                "general.generic",
+                RoleActivation(OrchestrationRole.VERIFIER, RoleMode.SCENARIO),
+                "verification_submission.json",
+                ["SemanticVerificationSubmissionArtifact"],
+            ),
+            (
+                "lifestyle.nutrition_checkin_producer",
+                RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR),
+                "producer_report.json",
+                ["UnitProducerReport", "UnitSplitRequest"],
+            ),
+            (
+                "software_engineering.v2_architect",
+                RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.REVISION),
+                "architecture_submission.json",
+                ["ArchitectureSkeletonSubmission"],
+            ),
+            (
+                "software_engineering.v2_reviewer",
+                RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
+                "architecture_review.json",
+                ["ArchitectureReviewStageOutput"],
+            ),
+            (
+                "software_engineering.v2_coder",
+                RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
+                "coder_report.json",
+                ["ModuleCoderReport", "ModuleSplitRequest"],
+            ),
+        )
+        for profile, activation, primary_artifact, output_types in cases:
+            with self.subTest(profile=profile, activation=activation):
+                bound = apply_v2_role_capability_policy(
+                    self._pack(profile),
+                    activation=activation,
+                )
+                workspace_policy = dict(bound.workspace["output_policy"])
+                resolved_policy = dict(
+                    bound.resolved_profile["effective_output_policy"]
+                )
+                self.assertEqual(workspace_policy["primary_artifact"], primary_artifact)
+                self.assertEqual(workspace_policy["allowed_output_types"], output_types)
+                self.assertEqual(resolved_policy, workspace_policy)
 
     def test_verification_submit_is_hydrated_in_the_scoped_runtime(self) -> None:
         scoped = MinionScopedExecutionRuntime(
@@ -445,15 +556,20 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("missing production", verifier_behavior)
         self.assertIn("platform probe plan", verifier_behavior)
         architecture_review_behavior = str(
-            self._pack("software_engineering.v2_architecture_reviewer").resolved_profile[
+            self._pack("software_engineering.v2_reviewer").resolved_profile[
                 "behavior_fragment"
             ]
         )
         self.assertIn("explicit production backend boundary", architecture_review_behavior)
 
-        binding_ref = MinionV2Catalog(self.root, self.store).publish_family_binding("software_engineering")
+        binding_ref = MinionV2Catalog(self.root, self.store).publish_family_binding(
+            "software_engineering.v2_coder"
+        )
         binding = self.store.read_json(binding_ref)
-        self.assertEqual(binding["roles"]["reviewer"], "software_engineering.v2_reviewer")
+        self.assertEqual(
+            binding["role_bindings"]["reviewer"]["executor_profile"]["canonical_profile_id"],
+            "software_engineering.v2_reviewer",
+        )
         self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
         self.assertTrue(binding["policies"]["verification"]["require_warning_clean"])
 
@@ -541,7 +657,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         task_sources = self.store.read_json(prepared["requirements_ref"])
         binding = self.store.read_json(
             MinionV2Catalog(self.root, self.store).publish_family_binding(
-                "software_engineering"
+                "software_engineering.v2_coder"
             )
         )
 
@@ -552,7 +668,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
     def test_software_architecture_and_verification_profiles_preserve_rigorous_methods(self) -> None:
         architect = str(self._pack("software_engineering.v2_architect").resolved_profile["behavior_fragment"])
         architecture_review = str(
-            self._pack("software_engineering.v2_architecture_reviewer").resolved_profile["behavior_fragment"]
+            self._pack("software_engineering.v2_reviewer").resolved_profile["behavior_fragment"]
         )
         verifier = str(self._pack("software_engineering.v2_verifier").resolved_profile["behavior_fragment"])
         generic = str(self._pack("general.generic").resolved_profile["behavior_fragment"])
@@ -570,7 +686,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Manager provides no semantic verdict", architecture_review)
         self.assertIn("independently evaluate directional contracts", architecture_review)
         self.assertIn("Submit exactly once", str(
-            self._pack("software_engineering.v2_architecture_reviewer").resolved_profile["output_contract_fragment"]
+            self._pack("software_engineering.v2_reviewer").resolved_profile["output_contract_fragment"]
         ))
         self.assertIn("unique data/worker/object/resource ownership", architecture_review)
         self.assertIn("one candidate-review cycle", architecture_review)
@@ -581,7 +697,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("semantic feasibility rehearsal", architecture_review)
         self.assertIn("object-address side table", architecture_review)
         self.assertIn("syntax or compilation as semantic proof", str(
-            self._pack("software_engineering.v2_architecture_reviewer").resolved_profile["output_contract_fragment"]
+            self._pack("software_engineering.v2_reviewer").resolved_profile["output_contract_fragment"]
         ))
         self.assertIn("manually simulating the data/state flow", architecture_review)
         self.assertIn("verify a local repair without reopening unchanged architecture", architecture_review)
@@ -645,7 +761,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         source = self.root / "source"
         source.mkdir()
         (source / "reference.txt").write_text("truth", encoding="utf-8")
-        planner = apply_v2_role_capability_policy(self._pack("lifestyle.architect"), role="architect")
+        planner = apply_v2_role_capability_policy(
+            self._pack("lifestyle.architect"),
+            activation=RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
+        )
         planner = MinionInvocationPack.from_dict(
             {**planner.to_dict(), "workspace": {**dict(planner.workspace), "repo_path": str(source)}}
         )
@@ -719,7 +838,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 "task_id": "nutrition-task",
                 "title": "Weekly nutrition check-in",
                 "objective": "Produce a non-medical structured check-in",
-                "family_id": "lifestyle",
+                "profile": "lifestyle.nutrition_checkin_producer",
                 "workspace": {"kind": "artifact_project", "project_name": "nutrition"},
             }
         )

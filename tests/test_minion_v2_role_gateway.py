@@ -7,47 +7,53 @@ from pathlib import Path
 from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
-from pal.minion.v2.worker_gateway import WorkerAssignmentGateway
-from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
+from pal.minion.v2.role_gateway import RoleAssignmentGateway
+from pal.minion.v2.role_protocol import RoleAssignmentRequest
 
 
-class MinionV2WorkerGatewayTests(unittest.TestCase):
+class MinionV2RoleGatewayTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal-v2-worker-gateway-"))
         self.service = MinionV2WorkflowService(self.runtime_root)
-        self.gateway = WorkerAssignmentGateway(self.service)
+        self.gateway = RoleAssignmentGateway(self.service)
         self.input_ref = self.service.artifacts.put_json(
             {"module": "router", "contract": "route deterministically"},
             artifact_type="ModuleWorkViewArtifact",
         )
         self.prompt_ref = self.service.artifacts.put_json(
             {"instruction": "implement router"},
-            artifact_type="WorkerPromptPackArtifact",
+            artifact_type="RolePromptPackArtifact",
         )
-        self.service.repository.ensure_worker_session(
+        self.service.repository.ensure_role_session(
             session_id="session-router",
             workflow_id="workflow-router",
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-router",
-            role="producer",
+            role="implementation",
+            mode="produce",
+            executor_profile_id="software_engineering.v2_coder",
+            family_binding_sha="binding",
         )
-        assignment = self.service.repository.create_worker_assignment(
-            WorkerAssignmentRequest(
+        assignment = self.service.repository.create_role_assignment(
+            RoleAssignmentRequest(
                 assignment_key="router-cycle-1",
                 session_id="session-router",
                 workflow_id="workflow-router",
                 aggregate_type=AggregateType.DAG_NODE_RUN.value,
                 aggregate_id="node-router",
-                role="producer",
+                role="implementation",
+                mode="produce",
+                executor_profile_id="software_engineering.v2_coder",
+                family_binding_sha="binding",
                 input_fingerprint="router-input",
                 required_inputs=(),
                 input_refs={"module_work_view": self.input_ref.to_dict()},
-                execution_spec={"effect_type": "spawn_producer_worker"},
+                execution_spec={"effect_type": "run_implementation_role"},
                 submission_kind="candidate",
             )
         )
         self.assignment_id = assignment["assignment_id"]
-        attempt = self.service.repository.claim_worker_assignment(self.assignment_id)
+        attempt = self.service.repository.claim_role_assignment(self.assignment_id)
         self.attempt_id = attempt["attempt_id"]
         self.lease_resource = f"assignment:{self.assignment_id}"
         lease = self.service.repository.claim_lease(
@@ -56,14 +62,14 @@ class MinionV2WorkerGatewayTests(unittest.TestCase):
             ttl_seconds=120,
         )
         self.fencing_token = lease.fencing_token
-        self.service.repository.start_worker_attempt(
+        self.service.repository.start_role_attempt(
             assignment_id=self.assignment_id,
             attempt_id_value=self.attempt_id,
             lease_resource_key=self.lease_resource,
             fencing_token=self.fencing_token,
             prompt_pack_ref=self.prompt_ref.to_dict(),
         )
-        self.access_token = self.service.repository.issue_worker_attempt_access_token(
+        self.access_token = self.service.repository.issue_role_attempt_access_token(
             assignment_id=self.assignment_id,
             attempt_id_value=self.attempt_id,
             fencing_token=self.fencing_token,
@@ -73,7 +79,8 @@ class MinionV2WorkerGatewayTests(unittest.TestCase):
             "invocation_id": self.attempt_id,
             "lease_resource_key": self.lease_resource,
             "fencing_token": self.fencing_token,
-            "role": "producer",
+            "role": "implementation",
+            "mode": "produce",
             "draft_kind": "candidate",
             "input_fingerprint": "router-input",
             "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
@@ -113,7 +120,7 @@ class MinionV2WorkerGatewayTests(unittest.TestCase):
         self.assertTrue(receipt["submitted"])
         self.assertTrue(receipt["submission_artifact_ref"]["sha256"])
         self.assertTrue(receipt["submission_payload_hash"])
-        assignment = self.service.repository.read_worker_assignment(self.assignment_id)
+        assignment = self.service.repository.read_role_assignment(self.assignment_id)
         self.assertEqual(assignment["state"], "result_recorded")
         self.assertTrue(assignment["submission_artifact_ref"]["sha256"])
         self.assertTrue(self.call("submission_status")["recorded"])

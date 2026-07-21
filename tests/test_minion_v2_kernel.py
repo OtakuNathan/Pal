@@ -55,8 +55,8 @@ from pal.minion.v2.formal import (
     render_implementation_topology,
     transition_topology,
 )
-from pal.minion.v2.workers import MinionV2SemanticWorker, SEMANTIC_EFFECT_TYPES
-from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
+from pal.minion.v2.semantic_orchestration import SemanticOrchestrator, SEMANTIC_EFFECT_TYPES
+from pal.minion.v2.role_protocol import RoleAssignmentRequest
 
 
 class MinionV2TransitionKernelTests(unittest.TestCase):
@@ -253,7 +253,12 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 "CREATE_TASK",
                 AggregateType.TASK,
                 "task_test",
-                payload={"family_id": "software_engineering", "task_revision_ref": {"sha256": "a"}},
+                payload={
+                    "primary_profile_id": "software_engineering.v2_coder",
+                    "family_id": "software_engineering",
+                    "family_binding_ref": {"sha256": "binding"},
+                    "task_revision_ref": {"sha256": "a"},
+                },
             ),
         ).snapshot
         self.assertEqual(created.state, TaskState.ACTIVE)
@@ -275,26 +280,29 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 self.action("START_WORKFLOW", AggregateType.WORKFLOW, "wf_test", expected_version=0),
             )
 
-    def test_worker_invocation_terminal_status_is_persisted_under_fencing(self) -> None:
+    def test_role_invocation_terminal_status_is_persisted_under_fencing(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_v2_worker_status_"))
         self.addCleanup(shutil.rmtree, root, True)
         repository = MinionV2Repository(root)
         store = ContentAddressedArtifactStore(root, repository)
-        prompt_ref = store.put_json({"prompt": "bounded"}, artifact_type="WorkerPromptPackArtifact")
+        prompt_ref = store.put_json({"prompt": "bounded"}, artifact_type="RolePromptPackArtifact")
         lease = repository.claim_lease("architecture:arch-status:requirements", "inv-status", ttl_seconds=60)
-        repository.record_worker_invocation(
+        repository.record_role_invocation(
             invocation_id="inv-status",
             workflow_id="wf-status",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch-status",
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
-            role="requirements",
+            role="architect",
+            mode="author",
+            executor_profile_id="software_engineering.v2_architect",
+            family_binding_sha="binding",
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt_ref.to_dict(),
         )
 
-        repository.finish_worker_invocation(
+        repository.finish_role_invocation(
             invocation_id="inv-status",
             fencing_token=lease.fencing_token,
             status="completed",
@@ -302,42 +310,48 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
 
         with repository._connect() as connection:
             row = connection.execute(
-                "SELECT status FROM minion_v2_worker_invocations WHERE invocation_id = 'inv-status'"
+                "SELECT status FROM minion_v2_role_invocations WHERE invocation_id = 'inv-status'"
             ).fetchone()
         self.assertEqual(row["status"], "completed")
 
-    def test_worker_session_suspends_and_resumes_with_same_continuation(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="pal_v2_worker_session_"))
+    def test_role_session_suspends_and_resumes_with_same_continuation(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="pal_v2_role_session_"))
         self.addCleanup(shutil.rmtree, root, True)
         repository = MinionV2Repository(root)
         store = ContentAddressedArtifactStore(root, repository)
-        prompt = store.put_json({"prompt": "initial"}, artifact_type="WorkerPromptPackArtifact")
+        prompt = store.put_json({"prompt": "initial"}, artifact_type="RolePromptPackArtifact")
         continuation = store.put_json(
             {"session_id": "inv-session", "llm_round_count": 7},
             artifact_type="AgentSessionContinuationArtifact",
         )
-        repository.ensure_worker_session(
+        repository.ensure_role_session(
             session_id="inv-session",
             workflow_id="wf-session",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch-session",
             role="architect",
+            mode="author",
+            executor_profile_id="software_engineering.v2_architect",
+            family_binding_sha="binding",
             scope_kind="architecture_revision",
             subject_key="arch-session",
         )
         lease = repository.claim_lease("architecture:arch-session:architect", "inv-session", ttl_seconds=60)
-        repository.record_worker_invocation(
+        repository.record_role_invocation(
             invocation_id="inv-session",
             workflow_id="wf-session",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch-session",
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
-            role="v2_architect",
+            role="architect",
+            mode="author",
+            executor_profile_id="software_engineering.v2_architect",
+            family_binding_sha="binding",
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt.to_dict(),
         )
-        repository.suspend_worker_invocation(
+        repository.suspend_role_invocation(
             invocation_id="inv-session",
             fencing_token=lease.fencing_token,
             continuation_ref=continuation.to_dict(),
@@ -345,26 +359,29 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         repository.release_lease(lease.resource_key, lease.owner_id, lease.fencing_token)
 
         resumed_lease = repository.claim_lease(lease.resource_key, "inv-session", ttl_seconds=60)
-        resumed_prompt = store.put_json({"prompt": "review response"}, artifact_type="WorkerPromptPackArtifact")
-        repository.record_worker_invocation(
+        resumed_prompt = store.put_json({"prompt": "review response"}, artifact_type="RolePromptPackArtifact")
+        repository.record_role_invocation(
             invocation_id="inv-session",
             workflow_id="wf-session",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch-session-revision",
             lease_resource_key=resumed_lease.resource_key,
             fencing_token=resumed_lease.fencing_token,
-            role="v2_architect",
+            role="architect",
+            mode="revision",
+            executor_profile_id="software_engineering.v2_architect",
+            family_binding_sha="binding",
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=resumed_prompt.to_dict(),
         )
 
-        invocation = repository.read_worker_invocation("inv-session")
+        invocation = repository.read_role_invocation("inv-session")
         self.assertEqual(invocation["status"], "running")
         self.assertEqual(invocation["aggregate_id"], "arch-session-revision")
         self.assertEqual(invocation["continuation_ref"]["sha256"], continuation.sha256)
         self.assertEqual(invocation["prompt_pack_ref"]["sha256"], resumed_prompt.sha256)
 
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(root))
         restore_path, checkpoint_path = worker._prepare_agent_session_attempt(
             session_id="inv-session",
             attempt_id="attempt-after-local-loss",
@@ -507,7 +524,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertEqual(node_role_generation({}), 0)
         self.assertEqual(node_role_generation({"role_session_generation": 2}), 2)
 
-    def test_worker_failure_is_owned_by_parent_aggregate_state_machine(self) -> None:
+    def test_role_failure_is_owned_by_parent_aggregate_state_machine(self) -> None:
         cases = (
             (AggregateType.DAG_NODE_RUN, DagNodeRunState.PRODUCING),
             (AggregateType.DAG_NODE_RUN, DagNodeRunState.REVIEWING),
@@ -538,14 +555,14 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 result = self.engine.transition(
                     snapshot,
                     self.action(
-                        "WORKER_FAILED",
+                        "ROLE_FAILED",
                         aggregate_type,
                         snapshot.aggregate_id,
                         expected_version=4,
                         payload={
                             "failure_artifact_ref": {"sha256": "failure"},
                             "blocker": {
-                                "kind": "worker_failure",
+                                "kind": "role_failure",
                                 "summary": "worker exited",
                             },
                         },
@@ -572,7 +589,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             self.engine.transition(
                 malformed,
                 self.action(
-                    "WORKER_FAILED",
+                    "ROLE_FAILED",
                     AggregateType.DAG_NODE_RUN,
                     malformed.aggregate_id,
                     expected_version=1,
@@ -612,6 +629,34 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             )
         }
         self.assertEqual(classified_worker_liveness, LIVENESS_REQUIRED_STATES)
+
+    def test_machine_runtime_metadata_owns_every_liveness_state(self) -> None:
+        expected_ownership: set[tuple[str, str, str, str, str]] = set()
+        for machine in all_machine_specs():
+            liveness = {
+                state
+                for state, state_class in machine.state_classes.items()
+                if state_class == StateClass.WORKER_LIVENESS
+            }
+            self.assertEqual(set(machine.runtime_states), liveness)
+            for state, runtime in machine.runtime_states.items():
+                self.assertTrue(runtime.activations)
+                expected_ownership.update(
+                    {
+                        (
+                            machine.aggregate_type.value,
+                            state,
+                            activation.role.value,
+                            activation.mode.value,
+                            runtime.reconciliation.value,
+                        )
+                        for activation in runtime.activations
+                    }
+                )
+        self.assertEqual(
+            set(transition_topology()["role_ownership"]),
+            expected_ownership,
+        )
 
     def test_machine_spec_control_states_form_exact_partitions(self) -> None:
         for machine in all_machine_specs():
@@ -733,18 +778,18 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             (
                 AggregateType.ARCHITECTURE_REVISION,
                 "CANCEL_REQUESTED",
-                "reconcile_architecture_revision",
+                "reconcile_semantic_state",
             ),
             (
                 AggregateType.EXECUTION_EPOCH,
                 "PAUSE_REQUESTED",
                 "reconcile_execution_epoch",
             ),
-            (AggregateType.DAG_NODE_RUN, "CANCEL_REQUESTED", "reconcile_node_run"),
+            (AggregateType.DAG_NODE_RUN, "CANCEL_REQUESTED", "reconcile_semantic_state"),
             (
                 AggregateType.STANDALONE_REVIEW,
                 "PAUSE_REQUESTED",
-                "reconcile_standalone_review",
+                "reconcile_semantic_state",
             ),
         )
         for aggregate_type, resume_state, expected_effect in cases:
@@ -804,7 +849,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 self.assertEqual(failed.snapshot.payload["triage_resume_state"], state.value)
                 self.assertEqual(
                     [effect.effect_type for effect in failed.effects],
-                    ["quiesce_node_for_triage"],
+                    ["quiesce_role_for_triage"],
                 )
                 resolved = self.engine.transition(
                     failed.snapshot,
@@ -995,7 +1040,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ),
         )
         self.assertEqual(submitted.snapshot.state, DagNodeRunState.REVIEW_QUIESCING)
-        self.assertEqual([item.effect_type for item in submitted.effects], ["quiesce_verifier"])
+        self.assertEqual([item.effect_type for item in submitted.effects], ["quiesce_verifier_role"])
 
         quiesced = self.engine.transition(
             submitted.snapshot,
@@ -1018,7 +1063,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         )
         self.assertEqual(
             [item.effect_type for item in quiesced.effects],
-            ["snapshot_verification"],
+            ["snapshot_verifier_result"],
         )
 
         triaged = self.engine.transition(
@@ -1219,7 +1264,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     ),
                 )
                 self.assertEqual(result.snapshot.state, expected_state)
-                self.assertEqual(result.effects[0].effect_type, "enqueue_architecture_stage")
+                self.assertEqual(result.effects[0].effect_type, "admit_architect_role")
 
     def test_node_candidate_requires_quiescing_before_snapshot(self) -> None:
         coding = AggregateSnapshot(
@@ -1313,7 +1358,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ),
         )
         self.assertEqual(quiescing_result.snapshot.state, ArchitectureRevisionState.ARCHITECT_QUIESCING)
-        self.assertEqual(quiescing_result.effects[0].effect_type, "quiesce_architect")
+        self.assertEqual(quiescing_result.effects[0].effect_type, "quiesce_architect_role")
 
         with self.assertRaises(TransitionGuardError):
             self.engine.transition(
@@ -1342,7 +1387,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ),
         )
         self.assertEqual(snapshotting_result.snapshot.state, ArchitectureRevisionState.ARCHITECT_SNAPSHOTTING)
-        self.assertEqual(snapshotting_result.effects[0].effect_type, "snapshot_architecture")
+        self.assertEqual(snapshotting_result.effects[0].effect_type, "snapshot_architect_result")
 
         rejected = self.engine.transition(
             snapshotting_result.snapshot,
@@ -1358,7 +1403,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ),
         )
         self.assertEqual(rejected.snapshot.state, ArchitectureRevisionState.ARCHITECT_QUEUED)
-        self.assertEqual(rejected.effects[0].effect_type, "enqueue_architecture_stage")
+        self.assertEqual(rejected.effects[0].effect_type, "admit_architect_role")
 
         reviewed = self.engine.transition(
             snapshotting_result.snapshot,
@@ -1374,7 +1419,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ),
         )
         self.assertEqual(reviewed.snapshot.state, ArchitectureRevisionState.REVIEW_QUEUED)
-        self.assertEqual(reviewed.effects[0].effect_type, "enqueue_architecture_review")
+        self.assertEqual(reviewed.effects[0].effect_type, "run_reviewer_role")
 
     def test_start_architect_clears_stale_quiesce_state(self) -> None:
         queued = AggregateSnapshot(
@@ -1650,7 +1695,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertEqual(reopened.snapshot.state, ArchitectureRevisionState.REVIEW_QUEUED)
         self.assertNotIn("review_artifact_ref", reopened.snapshot.payload)
         self.assertNotIn("human_review_card_ref", reopened.snapshot.payload)
-        self.assertEqual([effect.effect_type for effect in reopened.effects], ["enqueue_architecture_review"])
+        self.assertEqual([effect.effect_type for effect in reopened.effects], ["run_reviewer_role"])
 
     def test_human_edit_supersedes_the_old_revision_before_creating_the_next(self) -> None:
         waiting = AggregateSnapshot(
@@ -1788,7 +1833,7 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertEqual(projection["current_phase"], "architecture")
         self.assertEqual(projection["liveness"], "orphaned")
 
-    def test_durable_worker_assignment_is_a_liveness_source(self) -> None:
+    def test_durable_role_assignment_is_a_liveness_source(self) -> None:
         self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="worker-create"))
         self.repository.dispatch(self.action("START_WORKFLOW", version=1, key="worker-start"))
         self.repository.dispatch(
@@ -1802,25 +1847,31 @@ class MinionV2PersistenceTests(unittest.TestCase):
                 idempotency_key="worker-architecture",
             )
         )
-        self.repository.ensure_worker_session(
+        self.repository.ensure_role_session(
             session_id="session-worker",
             workflow_id="wf_1",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch_worker",
             role="architect",
+            mode="author",
+            executor_profile_id="software_engineering.v2_architect",
+            family_binding_sha="binding",
         )
-        self.repository.create_worker_assignment(
-            WorkerAssignmentRequest(
+        self.repository.create_role_assignment(
+            RoleAssignmentRequest(
                 assignment_key="worker-liveness",
                 session_id="session-worker",
                 workflow_id="wf_1",
                 aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
                 aggregate_id="arch_worker",
                 role="architect",
+                mode="author",
+                executor_profile_id="software_engineering.v2_architect",
+                family_binding_sha="binding",
                 input_fingerprint="worker-input",
                 required_inputs=(),
                 input_refs={},
-                execution_spec={"effect_type": "enqueue_architecture_stage"},
+                execution_spec={"effect_type": "admit_architect_role"},
                 submission_kind="architecture",
             )
         )
@@ -1832,7 +1883,7 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.repository.rebuild_workflow_projections()
 
         projection = self.repository.read_workflow_projection("wf_1")
-        self.assertEqual(projection["liveness"], "worker_assignment")
+        self.assertEqual(projection["liveness"], "role_assignment")
 
     def test_idempotency_key_cannot_hide_a_different_request(self) -> None:
         self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="same"))
@@ -1952,27 +2003,30 @@ class MinionV2PersistenceTests(unittest.TestCase):
     def test_worker_timing_metrics_are_persisted_in_workflow_status_projection(self) -> None:
         self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="metrics-create"))
         self.repository.dispatch(self.action("START_WORKFLOW", version=1, key="metrics-start"))
-        prompt = self.artifacts.put_json({"prompt": "test"}, artifact_type="WorkerPromptPackArtifact")
-        response = self.artifacts.put_json({"response": "test"}, artifact_type="WorkerTerminalArtifact")
-        summary = self.artifacts.put_json({"tools": []}, artifact_type="WorkerToolSummaryArtifact")
+        prompt = self.artifacts.put_json({"prompt": "test"}, artifact_type="RolePromptPackArtifact")
+        response = self.artifacts.put_json({"response": "test"}, artifact_type="RoleTerminalArtifact")
+        summary = self.artifacts.put_json({"tools": []}, artifact_type="RoleToolSummaryArtifact")
         lease = self.repository.claim_lease(
             "worker:metrics",
             "inv_metrics",
             ttl_seconds=60,
             metadata={"workflow_id": "wf_1"},
         )
-        self.repository.record_worker_invocation(
+        self.repository.record_role_invocation(
             invocation_id="inv_metrics",
             workflow_id="wf_1",
             aggregate_type=AggregateType.WORKFLOW,
             aggregate_id="wf_1",
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
-            role="v2_architecture_reviewer",
+            role="reviewer",
+            mode="architecture",
+            executor_profile_id="software_engineering.v2_reviewer",
+            family_binding_sha="binding",
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt.to_dict(),
         )
-        self.repository.record_worker_turn(
+        self.repository.record_role_turn(
             invocation_id="inv_metrics",
             fencing_token=lease.fencing_token,
             turn_index=1,
@@ -1991,9 +2045,9 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertEqual(metrics["review_time_ms"], 120)
 
     def test_worker_progress_events_advance_durable_round_ledger(self) -> None:
-        prompt = self.artifacts.put_json({"prompt": "test"}, artifact_type="WorkerPromptPackArtifact")
+        prompt = self.artifacts.put_json({"prompt": "test"}, artifact_type="RolePromptPackArtifact")
         lease = self.repository.claim_lease("worker:events", "inv_events", ttl_seconds=60)
-        self.repository.record_worker_invocation(
+        self.repository.record_role_invocation(
             invocation_id="inv_events",
             workflow_id="wf_1",
             aggregate_type=AggregateType.WORKFLOW,
@@ -2001,6 +2055,9 @@ class MinionV2PersistenceTests(unittest.TestCase):
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
             role="architect",
+            mode="author",
+            executor_profile_id="software_engineering.v2_architect",
+            family_binding_sha="binding",
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt.to_dict(),
         )
@@ -2014,7 +2071,7 @@ class MinionV2PersistenceTests(unittest.TestCase):
         )
         with self.repository._connect() as connection:
             invocation = connection.execute(
-                "SELECT last_completed_turn FROM minion_v2_worker_invocations WHERE invocation_id = 'inv_events'"
+                "SELECT last_completed_turn FROM minion_v2_role_invocations WHERE invocation_id = 'inv_events'"
             ).fetchone()
             event = connection.execute(
                 "SELECT phase, round_index, tool_call_count FROM minion_v2_worker_events WHERE invocation_id = 'inv_events'"
@@ -2092,31 +2149,37 @@ class MinionV2PersistenceTests(unittest.TestCase):
     def test_recovery_uses_attempt_process_group_when_lease_metadata_is_incomplete(self) -> None:
         prompt_ref = self.artifacts.put_json(
             {"instruction": "recover process"},
-            artifact_type="WorkerPromptPackArtifact",
+            artifact_type="RolePromptPackArtifact",
         )
-        self.repository.ensure_worker_session(
+        self.repository.ensure_role_session(
             session_id="session-process-recovery",
             workflow_id="workflow-process-recovery",
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-process-recovery",
-            role="producer",
+            role="implementation",
+            mode="produce",
+            executor_profile_id="software_engineering.v2_coder",
+            family_binding_sha="binding",
         )
-        assignment = self.repository.create_worker_assignment(
-            WorkerAssignmentRequest(
+        assignment = self.repository.create_role_assignment(
+            RoleAssignmentRequest(
                 assignment_key="process-recovery",
                 session_id="session-process-recovery",
                 workflow_id="workflow-process-recovery",
                 aggregate_type=AggregateType.DAG_NODE_RUN.value,
                 aggregate_id="node-process-recovery",
-                role="producer",
+                role="implementation",
+                mode="produce",
+                executor_profile_id="software_engineering.v2_coder",
+                family_binding_sha="binding",
                 input_fingerprint="process-input",
                 required_inputs=(),
                 input_refs={},
-                execution_spec={"effect_type": "spawn_producer_worker"},
+                execution_spec={"effect_type": "run_implementation_role"},
                 submission_kind="candidate",
             )
         )
-        attempt = self.repository.claim_worker_assignment(assignment["assignment_id"])
+        attempt = self.repository.claim_role_assignment(assignment["assignment_id"])
         resource = f"assignment:{assignment['assignment_id']}"
         lease = self.repository.claim_lease(
             resource,
@@ -2124,14 +2187,14 @@ class MinionV2PersistenceTests(unittest.TestCase):
             ttl_seconds=1,
             metadata={"workflow_id": "workflow-process-recovery"},
         )
-        self.repository.start_worker_attempt(
+        self.repository.start_role_attempt(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             lease_resource_key=resource,
             fencing_token=lease.fencing_token,
             prompt_pack_ref=prompt_ref.to_dict(),
         )
-        self.repository.update_worker_attempt_process_group(
+        self.repository.update_role_attempt_process_group(
             assignment_id=assignment["assignment_id"],
             attempt_id_value=attempt["attempt_id"],
             fencing_token=lease.fencing_token,

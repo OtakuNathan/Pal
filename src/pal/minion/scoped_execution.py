@@ -182,8 +182,9 @@ def _scoped_workspace_tool_spec(
     if name != ADD_FINDING_CAPABILITY:
         return value
     role = str(dict(workspace.get("minion_v2") or {}).get("role") or "")
+    mode = str(dict(workspace.get("minion_v2") or {}).get("mode") or "")
     examples = tuple(dict(item) for item in list(value.get("examples") or []))
-    if role == "architecture_reviewer":
+    if role == "reviewer" and mode == "architecture":
         base_model = value["InputModel"]
         fields = {
             field_name: (
@@ -649,7 +650,7 @@ def _scope_descriptor(
     examples = tuple(dict(item) for item in descriptor.examples)
     role = str(dict(workspace.get("minion_v2") or {}).get("role") or "")
     hidden: set[str] = set()
-    if role in {"verifier", "scenario_verifier"}:
+    if role == "verifier":
         if canonical.startswith("op_lsp_"):
             hidden.update({"workspace_root", "server_id"})
         if canonical == "op_exec_shell":
@@ -746,7 +747,7 @@ def _scrub_spec(
                 _replace_worker_internal_tool_names_in_value(dict(value.get(key) or {}))
             )
     role = str(dict((workspace or {}).get("minion_v2") or {}).get("role") or "")
-    if role in {"verifier", "scenario_verifier"}:
+    if role == "verifier":
         schema = dict(value.get("input_schema") or {})
         properties = dict(schema.get("properties") or {})
         hidden: set[str] = set()

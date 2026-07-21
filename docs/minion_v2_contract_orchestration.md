@@ -1,6 +1,6 @@
 # Minion V2 Contract-Driven Orchestration
 
-Status: active implementation as of 2026-07-20.
+Status: active implementation as of 2026-07-21.
 
 Minion V2 is a clean workflow cutover. V1 plans, milestones, cursors,
 checkpoints, write RPCs, and workflow resume paths are not accepted by V2.
@@ -13,11 +13,11 @@ transition engine in `src/pal/minion/v2/`. Reducers are pure. A committed
 transition atomically performs snapshot CAS, domain-event append, action
 deduplication, outbox insertion, and projection update for one aggregate.
 
-The five aggregate types are Workflow, Architecture Revision, Execution Epoch,
-DAG Node Run, and Standalone Review. Workflow phase is a query projection
+The six aggregate types are Task, Workflow, Architecture Revision, Execution
+Epoch, DAG Node Run, and Standalone Review. Workflow phase is a query projection
 derived from child aggregate state. It is not a second writable state field.
 
-## Durable Effects And Workers
+## Durable Effects And Roles
 
 Network delivery, process admission, channel delivery, Git publication, and
 cross-aggregate action submission are outbox effects with at-least-once
@@ -25,14 +25,14 @@ delivery. Each effect is keyed by its causative event and index. Effect receipts
 and action idempotency make crash replay safe.
 
 Long LLM work is not an in-flight Outbox attempt. The Outbox effect durably
-creates or locates a `WorkerAssignment`, starts it in a bounded supervisor, and
+creates or locates a `RoleAssignment`, starts it in a bounded supervisor, and
 ACKs once that assignment exists. The DAG Node Run is the sole owner of module
 business lifecycle: coding, verification, repair, acceptance, stale propagation,
 pause, cancellation, and triage are Node transitions, never assignment states.
 
-Each Node generation owns one canonical Coder session for the complete module
-run. `producer` and `repair` are activations of that same session. Each immutable
-Candidate or verification-scenario fingerprint owns a separate Verifier
+Each Node generation owns one canonical Implementation role session for the
+complete module run. `produce` and `repair` are modes of that same role. Each immutable
+Candidate or verification-scenario fingerprint owns a separate Verifier role
 session. A retry of the same Candidate resumes that session, while a new
 Candidate starts a fresh Verifier with no inherited dialogue or tool state.
 Historical failures cross Candidate boundaries only through Manager-owned
@@ -40,7 +40,7 @@ RepairBills and verification obligations. Node `ACCEPTED` or `CANCELLED` closes
 the Coder session; a Verifier session closes after its verdict receipt is
 settled. Reopening an accepted Node creates a new role-session generation.
 
-A `WorkerAssignment` binds one immutable role/input/effect activation and uses
+A `RoleAssignment` binds one immutable role/input/effect activation and uses
 one explicit receipt protocol:
 
 ```text
@@ -56,7 +56,7 @@ it.
 
 Success and failure are symmetric. Worker submit first records an immutable
 result receipt. Exhausted or permanent worker failure records a
-`WorkerAssignmentFailureArtifact` and a `WORKER_FAILED` settlement action. The
+`RoleAssignmentFailureArtifact` and a `ROLE_FAILED` settlement action. The
 corresponding parent Action and assignment settlement then commit in the same
 SQLite transaction. Action dedup reconciles a replayed receipt without another
 LLM call. Settlement revokes the activation token and lease; a failed attempt
@@ -66,10 +66,10 @@ Manager restart recovers queued, retry-queued, running, or result-recorded
 assignments without recreating the causative Outbox effect. Direct stale
 transitions also emit an Outbox effect that cancels any not-yet-started
 activation, so dependency invalidation does not wait for a later recovery tick.
-`worker_invocations` is an observability and durable-turn journal; its status is
+`role_invocations` is an observability and durable-turn journal; its status is
 not consulted as a second business state machine.
 
-The foreground Pal channel loop never waits for a semantic worker. Global
+The foreground Pal channel loop never waits for a semantic role invocation. Global
 worker slots, rather than completed Outbox attempts, enforce LLM concurrency.
 
 Workers hold leases with monotonically increasing fencing tokens. On startup,
@@ -116,7 +116,7 @@ receives every immutable task-source file and the skeleton diff and owns all of
 those semantic checks.
 
 Research mode is explicit: `none`, `local_only`, or `external_allowed`.
-`local_only` removes web capabilities from the resolved worker pack; this is
+`local_only` removes web capabilities from the resolved role pack; this is
 enforced by the Manager rather than prompt text. Architect research is limited
 to feasibility and boundary design. Coder handles implementation-local
 research from approved references and the repository.
@@ -136,7 +136,7 @@ the live workspace, derives hidden identities and Git deltas, and materializes
 the canonical artifact before allowing the worker to exit.
 
 Authoring Drafts are durable, lease-fenced, versioned, and operation-idempotent.
-A replacement worker with the same immutable input fingerprint inherits only
+A replacement role invocation with the same immutable input fingerprint inherits only
 semantic definitions by default. Every family Verifier uses one semantic
 outcome and restarts from immutable task sources, candidate or artifact diff,
 durable review-scratch probes, and prior Repair Packets. It never inherits an
@@ -145,7 +145,7 @@ review-only Draft because it produces a report rather than a DAG-node verdict.
 Every authoring tool schema is bounded to at most 12 top-level properties and
 depth four, with no arrays of objects, schema-valued `additionalProperties`, or
 `oneOf`/`anyOf`. Manager-owned identity fields such as IDs, refs, hashes,
-handles, and JSON pointers are rejected from worker authoring schemas. Old
+handles, and JSON pointers are rejected from role authoring schemas. Old
 monolithic builder and revision-read capabilities are not compatibility aliases.
 
 Architecture Reviewer receives every immutable task-source file that Architect
@@ -153,11 +153,13 @@ received, every module and scenario, the complete skeleton diff, and prior
 findings. It independently checks
 source-obligation preservation and coverage, contracts, consumers, ownership,
 lifecycle/state/invariants, implementation leakage, and end-to-end
-reachability. It submits once: PASS with no arguments, or FAIL with one
-deduplicated Markdown report containing all severity-labelled material findings.
-It does not maintain finding identities or mirror the input as positive audit rows.
+reachability. It records each material defect through `add_finding` with a stable
+semantic key, p0/p1/p2 priority, summary, and optional structured source locations,
+preferably batching independent calls in one tool round. It then submits once:
+PASS with an empty finding Draft or FAIL with the structured Draft. It never emits
+Markdown as its machine contract or mirrors the input as positive audit rows.
 
-Sandboxed workers cannot mount Minion's database or content-addressed store.
+Sandboxed role processes cannot mount Minion's database or content-addressed store.
 They receive only an assignment-scoped gateway endpoint and an opaque attempt
 token. Immutable semantic inputs are materialized under named read-only
 reference roots and read with ordinary file/search tools; no receipt protocol
@@ -253,7 +255,7 @@ Coder cannot commit. Candidate submission follows:
 PRODUCING/REPAIRING -> QUIESCING -> SNAPSHOTTING -> REVIEW_QUEUED
 ```
 
-Quiescing revokes the worker token, stops and reaps the process group, verifies
+Quiescing revokes the role token, stops and reaps the process group, verifies
 fencing, and holds an exclusive worktree lock. Manager then checks owned and
 reference-only paths, verifies Git HEAD did not move, compares pre/post content
 fingerprints, creates the candidate commit, and publishes a candidate artifact.
@@ -264,7 +266,8 @@ Manager-assembled Candidate union and writes executable probes/tests only to a
 durable review-scratch Artifact. Both derive adversarial cases from contracts,
 lifecycle, state, ownership, invariants, and the diff, write real regression
 tests, and execute them in an isolated review workspace. Their terminal
-tools carry only a semantic outcome and Markdown findings; Manager records tool
+tools carry a semantic outcome while every defect is recorded through the same
+structured `add_finding` contract; Manager records tool
 receipts, snapshots the test delta, computes fingerprints, and owns routing.
 Submission follows an explicit durable boundary:
 
@@ -286,8 +289,8 @@ architecture defect is reported to the Execution Epoch; a DAG node never creates
 an Architecture Revision directly.
 
 The first such report moves the epoch to `REPLAN_COLLECTING`. Scheduling and new
-worker admission stop immediately, implementation writers are stopped and made
-stale, and only Reviewer/Verifier workers that were already running may finish.
+role admission stop immediately, implementation writers are stopped and made
+stale, and only Reviewer/Verifier role invocations that were already running may finish.
 After those reviews drain, the manager scans persisted node findings and compiles
 one immutable `ArchitectureFindingBatchArtifact`. Equal finding fingerprints are
 grouped while retaining every RepairBill/reproducer; different findings of the
@@ -316,16 +319,18 @@ modify them. Runtime state contains only explicit JSON overrides under
 `data/minion/catalog/`.
 
 On attach, the sidecar archives legacy `plugins/minion/profiles` and
-`plugins/minion/families` TOML seeds before constructing workers. Explicit
+`plugins/minion/families` TOML seeds before constructing role bindings. Explicit
 legacy custom definitions are converted to sidecar-owned overrides; managed
 builtin seeds are removed from effective precedence so they cannot mask an
 upgraded package template.
 
 Catalog reads, semantic merge patches, resets, and refreshes are manager IPC
 operations. Writes are schema-validated, atomically published, audited, and
-optionally guarded by catalog generation CAS. Existing workflows retain their
-immutable `FamilyBindingArtifact` and profile hashes; catalog changes affect
-only subsequently created workflows.
+optionally guarded by catalog generation CAS. Task creation requires one canonical
+primary profile, derives its problem-domain Family from that profile, resolves the
+Family's exact Architect/Reviewer/Implementation/Verifier bindings, and pins the
+complete immutable `FamilyBindingArtifact` on the Task. All workflows inherit that
+binding. Catalog changes therefore affect only subsequently created Tasks.
 
 ## Public Surface
 
@@ -351,8 +356,8 @@ waive verification, or bypass a gate.
 `restart_execution` is the explicit replacement path for an execution attempt
 whose accepted architecture is still valid. The old workflow first enters
 cancel settlement, then a durable replacement effect creates a new
-`review_then_execute` workflow for the same Task. The replacement resolves the
-latest Family binding, reruns Architecture Review and Human Review, and never
+`review_then_execute` workflow for the same Task. The replacement inherits the
+Task-pinned Family binding, reruns Architecture Review and Human Review, and never
 reuses candidates from the discarded execution. The old workflow becomes
 terminal only after the replacement workflow exists, or after a concurrent
 restart cancellation has been durably acknowledged.
@@ -375,7 +380,7 @@ rebind the uniquely matched workflow to the current channel.
 ## Persistence
 
 V2 tables use the `minion_v2_` prefix in Minion's SQLite database. Durable
-worker session, assignment, attempt, input-read, submission, and effect-attempt
+role session, assignment, attempt, invocation, turn, submission, and effect-attempt
 records use the same database and transaction boundary. Artifact
 bytes live under `data/minion/artifacts/sha256/`; SQLite stores metadata and
 reference edges. Publication writes a same-filesystem temporary file, fsyncs,
@@ -385,7 +390,7 @@ identical JSON used for different semantic artifact types cannot overwrite
 metadata.
 
 An `AgentSessionContinuationArtifact` is the sole recovery truth for a logical
-worker session. Before each physical attempt, the Manager resolves the Artifact
+role session. Before each physical attempt, the Manager resolves the Artifact
 reference stored on the session and materializes one explicit continuation
 input inside that attempt directory. The runner never scans older run files for
 a checkpoint; it writes one explicit output path, which the Manager validates

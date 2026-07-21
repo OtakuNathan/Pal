@@ -58,17 +58,21 @@ class MinionV2WorkflowService:
         task_id = str(data.get("task_id") or f"task_{uuid4().hex}").strip()
         title = str(data.get("title") or "").strip()
         objective = str(data.get("objective") or data.get("goal") or "").strip()
-        family_id = str(data.get("family_id") or data.get("profile_family") or "").strip()
+        primary_profile = self.catalog.profile(str(data.get("profile") or "").strip())
+        primary_profile_id = primary_profile.canonical_profile_id
+        family_id = primary_profile.profile_group.replace("/", ".")
         workspace = _normalize_workspace(data.get("workspace"))
-        if not title or not objective or not family_id or not workspace:
-            raise ValueError("task requires title, objective, family_id, and workspace")
-        self.catalog.validate_family_exists(family_id)
+        if not title or not objective or not workspace:
+            raise ValueError("task requires title, objective, profile, and workspace")
+        family_binding_ref = self.catalog.publish_family_binding(primary_profile_id)
         revision_ref = self._publish_task_revision(
             task_id=task_id,
             revision=1,
             title=title,
             objective=objective,
+            primary_profile_id=primary_profile_id,
             family_id=family_id,
+            family_binding_ref=family_binding_ref.to_dict(),
             workspace=workspace,
             references=_normalize_references(data.get("references")),
             policies=dict(data.get("policies") or {}),
@@ -87,7 +91,9 @@ class MinionV2WorkflowService:
                 payload={
                     "title": title,
                     "objective": objective,
+                    "primary_profile_id": primary_profile_id,
                     "family_id": family_id,
+                    "family_binding_ref": family_binding_ref.to_dict(),
                     "workspace_key": _workspace_key(workspace),
                     "task_revision": 1,
                     "task_revision_ref": revision_ref.to_dict(),
@@ -99,6 +105,9 @@ class MinionV2WorkflowService:
             "status": "created",
             "task_id": task_id,
             "state": result.snapshot.state,
+            "profile": primary_profile_id,
+            "family": family_id,
+            "family_binding_ref": family_binding_ref.to_dict(),
             "task_revision_ref": revision_ref.to_dict(),
         }
 
@@ -184,6 +193,7 @@ class MinionV2WorkflowService:
                     "task_id": str(task["task_id"]),
                     "title": str(task.get("title") or ""),
                     "objective": str(task.get("objective") or ""),
+                    "profile": str(task.get("profile_id") or ""),
                     "family": str(task.get("family_id") or ""),
                     "workspace": str(task.get("workspace_key") or ""),
                     "state": str(task.get("state") or ""),
@@ -200,8 +210,8 @@ class MinionV2WorkflowService:
         task = self.repository.read_snapshot(AggregateType.TASK, task_id)
         if task is None or task.state != "ACTIVE":
             raise ValueError(f"active task not found: {task_id}")
-        if data.get("family_id") and str(data["family_id"]) != str(task.payload.get("family_id") or ""):
-            raise ValueError("task family_id is immutable")
+        if data.get("profile") and str(data["profile"]) != str(task.payload.get("primary_profile_id") or ""):
+            raise ValueError("task profile is immutable")
         previous_ref = dict(task.payload.get("task_revision_ref") or {})
         previous = dict(self.artifacts.read_json(previous_ref))
         title = str(data.get("title") or previous.get("title") or "").strip()
@@ -219,7 +229,9 @@ class MinionV2WorkflowService:
             revision=revision,
             title=title,
             objective=objective,
+            primary_profile_id=str(task.payload.get("primary_profile_id") or ""),
             family_id=str(task.payload.get("family_id") or ""),
+            family_binding_ref=dict(task.payload.get("family_binding_ref") or {}),
             workspace=workspace,
             references=references,
             policies=policies,
@@ -294,10 +306,14 @@ class MinionV2WorkflowService:
             raise ValueError("start_workflow requires an active task_id")
         if task_was_selected and data.get("workspace"):
             raise ValueError("workflow workspace is owned by Task; update the Task instead")
+        if task_was_selected and data.get("profile"):
+            raise ValueError("workflow profile is owned by Task; create a new Task to change it")
         task_revision_ref = dict(task.payload.get("task_revision_ref") or {})
         task_revision = dict(self.artifacts.read_json(task_revision_ref))
         workspace = _normalize_workspace(task_revision.get("workspace"))
-        family_binding_ref = self.catalog.publish_family_binding(str(task.payload.get("family_id") or ""))
+        family_binding_ref = _artifact_ref_mapping(task.payload.get("family_binding_ref"))
+        if not family_binding_ref:
+            raise ValueError("Task has no pinned FamilyBindingArtifact")
         workflow_id = str(data.get("workflow_id") or f"wf_{uuid4().hex}").strip()
         actor = str(data.get("actor") or "pal").strip()
         source_channel = str(data.get("source_channel") or "local").strip()
@@ -360,7 +376,7 @@ class MinionV2WorkflowService:
             "workflow_id": workflow_id,
             "task_id": task_id,
             "task_revision_ref": task_revision_ref,
-            "family_binding_ref": family_binding_ref.to_dict(),
+            "family_binding_ref": family_binding_ref,
             "operation": operation,
             "goal": raw_goal,
             "workflow_name": str(task_revision.get("title") or goal or "Minion workflow"),
@@ -384,7 +400,7 @@ class MinionV2WorkflowService:
             provenance={"actor": actor, "source_channel": source_channel},
             child_refs=(
                 (str(task_revision_ref["sha256"]), "task_revision"),
-                (family_binding_ref.sha256, "family_binding"),
+                (str(family_binding_ref["sha256"]), "family_binding"),
                 *(((str(requirements_ref["sha256"]), "requirements"),) if requirements_ref else ()),
                 *(((str(artifact_ref["sha256"]), "input"),) if artifact_ref else ()),
             ),
@@ -403,7 +419,7 @@ class MinionV2WorkflowService:
                     "request_ref": request_ref.to_dict(),
                     "task_id": task_id,
                     "task_revision_ref": task_revision_ref,
-                    "family_binding_ref": family_binding_ref.to_dict(),
+                    "family_binding_ref": family_binding_ref,
                     "operation": operation,
                     "research_mode": research_mode.value,
                     "owner": actor,
@@ -430,7 +446,9 @@ class MinionV2WorkflowService:
 
     def _create_or_reuse_task_for_workflow(self, data: Mapping[str, Any]) -> str:
         goal = str(data.get("goal") or data.get("objective") or "").strip()
-        family_id = str(data.get("family_id") or "software_engineering").strip()
+        primary_profile = self.catalog.profile(str(data.get("profile") or "").strip())
+        primary_profile_id = primary_profile.canonical_profile_id
+        family_id = primary_profile.profile_group.replace("/", ".")
         workspace = _normalize_workspace(data.get("workspace"))
         title = str(data.get("title") or goal or "Minion workflow").strip()
         if not workspace:
@@ -448,6 +466,7 @@ class MinionV2WorkflowService:
                 for item in candidates
                 if str(item.get("workspace_key") or "") == workspace_key
                 and str(item.get("objective") or "") == goal
+                and str(item.get("profile_id") or "") == primary_profile_id
                 and str(item.get("owner") or "") == str(data.get("actor") or "pal")
             ),
             None,
@@ -458,7 +477,7 @@ class MinionV2WorkflowService:
             {
                 "title": title,
                 "objective": goal,
-                "family_id": family_id,
+                "profile": primary_profile_id,
                 "workspace": workspace,
                 "references": list(data.get("references") or []),
                 "policies": dict(data.get("policies") or {}),
@@ -475,29 +494,36 @@ class MinionV2WorkflowService:
         revision: int,
         title: str,
         objective: str,
+        primary_profile_id: str,
         family_id: str,
+        family_binding_ref: Mapping[str, Any],
         workspace: Mapping[str, Any],
         references: list[Any],
         policies: Mapping[str, Any],
         actor: str,
         parent_ref: Mapping[str, Any] | None = None,
     ) -> ArtifactRef:
-        child_refs = ()
+        child_refs: tuple[tuple[str, str], ...] = (
+            (str(family_binding_ref["sha256"]), "family_binding"),
+        )
         if parent_ref and parent_ref.get("sha256"):
-            child_refs = ((str(parent_ref["sha256"]), "previous_revision"),)
+            child_refs = (*child_refs, (str(parent_ref["sha256"]), "previous_revision"))
         return self.artifacts.put_json(
             {
-                "schema_version": "1",
+                "schema_version": "2",
                 "task_id": task_id,
                 "revision": int(revision),
                 "title": title,
                 "objective": objective,
+                "primary_profile_id": primary_profile_id,
                 "family_id": family_id,
+                "family_binding_ref": dict(family_binding_ref),
                 "workspace": dict(workspace),
                 "references": list(references),
                 "policies": dict(policies),
             },
             artifact_type="TaskRevisionArtifact",
+            schema_version="2",
             provenance={"actor": actor, "task_id": task_id},
             child_refs=child_refs,
         )
@@ -648,7 +674,7 @@ class MinionV2WorkflowService:
             task_title = str(tasks[0].get("title") or "") if tasks else ""
         waiting_for_user = bool(projection["waiting_for_user"])
         active_worker = "" if waiting_for_user else str(projection.get("active_worker_id") or "")
-        invocation = self.repository.read_worker_invocation(active_worker) if active_worker else None
+        invocation = self.repository.read_role_invocation(active_worker) if active_worker else None
         worker_node = next(
             (
                 item
@@ -712,7 +738,7 @@ class MinionV2WorkflowService:
                     workflow_id=revision.workflow_id,
                     aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                     aggregate_id=revision.aggregate_id,
-                    effect_type="publish_human_architecture_review",
+                    effect_type="publish_architecture_review_request",
                 )
                 or {}
             )
@@ -1021,7 +1047,7 @@ class MinionV2WorkflowService:
                             "kind": "orphaned_worker",
                             "reason": (
                                 "worker-owned state has no live lease, pending outbox "
-                                "effect, or durable worker assignment"
+                                "effect, or durable role assignment"
                             ),
                         }
                     },

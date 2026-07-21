@@ -24,7 +24,7 @@ from pal.minion.v2.contracts import UnknownTransitionError
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.task_sources import TaskSourceBundleService
-from pal.minion.v2.workers import apply_v2_research_capability_policy
+from pal.minion.v2.semantic_orchestration import apply_v2_research_capability_policy
 from pal.shared import MinionInvocationPack
 
 
@@ -485,7 +485,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             child_refs=((manifest.sha256, "architecture_manifest"),),
         )
         claimed = self.repository.claim_outbox("legacy-card-worker", limit=20)
-        review_effect = next(item for item in claimed if item["effect_type"] == "publish_human_architecture_review")
+        review_effect = next(item for item in claimed if item["effect_type"] == "publish_architecture_review_request")
         for item in claimed:
             self.repository.complete_outbox_effect(
                 item["effect_id"],

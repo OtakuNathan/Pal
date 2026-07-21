@@ -1781,9 +1781,9 @@ class MinionRunner:
         if self._manager_submission_receipt_observed:
             return True
         try:
-            from pal.minion.v2.worker_gateway import worker_gateway_client_from_env
+            from pal.minion.v2.role_gateway import role_gateway_client_from_env
 
-            client = worker_gateway_client_from_env(self.runtime_root)
+            client = role_gateway_client_from_env(self.runtime_root)
             if client is None:
                 return False
             status = client.request_sync("submission_status", {})

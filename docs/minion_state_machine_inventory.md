@@ -593,7 +593,7 @@ Primary transition matrix:
 | `CHECKPOINT_REVIEW` | `GATE_PASSED_COMPLETE` | `SUCCEEDED` |
 | `CHECKPOINT_REVIEW` | `GATE_REQUESTED_REPAIR` | `REPAIRING` |
 | `REPAIRING` | `REPAIR_SUBMITTED` | `CHECKPOINT_REVIEW` |
-| active state | `WORKER_FAILED` | `FAILED` |
+| active state | `ROLE_FAILED` | `FAILED` |
 | completed/downstream state | `INVALIDATE_FOR_REPLAY` | target `READY`, dependent `STALE` |
 | `FAILED`/`PAUSED`/`STALE` | `RESUME` with dependencies satisfied | `READY` |
 

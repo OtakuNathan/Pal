@@ -77,10 +77,8 @@ MECHANICAL_EFFECT_TYPES = frozenset({
 CONTROL_RECONCILIATION_EFFECT_TYPES = frozenset(
     {
         "reconcile_workflow",
-        "reconcile_architecture_revision",
         "reconcile_execution_epoch",
-        "reconcile_node_run",
-        "reconcile_standalone_review",
+        "reconcile_semantic_state",
     }
 )
 
@@ -88,8 +86,7 @@ CANCELLATION_EFFECT_TYPES = CONTROL_RECONCILIATION_EFFECT_TYPES | frozenset(
     {
         "propagate_cancel",
         "cancel_epoch_nodes",
-        "cancel_node_worker",
-        "cancel_aggregate_work",
+        "cancel_role",
     }
 )
 
@@ -97,8 +94,7 @@ PAUSE_EFFECT_TYPES = CONTROL_RECONCILIATION_EFFECT_TYPES | frozenset(
     {
         "propagate_pause",
         "pause_epoch_nodes",
-        "pause_node_worker",
-        "pause_aggregate_work",
+        "pause_role",
     }
 )
 
@@ -106,8 +102,7 @@ TRIAGE_FREEZE_EFFECT_TYPES = frozenset(
     {
         "freeze_workflow_children",
         "freeze_epoch_nodes",
-        "quiesce_node_for_triage",
-        "quiesce_aggregate_for_triage",
+        "quiesce_role_for_triage",
     }
 )
 
@@ -298,7 +293,7 @@ class MinionV2OutboxProcessor:
             return self._control_epoch_nodes(effect_type, effect)
         if effect_type == "suspend_stale_node_assignments":
             node = self._effect_snapshot(effect)
-            self.repository.cancel_worker_assignments(
+            self.repository.cancel_role_assignments(
                 workflow_id=node.workflow_id,
                 aggregate_type=AggregateType.DAG_NODE_RUN,
                 aggregate_id=node.aggregate_id,
@@ -378,7 +373,7 @@ class MinionV2OutboxProcessor:
             return self._start_replacement_workflow_from_architecture(effect)
         if effect_type == "submit_workflow_rejection":
             revision = self._effect_snapshot(effect)
-            self.repository.complete_worker_session(
+            self.repository.complete_role_session(
                 architect_session_id_for_revision(
                     revision.workflow_id,
                     revision.aggregate_id,
@@ -761,7 +756,7 @@ class MinionV2OutboxProcessor:
             manifest_ref = dict(snapshot.payload.get("architecture_manifest_ref") or {})
             if not manifest_ref:
                 raise ValueError("accepted architecture revision has no manifest")
-            self.repository.complete_worker_session(
+            self.repository.complete_role_session(
                 architect_session_id_for_revision(
                     snapshot.workflow_id,
                     snapshot.aggregate_id,
@@ -867,7 +862,7 @@ class MinionV2OutboxProcessor:
 
     def _create_revision(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         previous = self._effect_snapshot(effect)
-        self.repository.complete_worker_session(
+        self.repository.complete_role_session(
             architect_session_id_for_revision(
                 previous.workflow_id,
                 previous.aggregate_id,
@@ -1343,7 +1338,7 @@ class MinionV2OutboxProcessor:
         node = self._effect_snapshot(effect)
         if str(node.payload.get("node_kind") or "unit") == "unit":
             generation = node_role_generation(node.payload)
-            self.repository.complete_worker_session(
+            self.repository.complete_role_session(
                 coder_session_id(node.aggregate_id, generation)
             )
         epoch_id = str(node.payload.get("epoch_id") or "")
@@ -1652,27 +1647,6 @@ class MinionV2OutboxProcessor:
                         idempotency_key=f"effect:{effect['effect_key']}:confirm",
                     )
                 )
-        return {}
-
-    def _confirm_simple_control(self, effect_type: str, effect: Mapping[str, Any]) -> Mapping[str, Any]:
-        snapshot = self._effect_snapshot(effect)
-        if effect_type == "pause_aggregate_work":
-            action_type = "PAUSE_CONFIRMED"
-        elif effect_type == "cancel_aggregate_work":
-            action_type = "CANCEL_CONFIRMED"
-        else:
-            return {}
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type=action_type,
-                workflow_id=snapshot.workflow_id,
-                aggregate_type=snapshot.aggregate_type,
-                aggregate_id=snapshot.aggregate_id,
-                actor="minion-v2-control",
-                expected_version=snapshot.version,
-                idempotency_key=f"effect:{effect['effect_key']}:confirm",
-            )
-        )
         return {}
 
     def _control_epoch_nodes(self, effect_type: str, effect: Mapping[str, Any]) -> Mapping[str, Any]:

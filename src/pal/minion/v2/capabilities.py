@@ -71,7 +71,7 @@ _FAMILY_OVERRIDE_CHANGES_SCHEMA = {
         "domain": {"type": ["string", "null"]},
         "domain_keywords": {"type": ["array", "null"], "items": {"type": "string"}},
         "workflow_template": {"type": ["string", "null"]},
-        "roles": {**_STRING_MAP_SCHEMA, "type": ["object", "null"]},
+        "role_bindings": {**_STRING_MAP_SCHEMA, "type": ["object", "null"]},
         "builders": {**_STRING_MAP_SCHEMA, "type": ["object", "null"]},
         "adapters": {**_STRING_MAP_SCHEMA, "type": ["object", "null"]},
         "policies": {"type": ["object", "null"]},
@@ -191,7 +191,7 @@ class MinionV2PublicProvider:
         action_name="set_profile_override",
         description=(
             "Atomically patch one Minion profile inside the sidecar. The profile is selected by semantic name; omitted fields retain their current "
-            "effective value and null removes an optional field. Existing workflows keep their pinned FamilyBindingArtifact, so this affects only future work."
+            "effective value and null removes an optional field. Existing Tasks keep their pinned FamilyBindingArtifact, so this affects only future Tasks."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInput,
     )
@@ -229,8 +229,8 @@ class MinionV2PublicProvider:
         scope="minion_catalog",
         action_name="set_family_override",
         description=(
-            "Atomically patch one data-driven Minion family inside the sidecar using its semantic family name. Role references and profile availability "
-            "are validated before the override becomes visible to future workflows."
+            "Atomically patch one data-driven Minion family inside the sidecar using its semantic family name. Four role bindings and profile availability "
+            "are validated before the override becomes visible to future Tasks."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput,
     )
@@ -286,9 +286,9 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="start_workflow",
         description=(
-            "Start one durable Minion workflow and bind it to the current actor/channel. Supply the user's exact goal, family, workspace, and optional "
+            "Start one durable Minion workflow and bind it to the current actor/channel. For a new Task, supply its canonical profile, exact goal, workspace, and optional "
             "workspace-relative source files. The Manager preserves those bytes as the immutable task truth without extracting or normalizing requirements, "
-            "and creates or reuses all internal identities. Use "
+            "derives the problem-domain Family from the profile, pins the full FamilyBinding for the Task, and creates all internal identities. Use "
             "review_then_execute with artifact for a named external architecture, execute_trusted only for a Manager-trusted named artifact, "
             "standalone_review for review-only, and review_and_repair for bounded repair. Never inspect or implement the target in the foreground first."
         ),

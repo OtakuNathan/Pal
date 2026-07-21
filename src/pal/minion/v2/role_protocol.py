@@ -6,22 +6,24 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Mapping
 
+from pal.minion.v2.role_contracts import RoleActivation
 
-class WorkerSessionState(StrEnum):
+
+class RoleSessionState(StrEnum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
 
-class WorkerSessionAction(StrEnum):
+class RoleSessionAction(StrEnum):
     ACTIVATE = "activate"
     SUSPEND = "suspend"
     COMPLETE = "complete"
     CANCEL = "cancel"
 
 
-class WorkerAssignmentState(StrEnum):
+class RoleAssignmentState(StrEnum):
     QUEUED = "queued"
     CLAIMED = "claimed"
     RUNNING = "running"
@@ -31,7 +33,7 @@ class WorkerAssignmentState(StrEnum):
     CANCELLED = "cancelled"
 
 
-class WorkerAssignmentAction(StrEnum):
+class RoleAssignmentAction(StrEnum):
     CLAIM = "claim"
     START = "start"
     QUEUE_RETRY = "queue_retry"
@@ -40,7 +42,7 @@ class WorkerAssignmentAction(StrEnum):
     CANCEL = "cancel"
 
 
-class WorkerAttemptState(StrEnum):
+class RoleAttemptState(StrEnum):
     STARTING = "starting"
     RUNNING = "running"
     SUBMITTED = "submitted"
@@ -52,109 +54,103 @@ class WorkerAttemptState(StrEnum):
 
 ACTIVE_ASSIGNMENT_STATES = frozenset(
     {
-        WorkerAssignmentState.CLAIMED,
-        WorkerAssignmentState.RUNNING,
-        WorkerAssignmentState.RESULT_RECORDED,
+        RoleAssignmentState.CLAIMED,
+        RoleAssignmentState.RUNNING,
+        RoleAssignmentState.RESULT_RECORDED,
     }
 )
 
 
 _SESSION_TRANSITIONS = {
-    (WorkerSessionState.ACTIVE, WorkerSessionAction.ACTIVATE): WorkerSessionState.ACTIVE,
-    (WorkerSessionState.ACTIVE, WorkerSessionAction.SUSPEND): WorkerSessionState.SUSPENDED,
-    (WorkerSessionState.SUSPENDED, WorkerSessionAction.ACTIVATE): WorkerSessionState.ACTIVE,
-    (WorkerSessionState.SUSPENDED, WorkerSessionAction.SUSPEND): WorkerSessionState.SUSPENDED,
-    (WorkerSessionState.ACTIVE, WorkerSessionAction.COMPLETE): WorkerSessionState.COMPLETED,
-    (WorkerSessionState.SUSPENDED, WorkerSessionAction.COMPLETE): WorkerSessionState.COMPLETED,
-    (WorkerSessionState.COMPLETED, WorkerSessionAction.COMPLETE): WorkerSessionState.COMPLETED,
-    (WorkerSessionState.ACTIVE, WorkerSessionAction.CANCEL): WorkerSessionState.CANCELLED,
-    (WorkerSessionState.SUSPENDED, WorkerSessionAction.CANCEL): WorkerSessionState.CANCELLED,
-    (WorkerSessionState.CANCELLED, WorkerSessionAction.CANCEL): WorkerSessionState.CANCELLED,
+    (RoleSessionState.ACTIVE, RoleSessionAction.ACTIVATE): RoleSessionState.ACTIVE,
+    (RoleSessionState.ACTIVE, RoleSessionAction.SUSPEND): RoleSessionState.SUSPENDED,
+    (RoleSessionState.SUSPENDED, RoleSessionAction.ACTIVATE): RoleSessionState.ACTIVE,
+    (RoleSessionState.SUSPENDED, RoleSessionAction.SUSPEND): RoleSessionState.SUSPENDED,
+    (RoleSessionState.ACTIVE, RoleSessionAction.COMPLETE): RoleSessionState.COMPLETED,
+    (RoleSessionState.SUSPENDED, RoleSessionAction.COMPLETE): RoleSessionState.COMPLETED,
+    (RoleSessionState.COMPLETED, RoleSessionAction.COMPLETE): RoleSessionState.COMPLETED,
+    (RoleSessionState.ACTIVE, RoleSessionAction.CANCEL): RoleSessionState.CANCELLED,
+    (RoleSessionState.SUSPENDED, RoleSessionAction.CANCEL): RoleSessionState.CANCELLED,
+    (RoleSessionState.CANCELLED, RoleSessionAction.CANCEL): RoleSessionState.CANCELLED,
 }
 
 
-def worker_session_target(
-    state: WorkerSessionState | str,
-    action: WorkerSessionAction | str,
-) -> WorkerSessionState:
+def role_session_target(
+    state: RoleSessionState | str,
+    action: RoleSessionAction | str,
+) -> RoleSessionState:
     """Resolve the only legal durable logical-session transition."""
 
-    source = WorkerSessionState(str(state))
-    operation = WorkerSessionAction(str(action))
+    source = RoleSessionState(str(state))
+    operation = RoleSessionAction(str(action))
     try:
         return _SESSION_TRANSITIONS[(source, operation)]
     except KeyError as exc:
         raise ValueError(
-            f"illegal worker session transition: {source.value} + {operation.value}"
+            f"illegal role session transition: {source.value} + {operation.value}"
         ) from exc
 
 
 _ASSIGNMENT_TRANSITIONS = {
-    (WorkerAssignmentState.QUEUED, WorkerAssignmentAction.CLAIM): WorkerAssignmentState.CLAIMED,
-    (WorkerAssignmentState.RETRY_QUEUED, WorkerAssignmentAction.CLAIM): WorkerAssignmentState.CLAIMED,
-    (WorkerAssignmentState.CLAIMED, WorkerAssignmentAction.START): WorkerAssignmentState.RUNNING,
-    (WorkerAssignmentState.CLAIMED, WorkerAssignmentAction.QUEUE_RETRY): WorkerAssignmentState.RETRY_QUEUED,
-    (WorkerAssignmentState.RUNNING, WorkerAssignmentAction.QUEUE_RETRY): WorkerAssignmentState.RETRY_QUEUED,
-    (WorkerAssignmentState.CLAIMED, WorkerAssignmentAction.RECORD_RESULT): WorkerAssignmentState.RESULT_RECORDED,
-    (WorkerAssignmentState.RUNNING, WorkerAssignmentAction.RECORD_RESULT): WorkerAssignmentState.RESULT_RECORDED,
-    (WorkerAssignmentState.RETRY_QUEUED, WorkerAssignmentAction.RECORD_RESULT): WorkerAssignmentState.RESULT_RECORDED,
-    (WorkerAssignmentState.RESULT_RECORDED, WorkerAssignmentAction.RECORD_RESULT): WorkerAssignmentState.RESULT_RECORDED,
-    (WorkerAssignmentState.RESULT_RECORDED, WorkerAssignmentAction.SETTLE): WorkerAssignmentState.SETTLED,
-    (WorkerAssignmentState.SETTLED, WorkerAssignmentAction.SETTLE): WorkerAssignmentState.SETTLED,
+    (RoleAssignmentState.QUEUED, RoleAssignmentAction.CLAIM): RoleAssignmentState.CLAIMED,
+    (RoleAssignmentState.RETRY_QUEUED, RoleAssignmentAction.CLAIM): RoleAssignmentState.CLAIMED,
+    (RoleAssignmentState.CLAIMED, RoleAssignmentAction.START): RoleAssignmentState.RUNNING,
+    (RoleAssignmentState.CLAIMED, RoleAssignmentAction.QUEUE_RETRY): RoleAssignmentState.RETRY_QUEUED,
+    (RoleAssignmentState.RUNNING, RoleAssignmentAction.QUEUE_RETRY): RoleAssignmentState.RETRY_QUEUED,
+    (RoleAssignmentState.CLAIMED, RoleAssignmentAction.RECORD_RESULT): RoleAssignmentState.RESULT_RECORDED,
+    (RoleAssignmentState.RUNNING, RoleAssignmentAction.RECORD_RESULT): RoleAssignmentState.RESULT_RECORDED,
+    (RoleAssignmentState.RETRY_QUEUED, RoleAssignmentAction.RECORD_RESULT): RoleAssignmentState.RESULT_RECORDED,
+    (RoleAssignmentState.RESULT_RECORDED, RoleAssignmentAction.RECORD_RESULT): RoleAssignmentState.RESULT_RECORDED,
+    (RoleAssignmentState.RESULT_RECORDED, RoleAssignmentAction.SETTLE): RoleAssignmentState.SETTLED,
+    (RoleAssignmentState.SETTLED, RoleAssignmentAction.SETTLE): RoleAssignmentState.SETTLED,
 }
 
-for _state in WorkerAssignmentState:
+for _state in RoleAssignmentState:
     if _state not in {
-        WorkerAssignmentState.RESULT_RECORDED,
-        WorkerAssignmentState.SETTLED,
-        WorkerAssignmentState.CANCELLED,
+        RoleAssignmentState.RESULT_RECORDED,
+        RoleAssignmentState.SETTLED,
+        RoleAssignmentState.CANCELLED,
     }:
-        _ASSIGNMENT_TRANSITIONS[(_state, WorkerAssignmentAction.CANCEL)] = (
-            WorkerAssignmentState.CANCELLED
+        _ASSIGNMENT_TRANSITIONS[(_state, RoleAssignmentAction.CANCEL)] = (
+            RoleAssignmentState.CANCELLED
         )
 _ASSIGNMENT_TRANSITIONS[
-    (WorkerAssignmentState.CANCELLED, WorkerAssignmentAction.CANCEL)
-] = WorkerAssignmentState.CANCELLED
+    (RoleAssignmentState.CANCELLED, RoleAssignmentAction.CANCEL)
+] = RoleAssignmentState.CANCELLED
 
 
-def worker_assignment_target(
-    state: WorkerAssignmentState | str,
-    action: WorkerAssignmentAction | str,
-) -> WorkerAssignmentState:
+def role_assignment_target(
+    state: RoleAssignmentState | str,
+    action: RoleAssignmentAction | str,
+) -> RoleAssignmentState:
     """Resolve the only legal durable assignment transition.
 
-    Worker assignments model one role activation and its Manager receipt. They
+    Role assignments model one role activation and its Manager receipt. They
     never own module triage, pause, repair, or acceptance; those remain actions
     on the parent aggregate.
     """
 
-    source = WorkerAssignmentState(str(state))
-    operation = WorkerAssignmentAction(str(action))
+    source = RoleAssignmentState(str(state))
+    operation = RoleAssignmentAction(str(action))
     try:
         return _ASSIGNMENT_TRANSITIONS[(source, operation)]
     except KeyError as exc:
         raise ValueError(
-            f"illegal worker assignment transition: {source.value} + {operation.value}"
+            f"illegal role assignment transition: {source.value} + {operation.value}"
         ) from exc
 
 
-def worker_session_role(activation_role: str) -> str:
-    role = str(activation_role or "").strip()
-    if role in {"producer", "repair"}:
-        return "coder"
-    if role in {"verifier", "scenario_verifier"}:
-        return "verifier"
-    return role
-
-
 @dataclass(frozen=True)
-class WorkerAssignmentRequest:
+class RoleAssignmentRequest:
     assignment_key: str
     session_id: str
     workflow_id: str
     aggregate_type: str
     aggregate_id: str
     role: str
+    mode: str
+    executor_profile_id: str
+    family_binding_sha: str
     input_fingerprint: str
     required_inputs: tuple[str, ...]
     input_refs: Mapping[str, Mapping[str, Any]]
@@ -169,25 +165,31 @@ class WorkerAssignmentRequest:
             "aggregate_type": self.aggregate_type,
             "aggregate_id": self.aggregate_id,
             "role": self.role,
+            "mode": self.mode,
+            "executor_profile_id": self.executor_profile_id,
+            "family_binding_sha": self.family_binding_sha,
             "input_fingerprint": self.input_fingerprint,
             "submission_kind": self.submission_kind,
         }
         missing = [name for name, value in required.items() if not str(value or "").strip()]
         if missing:
             raise ValueError(
-                "worker assignment request missing fields: " + ", ".join(missing)
+                "role assignment request missing fields: " + ", ".join(missing)
             )
+        RoleActivation.from_values(self.role, self.mode)
+        if "." not in self.executor_profile_id:
+            raise ValueError("role assignment executor_profile_id must be canonical")
         names = tuple(str(item).strip() for item in self.required_inputs)
         if any(not item for item in names) or len(set(names)) != len(names):
-            raise ValueError("worker assignment required inputs must be unique non-empty names")
+            raise ValueError("role assignment required inputs must be unique non-empty names")
         unknown = sorted(set(names) - {str(item) for item in self.input_refs})
         if unknown:
             raise ValueError(
-                "worker assignment required inputs have no bound artifact: "
+                "role assignment required inputs have no bound artifact: "
                 + ", ".join(unknown)
             )
         if not str(dict(self.execution_spec or {}).get("effect_type") or "").strip():
-            raise ValueError("worker assignment execution spec requires effect_type")
+            raise ValueError("role assignment execution spec requires effect_type")
 
     @property
     def assignment_id(self) -> str:
@@ -205,6 +207,9 @@ class WorkerAssignmentRequest:
             "aggregate_type": self.aggregate_type,
             "aggregate_id": self.aggregate_id,
             "role": self.role,
+            "mode": self.mode,
+            "executor_profile_id": self.executor_profile_id,
+            "family_binding_sha": self.family_binding_sha,
             "input_fingerprint": self.input_fingerprint,
             "required_inputs": sorted(str(item) for item in self.required_inputs),
             "input_refs": {
@@ -217,7 +222,7 @@ class WorkerAssignmentRequest:
 
 
 @dataclass(frozen=True)
-class WorkerSubmissionReceipt:
+class RoleSubmissionReceipt:
     assignment_id: str
     artifact_ref: Mapping[str, Any]
     payload_hash: str
@@ -234,7 +239,7 @@ class WorkerSubmissionReceipt:
 
 def attempt_id(assignment_id: str, attempt_index: int) -> str:
     if int(attempt_index) <= 0:
-        raise ValueError("worker attempt index must be positive")
+        raise ValueError("role attempt index must be positive")
     return semantic_id("att", f"{assignment_id}:{int(attempt_index)}")
 
 

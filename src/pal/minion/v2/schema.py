@@ -3,10 +3,21 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 17
+MINION_V2_SCHEMA_VERSION = 18
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS minion_v2_schema_meta (
+            schema_key TEXT PRIMARY KEY,
+            schema_value TEXT NOT NULL
+        )
+        """
+    )
+    previous_version = _schema_version(connection)
+    if previous_version < 18:
+        _rename_role_protocol_tables_v18(connection)
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS minion_v2_schema_meta (
@@ -34,6 +45,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             state TEXT NOT NULL,
             title TEXT NOT NULL,
             objective TEXT NOT NULL,
+            profile_id TEXT NOT NULL DEFAULT '',
             family_id TEXT NOT NULL,
             workspace_key TEXT NOT NULL DEFAULT '',
             task_revision_sha TEXT NOT NULL,
@@ -165,7 +177,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS minion_v2_human_decisions_revision
         ON minion_v2_human_decisions(workflow_id, architecture_revision_id, status);
 
-        CREATE TABLE IF NOT EXISTS minion_v2_worker_invocations (
+        CREATE TABLE IF NOT EXISTS minion_v2_role_invocations (
             invocation_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             aggregate_type TEXT NOT NULL,
@@ -173,6 +185,9 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             lease_resource_key TEXT NOT NULL,
             fencing_token INTEGER NOT NULL,
             role TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT '',
+            executor_profile_id TEXT NOT NULL DEFAULT '',
+            family_binding_sha TEXT NOT NULL DEFAULT '',
             authoring_contract_version TEXT NOT NULL DEFAULT '',
             prompt_pack_ref_json TEXT NOT NULL,
             continuation_ref_json TEXT NOT NULL DEFAULT '{}',
@@ -188,12 +203,15 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS minion_v2_worker_sessions (
+        CREATE TABLE IF NOT EXISTS minion_v2_role_sessions (
             session_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             aggregate_type TEXT NOT NULL,
             aggregate_id TEXT NOT NULL,
             role TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT '',
+            executor_profile_id TEXT NOT NULL DEFAULT '',
+            family_binding_sha TEXT NOT NULL DEFAULT '',
             scope_kind TEXT NOT NULL DEFAULT '',
             subject_key TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'active',
@@ -202,7 +220,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS minion_v2_worker_assignments (
+        CREATE TABLE IF NOT EXISTS minion_v2_role_assignments (
             assignment_id TEXT PRIMARY KEY,
             assignment_key TEXT NOT NULL UNIQUE,
             request_hash TEXT NOT NULL,
@@ -211,6 +229,9 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             aggregate_type TEXT NOT NULL,
             aggregate_id TEXT NOT NULL,
             role TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            executor_profile_id TEXT NOT NULL,
+            family_binding_sha TEXT NOT NULL,
             input_fingerprint TEXT NOT NULL,
             required_inputs_json TEXT NOT NULL DEFAULT '[]',
             input_refs_json TEXT NOT NULL DEFAULT '{}',
@@ -224,18 +245,18 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             last_error TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            FOREIGN KEY(session_id) REFERENCES minion_v2_worker_sessions(session_id)
+            FOREIGN KEY(session_id) REFERENCES minion_v2_role_sessions(session_id)
         );
 
-        CREATE INDEX IF NOT EXISTS minion_v2_worker_assignments_ready
-        ON minion_v2_worker_assignments(state, updated_at, assignment_id);
+        CREATE INDEX IF NOT EXISTS minion_v2_role_assignments_ready
+        ON minion_v2_role_assignments(state, updated_at, assignment_id);
 
-        CREATE INDEX IF NOT EXISTS minion_v2_worker_assignments_aggregate
-        ON minion_v2_worker_assignments(
+        CREATE INDEX IF NOT EXISTS minion_v2_role_assignments_aggregate
+        ON minion_v2_role_assignments(
             workflow_id, aggregate_type, aggregate_id, created_at
         );
 
-        CREATE TABLE IF NOT EXISTS minion_v2_worker_attempts (
+        CREATE TABLE IF NOT EXISTS minion_v2_role_attempts (
             attempt_id TEXT PRIMARY KEY,
             assignment_id TEXT NOT NULL,
             attempt_index INTEGER NOT NULL,
@@ -252,11 +273,11 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             finished_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL,
             UNIQUE(assignment_id, attempt_index),
-            FOREIGN KEY(assignment_id) REFERENCES minion_v2_worker_assignments(assignment_id)
+            FOREIGN KEY(assignment_id) REFERENCES minion_v2_role_assignments(assignment_id)
         );
 
-        CREATE INDEX IF NOT EXISTS minion_v2_worker_attempts_assignment
-        ON minion_v2_worker_attempts(assignment_id, attempt_index);
+        CREATE INDEX IF NOT EXISTS minion_v2_role_attempts_assignment
+        ON minion_v2_role_attempts(assignment_id, attempt_index);
 
         CREATE TABLE IF NOT EXISTS minion_v2_effect_attempts (
             effect_id TEXT NOT NULL,
@@ -286,7 +307,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS minion_v2_worker_events_invocation
         ON minion_v2_worker_events(invocation_id, event_id);
 
-        CREATE TABLE IF NOT EXISTS minion_v2_worker_turns (
+        CREATE TABLE IF NOT EXISTS minion_v2_role_turns (
             invocation_id TEXT NOT NULL,
             turn_index INTEGER NOT NULL,
             llm_request_ref_json TEXT NOT NULL,
@@ -319,6 +340,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             lease_resource_key TEXT NOT NULL,
             fencing_token INTEGER NOT NULL,
             role TEXT NOT NULL,
+            mode TEXT NOT NULL,
             draft_kind TEXT NOT NULL,
             input_fingerprint TEXT NOT NULL,
             authoring_contract_version TEXT NOT NULL,
@@ -399,24 +421,43 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
         );
         """
     )
-    _ensure_column(connection, "minion_v2_worker_invocations", "total_tool_latency_ms", "INTEGER NOT NULL DEFAULT 0")
-    _ensure_column(connection, "minion_v2_worker_invocations", "total_wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
-    _ensure_column(connection, "minion_v2_worker_invocations", "continuation_ref_json", "TEXT NOT NULL DEFAULT '{}'")
-    _ensure_column(connection, "minion_v2_worker_invocations", "authoring_contract_version", "TEXT NOT NULL DEFAULT ''")
-    _ensure_column(connection, "minion_v2_worker_sessions", "scope_kind", "TEXT NOT NULL DEFAULT ''")
-    _ensure_column(connection, "minion_v2_worker_sessions", "subject_key", "TEXT NOT NULL DEFAULT ''")
-    _ensure_column(connection, "minion_v2_worker_turns", "tool_latency_ms", "INTEGER NOT NULL DEFAULT 0")
-    _ensure_column(connection, "minion_v2_worker_turns", "wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "minion_v2_role_invocations", "total_tool_latency_ms", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "minion_v2_task_projection", "profile_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_role_invocations", "total_wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "minion_v2_role_invocations", "continuation_ref_json", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "minion_v2_role_invocations", "authoring_contract_version", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_role_sessions", "scope_kind", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_role_sessions", "subject_key", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_role_turns", "tool_latency_ms", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "minion_v2_role_turns", "wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_submission_drafts", "submitted_artifact_ref_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(connection, "minion_v2_submission_drafts", "submission_payload_hash", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "minion_v2_submission_drafts", "submitted_at", "TEXT NOT NULL DEFAULT ''")
-    _ensure_column(connection, "minion_v2_worker_attempts", "access_token_hash", "TEXT NOT NULL DEFAULT ''")
-    _ensure_column(connection, "minion_v2_worker_assignments", "execution_spec_json", "TEXT NOT NULL DEFAULT '{}'")
-    previous_version = _schema_version(connection)
+    _ensure_column(connection, "minion_v2_submission_drafts", "mode", "TEXT NOT NULL DEFAULT ''")
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS minion_v2_submission_drafts_role_mode
+        ON minion_v2_submission_drafts(
+            workflow_id, role, mode, draft_kind, input_fingerprint, updated_at DESC
+        )
+        """
+    )
+    _ensure_column(connection, "minion_v2_role_attempts", "access_token_hash", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_role_assignments", "execution_spec_json", "TEXT NOT NULL DEFAULT '{}'")
+    for table in (
+        "minion_v2_role_invocations",
+        "minion_v2_role_sessions",
+        "minion_v2_role_assignments",
+    ):
+        _ensure_column(connection, table, "mode", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(connection, table, "executor_profile_id", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(connection, table, "family_binding_sha", "TEXT NOT NULL DEFAULT ''")
     if previous_version < 15:
-        _migrate_worker_state_ownership_v15(connection)
+        _migrate_role_state_ownership_v15(connection)
     if previous_version < 16:
         _migrate_superseded_architecture_revisions_v16(connection)
+    if previous_version < 18:
+        _migrate_role_protocol_v18(connection)
     connection.execute(
         """
         INSERT INTO minion_v2_schema_meta(schema_key, schema_value)
@@ -443,13 +484,232 @@ def _schema_version(connection: sqlite3.Connection) -> int:
         return 0
 
 
-def _migrate_worker_state_ownership_v15(connection: sqlite3.Connection) -> None:
-    """Move obsolete activation roles and business states to the worker protocol."""
+def _rename_role_protocol_tables_v18(connection: sqlite3.Connection) -> None:
+    existing = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    for old_name, new_name in (
+        ("minion_v2_worker_invocations", "minion_v2_role_invocations"),
+        ("minion_v2_worker_sessions", "minion_v2_role_sessions"),
+        ("minion_v2_worker_assignments", "minion_v2_role_assignments"),
+        ("minion_v2_worker_attempts", "minion_v2_role_attempts"),
+        ("minion_v2_worker_turns", "minion_v2_role_turns"),
+    ):
+        if old_name in existing and new_name not in existing:
+            connection.execute(f"ALTER TABLE {old_name} RENAME TO {new_name}")
+    for index_name in (
+        "minion_v2_worker_assignments_ready",
+        "minion_v2_worker_assignments_aggregate",
+        "minion_v2_worker_attempts_assignment",
+    ):
+        connection.execute(f"DROP INDEX IF EXISTS {index_name}")
+
+
+def _migrate_role_protocol_v18(connection: sqlite3.Connection) -> None:
+    role_mode = """
+        CASE role
+            WHEN 'architect' THEN 'author'
+            WHEN 'architecture_reviewer' THEN 'architecture'
+            WHEN 'reviewer' THEN 'standalone'
+            WHEN 'coder' THEN 'produce'
+            WHEN 'producer' THEN 'produce'
+            WHEN 'repair' THEN 'repair'
+            WHEN 'verifier' THEN 'module'
+            WHEN 'scenario_verifier' THEN 'scenario'
+            ELSE ''
+        END
+    """
+    canonical_role = """
+        CASE role
+            WHEN 'architecture_reviewer' THEN 'reviewer'
+            WHEN 'coder' THEN 'implementation'
+            WHEN 'producer' THEN 'implementation'
+            WHEN 'repair' THEN 'implementation'
+            WHEN 'scenario_verifier' THEN 'verifier'
+            ELSE role
+        END
+    """
+    profile = """
+        CASE role
+            WHEN 'architect' THEN 'software_engineering.v2_architect'
+            WHEN 'architecture_reviewer' THEN 'software_engineering.v2_reviewer'
+            WHEN 'reviewer' THEN 'software_engineering.v2_reviewer'
+            WHEN 'coder' THEN 'software_engineering.v2_coder'
+            WHEN 'producer' THEN 'software_engineering.v2_coder'
+            WHEN 'repair' THEN 'software_engineering.v2_coder'
+            WHEN 'verifier' THEN 'software_engineering.v2_verifier'
+            WHEN 'scenario_verifier' THEN 'software_engineering.v2_verifier'
+            ELSE 'software_engineering.v2_coder'
+        END
+    """
+    for table in (
+        "minion_v2_role_invocations",
+        "minion_v2_role_sessions",
+        "minion_v2_role_assignments",
+    ):
+        connection.execute(
+            f"""
+            UPDATE {table}
+            SET mode = CASE WHEN mode = '' THEN {role_mode} ELSE mode END,
+                executor_profile_id = CASE
+                    WHEN executor_profile_id = '' THEN {profile}
+                    ELSE executor_profile_id
+                END,
+                family_binding_sha = CASE
+                    WHEN family_binding_sha = '' THEN COALESCE((
+                        SELECT json_extract(payload_json, '$.family_binding_ref.sha256')
+                        FROM minion_v2_aggregate_snapshots AS snapshot
+                        WHERE snapshot.aggregate_type = 'workflow'
+                          AND snapshot.aggregate_id = {table}.workflow_id
+                    ), '')
+                    ELSE family_binding_sha
+                END,
+                role = {canonical_role}
+            """
+        )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_submission_drafts
+        SET mode = CASE WHEN mode = '' THEN {role_mode} ELSE mode END,
+            role = {canonical_role}
+        """
+    )
+    effect_map = {
+        "enqueue_architecture_stage": ("admit_architect_role", ""),
+        "enqueue_architecture_review": ("run_reviewer_role", "architecture"),
+        "quiesce_architect": ("quiesce_architect_role", ""),
+        "snapshot_architecture": ("snapshot_architect_result", ""),
+        "publish_human_architecture_review": ("publish_architecture_review_request", ""),
+        "reconcile_architecture_revision": ("reconcile_semantic_state", ""),
+        "enqueue_producer": ("admit_implementation_role", "produce"),
+        "spawn_producer_worker": ("run_implementation_role", "produce"),
+        "enqueue_repair": ("admit_implementation_role", "repair"),
+        "spawn_repair_worker": ("run_implementation_role", "repair"),
+        "enqueue_node_review": ("admit_verifier_role", "module"),
+        "spawn_verifier_worker": ("run_verifier_role", "module"),
+        "enqueue_scenario_verifier": ("admit_verifier_role", "scenario"),
+        "spawn_scenario_verifier": ("run_verifier_role", "scenario"),
+        "quiesce_verifier": ("quiesce_verifier_role", ""),
+        "snapshot_verification": ("snapshot_verifier_result", ""),
+        "quiesce_worker": ("quiesce_implementation_role", ""),
+        "snapshot_candidate": ("snapshot_implementation_result", ""),
+        "pause_node_worker": ("pause_role", ""),
+        "pause_aggregate_work": ("pause_role", ""),
+        "cancel_node_worker": ("cancel_role", ""),
+        "cancel_aggregate_work": ("cancel_role", ""),
+        "quiesce_node_for_triage": ("quiesce_role_for_triage", ""),
+        "quiesce_aggregate_for_triage": ("quiesce_role_for_triage", ""),
+        "resume_node_work": ("resume_semantic_state", ""),
+        "resume_aggregate_work": ("resume_semantic_state", ""),
+        "reconcile_node_run": ("reconcile_semantic_state", ""),
+        "reconcile_standalone_review": ("reconcile_semantic_state", ""),
+    }
+    for old_effect, (new_effect, mode) in effect_map.items():
+        connection.execute(
+            """
+            UPDATE minion_v2_outbox
+            SET effect_type = ?,
+                payload_json = CASE
+                    WHEN ? = '' THEN payload_json
+                    ELSE json_set(payload_json, '$.role_mode', ?)
+                END
+            WHERE effect_type = ? AND status NOT IN ('completed', 'dead')
+            """,
+            (new_effect, mode, mode, old_effect),
+        )
+        connection.execute(
+            """
+            UPDATE minion_v2_role_assignments
+            SET execution_spec_json = json_set(
+                execution_spec_json,
+                '$.effect_type', ?,
+                '$.payload.role_mode', CASE
+                    WHEN ? = '' THEN json_extract(execution_spec_json, '$.payload.role_mode')
+                    ELSE ?
+                END
+            )
+            WHERE json_extract(execution_spec_json, '$.effect_type') = ?
+              AND state NOT IN ('settled', 'cancelled')
+            """,
+            (new_effect, mode, mode, old_effect),
+        )
+    connection.execute(
+        """
+        UPDATE minion_v2_role_assignments
+        SET settlement_action_json = json_set(
+            settlement_action_json,
+            '$.action_type',
+            'ROLE_FAILED'
+        )
+        WHERE json_extract(settlement_action_json, '$.action_type') = 'WORKER_FAILED'
+          AND state NOT IN ('settled', 'cancelled')
+        """
+    )
+    connection.execute(
+        """
+        UPDATE minion_v2_aggregate_snapshots
+        SET payload_json = json_set(
+            payload_json,
+            '$.primary_profile_id', CASE json_extract(payload_json, '$.family_id')
+                WHEN 'lifestyle' THEN 'lifestyle.nutrition_checkin_producer'
+                WHEN 'general' THEN 'general.generic'
+                ELSE 'software_engineering.v2_coder'
+            END
+        )
+        WHERE aggregate_type = 'task'
+          AND COALESCE(json_extract(payload_json, '$.primary_profile_id'), '') = ''
+        """
+    )
+    connection.execute(
+        """
+        UPDATE minion_v2_task_projection
+        SET profile_id = CASE family_id
+            WHEN 'lifestyle' THEN 'lifestyle.nutrition_checkin_producer'
+            WHEN 'general' THEN 'general.generic'
+            ELSE 'software_engineering.v2_coder'
+        END
+        WHERE profile_id = ''
+        """
+    )
+    connection.execute(
+        """
+        UPDATE minion_v2_aggregate_snapshots AS task
+        SET payload_json = json_set(
+            task.payload_json,
+            '$.family_binding_ref',
+            json((
+                SELECT json_extract(workflow.payload_json, '$.family_binding_ref')
+                FROM minion_v2_aggregate_snapshots AS workflow
+                WHERE workflow.aggregate_type = 'workflow'
+                  AND json_extract(workflow.payload_json, '$.task_id') = task.aggregate_id
+                  AND json_type(workflow.payload_json, '$.family_binding_ref') = 'object'
+                ORDER BY workflow.updated_at DESC
+                LIMIT 1
+            ))
+        )
+        WHERE task.aggregate_type = 'task'
+          AND json_type(task.payload_json, '$.family_binding_ref') IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM minion_v2_aggregate_snapshots AS workflow
+              WHERE workflow.aggregate_type = 'workflow'
+                AND json_extract(workflow.payload_json, '$.task_id') = task.aggregate_id
+                AND json_type(workflow.payload_json, '$.family_binding_ref') = 'object'
+          )
+        """
+    )
+
+
+def _migrate_role_state_ownership_v15(connection: sqlite3.Connection) -> None:
+    """Move obsolete activation roles and business states to the role protocol."""
 
     now = "strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')"
     connection.execute(
         """
-        UPDATE minion_v2_worker_sessions
+        UPDATE minion_v2_role_sessions
         SET role = CASE
             WHEN role IN ('producer', 'repair') THEN 'coder'
             WHEN role = 'scenario_verifier' THEN 'verifier'
@@ -460,24 +720,24 @@ def _migrate_worker_state_ownership_v15(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
-        UPDATE minion_v2_worker_sessions
+        UPDATE minion_v2_role_sessions
         SET continuation_ref_json = (
             SELECT invocation.continuation_ref_json
-            FROM minion_v2_worker_invocations AS invocation
-            WHERE invocation.invocation_id = minion_v2_worker_sessions.session_id
+            FROM minion_v2_role_invocations AS invocation
+            WHERE invocation.invocation_id = minion_v2_role_sessions.session_id
         )
         WHERE continuation_ref_json = '{}'
           AND EXISTS (
             SELECT 1
-            FROM minion_v2_worker_invocations AS invocation
-            WHERE invocation.invocation_id = minion_v2_worker_sessions.session_id
+            FROM minion_v2_role_invocations AS invocation
+            WHERE invocation.invocation_id = minion_v2_role_sessions.session_id
               AND invocation.continuation_ref_json != '{}'
           )
         """
     )
     invalid_assignments = """
         SELECT assignment_id
-        FROM minion_v2_worker_assignments
+        FROM minion_v2_role_assignments
         WHERE state NOT IN (
             'queued', 'claimed', 'running', 'retry_queued',
             'result_recorded', 'settled', 'cancelled'
@@ -485,7 +745,7 @@ def _migrate_worker_state_ownership_v15(connection: sqlite3.Connection) -> None:
     """
     connection.execute(
         f"""
-        UPDATE minion_v2_worker_attempts
+        UPDATE minion_v2_role_attempts
         SET status = 'cancelled',
             access_token_hash = '',
             error_kind = CASE
@@ -504,19 +764,19 @@ def _migrate_worker_state_ownership_v15(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         f"""
-        UPDATE minion_v2_worker_sessions
+        UPDATE minion_v2_role_sessions
         SET status = 'suspended', updated_at = {now}
         WHERE status = 'active'
           AND session_id IN (
             SELECT session_id
-            FROM minion_v2_worker_assignments
+            FROM minion_v2_role_assignments
             WHERE assignment_id IN ({invalid_assignments})
           )
         """
     )
     connection.execute(
         f"""
-        UPDATE minion_v2_worker_assignments
+        UPDATE minion_v2_role_assignments
         SET state = 'cancelled',
             last_error = CASE
                 WHEN last_error = '' THEN 'assignment state moved to its parent aggregate'

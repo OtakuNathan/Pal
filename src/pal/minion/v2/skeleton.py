@@ -903,7 +903,7 @@ class GitBackedSkeletonService:
             architecture_branch=branch,
         )
 
-    def snapshot_architecture(
+    def snapshot_architect_result(
         self,
         *,
         workflow_name: str,

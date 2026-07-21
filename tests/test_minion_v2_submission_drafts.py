@@ -31,6 +31,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
             lease_resource_key=self.resource,
             fencing_token=token,
             role="verifier",
+            mode="module",
             draft_kind="verification",
             input_fingerprint=fingerprint,
         )
@@ -149,6 +150,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
             lease_resource_key=replacement_resource,
             fencing_token=replacement_lease.fencing_token,
             role="verifier",
+            mode="module",
             draft_kind="verification",
             input_fingerprint="input-a",
         )
@@ -172,7 +174,8 @@ class SubmissionDraftStoreTests(unittest.TestCase):
             invocation_id=self.invocation,
             lease_resource_key=self.resource,
             fencing_token=first_token,
-            role="producer",
+            role="implementation",
+            mode="produce",
             draft_kind="candidate",
             input_fingerprint="input-a",
         )
@@ -199,7 +202,8 @@ class SubmissionDraftStoreTests(unittest.TestCase):
             invocation_id=self.invocation,
             lease_resource_key=self.resource,
             fencing_token=second_token,
-            role="producer",
+            role="implementation",
+            mode="produce",
             draft_kind="candidate",
             input_fingerprint="input-a",
         )
@@ -247,7 +251,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
         artifact_store = ContentAddressedArtifactStore(self.root, self.repository)
         submission_ref = artifact_store.put_json(
             submission,
-            artifact_type="VerifierSubmissionArtifact",
+            artifact_type="VerifierRoleSubmissionArtifact",
         )
         payload_hash = hashlib.sha256(
             json.dumps(
@@ -270,6 +274,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
             workflow_id=first.workflow_id,
             invocation_id=first.invocation_id,
             role=first.role,
+            mode=first.mode,
             draft_kind=first.draft_kind,
             input_fingerprint=first.input_fingerprint,
         )
@@ -287,6 +292,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
                 workflow_id=first.workflow_id,
                 invocation_id=first.invocation_id,
                 role=first.role,
+                mode=first.mode,
                 draft_kind=first.draft_kind,
                 input_fingerprint="changed-input",
             )
@@ -301,6 +307,7 @@ class SubmissionDraftStoreTests(unittest.TestCase):
                 "lease_resource_key": self.resource,
                 "fencing_token": 1,
                 "role": "verifier",
+                "mode": "module",
                 "authoring_input_fingerprint": "input-a",
             }
         }

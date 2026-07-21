@@ -1,25 +1,20 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from pal.minion.families import MinionFamilyManifest
-from pal.minion.profiles import MinionProfileRegistry
+from pal.minion.profiles import MinionProfile, MinionProfileRegistry
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
-
-
-CONTRACT_DAG_ROLES = frozenset(
-    {
-        "architect",
-        "architecture_reviewer",
-        "producer",
-        "repair",
-        "verifier",
-    }
+from pal.minion.v2.role_contracts import (
+    REQUIRED_ORCHESTRATION_ROLES,
+    TASK_PROFILE_BINDING,
+    validate_role_bindings,
 )
+
+
+CONTRACT_DAG_ROLES = REQUIRED_ORCHESTRATION_ROLES
 
 REGISTERED_BUILDERS = frozenset(
     {
@@ -34,32 +29,53 @@ REGISTERED_ADAPTERS = frozenset({"software_git.v2", "artifact_bundle.v2"})
 
 
 @dataclass(frozen=True)
-class ResolvedFamilyBinding:
-    family_id: str
-    workflow_template: str
-    roles: Mapping[str, str]
-    builders: Mapping[str, str]
-    adapters: Mapping[str, str]
-    policies: Mapping[str, Any]
-    manifest: Mapping[str, Any]
-    profile_hashes: Mapping[str, str]
-    profile_definitions: Mapping[str, Mapping[str, Any]]
+class ResolvedRoleBinding:
+    selector: str
+    executor_profile: Mapping[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "2",
+            "selector": self.selector,
+            "executor_profile": dict(self.executor_profile),
+        }
+
+
+@dataclass(frozen=True)
+class ResolvedFamilyBinding:
+    family_id: str
+    display_name: str
+    domain: str
+    domain_keywords: tuple[str, ...]
+    workflow_template: str
+    primary_profile: Mapping[str, Any]
+    role_bindings: Mapping[str, ResolvedRoleBinding]
+    builders: Mapping[str, str]
+    adapters: Mapping[str, str]
+    policies: Mapping[str, Any]
+    capability_groups: Mapping[str, Mapping[str, Any]]
+    metadata: Mapping[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "3",
             "family_id": self.family_id,
+            "display_name": self.display_name,
+            "domain": self.domain,
+            "domain_keywords": list(self.domain_keywords),
             "workflow_template": self.workflow_template,
-            "roles": dict(self.roles),
+            "primary_profile": dict(self.primary_profile),
+            "role_bindings": {
+                role: binding.to_dict()
+                for role, binding in sorted(self.role_bindings.items())
+            },
             "builders": dict(self.builders),
             "adapters": dict(self.adapters),
             "policies": dict(self.policies),
-            "manifest": dict(self.manifest),
-            "profile_hashes": dict(self.profile_hashes),
-            "profile_definitions": {
-                str(role): dict(definition)
-                for role, definition in self.profile_definitions.items()
+            "capability_groups": {
+                group_id: dict(group)
+                for group_id, group in sorted(self.capability_groups.items())
             },
+            "metadata": dict(self.metadata),
         }
 
 
@@ -78,25 +94,40 @@ class MinionV2Catalog:
     def validate_family_exists(self, family_id: str) -> None:
         self.family(family_id)
 
-    def publish_family_binding(self, family_id: str) -> ArtifactRef:
-        family = self.family(family_id)
+    def profile(self, profile_id: str) -> MinionProfile:
+        if not str(profile_id or "").strip():
+            raise ValueError("task requires an explicit primary minion profile")
         profile_registry = MinionProfileRegistry(runtime_root=Path(self.runtime_root))
-        roles = {str(key): str(value) for key, value in family.roles.items() if str(value)}
-        if family.workflow_template == "contract_dag.v2":
-            missing_roles = sorted(CONTRACT_DAG_ROLES - set(roles))
-            if missing_roles:
+        profile = profile_registry.get(str(profile_id or "").strip())
+        if profile is None:
+            raise ValueError(f"unknown minion profile: {profile_id or '<empty>'}")
+        return profile
+
+    def family_for_profile(self, profile_id: str) -> MinionFamilyManifest:
+        profile = self.profile(profile_id)
+        return self.family(profile.profile_group)
+
+    def publish_family_binding(self, primary_profile_id: str) -> ArtifactRef:
+        profile_registry = MinionProfileRegistry(runtime_root=Path(self.runtime_root))
+        primary_profile = self.profile(primary_profile_id)
+        family = self.family(primary_profile.profile_group)
+        selectors = validate_role_bindings(family.role_bindings)
+        resolved_roles: dict[str, ResolvedRoleBinding] = {}
+        for role, selector in selectors.items():
+            executor = primary_profile if selector == TASK_PROFILE_BINDING else profile_registry.get(selector)
+            if executor is None:
                 raise ValueError(
-                    f"family {family.family_id} is missing contract_dag roles: {', '.join(missing_roles)}"
+                    f"family {family.family_id} role {role} references unknown profile {selector}"
                 )
-        profile_hashes: dict[str, str] = {}
-        profile_definitions: dict[str, dict[str, Any]] = {}
-        for role, profile_id in roles.items():
-            profile = profile_registry.get(profile_id)
-            if profile is None:
-                raise ValueError(f"family {family.family_id} role {role} references unknown profile {profile_id}")
-            definition = profile.to_dict()
-            profile_hashes[role] = _stable_hash(definition)
-            profile_definitions[role] = definition
+            if executor.profile_group.replace("/", ".") != family.family_id:
+                raise ValueError(
+                    f"family {family.family_id} role {role} references cross-family profile "
+                    f"{executor.canonical_profile_id}"
+                )
+            resolved_roles[role] = ResolvedRoleBinding(
+                selector=selector,
+                executor_profile=executor.to_dict(),
+            )
         unknown_builders = sorted(set(family.builders.values()) - REGISTERED_BUILDERS)
         if unknown_builders:
             raise ValueError(f"family {family.family_id} references unknown builders: {', '.join(unknown_builders)}")
@@ -105,22 +136,27 @@ class MinionV2Catalog:
             raise ValueError(f"family {family.family_id} references unknown adapters: {', '.join(unknown_adapters)}")
         binding = ResolvedFamilyBinding(
             family_id=family.family_id,
+            display_name=family.display_name,
+            domain=family.domain,
+            domain_keywords=family.domain_keywords,
             workflow_template=family.workflow_template,
-            roles=roles,
+            primary_profile=primary_profile.to_dict(),
+            role_bindings=resolved_roles,
             builders=dict(family.builders),
             adapters=dict(family.adapters),
             policies=dict(family.policies),
-            manifest=family.to_dict(),
-            profile_hashes=profile_hashes,
-            profile_definitions=profile_definitions,
+            capability_groups={
+                group_id: group.to_dict()
+                for group_id, group in family.capability_groups.items()
+            },
+            metadata=dict(family.metadata),
         )
         return self.artifacts.put_json(
             binding.to_dict(),
             artifact_type="FamilyBindingArtifact",
-            provenance={"family_id": family.family_id},
+            schema_version="3",
+            provenance={
+                "family_id": family.family_id,
+                "primary_profile": primary_profile.canonical_profile_id,
+            },
         )
-
-
-def _stable_hash(value: Any) -> str:
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()

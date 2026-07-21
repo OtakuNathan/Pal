@@ -451,7 +451,7 @@ def _publish(
     filename: str,
 ) -> CanonicalToolResult:
     context, store = _store(workspace, draft_kind)
-    if store.uses_worker_gateway:
+    if store.uses_role_gateway:
         store.mark_submitted(
             context,
             expected_version=version,
@@ -469,7 +469,7 @@ def _publish(
         },
     )
     _append_unique_artifact(produced_artifacts, artifact)
-    if not store.uses_worker_gateway:
+    if not store.uses_role_gateway:
         store.mark_submitted(
             context,
             expected_version=version,

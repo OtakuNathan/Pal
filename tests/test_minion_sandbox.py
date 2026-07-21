@@ -392,9 +392,9 @@ class MinionSandboxTests(unittest.TestCase):
             minion_db.write_text("private", encoding="utf-8")
             pal_db = root / "pal.sqlite3"
             pal_db.write_text("memory", encoding="utf-8")
-            worker_socket = root / "data" / "minion-worker" / "worker.sock"
-            worker_socket.parent.mkdir(parents=True)
-            worker_socket.write_text("endpoint", encoding="utf-8")
+            role_socket = root / "data" / "minion-role" / "role.sock"
+            role_socket.parent.mkdir(parents=True)
+            role_socket.write_text("endpoint", encoding="utf-8")
             pack = MinionInvocationPack(
                 invocation_id="attempt-1",
                 goal="work",
@@ -417,7 +417,7 @@ class MinionSandboxTests(unittest.TestCase):
 
             triples = [argv[index : index + 3] for index in range(max(0, len(argv) - 2))]
             self.assertIn(["--ro-bind", str(pal_db), str(pal_db)], triples)
-            self.assertIn(["--ro-bind", str(worker_socket), str(worker_socket)], triples)
+            self.assertIn(["--ro-bind", str(role_socket), str(role_socket)], triples)
             self.assertIn(["--bind", str(run_dir), str(run_dir)], triples)
             self.assertNotIn(
                 ["--bind", str(root / "data" / "minion"), str(root / "data" / "minion")],

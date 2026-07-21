@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from pal.minion.ipc import MinionWorkerGatewayClient
+from pal.minion.ipc import MinionRoleGatewayClient
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.artifacts import ArtifactRef
 from pal.minion.v2.submission_drafts import (
@@ -14,37 +14,37 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftSnapshot,
     SubmissionDraftStore,
 )
-from pal.minion.v2.worker_protocol import WorkerAssignmentState, stable_hash
+from pal.minion.v2.role_protocol import RoleAssignmentState, stable_hash
 
 
-WORKER_GATEWAY_TOKEN_ENV = "PAL_MINION_ASSIGNMENT_TOKEN"
+ROLE_GATEWAY_TOKEN_ENV = "PAL_MINION_ROLE_ASSIGNMENT_TOKEN"
 
-WORKER_SUBMISSION_ARTIFACT_TYPES = {
-    "architecture": "ArchitectureWorkerSubmissionArtifact",
-    "architecture_review": "ArchitectureReviewWorkerSubmissionArtifact",
-    "candidate": "CandidateWorkerSubmissionArtifact",
-    "contract": "ContractWorkerSubmissionArtifact",
-    "standalone_review": "StandaloneReviewSubmissionArtifact",
+ROLE_SUBMISSION_ARTIFACT_TYPES = {
+    "architecture": "ArchitectureRoleSubmissionArtifact",
+    "architecture_review": "ArchitectureReviewRoleSubmissionArtifact",
+    "candidate": "CandidateRoleSubmissionArtifact",
+    "contract": "ContractRoleSubmissionArtifact",
+    "standalone_review": "StandaloneReviewRoleSubmissionArtifact",
     # The submission kind is shared by data-driven families. Its payload is
     # role-specific; Manager compilation produces the final typed artifact.
-    "verification": "VerifierSubmissionArtifact",
+    "verification": "VerifierRoleSubmissionArtifact",
 }
 
 
-def worker_submission_artifact_type(submission_kind: str) -> str:
-    return str(WORKER_SUBMISSION_ARTIFACT_TYPES.get(str(submission_kind or "")) or "")
+def role_submission_artifact_type(submission_kind: str) -> str:
+    return str(ROLE_SUBMISSION_ARTIFACT_TYPES.get(str(submission_kind or "")) or "")
 
 
-def worker_gateway_client_from_env(runtime_root: Path) -> MinionWorkerGatewayClient | None:
-    token = str(os.environ.get(WORKER_GATEWAY_TOKEN_ENV) or "").strip()
+def role_gateway_client_from_env(runtime_root: Path) -> MinionRoleGatewayClient | None:
+    token = str(os.environ.get(ROLE_GATEWAY_TOKEN_ENV) or "").strip()
     if not token:
         return None
-    return MinionWorkerGatewayClient(Path(runtime_root), token)
+    return MinionRoleGatewayClient(Path(runtime_root), token)
 
 
 @dataclass
-class WorkerAssignmentGateway:
-    """Narrow Manager-owned state surface exposed to sandboxed workers."""
+class RoleAssignmentGateway:
+    """Narrow Manager-owned state surface exposed to sandboxed role invocations."""
 
     service: MinionV2WorkflowService
 
@@ -53,7 +53,7 @@ class WorkerAssignmentGateway:
         return self.service.repository
 
     def authorize(self, access_token: str) -> dict[str, Any]:
-        return self.repository.authenticate_worker_attempt(access_token)
+        return self.repository.authenticate_role_attempt(access_token)
 
     def call(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         payload = dict(params or {})
@@ -68,21 +68,21 @@ class WorkerAssignmentGateway:
             return self._draft_submit(authenticated, payload)
         if method == "artifact_put":
             return self._artifact_put(authenticated, payload)
-        raise ValueError(f"worker gateway method is not allowed: {method}")
+        raise ValueError(f"role gateway method is not allowed: {method}")
 
     def _submission_status(
         self,
         authenticated: Mapping[str, Any],
     ) -> dict[str, Any]:
-        assignment = self.repository.read_worker_assignment(
+        assignment = self.repository.read_role_assignment(
             str(dict(authenticated["assignment"])["assignment_id"])
         )
         if assignment is None:
-            raise ValueError("worker assignment is unavailable")
+            raise ValueError("role assignment is unavailable")
         state = str(assignment.get("state") or "")
         recorded = state in {
-            WorkerAssignmentState.RESULT_RECORDED.value,
-            WorkerAssignmentState.SETTLED.value,
+            RoleAssignmentState.RESULT_RECORDED.value,
+            RoleAssignmentState.SETTLED.value,
         } and bool(assignment.get("submission_artifact_ref")) and bool(
             assignment.get("submission_payload_hash")
         )
@@ -126,16 +126,17 @@ class WorkerAssignmentGateway:
         context = self._context(authenticated, params)
         submission = params.get("submission")
         if not isinstance(submission, Mapping):
-            raise ValueError("worker submission must be a JSON object")
+            raise ValueError("role submission must be a JSON object")
         payload = dict(submission)
-        artifact_type = worker_submission_artifact_type(context.draft_kind)
+        artifact_type = role_submission_artifact_type(context.draft_kind)
         if not artifact_type:
-            raise ValueError(f"unsupported worker submission kind: {context.draft_kind}")
+            raise ValueError(f"unsupported role submission kind: {context.draft_kind}")
         store = SubmissionDraftStore(self.service.runtime_root)
         snapshot = store.read(context, seed={})
         if (
             context.draft_kind == "candidate"
-            and str(assignment.get("role") or "") == "repair"
+            and str(assignment.get("role") or "") == "implementation"
+            and str(assignment.get("mode") or "") == "repair"
             and str(payload.get("status") or "") == "candidate_ready"
         ):
             self._validate_repair_candidate(
@@ -151,17 +152,18 @@ class WorkerAssignmentGateway:
                 "aggregate_type": assignment["aggregate_type"],
                 "aggregate_id": assignment["aggregate_id"],
                 "role": assignment["role"],
+                "mode": assignment["mode"],
             },
         )
         payload_hash = stable_hash(payload)
-        self.repository.record_worker_submission(
+        self.repository.record_role_submission(
             assignment_id=str(assignment["assignment_id"]),
             attempt_id_value=str(authenticated["attempt_id"]),
             fencing_token=int(authenticated["fencing_token"]),
             artifact_ref=artifact_ref.to_dict(),
             payload_hash=payload_hash,
             settlement_action={
-                "action_type": "SETTLE_WORKER_SUBMISSION",
+                "action_type": "SETTLE_ROLE_SUBMISSION",
                 "aggregate_type": assignment["aggregate_type"],
                 "aggregate_id": assignment["aggregate_id"],
                 "submission_kind": assignment["submission_kind"],
@@ -236,12 +238,12 @@ class WorkerAssignmentGateway:
         try:
             data = base64.b64decode(encoded, validate=True)
         except ValueError as exc:
-            raise ValueError("worker artifact payload is not valid base64") from exc
+            raise ValueError("role artifact payload is not valid base64") from exc
         if len(data) > 16 * 1024 * 1024:
-            raise ValueError("worker artifact exceeds the 16 MiB gateway limit")
+            raise ValueError("role artifact exceeds the 16 MiB gateway limit")
         artifact_type = str(params.get("artifact_type") or "").strip()
         if not artifact_type.endswith("Artifact"):
-            raise ValueError("worker artifact type must end with Artifact")
+            raise ValueError("role artifact type must end with Artifact")
         ref = self.service.artifacts.put_bytes(
             data,
             artifact_type=artifact_type,
@@ -252,6 +254,7 @@ class WorkerAssignmentGateway:
                 "aggregate_type": assignment["aggregate_type"],
                 "aggregate_id": assignment["aggregate_id"],
                 "role": assignment["role"],
+                "mode": assignment["mode"],
             },
         )
         return {"artifact_ref": ref.to_dict()}
@@ -269,6 +272,7 @@ class WorkerAssignmentGateway:
             "lease_resource_key": str(authenticated["lease_resource_key"]),
             "fencing_token": int(authenticated["fencing_token"]),
             "role": str(assignment["role"]),
+            "mode": str(assignment["mode"]),
             "input_fingerprint": str(assignment["input_fingerprint"]),
         }
         actual = {
@@ -277,6 +281,7 @@ class WorkerAssignmentGateway:
             "lease_resource_key": context.lease_resource_key,
             "fencing_token": context.fencing_token,
             "role": context.role,
+            "mode": context.mode,
             "input_fingerprint": context.input_fingerprint,
         }
         if actual != expected:
@@ -291,8 +296,8 @@ def decode_remote_draft_snapshot(value: Mapping[str, Any]) -> SubmissionDraftSna
 
 
 @dataclass
-class WorkerGatewayArtifactStore:
-    client: MinionWorkerGatewayClient
+class RoleGatewayArtifactStore:
+    client: MinionRoleGatewayClient
 
     def put_bytes(
         self,

@@ -14,7 +14,7 @@ from pal.llm.contracts import (
     LLMPreflightRequest,
 )
 from pal.stream_events import NormalizedLLMStreamEvent
-from pal.minion.ipc import MinionManagerClient, MinionWorkerGatewayClient
+from pal.minion.ipc import MinionManagerClient, MinionRoleGatewayClient
 
 
 def llm_request_to_payload(request: CanonicalLLMRequest) -> dict[str, Any]:
@@ -177,17 +177,17 @@ class MinionBrokerLLMRuntime:
     supports_streaming: bool = True
 
     @property
-    def _client(self) -> MinionManagerClient | MinionWorkerGatewayClient:
+    def _client(self) -> MinionManagerClient | MinionRoleGatewayClient:
         access_token = str(os.environ.get("PAL_MINION_ASSIGNMENT_TOKEN") or "").strip()
         if access_token:
-            return MinionWorkerGatewayClient(
+            return MinionRoleGatewayClient(
                 runtime_root=Path(self.runtime_root),
                 access_token=access_token,
                 request_timeout_seconds=self.request_timeout_seconds,
             )
         if os.environ.get("PAL_MINION_SANDBOXED") == "1":
             raise RuntimeError(
-                "sandboxed minion has no assignment-scoped worker gateway token"
+                "sandboxed minion has no assignment-scoped role gateway token"
             )
         return MinionManagerClient(runtime_root=Path(self.runtime_root), request_timeout_seconds=self.request_timeout_seconds)
 

@@ -307,7 +307,7 @@ def _submit_candidate(
     # A report file is a presentation artifact, not the completion receipt.
     # Let the Manager accept and durably record the submission before exposing
     # a primary artifact to the runner completion gate.
-    if store.uses_worker_gateway:
+    if store.uses_role_gateway:
         store.mark_submitted(
             context,
             expected_version=snapshot.version,
@@ -328,7 +328,7 @@ def _submit_candidate(
         if str(existing.get("role") or "") == "primary":
             existing["role"] = "deliverable"
     _append_unique_artifact(produced_artifacts, artifact)
-    if not store.uses_worker_gateway:
+    if not store.uses_role_gateway:
         store.mark_submitted(
             context,
             expected_version=snapshot.version,

@@ -55,10 +55,10 @@ from pal.minion.v2.swe_verification import (
 )
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.minion.v2.task_sources import TaskSourceBundleService
-from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
+from pal.minion.v2.role_protocol import RoleAssignmentRequest
 from pal.shared import RuntimeStatus
-from pal.minion.v2.workers import (
-    MinionV2SemanticWorker,
+from pal.minion.v2.semantic_orchestration.orchestrator import (
+    SemanticOrchestrator,
     _compile_standalone_review_markdown,
     _confirmed_verification_findings,
     _recorded_verification_case_results,
@@ -297,7 +297,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 },
             },
         )
-        installed = MinionV2SemanticWorker(
+        installed = SemanticOrchestrator(
             MinionV2WorkflowService(self.runtime_root)
         )._install_verifier_tests_for_repair(node)
         self.assertIn("test_empty_rejected", test_path.read_text())
@@ -329,11 +329,11 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         prompt_ref = self.store.put_json(
             {"role": "verifier"},
-            artifact_type="WorkerPromptPackArtifact",
+            artifact_type="RolePromptPackArtifact",
         )
         terminal_ref = self.store.put_json(
             {"finish_reason": "stop"},
-            artifact_type="WorkerTerminalArtifact",
+            artifact_type="RoleTerminalArtifact",
         )
         node = AggregateSnapshot(
             aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -349,10 +349,10 @@ class MinionV2VerificationTests(unittest.TestCase):
                 }
             },
         )
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         settlement = {
-            "worker_assignment_id": "assignment-verifier",
-            "worker_submission_payload_hash": "submission-hash",
+            "role_assignment_id": "assignment-verifier",
+            "role_submission_payload_hash": "submission-hash",
         }
         submission = {
             "outcome": "pass",
@@ -366,17 +366,17 @@ class MinionV2VerificationTests(unittest.TestCase):
         with (
             patch.object(
                 worker,
-                "_worker_submission_settlement",
+                "_role_submission_settlement",
                 return_value=settlement,
             ),
             patch.object(
                 worker.repository,
-                "read_worker_assignment",
+                "read_role_assignment",
                 return_value={"submission_artifact_ref": submission_ref.to_dict()},
             ),
             patch.object(worker.repository, "read_snapshot", return_value=node),
             patch.object(worker.repository, "dispatch") as dispatch,
-            patch.object(worker, "_record_worker_turn"),
+            patch.object(worker, "_record_role_turn"),
         ):
             result = worker._complete_semantic_verifier(
                 effect={"effect_key": "verify-effect"},
@@ -423,7 +423,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "v2_role_workspace": True,
                 }
             },
-            artifact_type="WorkerPromptPackArtifact",
+            artifact_type="RolePromptPackArtifact",
         )
 
         actual_workspace, actual_scratch = _verification_workspace_from_prompt_pack(
@@ -490,7 +490,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             },
         )
 
-        installed = MinionV2SemanticWorker(
+        installed = SemanticOrchestrator(
             MinionV2WorkflowService(self.runtime_root)
         )._install_verifier_tests_for_repair(node)
 
@@ -546,7 +546,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             updated_at="2026-07-19T00:00:00+00:00",
             payload={"execution_adapter": "software_git.v2"},
         )
-        promoted_ref, promoted_digest, promoted = MinionV2SemanticWorker(
+        promoted_ref, promoted_digest, promoted = SemanticOrchestrator(
             MinionV2WorkflowService(self.runtime_root)
         )._promote_verifier_tests(
             node=node,
@@ -634,7 +634,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             },
         )
 
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         _promoted_ref, promoted_digest, _promoted = worker._promote_verifier_tests(
             node=node,
             review_workspace=review_repo,
@@ -818,7 +818,13 @@ class MinionV2VerificationTests(unittest.TestCase):
         workspace: dict[str, object],
         *,
         role: str,
+        mode: str | None = None,
     ) -> dict[str, object]:
+        resolved_mode = mode or {
+            "implementation": "produce",
+            "reviewer": "standalone",
+            "verifier": "module",
+        }[role]
         self.lease_index += 1
         invocation = f"inv_verify_{self.lease_index}"
         resource = f"verify:{self.lease_index}"
@@ -833,6 +839,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "lease_resource_key": resource,
                     "fencing_token": lease.fencing_token,
                     "role": role,
+                    "mode": resolved_mode,
                     "authoring_input_fingerprint": f"verify-input-{self.lease_index}",
                     "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
                 },
@@ -1397,7 +1404,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             "artifact_dir": str(artifact_dir),
             "artifact_stage_dir": str(stage_dir),
             "reference_paths": [{"name": "unit_work_view", "path": str(work_view)}],
-        }, role="producer")
+        }, role="implementation")
         result = self._candidate_call(
             workspace,
             "op_minion_candidate_report_architecture_defect",
@@ -1443,7 +1450,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             "artifact_dir": str(self.runtime_root / "candidate-artifacts"),
             "artifact_stage_dir": str(stage_dir),
             "reference_paths": [{"name": "unit_work_view", "path": str(work_view)}],
-        }, role="producer")
+        }, role="implementation")
         checked = self._candidate_call(
             workspace,
             "op_minion_developer_test",
@@ -1487,7 +1494,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "artifact_stage_dir": str(stage_dir),
                 "reference_paths": [{"name": "unit_work_view", "path": str(work_view)}],
             },
-            role="producer",
+            role="implementation",
         )
         checked = self._candidate_call(
             workspace,
@@ -1498,13 +1505,13 @@ class MinionV2VerificationTests(unittest.TestCase):
         produced: list[dict[str, object]] = []
         with (
             patch(
-                "pal.minion.v2.candidate_builder.SubmissionDraftStore.uses_worker_gateway",
+                "pal.minion.v2.candidate_builder.SubmissionDraftStore.uses_role_gateway",
                 new_callable=PropertyMock,
                 return_value=True,
             ),
             patch(
                 "pal.minion.v2.candidate_builder.SubmissionDraftStore.mark_submitted",
-                side_effect=ValueError("worker submission is missing required input reads: repair_bill"),
+                side_effect=ValueError("role submission is missing required input reads: repair_bill"),
             ),
         ):
             rejected = self._candidate_call(
@@ -1549,7 +1556,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     {"name": "unit_work_view", "path": str(work_view)}
                 ],
             },
-            role="producer",
+            role="implementation",
         )
         produced = [
             {
@@ -1601,7 +1608,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     {"name": "unit_work_view", "path": str(work_view)}
                 ],
             },
-            role="producer",
+            role="implementation",
         )
         checked = self._candidate_call(
             workspace,
@@ -1632,7 +1639,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     {"name": "unit_work_view", "path": str(work_view)}
                 ],
             },
-            role="producer",
+            role="implementation",
         )
         checked = self._candidate_call(
             workspace,
@@ -2204,38 +2211,45 @@ class MinionV2VerificationTests(unittest.TestCase):
             lease_resource_key=str(binding["lease_resource_key"]),
             fencing_token=int(binding["fencing_token"]),
             role="verifier",
+            mode="module",
             draft_kind="verification",
         )
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, VerificationStatus.PASS)
 
-    def test_manager_resolves_fenced_attempt_to_logical_worker_session(self) -> None:
+    def test_manager_resolves_fenced_attempt_to_logical_role_session(self) -> None:
         logical_session_id = "inv_logical_verifier"
         input_fingerprint = "logical-verifier-input"
-        self.repository.ensure_worker_session(
+        self.repository.ensure_role_session(
             session_id=logical_session_id,
             workflow_id="wf_verify",
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node_drawing",
             role="verifier",
+            mode="module",
+            executor_profile_id="software_engineering.v2_verifier",
+            family_binding_sha="binding",
         )
-        assignment = self.repository.create_worker_assignment(
-            WorkerAssignmentRequest(
+        assignment = self.repository.create_role_assignment(
+            RoleAssignmentRequest(
                 assignment_key="logical-verifier-assignment",
                 session_id=logical_session_id,
                 workflow_id="wf_verify",
                 aggregate_type=AggregateType.DAG_NODE_RUN.value,
                 aggregate_id="node_drawing",
                 role="verifier",
+                mode="module",
+                executor_profile_id="software_engineering.v2_verifier",
+                family_binding_sha="binding",
                 input_fingerprint=input_fingerprint,
                 required_inputs=(),
                 input_refs={},
-                execution_spec={"effect_type": "spawn_verifier_worker"},
+                execution_spec={"effect_type": "run_verifier_role"},
                 submission_kind="verification",
             )
         )
-        attempt = self.repository.claim_worker_assignment(assignment["assignment_id"])
+        attempt = self.repository.claim_role_assignment(assignment["assignment_id"])
         lease_resource_key = f"assignment:{assignment['assignment_id']}"
         lease = self.repository.claim_lease(
             lease_resource_key,
@@ -2244,9 +2258,9 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         prompt_ref = self.store.put_json(
             {"role": "verifier"},
-            artifact_type="WorkerPromptPackArtifact",
+            artifact_type="RolePromptPackArtifact",
         )
-        self.repository.start_worker_attempt(
+        self.repository.start_role_attempt(
             assignment_id=str(assignment["assignment_id"]),
             attempt_id_value=str(attempt["attempt_id"]),
             lease_resource_key=lease_resource_key,
@@ -2266,6 +2280,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "lease_resource_key": lease_resource_key,
                 "fencing_token": lease.fencing_token,
                 "role": "verifier",
+                "mode": "module",
                 "authoring_input_fingerprint": input_fingerprint,
                 "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
             },
@@ -2293,6 +2308,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             lease_resource_key="node:node_drawing:verifier",
             fencing_token=999,
             role="verifier",
+            mode="module",
             draft_kind="verification",
         )
 

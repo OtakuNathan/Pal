@@ -39,9 +39,9 @@ def bound_reference_payload(
         if str(item.get("name") or "") != name:
             continue
         if bool(item.get("bound_input")):
-            from pal.minion.v2.worker_gateway import worker_gateway_client_from_env
+            from pal.minion.v2.role_gateway import role_gateway_client_from_env
 
-            gateway = worker_gateway_client_from_env(
+            gateway = role_gateway_client_from_env(
                 Path(str(workspace.get("runtime_root") or ""))
             )
             if gateway is not None:

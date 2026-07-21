@@ -51,8 +51,20 @@ def transition_topology() -> dict[str, Any]:
     dynamic: list[tuple[str, str, str]] = []
     resolved: list[tuple[str, str, str, str]] = []
     control: dict[str, dict[str, tuple[tuple[str, str], ...]]] = {}
+    role_ownership: list[tuple[str, str, str, str, str]] = []
     for machine in all_machine_specs():
         aggregate = machine.aggregate_type.value
+        role_ownership.extend(
+            (
+                aggregate,
+                state,
+                activation.role.value,
+                activation.mode.value,
+                runtime.reconciliation.value,
+            )
+            for state, runtime in machine.runtime_states.items()
+            for activation in runtime.activations
+        )
         for spec in machine.transitions:
             source = str(spec.source_state) if spec.source_state is not None else "<create>"
             if callable(spec.target_state):
@@ -94,6 +106,7 @@ def transition_topology() -> dict[str, Any]:
         "static_transitions": tuple(sorted(static)),
         "dynamic_transitions": tuple(sorted(dynamic)),
         "resolved_transitions": tuple(sorted(resolved)),
+        "role_ownership": tuple(sorted(role_ownership)),
         "control": control,
     }
 
@@ -185,6 +198,8 @@ def render_implementation_topology() -> str:
             f"DynamicTransitions == {_tla_set(topology['dynamic_transitions'])}",
             "",
             f"ResolvedTransitions == {_tla_set(topology['resolved_transitions'])}",
+            "",
+            f"RoleOwnership == {_tla_set(topology['role_ownership'])}",
             "",
             "StateClasses == {",
             "    " + ", ".join(class_names.values()),

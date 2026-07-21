@@ -130,12 +130,16 @@ class MinionCatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown profiles"):
             service.set_family_override(
                 family="software_engineering",
-                changes={"roles": {"coder": "software_engineering.missing_coder"}},
+                changes={
+                    "role_bindings": {
+                        "implementation": "software_engineering.missing_coder"
+                    }
+                },
             )
-        with self.assertRaisesRegex(ValueError, "missing roles"):
+        with self.assertRaisesRegex(ValueError, "missing architect"):
             service.set_family_override(
                 family="software_engineering",
-                changes={"roles": {"architect": None}},
+                changes={"role_bindings": {"architect": None}},
             )
         service.reset_family_override(family="software_engineering")
         self.assertFalse(family_override_path(self.root, "software_engineering").exists())

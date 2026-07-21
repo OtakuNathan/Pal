@@ -878,7 +878,7 @@ MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputChanges = _stric
         'domain': (str | None, Field(None)),
         'domain_keywords': (list[str] | None, Field(None)),
         'workflow_template': (str | None, Field(None)),
-        'roles': (dict[str, str | None] | None, Field(None)),
+        'role_bindings': (dict[str, str | None] | None, Field(None)),
         'builders': (dict[str, str | None] | None, Field(None)),
         'adapters': (dict[str, str | None] | None, Field(None)),
         'policies': (dict[str, Any] | None, Field(None)),
@@ -923,7 +923,7 @@ MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput = _strict_model(
     {
         'task': (str, Field(None, description='Optional natural-language title of an existing Task.')),
         'title': (str, Field(None)),
-        'family_id': (str, Field('software_engineering')),
+        'profile': (str, Field(None, description='Canonical Task profile, such as software_engineering.v2_coder or lifestyle.nutritionist. Required when task is omitted and immutable after Task creation.')),
         'operation': (Literal['new_requirement', 'execute_trusted', 'review_then_execute', 'standalone_review', 'review_and_repair'], Field('new_requirement')),
         'goal': (str, Field(None)),
         'workspace': (MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInputWorkspace, Field(None)),

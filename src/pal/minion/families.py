@@ -47,7 +47,7 @@ class MinionFamilyManifest:
     domain: str = ""
     domain_keywords: tuple[str, ...] = ()
     workflow_template: str = "contract_dag.v2"
-    roles: dict[str, str] = field(default_factory=dict)
+    role_bindings: dict[str, str] = field(default_factory=dict)
     builders: dict[str, str] = field(default_factory=dict)
     adapters: dict[str, str] = field(default_factory=dict)
     policies: dict[str, Any] = field(default_factory=dict)
@@ -58,7 +58,7 @@ class MinionFamilyManifest:
     def from_dict(cls, payload: dict[str, Any]) -> "MinionFamilyManifest":
         if not isinstance(payload, dict):
             raise ValueError("MinionFamilyManifest payload must be an object")
-        family_id = str(payload.get("family_id") or payload.get("profile_family") or payload.get("id") or "").strip()
+        family_id = str(payload.get("family_id") or "").strip()
         if not family_id:
             raise ValueError("MinionFamilyManifest.family_id is required")
         raw_groups = _dict(payload.get("capability_groups"))
@@ -73,7 +73,10 @@ class MinionFamilyManifest:
             domain=str(payload.get("domain") or "").strip(),
             domain_keywords=tuple(_string_list(payload.get("domain_keywords") or payload.get("keywords"))),
             workflow_template=str(payload.get("workflow_template") or "contract_dag.v2").strip(),
-            roles={str(key): str(value).strip().replace("/", ".") for key, value in _dict(payload.get("roles")).items()},
+            role_bindings={
+                str(key): str(value).strip().replace("/", ".")
+                for key, value in _dict(payload.get("role_bindings")).items()
+            },
             builders={str(key): str(value).strip() for key, value in _dict(payload.get("builders")).items()},
             adapters={str(key): str(value).strip() for key, value in _dict(payload.get("adapters")).items()},
             policies=_dict(payload.get("policies")),
@@ -88,7 +91,7 @@ class MinionFamilyManifest:
             "domain": self.domain,
             "domain_keywords": list(self.domain_keywords),
             "workflow_template": self.workflow_template,
-            "roles": dict(self.roles),
+            "role_bindings": dict(self.role_bindings),
             "builders": dict(self.builders),
             "adapters": dict(self.adapters),
             "policies": dict(self.policies),

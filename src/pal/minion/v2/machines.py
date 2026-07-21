@@ -23,9 +23,12 @@ from pal.minion.v2.machine_dsl import (
     ControlIntent,
     ControlPolicy,
     MachineSpec,
+    ReconciliationKind,
     StateClass,
+    StateRuntimeSpec,
     target_resolver,
 )
+from pal.minion.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 
 
 def _no_guard(_payload: Mapping[str, Any], _action: ActionEnvelope) -> None:
@@ -524,15 +527,15 @@ def _lease_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
         raise TransitionGuardError(f"{action.action_type} requires a positive fencing_token")
 
 
-def _worker_failure_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
+def _role_failure_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
     _required("failure_artifact_ref", "blocker")(_payload, action)
     blocker = action.payload.get("blocker")
     if not isinstance(blocker, Mapping):
-        raise TransitionGuardError("WORKER_FAILED blocker must be a structured mapping")
+        raise TransitionGuardError("ROLE_FAILED blocker must be a structured mapping")
     if not str(blocker.get("kind") or "").strip() or not str(
         blocker.get("summary") or ""
     ).strip():
-        raise TransitionGuardError("WORKER_FAILED blocker requires kind and summary")
+        raise TransitionGuardError("ROLE_FAILED blocker requires kind and summary")
 
 
 def _quiesce_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
@@ -713,7 +716,12 @@ def _task_transitions() -> list[TransitionSpec]:
             None,
             "CREATE_TASK",
             S.ACTIVE,
-            guard=_required("family_id", "task_revision_ref"),
+            guard=_required(
+                "primary_profile_id",
+                "family_id",
+                "family_binding_ref",
+                "task_revision_ref",
+            ),
         ),
         _spec(
             kind,
@@ -730,8 +738,8 @@ def _architecture_transitions() -> list[TransitionSpec]:
     kind = AggregateType.ARCHITECTURE_REVISION
     S = ArchitectureRevisionState
     transitions = [
-        _spec(kind, None, "CREATE_ARCHITECTURE_REVISION", S.ARCHITECT_QUEUED, effects=_effect("enqueue_architecture_stage", stage="architect")),
-        _spec(kind, None, "IMPORT_ARCHITECTURE_REVISION", S.REVIEW_QUEUED, guard=_required("architecture_manifest_ref"), effects=_effect("enqueue_architecture_review")),
+        _spec(kind, None, "CREATE_ARCHITECTURE_REVISION", S.ARCHITECT_QUEUED, effects=_effect("admit_architect_role")),
+        _spec(kind, None, "IMPORT_ARCHITECTURE_REVISION", S.REVIEW_QUEUED, guard=_required("architecture_manifest_ref"), effects=_effect("run_reviewer_role", role_mode="architecture")),
         _spec(
             kind,
             S.ARCHITECT_QUEUED,
@@ -754,7 +762,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             "DATA_ARCHITECT_COMPLETED",
             S.REVIEW_QUEUED,
             guard=_required("requirements_ref", "architecture_manifest_ref"),
-            effects=_effect("enqueue_architecture_review"),
+            effects=_effect("run_reviewer_role", role_mode="architecture"),
         ),
         _spec(
             kind,
@@ -762,7 +770,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             "ARCHITECT_SUBMITTED",
             S.ARCHITECT_QUIESCING,
             guard=_all(_required("requirements_ref", "pending_architecture_submission_ref", "architecture_workspace_path"), _lease_guard),
-            effects=_effect("quiesce_architect"),
+            effects=_effect("quiesce_architect_role"),
         ),
         _spec(kind, S.ARCHITECT_QUIESCING, "REBIND_ARCHITECT_QUIESCER", S.ARCHITECT_QUIESCING, guard=_lease_guard),
         _spec(
@@ -771,7 +779,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             "ARCHITECT_QUIESCED",
             S.ARCHITECT_SNAPSHOTTING,
             guard=_quiesce_guard,
-            effects=_effect("snapshot_architecture"),
+            effects=_effect("snapshot_architect_result"),
         ),
         _spec(kind, S.ARCHITECT_SNAPSHOTTING, "REBIND_ARCHITECT_SNAPSHOTTER", S.ARCHITECT_SNAPSHOTTING, guard=_lease_guard),
         _spec(
@@ -781,7 +789,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             S.REVIEW_QUEUED,
             guard=_required("requirements_ref", "architecture_manifest_ref"),
             reducer=_architecture_snapshotted_reducer,
-            effects=_effect("enqueue_architecture_review"),
+            effects=_effect("run_reviewer_role", role_mode="architecture"),
         ),
         _spec(
             kind,
@@ -789,7 +797,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             "ARCHITECTURE_SNAPSHOT_REJECTED",
             S.ARCHITECT_QUEUED,
             guard=_required("finding_artifact_ref", "architecture_repair_baseline_ref"),
-            effects=_effect("enqueue_architecture_stage", stage="architect"),
+            effects=_effect("admit_architect_role"),
         ),
         _spec(kind, S.REVIEW_QUEUED, "START_ARCHITECTURE_REVIEW", S.REVIEWING, guard=_lease_guard),
         _spec(kind, S.REVIEWING, "REBIND_ARCHITECTURE_REVIEW", S.REVIEWING, guard=_lease_guard),
@@ -800,7 +808,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             S.HUMAN_REVIEW,
             guard=_required("review_artifact_ref", "architecture_manifest_ref"),
             reducer=_worker_finished_reducer,
-            effects=_effect("publish_human_architecture_review"),
+            effects=_effect("publish_architecture_review_request"),
         ),
         _spec(
             kind,
@@ -816,7 +824,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             S.REVIEW_QUEUED,
             guard=_required("reason"),
             reducer=_architecture_review_reopened_reducer,
-            effects=_effect("enqueue_architecture_review"),
+            effects=_effect("run_reviewer_role", role_mode="architecture"),
         ),
         _spec(
             kind,
@@ -825,7 +833,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             S.ARCHITECT_QUEUED,
             guard=_required("finding_artifact_ref"),
             reducer=_worker_finished_reducer,
-            effects=_effect("enqueue_architecture_stage", stage="architect"),
+            effects=_effect("admit_architect_role"),
         ),
         _spec(
             kind,
@@ -834,7 +842,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             S.ARCHITECT_QUEUED,
             guard=_required("finding_artifact_ref"),
             reducer=_worker_finished_reducer,
-            effects=_effect("enqueue_architecture_stage", stage="architect"),
+            effects=_effect("admit_architect_role"),
         ),
         _spec(
             kind,
@@ -843,7 +851,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             S.ARCHITECT_QUEUED,
             guard=_required("finding_artifact_ref"),
             reducer=_worker_finished_reducer,
-            effects=_effect("enqueue_architecture_stage", stage="architect"),
+            effects=_effect("admit_architect_role"),
         ),
         _spec(
             kind,
@@ -852,7 +860,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             S.ARCHITECT_QUEUED,
             guard=_required("finding_artifact_ref"),
             reducer=_worker_finished_reducer,
-            effects=_effect("enqueue_architecture_stage", stage="architect"),
+            effects=_effect("admit_architect_role"),
         ),
         _spec(
             kind,
@@ -900,7 +908,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
         S.HUMAN_REVIEW,
     }
     for state in pausable:
-        transitions.append(_spec(kind, state, "REQUEST_PAUSE", S.PAUSE_REQUESTED, reducer=_pause_reducer(str(state)), effects=_effect("pause_aggregate_work")))
+        transitions.append(_spec(kind, state, "REQUEST_PAUSE", S.PAUSE_REQUESTED, reducer=_pause_reducer(str(state)), effects=_effect("pause_role")))
     architecture_resume = {
         str(S.ARCHITECT_QUEUED): str(S.ARCHITECT_QUEUED),
         str(S.ARCHITECT_RUNNING): str(S.ARCHITECT_QUEUED),
@@ -919,12 +927,12 @@ def _architecture_transitions() -> list[TransitionSpec]:
             "RESUME",
             _mapped_resume_target(architecture_resume),
             reducer=_architecture_resume_cleanup_reducer,
-            effects=_effect("resume_aggregate_work"),
+            effects=_effect("resume_semantic_state"),
         )
     )
     cancellable = pausable | {S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED}
     for state in cancellable:
-        transitions.append(_spec(kind, state, "REQUEST_CANCEL", S.CANCEL_REQUESTED, effects=_effect("cancel_aggregate_work")))
+        transitions.append(_spec(kind, state, "REQUEST_CANCEL", S.CANCEL_REQUESTED, effects=_effect("cancel_role")))
     triageable = pausable | {S.PAUSE_REQUESTED, S.CANCEL_REQUESTED}
     for state in triageable:
         transitions.append(
@@ -935,7 +943,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
                 S.TRIAGE_REQUIRED,
                 reducer=_triage_reducer(str(state)),
                 effects=(
-                    _effect("quiesce_aggregate_for_triage")
+                    _effect("quiesce_role_for_triage")
                     if state not in {S.PAUSE_REQUESTED, S.CANCEL_REQUESTED}
                     else _no_effects
                 ),
@@ -949,11 +957,11 @@ def _architecture_transitions() -> list[TransitionSpec]:
             _spec(
                 kind,
                 state,
-                "WORKER_FAILED",
+                "ROLE_FAILED",
                 S.TRIAGE_REQUIRED,
-                guard=_worker_failure_guard,
+                guard=_role_failure_guard,
                 reducer=_triage_reducer(str(state)),
-                effects=_effect("quiesce_aggregate_for_triage"),
+                effects=_effect("quiesce_role_for_triage"),
             )
         )
     transitions.append(
@@ -963,7 +971,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             "RESOLVE_TRIAGE",
             _mapped_triage_resume_target(architecture_resume),
             reducer=_architecture_resume_cleanup_reducer,
-            effects=_effect("reconcile_architecture_revision"),
+            effects=_effect("reconcile_semantic_state"),
         )
     )
     return transitions
@@ -1156,14 +1164,14 @@ def _node_transitions() -> list[TransitionSpec]:
             ),
             effects=_effects("notify_node_accepted", "publish_accepted_memory_candidate"),
         ),
-        _spec(kind, S.BLOCKED_BY_DEPS, "DEPENDENCIES_ACCEPTED", S.QUEUED, guard=_all(_node_kind("unit"), _ready_dependencies), effects=_effect("enqueue_producer")),
+        _spec(kind, S.BLOCKED_BY_DEPS, "DEPENDENCIES_ACCEPTED", S.QUEUED, guard=_all(_node_kind("unit"), _ready_dependencies), effects=_effect("admit_implementation_role", role_mode="produce")),
         _spec(
             kind,
             S.BLOCKED_BY_DEPS,
             "LEGACY_INTEGRATION_DEPENDENCIES_ACCEPTED",
             S.QUEUED,
             guard=_all(_node_kind("integration"), _ready_dependencies),
-            effects=_effect("enqueue_producer"),
+            effects=_effect("admit_implementation_role", role_mode="produce"),
         ),
         _spec(
             kind,
@@ -1179,15 +1187,15 @@ def _node_transitions() -> list[TransitionSpec]:
             "START_PRODUCING",
             S.PRODUCING,
             guard=_all(_node_kind_in("unit", "integration"), _lease_guard),
-            effects=_effect("spawn_producer_worker"),
+            effects=_effect("run_implementation_role", role_mode="produce"),
             reducer=_worker_started_reducer,
         ),
         _spec(kind, S.PRODUCING, "REBIND_PRODUCER", S.PRODUCING, guard=_lease_guard, reducer=_worker_started_reducer),
-        _spec(kind, S.PRODUCING, "SUBMIT_CANDIDATE", S.QUIESCING, guard=_lease_guard, effects=_effect("quiesce_worker")),
-        _spec(kind, S.REPAIRING, "SUBMIT_CANDIDATE", S.QUIESCING, guard=_lease_guard, effects=_effect("quiesce_worker")),
+        _spec(kind, S.PRODUCING, "SUBMIT_CANDIDATE", S.QUIESCING, guard=_lease_guard, effects=_effect("quiesce_implementation_role", role_mode="produce")),
+        _spec(kind, S.REPAIRING, "SUBMIT_CANDIDATE", S.QUIESCING, guard=_lease_guard, effects=_effect("quiesce_implementation_role", role_mode="repair")),
         _spec(kind, S.PRODUCING, "PRODUCER_ARCHITECTURE_DEFECT", S.STALE, guard=_required("finding_artifact_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
         _spec(kind, S.REPAIRING, "PRODUCER_ARCHITECTURE_DEFECT", S.STALE, guard=_required("finding_artifact_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
-        _spec(kind, S.QUIESCING, "QUIESCE_COMPLETED", S.SNAPSHOTTING, guard=_quiesce_guard, effects=_effect("snapshot_candidate")),
+        _spec(kind, S.QUIESCING, "QUIESCE_COMPLETED", S.SNAPSHOTTING, guard=_quiesce_guard, effects=_effect("snapshot_implementation_result")),
         _spec(kind, S.QUIESCING, "REBIND_QUIESCER", S.QUIESCING, guard=_lease_guard, reducer=_worker_started_reducer),
         _spec(
             kind,
@@ -1196,9 +1204,9 @@ def _node_transitions() -> list[TransitionSpec]:
             S.TRIAGE_REQUIRED,
             guard=_required("failure_artifact_ref"),
             reducer=_triage_reducer(str(S.QUIESCING)),
-            effects=_effect("quiesce_node_for_triage"),
+            effects=_effect("quiesce_role_for_triage"),
         ),
-        _spec(kind, S.SNAPSHOTTING, "CANDIDATE_SNAPSHOTTED", S.REVIEW_QUEUED, guard=_candidate_guard, effects=_effect("enqueue_node_review")),
+        _spec(kind, S.SNAPSHOTTING, "CANDIDATE_SNAPSHOTTED", S.REVIEW_QUEUED, guard=_candidate_guard, effects=_effect("admit_verifier_role", role_mode="module")),
         _spec(kind, S.SNAPSHOTTING, "REBIND_SNAPSHOTTER", S.SNAPSHOTTING, guard=_lease_guard, reducer=_worker_started_reducer),
         _spec(
             kind,
@@ -1207,9 +1215,9 @@ def _node_transitions() -> list[TransitionSpec]:
             S.TRIAGE_REQUIRED,
             guard=_required("failure_artifact_ref"),
             reducer=_triage_reducer(str(S.SNAPSHOTTING)),
-            effects=_effect("quiesce_node_for_triage"),
+            effects=_effect("quiesce_role_for_triage"),
         ),
-        _spec(kind, S.REVIEW_QUEUED, "START_REVIEW", S.REVIEWING, guard=_lease_guard, effects=_effect("spawn_verifier_worker"), reducer=_worker_started_reducer),
+        _spec(kind, S.REVIEW_QUEUED, "START_REVIEW", S.REVIEWING, guard=_lease_guard, effects=_effect("run_verifier_role", role_mode="module"), reducer=_worker_started_reducer),
         _spec(kind, S.REVIEWING, "REBIND_REVIEWER", S.REVIEWING, guard=_lease_guard, reducer=_worker_started_reducer),
         _spec(
             kind,
@@ -1217,7 +1225,7 @@ def _node_transitions() -> list[TransitionSpec]:
             "SUBMIT_SEMANTIC_VERIFICATION",
             S.REVIEW_QUIESCING,
             guard=_required("pending_verification_ref"),
-            effects=_effect("quiesce_verifier"),
+            effects=_effect("quiesce_verifier_role", role_mode="module"),
         ),
         _spec(
             kind,
@@ -1225,9 +1233,9 @@ def _node_transitions() -> list[TransitionSpec]:
             "VERIFIER_QUIESCED",
             S.REVIEW_SNAPSHOTTING,
             guard=_quiesce_guard,
-            effects=_effect("snapshot_verification"),
+            effects=_effect("snapshot_verifier_result", role_mode="module"),
         ),
-        _spec(kind, S.REPAIR_QUEUED, "START_REPAIR", S.REPAIRING, guard=_lease_guard, effects=_effect("spawn_repair_worker"), reducer=_worker_started_reducer),
+        _spec(kind, S.REPAIR_QUEUED, "START_REPAIR", S.REPAIRING, guard=_lease_guard, effects=_effect("run_implementation_role", role_mode="repair"), reducer=_worker_started_reducer),
         _spec(kind, S.REPAIRING, "REBIND_REPAIRER", S.REPAIRING, guard=_lease_guard, reducer=_worker_started_reducer),
         _spec(
             kind,
@@ -1240,7 +1248,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 "scenario_commit_sha",
                 "verification_workspace_fingerprint",
             ),
-            effects=_effect("enqueue_scenario_verifier"),
+            effects=_effect("admit_verifier_role", role_mode="scenario"),
         ),
         _spec(kind, S.VERIFY_PREPARING, "REBIND_VERIFICATION_PREPARER", S.VERIFY_PREPARING),
         _spec(
@@ -1256,7 +1264,7 @@ def _node_transitions() -> list[TransitionSpec]:
             "START_SCENARIO_VERIFICATION",
             S.VERIFYING,
             guard=_all(_node_kind("verification"), _lease_guard),
-            effects=_effect("spawn_scenario_verifier"),
+            effects=_effect("run_verifier_role", role_mode="scenario"),
             reducer=_worker_started_reducer,
         ),
         _spec(kind, S.VERIFYING, "REBIND_SCENARIO_VERIFIER", S.VERIFYING, guard=_lease_guard, reducer=_worker_started_reducer),
@@ -1266,7 +1274,7 @@ def _node_transitions() -> list[TransitionSpec]:
             "SUBMIT_SEMANTIC_VERIFICATION",
             S.VERIFY_QUIESCING,
             guard=_required("pending_verification_ref"),
-            effects=_effect("quiesce_verifier"),
+            effects=_effect("quiesce_verifier_role", role_mode="scenario"),
         ),
         _spec(
             kind,
@@ -1274,11 +1282,11 @@ def _node_transitions() -> list[TransitionSpec]:
             "VERIFIER_QUIESCED",
             S.VERIFY_SNAPSHOTTING,
             guard=_quiesce_guard,
-            effects=_effect("snapshot_verification"),
+            effects=_effect("snapshot_verifier_result", role_mode="scenario"),
         ),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "REVIEW_PASSED", S.ACCEPTED, guard=_required("verification_artifact_ref"), effects=_effects("notify_node_accepted", "publish_accepted_memory_candidate"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "REVIEW_UNKNOWN_ALLOWED", S.ACCEPTED, guard=_all(_required("verification_artifact_ref"), _allowed_unknown_guard), effects=_effects("notify_node_accepted", "publish_accepted_memory_candidate"), reducer=_worker_finished_reducer),
-        _spec(kind, S.REVIEW_SNAPSHOTTING, "REVIEW_FAILED", S.REPAIR_QUEUED, guard=_required("verification_artifact_ref", "repair_bill_ref", "finding_fingerprint"), effects=_effect("enqueue_repair"), reducer=_worker_finished_reducer),
+        _spec(kind, S.REVIEW_SNAPSHOTTING, "REVIEW_FAILED", S.REPAIR_QUEUED, guard=_required("verification_artifact_ref", "repair_bill_ref", "finding_fingerprint"), effects=_effect("admit_implementation_role", role_mode="repair"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "DEPENDENCY_DEFECT", S.STALE, guard=_required("repair_bill_ref", "dependency_node_id"), effects=_effect("reopen_dependency_and_stale_descendants"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "CONTRACT_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "ARCHITECTURE_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
@@ -1288,7 +1296,7 @@ def _node_transitions() -> list[TransitionSpec]:
         _spec(kind, S.VERIFY_SNAPSHOTTING, "DEPENDENCY_DEFECT", S.STALE, guard=_required("repair_bill_ref", "dependency_node_id"), effects=_effect("reopen_dependency_and_stale_descendants"), reducer=_worker_finished_reducer),
         _spec(kind, S.VERIFY_SNAPSHOTTING, "CONTRACT_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
         _spec(kind, S.VERIFY_SNAPSHOTTING, "ARCHITECTURE_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
-        _spec(kind, S.STALE, "REQUEUE_STALE", S.QUEUED, guard=_all(_node_kind("unit"), _required("unit_contract_ref", "dependency_fingerprint"), _ready_dependencies), effects=_effect("enqueue_producer")),
+        _spec(kind, S.STALE, "REQUEUE_STALE", S.QUEUED, guard=_all(_node_kind("unit"), _required("unit_contract_ref", "dependency_fingerprint"), _ready_dependencies), effects=_effect("admit_implementation_role", role_mode="produce")),
         _spec(
             kind,
             S.STALE,
@@ -1299,7 +1307,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 _required("unit_contract_ref", "dependency_fingerprint"),
                 _ready_dependencies,
             ),
-            effects=_effect("enqueue_producer"),
+            effects=_effect("admit_implementation_role", role_mode="produce"),
         ),
         _spec(
             kind,
@@ -1322,7 +1330,7 @@ def _node_transitions() -> list[TransitionSpec]:
             "REOPEN_DEPENDENCY",
             S.REPAIR_QUEUED,
             guard=_required("repair_bill_ref"),
-            effects=_effect("enqueue_repair"),
+            effects=_effect("admit_implementation_role", role_mode="repair"),
             reducer=_new_node_role_generation_reducer,
         ),
         _spec(kind, S.ACCEPTED, "MEMORY_CANDIDATE_PUBLISHED", S.ACCEPTED, guard=_required("memory_candidate_ref")),
@@ -1344,7 +1352,7 @@ def _node_transitions() -> list[TransitionSpec]:
     }
     resumable = frozenset(str(state) for state in pausable)
     for state in pausable:
-        transitions.append(_spec(kind, state, "REQUEST_PAUSE", S.PAUSE_REQUESTED, reducer=_pause_reducer(str(state)), effects=_effect("pause_node_worker")))
+        transitions.append(_spec(kind, state, "REQUEST_PAUSE", S.PAUSE_REQUESTED, reducer=_pause_reducer(str(state)), effects=_effect("pause_role")))
     node_resume = {
         str(S.BLOCKED_BY_DEPS): str(S.BLOCKED_BY_DEPS),
         str(S.QUEUED): str(S.QUEUED),
@@ -1371,7 +1379,7 @@ def _node_transitions() -> list[TransitionSpec]:
             "RESUME",
             _mapped_resume_target(node_resume),
             reducer=_resume_cleanup_reducer,
-            effects=_effect("resume_node_work"),
+            effects=_effect("resume_semantic_state"),
         )
     )
     cancellable = pausable | {S.BLOCKED_BY_DEPS, S.QUIESCING, S.SNAPSHOTTING, S.REVIEW_QUIESCING, S.REVIEW_SNAPSHOTTING, S.VERIFY_QUIESCING, S.VERIFY_SNAPSHOTTING, S.STALE, S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED}
@@ -1383,7 +1391,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 "REQUEST_CANCEL",
                 S.CANCEL_REQUESTED,
                 reducer=_cancel_reducer(str(S.CANCELLED)),
-                effects=_effect("cancel_node_worker"),
+                effects=_effect("cancel_role"),
             )
         )
     directly_staleable = {S.BLOCKED_BY_DEPS, S.QUEUED, S.REVIEW_QUEUED, S.REPAIR_QUEUED, S.ACCEPTED, S.CANCELLED}
@@ -1412,7 +1420,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 S.CANCEL_REQUESTED,
                 guard=_required("stale_reason_ref"),
                 reducer=_cancel_reducer(str(S.STALE)),
-                effects=_effect("cancel_node_worker"),
+                effects=_effect("cancel_role"),
             )
         )
     triageable = pausable | {
@@ -1434,7 +1442,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 S.TRIAGE_REQUIRED,
                 reducer=_triage_reducer(str(state)),
                 effects=(
-                    _effect("quiesce_node_for_triage")
+                    _effect("quiesce_role_for_triage")
                     if state not in {S.PAUSE_REQUESTED, S.CANCEL_REQUESTED}
                     else _no_effects
                 ),
@@ -1448,11 +1456,11 @@ def _node_transitions() -> list[TransitionSpec]:
             _spec(
                 kind,
                 state,
-                "WORKER_FAILED",
+                "ROLE_FAILED",
                 S.TRIAGE_REQUIRED,
-                guard=_worker_failure_guard,
+                guard=_role_failure_guard,
                 reducer=_triage_reducer(str(state)),
-                effects=_effect("quiesce_node_for_triage"),
+                effects=_effect("quiesce_role_for_triage"),
             )
         )
     transitions.append(
@@ -1462,7 +1470,7 @@ def _node_transitions() -> list[TransitionSpec]:
             "RESOLVE_TRIAGE",
             _mapped_triage_resume_target(node_resume),
             reducer=_node_resume_cleanup_reducer,
-            effects=_effect("reconcile_node_run"),
+            effects=_effect("reconcile_semantic_state"),
         )
     )
     return transitions
@@ -1473,8 +1481,8 @@ def _standalone_review_transitions() -> list[TransitionSpec]:
     S = StandaloneReviewState
     transitions = [
         _spec(kind, None, "CREATE_STANDALONE_REVIEW", S.RECEIVED, guard=_required("review_request_ref")),
-        _spec(kind, S.RECEIVED, "QUEUE_REVIEW", S.REVIEW_QUEUED, effects=_effect("enqueue_standalone_review")),
-        _spec(kind, S.REVIEW_QUEUED, "START_REVIEW", S.REVIEWING, guard=_lease_guard, effects=_effect("spawn_verifier_worker"), reducer=_worker_started_reducer),
+        _spec(kind, S.RECEIVED, "QUEUE_REVIEW", S.REVIEW_QUEUED, effects=_effect("admit_reviewer_role", role_mode="standalone")),
+        _spec(kind, S.REVIEW_QUEUED, "START_REVIEW", S.REVIEWING, guard=_lease_guard, effects=_effect("run_reviewer_role", role_mode="standalone"), reducer=_worker_started_reducer),
         _spec(kind, S.REVIEWING, "REBIND_REVIEWER", S.REVIEWING, guard=_lease_guard, reducer=_worker_started_reducer),
         _spec(kind, S.REVIEWING, "REPORT_PRODUCED", S.REPORT_READY, guard=_required("verification_artifact_ref"), effects=_effect("publish_review_report"), reducer=_worker_finished_reducer),
         _spec(kind, S.REPORT_READY, "ACKNOWLEDGE_REPORT", S.COMPLETED, effects=_effect("submit_standalone_completion")),
@@ -1485,7 +1493,7 @@ def _standalone_review_transitions() -> list[TransitionSpec]:
     pausable = {S.RECEIVED, S.REVIEW_QUEUED, S.REVIEWING, S.REPORT_READY}
     resumable = frozenset(str(state) for state in pausable)
     for state in pausable:
-        transitions.append(_spec(kind, state, "REQUEST_PAUSE", S.PAUSE_REQUESTED, reducer=_pause_reducer(str(state)), effects=_effect("pause_aggregate_work")))
+        transitions.append(_spec(kind, state, "REQUEST_PAUSE", S.PAUSE_REQUESTED, reducer=_pause_reducer(str(state)), effects=_effect("pause_role")))
     transitions.append(
         _spec(
             kind,
@@ -1493,11 +1501,11 @@ def _standalone_review_transitions() -> list[TransitionSpec]:
             "RESUME",
             _resume_target(resumable),
             reducer=_resume_cleanup_reducer,
-            effects=_effect("resume_aggregate_work"),
+            effects=_effect("resume_semantic_state"),
         )
     )
     for state in pausable | {S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED}:
-        transitions.append(_spec(kind, state, "REQUEST_CANCEL", S.CANCEL_REQUESTED, effects=_effect("cancel_aggregate_work")))
+        transitions.append(_spec(kind, state, "REQUEST_CANCEL", S.CANCEL_REQUESTED, effects=_effect("cancel_role")))
     for state in pausable | {S.PAUSE_REQUESTED, S.CANCEL_REQUESTED}:
         transitions.append(
             _spec(
@@ -1507,7 +1515,7 @@ def _standalone_review_transitions() -> list[TransitionSpec]:
                 S.TRIAGE_REQUIRED,
                 reducer=_triage_reducer(str(state)),
                 effects=(
-                    _effect("quiesce_aggregate_for_triage")
+                    _effect("quiesce_role_for_triage")
                     if state not in {S.PAUSE_REQUESTED, S.CANCEL_REQUESTED}
                     else _no_effects
                 ),
@@ -1520,11 +1528,11 @@ def _standalone_review_transitions() -> list[TransitionSpec]:
         _spec(
             kind,
             S.REVIEWING,
-            "WORKER_FAILED",
+            "ROLE_FAILED",
             S.TRIAGE_REQUIRED,
-            guard=_worker_failure_guard,
+            guard=_role_failure_guard,
             reducer=_triage_reducer(str(S.REVIEWING)),
-            effects=_effect("quiesce_aggregate_for_triage"),
+            effects=_effect("quiesce_role_for_triage"),
         )
     )
     standalone_resume = {
@@ -1542,7 +1550,7 @@ def _standalone_review_transitions() -> list[TransitionSpec]:
             "RESOLVE_TRIAGE",
             _mapped_triage_resume_target(standalone_resume),
             reducer=_resume_cleanup_reducer,
-            effects=_effect("reconcile_standalone_review"),
+            effects=_effect("reconcile_semantic_state"),
         )
     )
     return transitions
@@ -1565,6 +1573,28 @@ def _state_class_map(
             f"state classification mismatch for {state_enum.__name__}: "
             f"missing={missing}, extra={extra}"
         )
+    return result
+
+
+def _activation(role: OrchestrationRole, mode: RoleMode) -> RoleActivation:
+    return RoleActivation(role, mode)
+
+
+def _runtime_state_map(
+    *entries: tuple[
+        Iterable[Any],
+        Iterable[RoleActivation],
+        ReconciliationKind,
+    ],
+) -> Mapping[str, StateRuntimeSpec]:
+    result: dict[str, StateRuntimeSpec] = {}
+    for states, activations, reconciliation in entries:
+        runtime = StateRuntimeSpec(frozenset(activations), reconciliation)
+        for state in states:
+            key = str(state)
+            if key in result:
+                raise ValueError(f"duplicate runtime state declaration: {key}")
+            result[key] = runtime
     return result
 
 
@@ -1700,6 +1730,155 @@ def all_machine_specs() -> tuple[MachineSpec, ...]:
             StateClass.OPERATOR_WAIT: {StandaloneReviewState.TRIAGE_REQUIRED},
         },
     )
+    architect_activations = {
+        _activation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
+        _activation(OrchestrationRole.ARCHITECT, RoleMode.REVISION),
+    }
+    architecture_review = {
+        _activation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE)
+    }
+    architecture_runtime = _runtime_state_map(
+        (
+            {ArchitectureRevisionState.ARCHITECT_QUEUED},
+            architect_activations,
+            ReconciliationKind.ADMIT_ROLE,
+        ),
+        (
+            {ArchitectureRevisionState.ARCHITECT_RUNNING},
+            architect_activations,
+            ReconciliationKind.RESUME_ROLE,
+        ),
+        (
+            {
+                ArchitectureRevisionState.ARCHITECT_QUIESCING,
+                ArchitectureRevisionState.ARCHITECT_SNAPSHOTTING,
+            },
+            architect_activations,
+            ReconciliationKind.RECONCILE_STATE,
+        ),
+        (
+            {ArchitectureRevisionState.REVIEW_QUEUED},
+            architecture_review,
+            ReconciliationKind.ADMIT_ROLE,
+        ),
+        (
+            {ArchitectureRevisionState.REVIEWING},
+            architecture_review,
+            ReconciliationKind.RESUME_ROLE,
+        ),
+        (
+            {
+                ArchitectureRevisionState.PAUSE_REQUESTED,
+                ArchitectureRevisionState.CANCEL_REQUESTED,
+            },
+            architect_activations | architecture_review,
+            ReconciliationKind.CONTROL_ROLE,
+        ),
+    )
+    implementation_produce = {
+        _activation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE)
+    }
+    implementation_repair = {
+        _activation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR)
+    }
+    verifier_module = {_activation(OrchestrationRole.VERIFIER, RoleMode.MODULE)}
+    verifier_scenario = {_activation(OrchestrationRole.VERIFIER, RoleMode.SCENARIO)}
+    all_node_activations = (
+        implementation_produce
+        | implementation_repair
+        | verifier_module
+        | verifier_scenario
+    )
+    node_runtime = _runtime_state_map(
+        (
+            {DagNodeRunState.QUEUED},
+            implementation_produce,
+            ReconciliationKind.ADMIT_ROLE,
+        ),
+        (
+            {DagNodeRunState.PRODUCING},
+            implementation_produce,
+            ReconciliationKind.RESUME_ROLE,
+        ),
+        (
+            {DagNodeRunState.QUIESCING, DagNodeRunState.SNAPSHOTTING},
+            implementation_produce,
+            ReconciliationKind.RECONCILE_STATE,
+        ),
+        (
+            {DagNodeRunState.REPAIR_QUEUED},
+            implementation_repair,
+            ReconciliationKind.ADMIT_ROLE,
+        ),
+        (
+            {DagNodeRunState.REPAIRING},
+            implementation_repair,
+            ReconciliationKind.RESUME_ROLE,
+        ),
+        (
+            {DagNodeRunState.REVIEW_QUEUED},
+            verifier_module,
+            ReconciliationKind.ADMIT_ROLE,
+        ),
+        (
+            {DagNodeRunState.REVIEWING},
+            verifier_module,
+            ReconciliationKind.RESUME_ROLE,
+        ),
+        (
+            {DagNodeRunState.REVIEW_QUIESCING, DagNodeRunState.REVIEW_SNAPSHOTTING},
+            verifier_module,
+            ReconciliationKind.RECONCILE_STATE,
+        ),
+        (
+            {DagNodeRunState.VERIFY_PREPARING},
+            verifier_scenario,
+            ReconciliationKind.ADMIT_ROLE,
+        ),
+        (
+            {DagNodeRunState.VERIFYING},
+            verifier_scenario,
+            ReconciliationKind.RESUME_ROLE,
+        ),
+        (
+            {DagNodeRunState.VERIFY_QUIESCING, DagNodeRunState.VERIFY_SNAPSHOTTING},
+            verifier_scenario,
+            ReconciliationKind.RECONCILE_STATE,
+        ),
+        (
+            {DagNodeRunState.PAUSE_REQUESTED, DagNodeRunState.CANCEL_REQUESTED},
+            all_node_activations,
+            ReconciliationKind.CONTROL_ROLE,
+        ),
+    )
+    standalone_review = {
+        _activation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE)
+    }
+    standalone_runtime = _runtime_state_map(
+        (
+            {StandaloneReviewState.RECEIVED, StandaloneReviewState.REVIEW_QUEUED},
+            standalone_review,
+            ReconciliationKind.ADMIT_ROLE,
+        ),
+        (
+            {StandaloneReviewState.REVIEWING},
+            standalone_review,
+            ReconciliationKind.RESUME_ROLE,
+        ),
+        (
+            {StandaloneReviewState.REPORT_READY},
+            standalone_review,
+            ReconciliationKind.RECONCILE_STATE,
+        ),
+        (
+            {
+                StandaloneReviewState.PAUSE_REQUESTED,
+                StandaloneReviewState.CANCEL_REQUESTED,
+            },
+            standalone_review,
+            ReconciliationKind.CONTROL_ROLE,
+        ),
+    )
 
     return (
         MachineSpec(AggregateType.TASK, task_classes, tuple(_task_transitions())),
@@ -1762,6 +1941,7 @@ def all_machine_specs() -> tuple[MachineSpec, ...]:
                     ),
                 ),
             },
+            runtime_states=architecture_runtime,
         ),
         MachineSpec(
             AggregateType.EXECUTION_EPOCH,
@@ -1819,6 +1999,7 @@ def all_machine_specs() -> tuple[MachineSpec, ...]:
                     ),
                 ),
             },
+            runtime_states=node_runtime,
         ),
         MachineSpec(
             AggregateType.STANDALONE_REVIEW,
@@ -1846,6 +2027,7 @@ def all_machine_specs() -> tuple[MachineSpec, ...]:
                     ),
                 ),
             },
+            runtime_states=standalone_runtime,
         ),
     )
 

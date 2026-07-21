@@ -5,6 +5,7 @@ from enum import StrEnum
 from typing import Any, Callable, Mapping
 
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType, TransitionSpec
+from pal.minion.v2.role_contracts import RoleActivation
 
 
 TargetResolver = Callable[[Mapping[str, Any], ActionEnvelope], str]
@@ -31,6 +32,27 @@ class ControlDisposition(StrEnum):
     REQUEST = "request"
     WAIT = "wait"
     SETTLED = "settled"
+
+
+class ReconciliationKind(StrEnum):
+    """How startup recovery owns a state after process-local work is lost."""
+
+    ADMIT_ROLE = "admit_role"
+    RESUME_ROLE = "resume_role"
+    RECONCILE_STATE = "reconcile_state"
+    CONTROL_ROLE = "control_role"
+
+
+@dataclass(frozen=True)
+class StateRuntimeSpec:
+    """Finite role ownership and recovery behavior for one durable state."""
+
+    activations: frozenset[RoleActivation]
+    reconciliation: ReconciliationKind
+
+    def __post_init__(self) -> None:
+        if not self.activations:
+            raise ValueError("a runtime state must declare at least one role activation")
 
 
 @dataclass(frozen=True)
@@ -87,9 +109,33 @@ class MachineSpec:
     state_classes: Mapping[str, StateClass]
     transitions: tuple[TransitionSpec, ...]
     control_policies: Mapping[ControlIntent, ControlPolicy] = field(default_factory=dict)
+    runtime_states: Mapping[str, StateRuntimeSpec] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         states = set(self.state_classes)
+        unknown_runtime_states = set(self.runtime_states) - states
+        if unknown_runtime_states:
+            raise ValueError(
+                f"{self.aggregate_type.value} runtime metadata references unknown states: "
+                + ", ".join(sorted(unknown_runtime_states))
+            )
+        required_runtime_states = {
+            state
+            for state, state_class in self.state_classes.items()
+            if state_class == StateClass.WORKER_LIVENESS
+        }
+        missing_runtime_states = required_runtime_states - set(self.runtime_states)
+        extra_runtime_states = set(self.runtime_states) - required_runtime_states
+        if missing_runtime_states or extra_runtime_states:
+            details: list[str] = []
+            if missing_runtime_states:
+                details.append("missing " + ", ".join(sorted(missing_runtime_states)))
+            if extra_runtime_states:
+                details.append("non-liveness " + ", ".join(sorted(extra_runtime_states)))
+            raise ValueError(
+                f"{self.aggregate_type.value} runtime state metadata must exactly cover "
+                "worker-liveness states: " + "; ".join(details)
+            )
         keys: set[tuple[str | None, str]] = set()
         for transition in self.transitions:
             if transition.aggregate_type != self.aggregate_type:
@@ -217,4 +263,14 @@ class MachineSpec:
             state
             for state in self.states
             if self.control_disposition(intent, state) == disposition
+        )
+
+    def runtime_for_state(self, state: str) -> StateRuntimeSpec | None:
+        return self.runtime_states.get(str(state))
+
+    def states_for_activation(self, activation: RoleActivation) -> frozenset[str]:
+        return frozenset(
+            state
+            for state, runtime in self.runtime_states.items()
+            if activation in runtime.activations
         )

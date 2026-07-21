@@ -331,10 +331,10 @@ async def _publish_architecture_clarification(
     workspace: Mapping[str, Any],
     data: bytes,
 ) -> dict[str, Any]:
-    from pal.minion.v2.worker_gateway import worker_gateway_client_from_env
+    from pal.minion.v2.role_gateway import role_gateway_client_from_env
 
     runtime_root = Path(str(workspace["runtime_root"]))
-    gateway = worker_gateway_client_from_env(runtime_root)
+    gateway = role_gateway_client_from_env(runtime_root)
     if gateway is not None:
         response = await gateway.request(
             "artifact_put",
@@ -410,7 +410,7 @@ def skeleton_builder_tool_result(
             return _mutate_architecture_draft(call, workspace)
         context = SubmissionDraftContext.from_workspace(workspace, draft_kind=draft_kind)
         store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
-        if store.uses_worker_gateway:
+        if store.uses_role_gateway:
             store.mark_submitted(
                 context,
                 expected_version=version,
@@ -428,7 +428,7 @@ def skeleton_builder_tool_result(
             },
         )
         _append_unique_artifact(produced_artifacts, artifact)
-        if not store.uses_worker_gateway:
+        if not store.uses_role_gateway:
             store.mark_submitted(
                 context,
                 expected_version=version,

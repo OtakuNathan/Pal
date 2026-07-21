@@ -40,7 +40,7 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
     SubmissionDraftStore,
 )
-from pal.minion.v2.workers import MinionV2SemanticWorker
+from pal.minion.v2.semantic_orchestration import SemanticOrchestrator
 
 
 def _git(root: Path, *args: str) -> str:
@@ -285,7 +285,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             },
         }
         submission["scenarios"]["router_end_to_end"]["modules"] = ["router", "consumer"]
-        manifest_ref = self.service.snapshot_architecture(
+        manifest_ref = self.service.snapshot_architect_result(
             workflow_name="parallel-contracts",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -336,6 +336,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "artifact_stage_dir": str(self.runtime_root / "question-stage"),
             },
             role="architect",
+            mode="author",
         )
         observed: list[dict[str, object]] = []
 
@@ -385,7 +386,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         submission = self._submission()
         submission["clarification_refs"] = [amendment_ref.to_dict()]
 
-        manifest_ref = self.service.snapshot_architecture(
+        manifest_ref = self.service.snapshot_architect_result(
             workflow_name="clarified-task",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -444,7 +445,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             _contract("route_types").replace("class RuleRouter;", "struct RouteInput;"),
             encoding="utf-8",
         )
-        manifest_ref = self.service.snapshot_architecture(
+        manifest_ref = self.service.snapshot_architect_result(
             workflow_name="contract-only",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -468,7 +469,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "task_id": "contract-only-repair-task",
                 "title": "Repair router with frozen route types",
                 "objective": "Repair the one implementation module",
-                "family_id": "software_engineering",
+                "profile": "software_engineering.v2_coder",
                 "workspace": {"kind": "existing_repo", "repo_path": str(self.repo)},
             }
         )
@@ -536,7 +537,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
         (workspace.worktree / "include").mkdir()
         (workspace.worktree / "include" / "router.h").write_text(_contract("router"), encoding="utf-8")
-        artifact_ref = self.service.snapshot_architecture(
+        artifact_ref = self.service.snapshot_architect_result(
             workflow_name="tiny-router",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -597,7 +598,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         (workspace.worktree / "include" / "router.h").write_text(
             _contract("router"), encoding="utf-8"
         )
-        skeleton_ref = self.service.snapshot_architecture(
+        skeleton_ref = self.service.snapshot_architect_result(
             workflow_name="Tiny Router Delivery",
             revision_name="rev_7432f60a16414b30b3393379950d84c0",
             architecture_workspace=workspace,
@@ -649,7 +650,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "class RuleRouter;\n", encoding="utf-8"
         )
 
-        manifest_ref = self.service.snapshot_architecture(
+        manifest_ref = self.service.snapshot_architect_result(
             workflow_name="warning-review",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -679,7 +680,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         (workspace.worktree / "include" / "router.h").write_text(
             _contract("router"), encoding="utf-8"
         )
-        skeleton_ref = self.service.snapshot_architecture(
+        skeleton_ref = self.service.snapshot_architect_result(
             workflow_name="Restore Review Repository",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -705,7 +706,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_architecture_snapshot_is_idempotent_and_reuses_workspace_snapshot_after_restart(self) -> None:
         workspace = self._provision_complete_workspace("idempotent", "initial")
-        first_ref = self.service.snapshot_architecture(
+        first_ref = self.service.snapshot_architect_result(
             workflow_name="idempotent",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -714,7 +715,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         first = self.artifacts.read_json(first_ref)
 
-        second_ref = self.service.snapshot_architecture(
+        second_ref = self.service.snapshot_architect_result(
             workflow_name="idempotent",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -756,7 +757,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "architect-owned commit",
         )
         with self.assertRaisesRegex(ValueError, "manager-owned operations"):
-            self.service.snapshot_architecture(
+            self.service.snapshot_architect_result(
                 workflow_name="git-mutation",
                 revision_name="initial",
                 architecture_workspace=workspace,
@@ -766,7 +767,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_execution_epoch_starts_every_node_from_skeleton_and_handoff_hides_manager_identity(self) -> None:
         workspace = self._provision_complete_workspace("execution", "initial")
-        skeleton_ref = self.service.snapshot_architecture(
+        skeleton_ref = self.service.snapshot_architect_result(
             workflow_name="execution",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -833,7 +834,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_scenario_verification_artifact_closes_final_candidate_union(self) -> None:
         workspace = self._provision_complete_workspace("module-union", "initial")
-        skeleton_ref = self.service.snapshot_architecture(
+        skeleton_ref = self.service.snapshot_architect_result(
             workflow_name="module-union",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -920,7 +921,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             )
         )
         publish_result = asyncio.run(
-            MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root)).execute_semantic_effect(
+            SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root)).execute_semantic_effect(
                 {
                     "effect_type": "publish_final_deliverable",
                     "effect_id": "module-union:publish",
@@ -979,7 +980,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "reference_paths": [{"name": "requirements", "path": str(requirements_path)}],
             "artifact_dir": str(self.runtime_root / "artifacts"),
             "artifact_stage_dir": str(self.runtime_root / "artifact-stage"),
-        }, role="architect")
+        }, role="architect", mode="author")
         produced: list[dict[str, object]] = []
         self._author_submission(workspace, self._submission())
         submitted = self._builder_call(
@@ -1015,6 +1016,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "artifact_stage_dir": str(self.runtime_root / "live-path-stage"),
             },
             role="architect",
+            mode="author",
         )
         self._author_submission(workspace, self._submission())
         produced: list[dict[str, object]] = []
@@ -1049,7 +1051,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             ],
             "artifact_dir": str(self.runtime_root / "review-artifacts"),
             "artifact_stage_dir": str(self.runtime_root / "review-stage"),
-        }, role="architecture_reviewer")
+        }, role="reviewer", mode="architecture")
         finding = self._builder_call(
             workspace,
             ADD_FINDING_CAPABILITY,
@@ -1081,7 +1083,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "reference_paths": [{"name": "requirements", "path": str(requirements_path)}],
             "artifact_dir": str(self.runtime_root / "review-artifacts"),
             "artifact_stage_dir": str(self.runtime_root / "review-stage"),
-        }, role="architecture_reviewer")
+        }, role="reviewer", mode="architecture")
         finding = self._builder_call(
             workspace,
             ADD_FINDING_CAPABILITY,
@@ -1196,7 +1198,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "architecture_revision_base_submission": base,
             "architecture_revision_scope": architecture_revision_scope(base, finding),
             "architecture_revision_base_sha": base_sha,
-        }, role="architect")
+        }, role="architect", mode="revision")
         contract_path.write_text(_contract("router") + "// clarified\n", encoding="utf-8")
         produced: list[dict[str, object]] = []
         result = self._builder_call(
@@ -1217,6 +1219,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "artifact_stage_dir": str(self.runtime_root / "revision-rejected-stage"),
             },
             role="architect",
+            mode="revision",
         )
         rejected = self._builder_call(rejected_workspace, "op_minion_architecture_submit")
         self.assertFalse(rejected.ok)
@@ -1264,6 +1267,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "architecture_revision_base_sha": base_sha,
             },
             role="architect",
+            mode="revision",
         )
         contract_path.write_text(_contract("router") + "// clarified\n", encoding="utf-8")
         produced: list[dict[str, object]] = []
@@ -1324,6 +1328,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 ).strip(),
             },
             role="architect",
+            mode="revision",
         )
 
         result = self._builder_call(workspace, "op_minion_architecture_submit")
@@ -1333,7 +1338,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_revision_scope_is_rechecked_during_stable_snapshot(self) -> None:
         initial = self._provision_complete_workspace("stable-revision", "initial")
-        base_ref = self.service.snapshot_architecture(
+        base_ref = self.service.snapshot_architect_result(
             workflow_name="stable-revision",
             revision_name="initial",
             architecture_workspace=initial,
@@ -1366,7 +1371,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             encoding="utf-8",
         )
         revised_submission = json.loads(json.dumps(base_artifact["submission"]))
-        accepted_ref = self.service.snapshot_architecture(
+        accepted_ref = self.service.snapshot_architect_result(
             workflow_name="stable-revision",
             revision_name="allowed",
             architecture_workspace=revision,
@@ -1392,7 +1397,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             encoding="utf-8",
         )
         with self.assertRaisesRegex(ValueError, "outside the finding scope"):
-            self.service.snapshot_architecture(
+            self.service.snapshot_architect_result(
                 workflow_name="stable-revision",
                 revision_name="rejected",
                 architecture_workspace=rejected_revision,
@@ -1450,6 +1455,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 ).strip(),
             },
             role="architect",
+            mode="revision",
         )
         produced: list[dict[str, object]] = []
 
@@ -1533,7 +1539,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_stable_snapshot_scopes_against_rejected_candidate_not_revision_origin(self) -> None:
         initial = self._provision_complete_workspace("repair-baseline", "initial")
-        base_ref = self.service.snapshot_architecture(
+        base_ref = self.service.snapshot_architect_result(
             workflow_name="repair-baseline",
             revision_name="initial",
             architecture_workspace=initial,
@@ -1570,7 +1576,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             _contract("router") + "// local repair\n", encoding="utf-8"
         )
 
-        accepted_ref = self.service.snapshot_architecture(
+        accepted_ref = self.service.snapshot_architect_result(
             workflow_name="repair-baseline",
             revision_name="revision",
             architecture_workspace=revision,
@@ -1598,7 +1604,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "artifact_stage_dir": str(self.runtime_root / "human-edit-stage"),
             "architecture_revision_base_submission": self._submission(),
             "architecture_revision_base_sha": _git(self.repo, "rev-parse", "HEAD").strip(),
-        }, role="architect")
+        }, role="architect", mode="revision")
         produced: list[dict[str, object]] = []
         (self.repo / "include" / "router.h").write_text(
             _contract("router") + "// human clarification\n", encoding="utf-8"
@@ -1639,7 +1645,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "architecture_revision_base_submission": base,
             "architecture_revision_scope": architecture_revision_scope(base, finding),
             "architecture_revision_base_sha": _git(self.repo, "rev-parse", "HEAD").strip(),
-        }, role="architect")
+        }, role="architect", mode="revision")
         produced: list[dict[str, object]] = []
 
         updated = self._builder_call(
@@ -1664,7 +1670,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_software_workflow_imports_skeleton_and_rejects_legacy_contract_graph(self) -> None:
         workspace = self._provision_complete_workspace("external", "initial")
-        skeleton_ref = self.service.snapshot_architecture(
+        skeleton_ref = self.service.snapshot_architect_result(
             workflow_name="external",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -1677,7 +1683,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "task_id": "external-task",
                 "title": "External tiny router skeleton",
                 "objective": "Implement the accepted tiny router skeleton",
-                "family_id": "software_engineering",
+                "profile": "software_engineering.v2_coder",
                 "workspace": {"kind": "existing_repo", "repo_path": str(self.repo)},
             }
         )
@@ -1746,7 +1752,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_candidate_reuse_transplants_module_diff_and_stops_when_contract_changes(self) -> None:
         workspace = self._provision_complete_workspace("reuse", "initial")
-        initial_ref = self.service.snapshot_architecture(
+        initial_ref = self.service.snapshot_architect_result(
             workflow_name="reuse",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -1830,7 +1836,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         (changed_workspace.worktree / "include" / "router.h").write_text(
             changed_contract, encoding="utf-8"
         )
-        changed_ref = self.service.snapshot_architecture(
+        changed_ref = self.service.snapshot_architect_result(
             workflow_name="reuse",
             revision_name="changed-contract",
             architecture_workspace=changed_workspace,
@@ -1851,7 +1857,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_human_review_publish_persists_and_reuses_the_card(self) -> None:
         workspace = self._provision_complete_workspace("human-card", "initial")
-        manifest_ref = self.service.snapshot_architecture(
+        manifest_ref = self.service.snapshot_architect_result(
             workflow_name="human-card",
             revision_name="initial",
             architecture_workspace=workspace,
@@ -1945,12 +1951,12 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 )
             )
         published: list[dict[str, object]] = []
-        worker = MinionV2SemanticWorker(
+        worker = SemanticOrchestrator(
             workflows,
             publish_human_review=lambda payload: _record_async(published, payload),
         )
         effect = {
-            "effect_type": "publish_human_architecture_review",
+            "effect_type": "publish_architecture_review_request",
             "effect_id": "effect-human-card",
             "workflow_id": workflow_id,
             "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
@@ -2186,7 +2192,8 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "artifact_dir": str(self.runtime_root / f"review-artifacts-{self.builder_lease_index}"),
                 "artifact_stage_dir": str(self.runtime_root / f"review-stage-{self.builder_lease_index}"),
             },
-            role="architecture_reviewer",
+            role="reviewer",
+            mode="architecture",
         )
 
     def _bind_builder_workspace(
@@ -2194,6 +2201,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         workspace: dict[str, object],
         *,
         role: str,
+        mode: str,
     ) -> dict[str, object]:
         self.builder_lease_index += 1
         invocation_id = f"inv_builder_{self.builder_lease_index}"
@@ -2208,6 +2216,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                     "lease_resource_key": resource,
                     "fencing_token": lease.fencing_token,
                     "role": role,
+                    "mode": mode,
                     "authoring_input_fingerprint": f"input-{self.builder_lease_index}",
                     "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
                 },

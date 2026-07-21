@@ -10,10 +10,11 @@ from typing import Any, Callable, Mapping
 
 from pal.foundation import utc_now
 from pal.minion.config import minion_db_path
+from pal.minion.v2.role_contracts import RoleActivation
 from pal.minion.v2.schema import ensure_minion_v2_schema
 
 
-AUTHORING_CONTRACT_VERSION = "5"
+AUTHORING_CONTRACT_VERSION = "6"
 ACTIVE_DRAFT_STATUS = "active"
 SUBMITTED_DRAFT_STATUS = "submitted"
 
@@ -25,6 +26,7 @@ class SubmissionDraftContext:
     lease_resource_key: str
     fencing_token: int
     role: str
+    mode: str
     draft_kind: str
     input_fingerprint: str
     authoring_contract_version: str = AUTHORING_CONTRACT_VERSION
@@ -36,6 +38,7 @@ class SubmissionDraftContext:
             "lease_resource_key": self.lease_resource_key,
             "fencing_token": self.fencing_token,
             "role": self.role,
+            "mode": self.mode,
             "draft_kind": self.draft_kind,
             "input_fingerprint": self.input_fingerprint,
             "authoring_contract_version": self.authoring_contract_version,
@@ -49,6 +52,7 @@ class SubmissionDraftContext:
             lease_resource_key=str(value.get("lease_resource_key") or "").strip(),
             fencing_token=int(value.get("fencing_token") or 0),
             role=str(value.get("role") or "").strip(),
+            mode=str(value.get("mode") or "").strip(),
             draft_kind=str(value.get("draft_kind") or "").strip(),
             input_fingerprint=str(value.get("input_fingerprint") or "").strip(),
             authoring_contract_version=str(
@@ -64,6 +68,7 @@ class SubmissionDraftContext:
                 "invocation_id": self.invocation_id,
                 "fencing_token": self.fencing_token,
                 "role": self.role,
+                "mode": self.mode,
                 "draft_kind": self.draft_kind,
                 "input_fingerprint": self.input_fingerprint,
             }
@@ -78,6 +83,7 @@ class SubmissionDraftContext:
             lease_resource_key=str(binding.get("lease_resource_key") or binding.get("lease_resource") or "").strip(),
             fencing_token=int(binding.get("fencing_token") or 0),
             role=str(binding.get("role") or "").strip(),
+            mode=str(binding.get("mode") or "").strip(),
             draft_kind=str(draft_kind or "").strip(),
             input_fingerprint=str(binding.get("authoring_input_fingerprint") or "").strip(),
             authoring_contract_version=str(
@@ -92,6 +98,7 @@ class SubmissionDraftContext:
                 ("lease_resource_key", context.lease_resource_key),
                 ("fencing_token", context.fencing_token),
                 ("role", context.role),
+                ("mode", context.mode),
                 ("draft_kind", context.draft_kind),
                 ("input_fingerprint", context.input_fingerprint),
                 ("authoring_contract_version", context.authoring_contract_version),
@@ -102,9 +109,10 @@ class SubmissionDraftContext:
             raise ValueError("submission Draft is missing bound runtime fields: " + ", ".join(missing))
         if context.authoring_contract_version != AUTHORING_CONTRACT_VERSION:
             raise ValueError(
-                "worker authoring contract is stale; expected "
+                "role authoring contract is stale; expected "
                 f"{AUTHORING_CONTRACT_VERSION}, received {context.authoring_contract_version}"
             )
+        RoleActivation.from_values(context.role, context.mode)
         return context
 
 
@@ -120,6 +128,7 @@ class SubmissionDraftSnapshot:
     lease_resource_key: str = ""
     fencing_token: int = 0
     role: str = ""
+    mode: str = ""
     draft_kind: str = ""
     input_fingerprint: str = ""
     submission_artifact_ref: Mapping[str, Any] = field(default_factory=dict)
@@ -138,6 +147,7 @@ class SubmissionDraftSnapshot:
             "lease_resource_key": self.lease_resource_key,
             "fencing_token": self.fencing_token,
             "role": self.role,
+            "mode": self.mode,
             "draft_kind": self.draft_kind,
             "input_fingerprint": self.input_fingerprint,
             "submission_artifact_ref": dict(self.submission_artifact_ref),
@@ -158,6 +168,7 @@ class SubmissionDraftSnapshot:
             lease_resource_key=str(value.get("lease_resource_key") or ""),
             fencing_token=int(value.get("fencing_token") or 0),
             role=str(value.get("role") or ""),
+            mode=str(value.get("mode") or ""),
             draft_kind=str(value.get("draft_kind") or ""),
             input_fingerprint=str(value.get("input_fingerprint") or ""),
             submission_artifact_ref=dict(value.get("submission_artifact_ref") or {}),
@@ -170,18 +181,18 @@ DraftReducer = Callable[[dict[str, Any]], tuple[dict[str, Any], Mapping[str, Any
 
 
 class SubmissionDraftStore:
-    """Durable worker-local authoring state guarded by the worker lease fence."""
+    """Durable role-local authoring state guarded by the active role lease fence."""
 
     def __init__(self, runtime_root: Path) -> None:
         self.runtime_root = Path(runtime_root)
         self.db_path = minion_db_path(self.runtime_root)
-        from pal.minion.v2.worker_gateway import worker_gateway_client_from_env
+        from pal.minion.v2.role_gateway import role_gateway_client_from_env
 
-        self._worker_gateway = worker_gateway_client_from_env(self.runtime_root)
+        self._role_gateway = role_gateway_client_from_env(self.runtime_root)
 
     @property
-    def uses_worker_gateway(self) -> bool:
-        return self._worker_gateway is not None
+    def uses_role_gateway(self) -> bool:
+        return self._role_gateway is not None
 
     def mutate(
         self,
@@ -196,14 +207,14 @@ class SubmissionDraftStore:
         operation = str(operation_key or "").strip()
         if not operation:
             raise ValueError("Draft mutation requires an operation key")
-        if self._worker_gateway is not None:
+        if self._role_gateway is not None:
             snapshot = self.read(context, seed=seed)
             if snapshot.status != ACTIVE_DRAFT_STATUS:
                 raise ValueError("submission Draft is already frozen; start a new fenced invocation")
             next_payload, result = reducer(_deepcopy_json(snapshot.payload))
             if not isinstance(next_payload, dict):
                 raise TypeError("Draft reducer must return an object payload")
-            response = self._worker_gateway.request_sync(
+            response = self._role_gateway.request_sync(
                 "draft_mutate",
                 {
                     "context": context.to_dict(),
@@ -281,7 +292,7 @@ class SubmissionDraftStore:
         result: Mapping[str, Any],
         seed: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
-        """CAS a reducer result computed by an assignment-scoped worker.
+        """CAS a reducer result computed by an assignment-scoped role invocation.
 
         The Manager still owns idempotency, fencing and the durable mutation;
         only the pure reducer runs in the sandbox process.
@@ -356,11 +367,11 @@ class SubmissionDraftStore:
         seed: Mapping[str, Any] | None = None,
     ) -> SubmissionDraftSnapshot:
         self._assert_authoring_contract(context)
-        if self._worker_gateway is not None:
-            from pal.minion.v2.worker_gateway import decode_remote_draft_snapshot
+        if self._role_gateway is not None:
+            from pal.minion.v2.role_gateway import decode_remote_draft_snapshot
 
             return decode_remote_draft_snapshot(
-                self._worker_gateway.request_sync(
+                self._role_gateway.request_sync(
                     "draft_read",
                     {"context": context.to_dict(), "seed": dict(seed or {})},
                 )
@@ -380,10 +391,10 @@ class SubmissionDraftStore:
         submission_payload: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         self._assert_authoring_contract(context)
-        if self._worker_gateway is not None:
+        if self._role_gateway is not None:
             if not isinstance(submission_payload, Mapping):
                 raise ValueError("remote submission requires its compiled JSON payload")
-            return dict(self._worker_gateway.request_sync(
+            return dict(self._role_gateway.request_sync(
                 "draft_submit",
                 {
                     "context": context.to_dict(),
@@ -469,10 +480,11 @@ class SubmissionDraftStore:
         workflow_id: str,
         invocation_id: str,
         role: str,
+        mode: str,
         draft_kind: str,
         input_fingerprint: str,
     ) -> SubmissionDraftSnapshot | None:
-        """Resolve the newest exact-input receipt for one logical worker invocation."""
+        """Resolve the newest exact-input receipt for one logical role invocation."""
 
         self._ensure_schema()
         with sqlite3.connect(str(self.db_path)) as connection:
@@ -480,7 +492,7 @@ class SubmissionDraftStore:
             row = connection.execute(
                 """
                 SELECT * FROM minion_v2_submission_drafts
-                WHERE workflow_id = ? AND invocation_id = ? AND role = ?
+                WHERE workflow_id = ? AND invocation_id = ? AND role = ? AND mode = ?
                   AND draft_kind = ? AND input_fingerprint = ?
                   AND authoring_contract_version = ? AND status = ?
                   AND submitted_artifact_ref_json != '{}'
@@ -492,6 +504,7 @@ class SubmissionDraftStore:
                     str(workflow_id),
                     str(invocation_id),
                     str(role),
+                    str(mode),
                     str(draft_kind),
                     str(input_fingerprint),
                     AUTHORING_CONTRACT_VERSION,
@@ -593,10 +606,10 @@ class SubmissionDraftStore:
                 """
                 INSERT INTO minion_v2_submission_drafts(
                     draft_key, workflow_id, invocation_id, lease_resource_key,
-                    fencing_token, role, draft_kind, input_fingerprint,
+                    fencing_token, role, mode, draft_kind, input_fingerprint,
                     authoring_contract_version, version, status, payload_json,
                     source_draft_key, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
                 """,
                 (
                     context.draft_key,
@@ -605,6 +618,7 @@ class SubmissionDraftStore:
                     context.lease_resource_key,
                     context.fencing_token,
                     context.role,
+                    context.mode,
                     context.draft_kind,
                     context.input_fingerprint,
                     context.authoring_contract_version,
@@ -631,7 +645,7 @@ class SubmissionDraftStore:
             SELECT draft_key, invocation_id, lease_resource_key, fencing_token,
                    payload_json
             FROM minion_v2_submission_drafts
-            WHERE workflow_id = ? AND role = ? AND draft_kind = ?
+            WHERE workflow_id = ? AND role = ? AND mode = ? AND draft_kind = ?
               AND input_fingerprint = ? AND authoring_contract_version = ?
               AND draft_key != ?
             ORDER BY updated_at DESC
@@ -640,6 +654,7 @@ class SubmissionDraftStore:
             (
                 context.workflow_id,
                 context.role,
+                context.mode,
                 context.draft_kind,
                 context.input_fingerprint,
                 context.authoring_contract_version,
@@ -678,10 +693,11 @@ class SubmissionDraftStore:
     def _assert_authoring_contract(context: SubmissionDraftContext) -> None:
         if context.authoring_contract_version != AUTHORING_CONTRACT_VERSION:
             raise ValueError(
-                "worker authoring contract is stale; expected "
+                "role authoring contract is stale; expected "
                 f"{AUTHORING_CONTRACT_VERSION}, received "
                 f"{context.authoring_contract_version or '<missing>'}"
             )
+        RoleActivation.from_values(context.role, context.mode)
 
     def _assert_fence(self, connection: sqlite3.Connection, context: SubmissionDraftContext) -> None:
         row = connection.execute(
@@ -818,6 +834,7 @@ def _snapshot_from_row(row: sqlite3.Row) -> SubmissionDraftSnapshot:
         lease_resource_key=str(row["lease_resource_key"] or ""),
         fencing_token=int(row["fencing_token"] or 0),
         role=str(row["role"] or ""),
+        mode=str(row["mode"] or ""),
         draft_kind=str(row["draft_kind"] or ""),
         input_fingerprint=str(row["input_fingerprint"] or ""),
         submission_artifact_ref=artifact_ref,
