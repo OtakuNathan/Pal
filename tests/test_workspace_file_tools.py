@@ -49,9 +49,9 @@ class WorkspaceFileToolContractTests(unittest.TestCase):
         )
 
     def test_scoped_schemas_match_low_friction_call_shape(self) -> None:
-        read_properties = WORKSPACE_FILE_TOOL_SPECS["op_file_read"]["parameters_schema"]["properties"]
-        write_properties = WORKSPACE_FILE_TOOL_SPECS["op_file_write"]["parameters_schema"]["properties"]
-        edit_properties = WORKSPACE_FILE_TOOL_SPECS["op_file_edit"]["parameters_schema"]["properties"]
+        read_properties = WORKSPACE_FILE_TOOL_SPECS["op_file_read"]["InputModel"].model_json_schema(mode="validation")["properties"]
+        write_properties = WORKSPACE_FILE_TOOL_SPECS["op_file_write"]["InputModel"].model_json_schema(mode="validation")["properties"]
+        edit_properties = WORKSPACE_FILE_TOOL_SPECS["op_file_edit"]["InputModel"].model_json_schema(mode="validation")["properties"]
 
         self.assertEqual({"path", "offset", "limit", "root", "reference_name"}, set(read_properties))
         self.assertEqual({"path", "content"}, set(write_properties))

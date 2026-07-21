@@ -1,5 +1,24 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    MinionV2ContractBuilderOpMinionArchitectureReviewSubmitInput,
+    MinionV2ContractBuilderOpMinionContractAddAssumptionInput,
+    MinionV2ContractBuilderOpMinionContractAddConstraintInput,
+    MinionV2ContractBuilderOpMinionContractAddCrossUnitContractInput,
+    MinionV2ContractBuilderOpMinionContractAddDesignDecisionInput,
+    MinionV2ContractBuilderOpMinionContractAddGateCheckInput,
+    MinionV2ContractBuilderOpMinionContractAddRiskInput,
+    MinionV2ContractBuilderOpMinionContractSetIntegrationInput,
+    MinionV2ContractBuilderOpMinionContractSubmitInput,
+    MinionV2ContractBuilderOpMinionContractUnitAddInterfaceInput,
+    MinionV2ContractBuilderOpMinionContractUnitAddRuleInput,
+    MinionV2ContractBuilderOpMinionContractUnitRemoveInput,
+    MinionV2ContractBuilderOpMinionContractUnitSetLifecycleInput,
+    MinionV2ContractBuilderOpMinionContractUnitSetOwnershipInput,
+    MinionV2ContractBuilderOpMinionContractUnitSetStateInput,
+    MinionV2ContractBuilderOpMinionContractUnitUpsertInput,
+)
+
 import hashlib
 import json
 from copy import deepcopy
@@ -11,6 +30,11 @@ from pal.minion.v2.architecture import (
     contract_revision_changes,
     normalize_revision_targets,
     revision_target_allows,
+)
+from pal.minion.v2.review_findings import (
+    ADD_FINDING_CAPABILITY,
+    empty_review_draft,
+    structured_findings,
 )
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
@@ -41,14 +65,17 @@ CONTRACT_SKETCH_BUILDER_CAPABILITIES = (
 
 REVISION_CONTRACT_BUILDER_CAPABILITIES: tuple[str, ...] = ()
 ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES = (
-    "op_minion_contract_review_finding",
+    ADD_FINDING_CAPABILITY,
     "op_minion_architecture_review_submit",
 )
 CONTRACT_BUILDER_CAPABILITIES = (
     *CONTRACT_SKETCH_BUILDER_CAPABILITIES,
     *ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
 )
-ARCHITECT_BUILDER_CAPABILITIES = CONTRACT_SKETCH_BUILDER_CAPABILITIES
+ARCHITECT_BUILDER_CAPABILITIES = (
+    *CONTRACT_SKETCH_BUILDER_CAPABILITIES,
+    "op_minion_architecture_ask_user",
+)
 
 
 def _schema(properties: Mapping[str, Any], *, required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -186,46 +213,30 @@ _RISK = _schema(
     },
     required=("name", "risk", "severity"),
 )
-_REVIEW_FINDING = _schema(
-    {
-        "finding_kind": {"type": "string", "enum": ["requirements_defect", "contract_defect", "architecture_defect"]},
-        "summary": {"type": "string", "minLength": 1},
-        "severity": {"type": "string", "enum": ["error", "warning"]},
-        "target_section": {
-            "type": "string",
-            "enum": ["task_source", "constraint", "design_decision", "gate_check", "unit", "cross_unit_contract", "topology", "integration_contract", "assumption_ledger", "risk_ledger"],
-        },
-        "target_name": {"type": "string", "minLength": 1},
-        "fields": _STRING_ARRAY,
-        "operation": {"type": "string", "enum": ["create", "update", "delete"]},
-        "related_names": _STRING_ARRAY,
-    },
-    required=("finding_kind", "summary", "severity", "target_section", "target_name", "operation"),
-)
-
-
 CONTRACT_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
-    "op_minion_contract_unit_upsert": {"name": "op_contract_unit_upsert", "description": "Create or update one semantic unit shell and its construction dependencies. behavior_kind is stateless, resource_owner, service, workflow, or adapter. owned_area names this unit's boundary; reference_only_paths are readable truth sources. Do not include implementation steps.", "parameters_schema": _UNIT_UPSERT},
-    "op_minion_contract_unit_add_interface": {"name": "op_contract_unit_add_interface", "description": "Add one provided or consumed interface contract to one unit. direction is provided or consumed; data_shape, valid_when, lifetime, ownership, error_behavior, and compatibility describe the boundary.", "parameters_schema": _INTERFACE},
-    "op_minion_contract_unit_set_ownership": {"name": "op_contract_unit_set_ownership", "description": "Set one unit's ownership rule as a semantic statement.", "parameters_schema": _UNIT_STATEMENT},
-    "op_minion_contract_unit_set_lifecycle": {"name": "op_contract_unit_set_lifecycle", "description": "Set one unit's lifecycle model. Stateless units may state process/import lifetime.", "parameters_schema": _LIFECYCLE},
-    "op_minion_contract_unit_set_state": {"name": "op_contract_unit_set_state", "description": "Set one unit's state model. Stateless units must use description=stateless.", "parameters_schema": _LIFECYCLE},
-    "op_minion_contract_unit_add_rule": {"name": "op_contract_unit_add_rule", "description": "Add one rule. kind is invariant, error_behavior, compatibility, dependency_constraint, verification_obligation, or split_condition; statement is required and condition/expected are optional.", "parameters_schema": _RULE},
-    "op_minion_contract_unit_remove": {"name": "op_contract_unit_remove", "description": "Remove one semantic unit during a scoped revision.", "parameters_schema": _NAME},
-    "op_minion_contract_add_constraint": {"name": "op_contract_add_constraint", "description": "Add or replace one named global constraint.", "parameters_schema": _CONSTRAINT},
-    "op_minion_contract_add_design_decision": {"name": "op_contract_add_design_decision", "description": "Add or replace one named architecture decision.", "parameters_schema": _DECISION},
-    "op_minion_contract_add_gate_check": {"name": "op_contract_add_gate_check", "description": "Add or replace one module-boundary or end-to-end gate, not an implementation checklist.", "parameters_schema": _GATE},
-    "op_minion_contract_add_cross_unit_contract": {"name": "op_contract_add_cross_unit_contract", "description": "Add or replace one directional cross-unit data/lifecycle contract.", "parameters_schema": _CROSS},
-    "op_minion_contract_set_integration": {"name": "op_contract_set_integration", "description": "Set the real end-to-end delivery entrypoint, dataflow, completion, and failure behavior.", "parameters_schema": _INTEGRATION},
-    "op_minion_contract_add_assumption": {"name": "op_contract_add_assumption", "description": "Add or replace one named assumption with owner, impact, and verification plan.", "parameters_schema": _ASSUMPTION},
-    "op_minion_contract_add_risk": {"name": "op_contract_add_risk", "description": "Add or replace one named risk and mitigation. severity is low, medium, high, or critical.", "parameters_schema": _RISK},
-    "op_minion_contract_submit": {"name": "op_contract_submit", "description": "Submit the current Architecture Contract Draft. Takes no arguments; Manager checks only names, topology, and structural safety.", "parameters_schema": _NO_ARGS},
-    "op_minion_contract_review_finding": {"name": "op_architecture_review_finding", "description": "Record one requirements_defect, contract_defect, or architecture_defect. severity is error or warning. target_section is task_source, constraint, design_decision, gate_check, unit, cross_unit_contract, topology, integration_contract, assumption_ledger, or risk_ledger; target_name is its readable semantic name. operation is create, update, or delete.", "parameters_schema": _REVIEW_FINDING},
-    "op_minion_architecture_review_submit": {"name": "op_architecture_review_submit", "description": "Submit the review. Takes no arguments; verdict is PASS with no findings and FAIL otherwise.", "parameters_schema": _NO_ARGS},
+    "op_minion_contract_unit_upsert": {"name": "op_contract_unit_upsert", "description": "Create or update one semantic unit shell and its construction dependencies. behavior_kind is stateless, resource_owner, service, workflow, or adapter. owned_area names this unit's boundary; reference_only_paths are readable truth sources. Do not include implementation steps.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitUpsertInput},
+    "op_minion_contract_unit_add_interface": {"name": "op_contract_unit_add_interface", "description": "Add one provided or consumed interface contract to one unit. direction is provided or consumed; data_shape, valid_when, lifetime, ownership, error_behavior, and compatibility describe the boundary.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitAddInterfaceInput},
+    "op_minion_contract_unit_set_ownership": {"name": "op_contract_unit_set_ownership", "description": "Set one unit's ownership rule as a semantic statement.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitSetOwnershipInput},
+    "op_minion_contract_unit_set_lifecycle": {"name": "op_contract_unit_set_lifecycle", "description": "Set one unit's lifecycle model. Stateless units may state process/import lifetime.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitSetLifecycleInput},
+    "op_minion_contract_unit_set_state": {"name": "op_contract_unit_set_state", "description": "Set one unit's state model. Stateless units must use description=stateless.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitSetStateInput},
+    "op_minion_contract_unit_add_rule": {"name": "op_contract_unit_add_rule", "description": "Add one rule. kind is invariant, error_behavior, compatibility, dependency_constraint, verification_obligation, or split_condition; statement is required and condition/expected are optional.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitAddRuleInput},
+    "op_minion_contract_unit_remove": {"name": "op_contract_unit_remove", "description": "Remove one semantic unit during a scoped revision.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitRemoveInput},
+    "op_minion_contract_add_constraint": {"name": "op_contract_add_constraint", "description": "Add or replace one named global constraint.", "InputModel": MinionV2ContractBuilderOpMinionContractAddConstraintInput},
+    "op_minion_contract_add_design_decision": {"name": "op_contract_add_design_decision", "description": "Add or replace one named architecture decision.", "InputModel": MinionV2ContractBuilderOpMinionContractAddDesignDecisionInput},
+    "op_minion_contract_add_gate_check": {"name": "op_contract_add_gate_check", "description": "Add or replace one module-boundary or end-to-end gate, not an implementation checklist.", "InputModel": MinionV2ContractBuilderOpMinionContractAddGateCheckInput},
+    "op_minion_contract_add_cross_unit_contract": {"name": "op_contract_add_cross_unit_contract", "description": "Add or replace one directional cross-unit data/lifecycle contract.", "InputModel": MinionV2ContractBuilderOpMinionContractAddCrossUnitContractInput},
+    "op_minion_contract_set_integration": {"name": "op_contract_set_integration", "description": "Set the real end-to-end delivery entrypoint, dataflow, completion, and failure behavior.", "InputModel": MinionV2ContractBuilderOpMinionContractSetIntegrationInput},
+    "op_minion_contract_add_assumption": {"name": "op_contract_add_assumption", "description": "Add or replace one named assumption with owner, impact, and verification plan.", "InputModel": MinionV2ContractBuilderOpMinionContractAddAssumptionInput},
+    "op_minion_contract_add_risk": {"name": "op_contract_add_risk", "description": "Add or replace one named risk and mitigation. severity is low, medium, high, or critical.", "InputModel": MinionV2ContractBuilderOpMinionContractAddRiskInput},
+    "op_minion_contract_submit": {"name": "op_contract_submit", "description": "Submit the current Architecture Contract Draft. Takes no arguments; Manager checks only names, topology, and structural safety.", "InputModel": MinionV2ContractBuilderOpMinionContractSubmitInput},
+    "op_minion_architecture_review_submit": {"name": "op_architecture_review_submit", "description": "Submit the review. Takes no arguments; verdict is PASS with no findings and FAIL otherwise.", "InputModel": MinionV2ContractBuilderOpMinionArchitectureReviewSubmitInput},
 }
 
 for _tool_name, _tool_spec in CONTRACT_BUILDER_TOOL_SPECS.items():
-    assert_authoring_schema_budget(_tool_spec["parameters_schema"], owner=_tool_name)
+    assert_authoring_schema_budget(
+        _tool_spec["InputModel"].model_json_schema(mode="validation", union_format="primitive_type_array"),
+        owner=_tool_name,
+    )
 
 
 def is_contract_builder_capability(name: str) -> bool:
@@ -248,8 +259,6 @@ def contract_builder_tool_result(
             return _publish(call, workspace, produced_artifacts, output, version=version, draft_kind="architecture_review", filename="architecture_review.json")
         if stage in {"architect", "architect_planning", "contract"}:
             return _mutate_contract(call, workspace)
-        if stage == "architecture_review":
-            return _mutate_review(call, workspace)
         raise ValueError(f"capability {name} is unavailable in stage {stage}")
     except Exception as exc:
         text = f"{exc.__class__.__name__}: {exc}"
@@ -421,40 +430,12 @@ def _compile_contract(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> 
     return contract, snapshot.version
 
 
-def _mutate_review(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> CanonicalToolResult:
-    if str(call.name or "") != "op_minion_contract_review_finding":
-        raise ValueError(f"unknown architecture review capability: {call.name}")
-    args = dict(call.args or {})
-    target = _resolve_revision_target(workspace, args)
-    finding = {
-        "finding_kind": str(args.get("finding_kind") or ""),
-        "summary": str(args.get("summary") or "").strip(),
-        "severity": str(args.get("severity") or "error"),
-        # The worker authors semantic names. The Manager maps them into the
-        # existing internal review record without exposing that storage field.
-        "refs": _strings(
-            args.get("related_names") or [], "related_names"
-        ),
-        "revision_targets": [target],
-    }
-    context, store = _store(workspace, "architecture_review")
-
-    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-        findings = [dict(item) for item in list(payload.get("findings") or [])]
-        findings.append(finding)
-        payload["findings"] = findings
-        return payload, {"recorded": True, "finding_count": len(findings)}
-
-    result = store.mutate(context, operation_key=_op_key(call), request=args, reducer=reducer, seed=_review_seed())
-    return _ok(call, "architecture finding recorded", result)
-
-
 def _compile_review(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> tuple[dict[str, Any], int]:
     _require_no_args(call)
     context, store = _store(workspace, "architecture_review")
     snapshot = store.read(context, seed=_review_seed())
-    findings = [dict(item) for item in list(snapshot.payload.get("findings") or [])]
-    output = {"verdict": "FAIL" if findings else "PASS", "findings": findings}
+    findings = structured_findings(snapshot.payload)
+    output = {"schema_version": "2", "verdict": "FAIL" if findings else "PASS", "findings": findings}
     _validate_architecture_review(output)
     return output, snapshot.version
 
@@ -553,44 +534,6 @@ def _validate_contract(payload: Mapping[str, Any]) -> None:
     _reject_implementation_fields(payload)
 
 
-def _resolve_revision_target(workspace: Mapping[str, Any], args: Mapping[str, Any]) -> dict[str, Any]:
-    contract = dict(workspace.get("contract_review_base_payload") or {})
-    section = str(args.get("target_section") or "")
-    target_name = str(args.get("target_name") or "").strip()
-    operation = str(args.get("operation") or "update")
-    fields = _strings(args.get("fields") or [], "fields")
-    if section == "task_source":
-        target_id = target_name
-    elif section in {"unit", "topology"}:
-        known_units = {str(item.get("unit_id")) for item in list(contract.get("units") or [])}
-        if operation != "create" and target_name not in known_units:
-            raise ValueError(f"unknown semantic unit target: {target_name}")
-        if operation == "create" and target_name in known_units:
-            raise ValueError(f"semantic unit target already exists: {target_name}")
-        target_id = target_name
-    elif section in {"integration_contract", "assumption_ledger", "risk_ledger"}:
-        target_id = {"integration_contract": "integration", "assumption_ledger": "assumptions", "risk_ledger": "risks"}[section]
-    else:
-        field, prefix = {
-            "constraint": ("global_constraints", "C"),
-            "design_decision": ("design_decisions", "D"),
-            "gate_check": ("gate_checks", "G"),
-            "cross_unit_contract": ("cross_unit_contracts", "X"),
-        }[section]
-        matches = [dict(item) for item in list(contract.get(field) or []) if str(dict(item).get("semantic_name") or "") == target_name]
-        if operation == "create" and not matches:
-            target_id = _manager_id(prefix, target_name)
-        elif len(matches) != 1:
-            raise ValueError(f"semantic review target is unknown or ambiguous: {section} {target_name!r}")
-        else:
-            if operation == "create":
-                raise ValueError(f"semantic review target already exists: {section} {target_name!r}")
-            target_id = str(matches[0]["id"])
-    target = {"section": section, "id": target_id, "fields": fields, "operation": operation}
-    normalize_revision_targets([target])
-    return target
-
-
 def _assert_revision_scope(workspace: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
     base = workspace.get("contract_revision_base_payload")
     scope = dict(workspace.get("contract_revision_scope") or {})
@@ -648,7 +591,7 @@ def _contract_seed(workspace: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _review_seed() -> dict[str, Any]:
-    return {"definitions": {}, "evidence": {}, "findings": [], "summary": {}}
+    return empty_review_draft()
 
 
 def _stage(workspace: Mapping[str, Any]) -> str:
@@ -725,8 +668,7 @@ def _validate_architecture_review(payload: Mapping[str, Any]) -> None:
         raise ValueError("FAIL architecture review requires findings")
     if verdict not in {"PASS", "FAIL"}:
         raise ValueError("architecture review verdict is invalid")
-    for finding in findings:
-        normalize_revision_targets(dict(finding).get("revision_targets") or [])
+    structured_findings({"findings": findings})
 
 
 def _reject_implementation_fields(value: Any) -> None:

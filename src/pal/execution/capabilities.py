@@ -4,24 +4,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
-from pal.execution.channel_attachment import ChannelSendAttachmentTool
-from pal.execution.file_capabilities import FileCapabilityMixin
-from pal.execution.file_edit import FileEditTool
-from pal.execution.file_read import FileReadTool
-from pal.execution.file_state import FileStateCache, FileStateTool
-from pal.execution.file_write import FileWriteTool
+from pal.execution.file_capabilities import FileCapabilityMixin, get_file_state_cache as _get_file_state_cache
+from pal.execution.file_state import FileStateCache
 from pal.execution.git_capabilities import GitCapabilityMixin
-from pal.execution.git_tool import GitTool
-from pal.execution.path_delete import PathDeleteTool
 from pal.execution.runtime import ExecutionRuntime
-from pal.execution.shell_exec import ShellExecCapabilityMixin, ShellExecTool
-from pal.execution.tool_result_pager import ToolResultPageTool
+from pal.execution.shell_exec import ShellExecCapabilityMixin
 from pal.execution.tool_search import (
     ExecutionDiscoveryCapabilityMixin,
     ExecutionToolSearchMixin,
-    ToolCallTool,
-    ToolReadTool,
-    ToolSearchTool,
 )
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -39,12 +29,9 @@ if TYPE_CHECKING:
 
 
 # Singleton file-state cache shared by FileEditTool and future file-read tools.
-_FILE_STATE_CACHE = FileStateCache()
-
-
 def get_file_state_cache() -> FileStateCache:
     """Return the module-level singleton :class:`FileStateCache`."""
-    return _FILE_STATE_CACHE
+    return _get_file_state_cache()
 
 
 @dataclass(frozen=True)
@@ -110,18 +97,6 @@ def inspect_execution(provider: ExecutionIntrospectionProvider) -> ExecutionSnap
 
 def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = None) -> ModuleHandle:
     resolved_runtime = runtime or context.execution_runtime
-    resolved_runtime.register_tool(ShellExecTool())
-    resolved_runtime.register_tool(ToolSearchTool(runtime=resolved_runtime))
-    resolved_runtime.register_tool(ToolReadTool(runtime=resolved_runtime))
-    resolved_runtime.register_tool(ToolCallTool(runtime=resolved_runtime))
-    resolved_runtime.register_tool(ToolResultPageTool(runtime=resolved_runtime))
-    resolved_runtime.register_tool(ChannelSendAttachmentTool())
-    resolved_runtime.register_tool(FileReadTool(cache=_FILE_STATE_CACHE))
-    resolved_runtime.register_tool(FileEditTool(cache=_FILE_STATE_CACHE))
-    resolved_runtime.register_tool(FileWriteTool(cache=_FILE_STATE_CACHE))
-    resolved_runtime.register_tool(PathDeleteTool(cache=_FILE_STATE_CACHE))
-    resolved_runtime.register_tool(FileStateTool(cache=_FILE_STATE_CACHE))
-    resolved_runtime.register_tool(GitTool())
     provider = ExecutionIntrospectionProvider(runtime=resolved_runtime)
     handle = ModuleHandle(
         module_id="execution",

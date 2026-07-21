@@ -8,6 +8,15 @@ from jsonschema.exceptions import SchemaError
 
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor
 from pal.execution.tool_facade import McpToolOutput
+from pal.execution.tool_facade import (
+    EffectKind,
+    Idempotency,
+    InvocationMode,
+    PagingMode,
+    RetryPolicy,
+    ToolExecutionSemantics,
+    ToolGuidance,
+)
 from pal.mcp.model import McpDiscoverySnapshot, McpRejectedItem, McpToolSpec
 from pal.mcp.normalize import (
     normalize_prompt_result,
@@ -177,8 +186,15 @@ class McpCompiler:
             target_kind="mcp_tool",
             target_id=SINGLETON_TARGET,
             target_label=tool.name,
-            parameters_schema=dict(schema or {"type": "object", "properties": {}, "required": []}),
-            result_schema=output_schema,
+            InputModel=None,
+            OutputModel=None,
+            guidance=_mcp_guidance(
+                tool.description or f"MCP tool `{tool.name}` from `{snapshot.server_id}`."
+            ),
+            execution=_mcp_tool_execution(tool.annotations),
+            search_text=f"{alias} {tool.description or tool.name} {snapshot.server_id}",
+            mcp_input_schema=dict(schema or {"type": "object", "properties": {}, "required": []}),
+            mcp_output_schema=output_schema,
             metadata=_mcp_metadata(
                 server_id=snapshot.server_id,
                 transport=snapshot.transport,
@@ -225,8 +241,21 @@ class McpCompiler:
             target_kind="mcp_prompt",
             target_id=SINGLETON_TARGET,
             target_label=prompt.name,
-            parameters_schema=prompt_arguments_schema(prompt),
-            result_schema={"type": "object"},
+            InputModel=None,
+            OutputModel=None,
+            guidance=_mcp_guidance(
+                prompt.description or f"Render MCP prompt `{prompt.name}` from `{snapshot.server_id}`."
+            ),
+            execution=ToolExecutionSemantics(
+                invocation_mode=InvocationMode.INDIRECT,
+                effect_kind=EffectKind.EXTERNAL_READ,
+                idempotency=Idempotency.IDEMPOTENT,
+                retry_policy=RetryPolicy.AUTOMATIC,
+                paging=PagingMode.SUPPORTED,
+            ),
+            search_text=f"{alias} {prompt.description or prompt.name} {snapshot.server_id}",
+            mcp_input_schema=prompt_arguments_schema(prompt),
+            mcp_output_schema={"type": "object"},
             metadata=_mcp_metadata(
                 server_id=snapshot.server_id,
                 transport=snapshot.transport,
@@ -315,6 +344,29 @@ def _unique_path(base: str, used_paths: set[str]) -> str:
     value = f"{base}_{index}"
     used_paths.add(value)
     return value
+
+
+def _mcp_guidance(purpose: str) -> ToolGuidance:
+    return ToolGuidance(
+        purpose=purpose,
+        use_when=purpose,
+        do_not_use_when="Do not use when a Pal-owned tool matches the task or when the external MCP server is not trusted for the data.",
+        failure_next_steps="Inspect the MCP error and recovery affordances; reconcile external writes before retrying.",
+    )
+
+
+def _mcp_tool_execution(annotations: dict[str, Any] | None) -> ToolExecutionSemantics:
+    values = dict(annotations or {})
+    direct = str(values.get("invocation_mode") or "").strip() == InvocationMode.DIRECT.value
+    read_only = bool(values.get("readOnlyHint"))
+    idempotent = read_only or bool(values.get("idempotentHint"))
+    return ToolExecutionSemantics(
+        invocation_mode=InvocationMode.DIRECT if direct else InvocationMode.INDIRECT,
+        effect_kind=EffectKind.EXTERNAL_READ if read_only else EffectKind.EXTERNAL_WRITE,
+        idempotency=Idempotency.IDEMPOTENT if idempotent else Idempotency.NON_IDEMPOTENT,
+        retry_policy=RetryPolicy.AUTOMATIC if read_only else RetryPolicy.RECONCILE_FIRST,
+        paging=PagingMode.SUPPORTED,
+    )
 
 
 def _mcp_metadata(

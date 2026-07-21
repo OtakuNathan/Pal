@@ -139,7 +139,6 @@ def chat_tools_to_responses_tools(tools: list[dict[str, Any]]) -> list[dict[str,
                     "name": name,
                     "description": str(function.get("description") or name),
                     "parameters": function.get("input_schema")
-                    or function.get("parameters")
                     or {"type": "object", "properties": {}},
                 }
             )
@@ -152,7 +151,6 @@ def chat_tools_to_responses_tools(tools: list[dict[str, Any]]) -> list[dict[str,
                     "name": name,
                     "description": str(tool.get("description") or name),
                     "parameters": tool.get("input_schema")
-                    or tool.get("parameters")
                     or {"type": "object", "properties": {}},
                 }
             )

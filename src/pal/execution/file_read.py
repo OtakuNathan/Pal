@@ -10,17 +10,11 @@ images, and PDFs should be handled through artifact / vision tools instead.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.file_state import FileStateCache
-from pal.execution.file_tool_contracts import (
-    DEFAULT_FILE_READ_LIMIT,
-    FILE_READ_DESCRIPTION,
-    FILE_READ_RESULT_SCHEMA,
-    file_read_args_schema,
-)
+from pal.execution.file_state import FileStateCache, resolve_file_path
+from pal.execution.file_tool_contracts import DEFAULT_FILE_READ_LIMIT
 from pal.shared import RuntimeStatus
 
 
@@ -48,34 +42,9 @@ FILE_UNCHANGED_STUB = (
 
 @dataclass
 class FileReadTool:
-    """File read tool implementing the :class:`~pal.execution.contracts.Tool` protocol.
+    """Business handler for validated file reads and shared state caching."""
 
-    Every successful read populates the shared :class:`FileStateCache`. Only a
-    complete visible read authorizes a later whole-file mutation.
-    """
-
-    name: str = "op_file_read"
-    display_name: str = "File Read"
-    family: str = "system"
-    description: str = (
-        "Use this instead of shell cat/head/tail when it is visible. "
-        + FILE_READ_DESCRIPTION
-    )
-    tags: tuple[str, ...] = ("file", "read", "system")
-    keywords: tuple[str, ...] = ("read", "cat", "view", "file", "open", "load")
     cache: FileStateCache = field(default_factory=FileStateCache)
-    args_schema: dict[str, Any] = field(default_factory=dict)
-    result_schema: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.args_schema:
-            self.args_schema = file_read_args_schema()
-        if not self.result_schema:
-            self.result_schema = dict(FILE_READ_RESULT_SCHEMA)
-
-    # ------------------------------------------------------------------
-    # Tool protocol
-    # ------------------------------------------------------------------
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         file_path = str(args.get("file_path") or args.get("path") or "").strip()
@@ -94,7 +63,7 @@ class FileReadTool:
         if not file_path:
             return _result(RuntimeStatus.INVALID, "file_path is required.", error_code="MISSING_FILE_PATH")
 
-        resolved = Path(file_path).expanduser().resolve()
+        resolved = resolve_file_path(file_path)
 
         if not resolved.exists():
             msg = _ERROR_LLMS[ERR_FILE_NOT_FOUND]

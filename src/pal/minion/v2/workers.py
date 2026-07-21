@@ -115,6 +115,7 @@ from pal.minion.v2.paths import (
 )
 from pal.minion.v2.projections import PlanRevisionProjectionStore
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.review_findings import structured_findings
 from pal.minion.v2.replan import (
     ARCHITECTURE_FINDING_BATCH_VIEW_ARTIFACT,
     architecture_finding_semantic_view,
@@ -2647,10 +2648,16 @@ class MinionV2SemanticWorker:
         errors: list[str] = []
         if outcome not in allowed_outcomes:
             errors.append(f"unknown semantic verification outcome: {outcome or '<missing>'}")
-        findings = str(submission.get("findings_markdown") or "").strip()
+        try:
+            findings = structured_findings(submission)
+        except ValueError as exc:
+            findings = []
+            errors.append(str(exc))
         reason = str(submission.get("reason") or "").strip()
         if outcome not in {"pass", "unknown"} and not findings:
-            errors.append("repair and revision outcomes require findings_markdown")
+            errors.append("repair and revision outcomes require structured findings")
+        if outcome in {"pass", "unknown"} and findings:
+            errors.append(f"{outcome.upper()} requires an empty finding list")
         if outcome == "unknown" and not reason:
             errors.append("UNKNOWN requires an environmental reason")
         scratch_only = scenario_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
@@ -2976,7 +2983,7 @@ class MinionV2SemanticWorker:
             or 0
         )
         outcome = str(submission.get("outcome") or "").strip()
-        findings = str(submission.get("findings_markdown") or "").strip()
+        findings = structured_findings(submission)
         reason = str(submission.get("reason") or "").strip()
         scratch_only = scenario_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
         changed_paths = (
@@ -3069,7 +3076,7 @@ class MinionV2SemanticWorker:
                 ),
                 "outcome": outcome,
                 "status": status.value,
-                "findings_markdown": findings,
+                "findings": findings,
                 "unknown_reason": reason,
                 "changed_test_paths": changed_paths,
                 "candidate_ref": accepted_candidate_ref.to_dict(),
@@ -3127,7 +3134,7 @@ class MinionV2SemanticWorker:
             json.dumps(
                 {
                     "outcome": outcome,
-                    "findings": " ".join(findings.split()),
+                    "findings": findings,
                     "test_delta": test_workspace_ref.sha256,
                     "receipt_hashes": [str(item.get("output_sha256") or "") for item in receipts],
                     "candidate_tree": _candidate_tree_fingerprint(
@@ -3151,7 +3158,7 @@ class MinionV2SemanticWorker:
                     ),
                     "route": outcome,
                     "target_modules": target_modules,
-                    "findings_markdown": findings,
+                    "findings": findings,
                     "candidate_ref": candidate_ref.to_dict(),
                     "verification_ref": report_ref.to_dict(),
                     "test_delta_ref": test_workspace_ref.to_dict(),
@@ -4020,22 +4027,13 @@ class MinionV2SemanticWorker:
         module_name = next(iter(implementation_modules))
         finding = findings[0]
         payload = {
-            "schema_version": "1",
+            "schema_version": "2",
+            "artifact_kind": "structured_repair_bill",
             "module_name": module_name,
-            "defect_kind": DefectKind.MODULE.value,
-            "severity": str(finding.get("severity") or "major"),
-            "finding_section": str(finding.get("finding_section") or "implementation"),
-            "finding_summary": str(finding.get("summary") or "Standalone review failed."),
-            "failure_reason": str(finding.get("failure_reason") or ""),
-            "case_name": str(finding.get("case") or ""),
-            "requirements": [dict(item) for item in list(finding.get("requirements") or [])],
-            "locations": [dict(item) for item in list(finding.get("locations") or [])],
-            "invariants": [str(item) for item in list(finding.get("invariants") or [])],
+            "route": "module_repair",
+            "findings": findings,
             "expected": "The accepted skeleton contract and Requirements are satisfied.",
-            "actual": str(finding.get("failure_reason") or finding.get("summary") or "Review failed."),
-            "suggested_repair_boundary": [
-                str(item) for item in list(finding.get("suggested_repair_boundary") or [])
-            ],
+            "actual": str(finding.get("summary") or "Review failed."),
             "regression_test_obligation": {
                 "instruction": "Reproduce this standalone finding before repair and preserve the probe as a regression."
             },
@@ -5470,15 +5468,18 @@ class MinionV2SemanticWorker:
         raw_targets: list[Any] = []
         for finding in list(dict(finding_payload).get("findings") or []):
             raw_targets.extend(list(dict(finding or {}).get("revision_targets") or []))
-        # Human edit instructions are intentionally not guessed into a broad
-        # writable scope. They retain the existing full-revision path until the
-        # foreground can issue semantic edit targets.
         targets = normalize_revision_targets(raw_targets)
-        if not targets:
-            raise ValueError("architecture revision finding requires semantic revision_targets")
         base_payload = self._base_contract_builder_payload_from_manifest(base_manifest_ref)
         requirements_payload = self.service.artifacts.read_json(revision.payload["requirements_ref"])
         context: list[dict[str, Any]] = []
+        if not targets:
+            context.append(
+                {
+                    "access": "write",
+                    "target": {"section": "architecture_contract", "name": "complete_contract"},
+                    "value": _semantic_contract_review_view(base_payload, requirements_payload),
+                }
+            )
         for target in targets:
             value = self._revision_scope_value(base_payload, requirements_payload, target)
             context.append(
@@ -5514,14 +5515,7 @@ class MinionV2SemanticWorker:
                     }
                 )
         scope = {
-            "findings": [
-                {
-                    "finding_kind": str(dict(item or {}).get("finding_kind") or ""),
-                    "summary": str(dict(item or {}).get("summary") or ""),
-                    "severity": str(dict(item or {}).get("severity") or "error"),
-                }
-                for item in list(dict(finding_payload).get("findings") or [])
-            ],
+            "findings": [dict(item) for item in list(dict(finding_payload).get("findings") or [])],
             "context": context,
         }
         child_refs = [(base_manifest_ref.sha256, "base_manifest")]
@@ -5564,7 +5558,7 @@ class MinionV2SemanticWorker:
         ]
         targets = normalize_revision_targets(raw_targets)
         if not targets:
-            raise ValueError("architecture revision finding requires semantic revision_targets")
+            return {}
         return {"write_targets": [target.to_dict() for target in targets]}
 
     @staticmethod
@@ -5857,7 +5851,7 @@ class MinionV2SemanticWorker:
             if skeleton_mode:
                 revision_scope = dict(workspace.get("architecture_revision_scope") or {}) or None
             else:
-                revision_scope = self._internal_architecture_revision_scope(snapshot)
+                revision_scope = self._internal_architecture_revision_scope(snapshot) or None
         profile_definitions = dict(binding.get("profile_definitions") or {})
         pinned_profile = dict(profile_definitions.get(role) or {})
         if not pinned_profile:
@@ -7007,7 +7001,7 @@ class MinionV2SemanticWorker:
             action_type = "ARCHITECTURE_REVIEW_FAILED"
             payload = {
                 "finding_artifact_ref": review_ref.to_dict(),
-                "findings_markdown": review.findings_markdown,
+                "findings": [item.to_dict() for item in review.findings],
             }
         self.repository.dispatch(
             ActionEnvelope(
@@ -7439,7 +7433,10 @@ def apply_v2_role_capability_policy(pack: MinionInvocationPack, *, role: str) ->
     if role == "architect":
         allowed_authoring = (
             set(ARCHITECTURE_SKELETON_CAPABILITIES)
-            if current.intersection(ARCHITECTURE_SKELETON_CAPABILITIES)
+            if current.intersection(
+                set(ARCHITECTURE_SKELETON_CAPABILITIES)
+                - {"op_minion_architecture_ask_user"}
+            )
             else set(ARCHITECT_BUILDER_CAPABILITIES)
         )
     elif role == "architecture_reviewer":
@@ -7468,7 +7465,10 @@ def apply_v2_role_capability_policy(pack: MinionInvocationPack, *, role: str) ->
     }
     if role in {"architect", "architecture_reviewer", "requirements", "planner", "reviewer"}:
         forbidden_writes.update({"op_file_write", "op_file_edit", "op_path_delete"})
-    if role == "architect" and current.intersection(ARCHITECTURE_SKELETON_CAPABILITIES):
+    if role == "architect" and current.intersection(
+        set(ARCHITECTURE_SKELETON_CAPABILITIES)
+        - {"op_minion_architecture_ask_user"}
+    ):
         forbidden_writes.difference_update({"op_file_write", "op_file_edit", "op_path_delete"})
     if role in {"producer", "repair"} and str(pack.profile_group or "") != "software_engineering":
         forbidden_writes.difference_update(
@@ -7484,7 +7484,8 @@ def apply_v2_role_capability_policy(pack: MinionInvocationPack, *, role: str) ->
 
 
 def _is_authoring_capability_name(name: str) -> bool:
-    return str(name or "").startswith(
+    value = str(name or "")
+    return value == "op_minion_add_finding" or value.startswith(
         (
             "op_minion_requirement",
             "op_minion_requirements",
@@ -7505,41 +7506,47 @@ def apply_v2_revision_scope_capability_policy(pack: MinionInvocationPack) -> Min
     return pack
 
 
-def _parse_architecture_review(payload: Mapping[str, Any]) -> ArchitectureReviewResult:
+def _parse_architecture_review(payload: Mapping[str, Any]) -> SkeletonReviewResult:
     verdict = str(payload.get("verdict") or "").strip().upper()
     if verdict not in {"PASS", "FAIL"}:
         raise ValueError("architecture review verdict must be PASS or FAIL")
-    from pal.minion.v2.architecture import ArchitectureFinding
-
-    findings = []
-    for item in list(payload.get("findings") or []):
-        finding_kind = ArchitectureFindingKind(str(dict(item).get("finding_kind") or ""))
-        findings.append(
-            ArchitectureFinding(
-                finding_kind=finding_kind,
-                summary=str(dict(item).get("summary") or "").strip(),
-                refs=tuple(str(ref) for ref in list(dict(item).get("refs") or [])),
-                severity=str(dict(item).get("severity") or "error"),
-                revision_targets=normalize_revision_targets(dict(item).get("revision_targets") or []),
-            )
+    findings = tuple(
+        SkeletonReviewFinding(
+            finding_key=str(item["finding_key"]),
+            finding_kind=str(item["finding_kind"]),
+            priority=str(item["priority"]),
+            summary=str(item["summary"]),
+            locations=tuple(dict(location) for location in list(item.get("locations") or [])),
         )
+        for item in structured_findings(payload)
+    )
     if verdict == "PASS" and findings:
         raise ValueError("PASS architecture review cannot contain findings")
     if verdict == "FAIL" and not findings:
         raise ValueError("FAIL architecture review requires typed findings")
-    return ArchitectureReviewResult(verdict=verdict, findings=tuple(findings))
+    return SkeletonReviewResult(verdict=verdict, findings=findings)
 
 
 def _parse_skeleton_review(payload: Mapping[str, Any]) -> SkeletonReviewResult:
     verdict = str(payload.get("verdict") or "").strip().upper()
     if verdict not in {"PASS", "FAIL"}:
         raise ValueError("architecture skeleton review verdict must be PASS or FAIL")
-    findings = str(payload.get("findings_markdown") or "").strip()
+    raw_findings = structured_findings(payload)
+    findings = tuple(
+        SkeletonReviewFinding(
+            finding_key=str(item["finding_key"]),
+            finding_kind=str(item["finding_kind"]),
+            priority=str(item["priority"]),
+            summary=str(item["summary"]),
+            locations=tuple(dict(location) for location in list(item.get("locations") or [])),
+        )
+        for item in raw_findings
+    )
     if verdict == "PASS" and findings:
         raise ValueError("PASS architecture review cannot contain findings")
     if verdict == "FAIL" and not findings:
         raise ValueError("FAIL architecture review requires findings")
-    return SkeletonReviewResult(verdict=verdict, findings_markdown=findings)
+    return SkeletonReviewResult(verdict=verdict, findings=findings)
 
 
 def _ref_from_mapping(value: Any) -> ArtifactRef:
@@ -8076,59 +8083,8 @@ def _standalone_review_findings(
     plan: Mapping[str, Any],
     cases: list[VerificationCaseSpec],
 ) -> list[dict[str, Any]]:
-    cases_by_name = {item.case_name: item for item in cases}
-    findings: list[dict[str, Any]] = []
-    for raw in list(plan.get("findings") or []):
-        item = dict(raw or {})
-        section = str(item.get("finding_section") or "implementation").strip()
-        if section not in _FINDING_SECTIONS:
-            raise ValueError(f"standalone finding has invalid finding_section: {section}")
-        case_name = str(item.get("case") or "").strip()
-        if case_name and case_name not in cases_by_name:
-            raise ValueError(f"standalone finding references unknown case name: {case_name}")
-        summary = str(item.get("summary") or "").strip()
-        failure_reason = str(item.get("failure_reason") or "").strip()
-        if not summary or not failure_reason:
-            raise ValueError("standalone finding requires summary and failure_reason")
-        case = cases_by_name.get(case_name)
-        findings.append(
-            {
-                "case_id": case.case_id if case is not None else "",
-                "case_name": case_name,
-                "finding_section": section,
-                "summary": summary,
-                "failure_reason": failure_reason,
-                "requirements": list(
-                    _semantic_requirement_refs(item.get("requirements"), owner="standalone finding")
-                    or (case.requirements if case is not None else ())
-                ),
-                "locations": list(
-                    _semantic_locations(item.get("locations"), owner="standalone finding")
-                    or (case.locations if case is not None else ())
-                ),
-                "invariants": [
-                    str(value).strip()
-                    for value in list(item.get("invariants") or (case.invariants if case is not None else ()))
-                    if str(value).strip()
-                ],
-                "severity": str(item.get("severity") or "major"),
-                "evidence": list(item.get("evidence") or []),
-                "suggested_repair_boundary": [
-                    str(value) for value in list(item.get("suggested_repair_boundary") or [])
-                ],
-            }
-        )
-        finding = findings[-1]
-        if not (
-            finding["requirements"]
-            or finding["locations"]
-            or finding["invariants"]
-            or finding["evidence"]
-        ):
-            raise ValueError(
-                "standalone finding requires Requirement text, a source location, an invariant, or concrete evidence"
-            )
-    return findings
+    del cases
+    return structured_findings(plan)
 
 
 def _standalone_review_status(
@@ -8167,33 +8123,17 @@ def _compile_standalone_review_markdown(report: Mapping[str, Any]) -> str:
     if not findings:
         lines.append("- No findings.")
     for index, finding in enumerate(findings, start=1):
-        severity = str(finding.get("severity") or "major").upper()
-        section = str(finding.get("finding_section") or "implementation")
+        severity = str(finding.get("priority") or "p1").upper()
+        section = str(finding.get("finding_kind") or "finding")
         finding_summary = str(finding.get("summary") or "Finding").strip()
         lines.extend(("", f"### {index}. [{severity}] {finding_summary}", f"- Area: {section}"))
-        case_name = str(finding.get("case") or "").strip()
-        if case_name:
-            lines.append(f"- Case: {case_name}")
-        reason = str(finding.get("failure_reason") or "").strip()
-        if reason:
-            lines.append(f"- Reason: {reason}")
-        for requirement in list(finding.get("requirements") or []):
-            item = dict(requirement or {})
-            lines.append(
-                "- Requirement: "
-                f"{str(item.get('section') or 'Requirements')} - "
-                f"{str(item.get('requirement') or '')}"
-            )
+        lines.append(f"- Key: {str(finding.get('finding_key') or '')}")
         for location in list(finding.get("locations") or []):
             item = dict(location or {})
-            label = str(item.get("path") or "")
+            label = str(item.get("file") or "") + f":{int(item.get('line') or 1)}"
             if item.get("symbol"):
                 label += f"::{str(item['symbol'])}"
-            if item.get("section"):
-                label += f" ({str(item['section'])})"
             lines.append(f"- Location: {label}")
-        for invariant in list(finding.get("invariants") or []):
-            lines.append(f"- Invariant: {str(invariant)}")
 
     cases = [dict(item or {}) for item in list(report.get("cases") or [])]
     lines.extend(("", "## Verification Cases"))

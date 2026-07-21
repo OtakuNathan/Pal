@@ -191,20 +191,18 @@ class ArchitectureReviewWorkspace:
 
 @dataclass(frozen=True)
 class SkeletonReviewFinding:
+    finding_key: str
     finding_kind: str
+    priority: str
     summary: str
-    severity: str = "error"
-    affected_modules: tuple[str, ...] = ()
-    requirements: tuple[Mapping[str, str], ...] = ()
-    locations: tuple[Mapping[str, str], ...] = ()
+    locations: tuple[Mapping[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "finding_key": self.finding_key,
             "finding_kind": self.finding_kind,
+            "priority": self.priority,
             "summary": self.summary,
-            "severity": self.severity,
-            "affected_modules": list(self.affected_modules),
-            "requirements": [dict(item) for item in self.requirements],
             "locations": [dict(item) for item in self.locations],
         }
 
@@ -213,17 +211,11 @@ class SkeletonReviewFinding:
 class SkeletonReviewResult:
     verdict: str
     findings: tuple[SkeletonReviewFinding, ...] = ()
-    findings_markdown: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "verdict": self.verdict,
-            "findings_markdown": self.findings_markdown,
-            **(
-                {"findings": [item.to_dict() for item in self.findings]}
-                if self.findings
-                else {}
-            ),
+            "findings": [item.to_dict() for item in self.findings],
         }
 
 
@@ -547,10 +539,11 @@ def review_architecture_skeleton(
             except (OSError, UnicodeError):
                 findings.append(
                     SkeletonReviewFinding(
-                        "contract_defect",
-                        "A frozen contract path is not readable UTF-8 source.",
-                        affected_modules=(str(name),),
-                        locations=({"path": str(contract_path), "section": "Contract"},),
+                        finding_key=f"unreadable_contract_{str(name)}",
+                        finding_kind="contract_defect",
+                        priority="p0",
+                        summary="A frozen contract path is not readable UTF-8 source.",
+                        locations=({"scope": "workspace", "file": str(contract_path), "line": 1},),
                     )
                 )
     return SkeletonReviewResult("PASS" if not findings else "FAIL", tuple(findings))
@@ -623,23 +616,6 @@ def architecture_revision_scope(
 ) -> dict[str, Any]:
     """Compile a reviewer finding into semantic names and exact writable paths."""
 
-    if str(finding_payload.get("findings_markdown") or "").strip():
-        modules = {
-            str(name): dict(value or {})
-            for name, value in dict(base_submission.get("modules") or {}).items()
-        }
-        return {
-            "affected_modules": sorted(modules),
-            "allowed_paths": sorted(
-                {
-                    path
-                    for module in modules.values()
-                    for path in _module_declared_paths(module)
-                }
-            ),
-            "allow_topology_changes": True,
-        }
-
     findings = list(finding_payload.get("findings") or [])
     if not findings and finding_payload:
         findings = [dict(finding_payload)]
@@ -665,7 +641,13 @@ def architecture_revision_scope(
             if str(path).strip()
         )
         for raw_location in locations:
-            path = _normalized_repo_path(str(dict(raw_location or {}).get("path") or ""))
+            path = _normalized_repo_path(
+                str(
+                    dict(raw_location or {}).get("file")
+                    or dict(raw_location or {}).get("path")
+                    or ""
+                )
+            )
             if not path:
                 continue
             allowed_paths.add(path)
@@ -675,6 +657,11 @@ def architecture_revision_scope(
     allow_topology_changes = bool(
         finding_kinds.intersection({"architecture_defect", "requirements_defect"})
     )
+    if allow_topology_changes and not allowed_paths:
+        affected_modules.update(modules)
+        allowed_paths.update(
+            path for module in modules.values() for path in _module_declared_paths(module)
+        )
     unknown_modules = sorted(affected_modules - set(modules))
     if unknown_modules and not allow_topology_changes:
         raise ValueError(

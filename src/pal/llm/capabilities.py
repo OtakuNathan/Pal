@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
+    LlmCapabilitiesLLMIntrospectionProviderShowInput,
+)
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -145,13 +150,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show public metadata for one enabled llm model by model_id",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "model_id": {"type": "string"},
-            },
-            "required": ["model_id"],
-        },
+        InputModel=LlmCapabilitiesLLMIntrospectionProviderShowInput,
     )
     def show_model(self, call: IntrospectionCall) -> IntrospectionResult:
         model_id = str(call.args.get("model_id") or "").strip()
@@ -203,13 +202,7 @@ class LLMIntrospectionProvider:
         family="management",
         action_name="set_active_endpoint",
         description="Switch the active llm endpoint used for future requests",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "active_endpoint_id": {"type": "string"},
-            },
-            "required": ["active_endpoint_id"],
-        },
+        InputModel=LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
     )
     def set_active_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
         endpoint_id = str(call.args.get("active_endpoint_id") or "").strip()

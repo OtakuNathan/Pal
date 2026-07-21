@@ -1,7 +1,24 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderInfoOutput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderListInput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderListOutput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderReadInput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput,
+    ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput,
+)
+
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pal.artifact.service import ArtifactManager
 from pal.artifact.tools import (
@@ -12,8 +29,6 @@ from pal.artifact.tools import (
     ArtifactSearchTool,
     ArtifactSelectTool,
     ArtifactTranscribeTool,
-    artifact_args_schema,
-    artifact_result_schema,
 )
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
@@ -49,6 +64,7 @@ if TYPE_CHECKING:
 @dataclass
 class ArtifactIntrospectionProvider:
     service: ArtifactManager
+    execution_runtime: Any | None = None
     module_id: str = "artifact"
 
     @capability_action(
@@ -77,13 +93,14 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="list",
         description="List recent tagged conversation artifacts visible to the current turn.",
-        args_schema=artifact_args_schema("op_artifact_list"),
-        result_schema=artifact_result_schema("op_artifact_list"),
+        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListInput,
+        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListOutput,
         metadata={"async_required": True},
     )
-    def list_artifacts(self, call: CapabilityCall) -> CapabilityResult:
-        _ = call
-        return _async_required("op_artifact_list")
+    async def list_artifacts(self, call: CapabilityCall) -> CapabilityResult:
+        return await ArtifactListTool(service=self.service).ainvoke(
+            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -91,13 +108,14 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="info",
         description="Inspect metadata and available representations for one artifact id.",
-        args_schema=artifact_args_schema("op_artifact_info"),
-        result_schema=artifact_result_schema("op_artifact_info"),
+        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput,
+        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoOutput,
         metadata={"async_required": True},
     )
-    def info(self, call: CapabilityCall) -> CapabilityResult:
-        _ = call
-        return _async_required("op_artifact_info")
+    async def info(self, call: CapabilityCall) -> CapabilityResult:
+        return await ArtifactInfoTool(service=self.service).ainvoke(
+            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -105,13 +123,14 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="read",
         description="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
-        args_schema=artifact_args_schema("op_artifact_read"),
-        result_schema=artifact_result_schema("op_artifact_read"),
+        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadInput,
+        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput,
         metadata={"async_required": True},
     )
-    def read(self, call: CapabilityCall) -> CapabilityResult:
-        _ = call
-        return _async_required("op_artifact_read")
+    async def read(self, call: CapabilityCall) -> CapabilityResult:
+        return await ArtifactReadTool(service=self.service).ainvoke(
+            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -119,13 +138,14 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="search",
         description="Search recent tagged conversation artifacts by filename, kind, caption, summary, or time hint.",
-        args_schema=artifact_args_schema("op_artifact_search"),
-        result_schema=artifact_result_schema("op_artifact_search"),
+        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput,
+        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput,
         metadata={"async_required": True},
     )
-    def search(self, call: CapabilityCall) -> CapabilityResult:
-        _ = call
-        return _async_required("op_artifact_search")
+    async def search(self, call: CapabilityCall) -> CapabilityResult:
+        return await ArtifactSearchTool(service=self.service).ainvoke(
+            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -133,13 +153,14 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="select",
         description="Mark an artifact search result as selected and refresh its short-lived hot state.",
-        args_schema=artifact_args_schema("op_artifact_select"),
-        result_schema=artifact_result_schema("op_artifact_select"),
+        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput,
+        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput,
         metadata={"async_required": True},
     )
-    def select(self, call: CapabilityCall) -> CapabilityResult:
-        _ = call
-        return _async_required("op_artifact_select")
+    async def select(self, call: CapabilityCall) -> CapabilityResult:
+        return await ArtifactSelectTool(service=self.service).ainvoke(
+            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -150,13 +171,14 @@ class ArtifactIntrospectionProvider:
             "Search inside existing text representations of a known artifact, such as text files, PDF page text/chunks, "
             "or an already-created transcript. Does not inspect image pixels or create transcripts from audio."
         ),
-        args_schema=artifact_args_schema("op_artifact_grep"),
-        result_schema=artifact_result_schema("op_artifact_grep"),
+        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput,
+        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput,
         metadata={"async_required": True},
     )
-    def content_search(self, call: CapabilityCall) -> CapabilityResult:
-        _ = call
-        return _async_required("op_artifact_grep")
+    async def content_search(self, call: CapabilityCall) -> CapabilityResult:
+        return await ArtifactContentSearchTool(service=self.service).ainvoke(
+            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -164,27 +186,21 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="transcribe",
         description="Request transcription for an audio artifact.",
-        args_schema=artifact_args_schema("op_artifact_transcribe"),
-        result_schema=artifact_result_schema("op_artifact_transcribe"),
+        InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput,
+        OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput,
         metadata={"async_required": True},
     )
-    def transcribe(self, call: CapabilityCall) -> CapabilityResult:
-        _ = call
-        return _async_required("op_artifact_transcribe")
+    async def transcribe(self, call: CapabilityCall) -> CapabilityResult:
+        return await ArtifactTranscribeTool(service=self.service).ainvoke(
+            dict(call.args), runtime=self.execution_runtime, turn_id=str(call.meta.get("turn_id") or "") or None
+        )
 
 
 def register_with_core(context: "MainContext", service: ArtifactManager) -> ModuleHandle:
     from pal.artifact.prompt import ArtifactPromptFragmentProvider
 
     context.execution_runtime.register_provider_ref("artifact:artifact", service)
-    context.execution_runtime.register_tool(ArtifactListTool(service=service))
-    context.execution_runtime.register_tool(ArtifactInfoTool(service=service))
-    context.execution_runtime.register_tool(ArtifactReadTool(service=service))
-    context.execution_runtime.register_tool(ArtifactSearchTool(service=service))
-    context.execution_runtime.register_tool(ArtifactSelectTool(service=service))
-    context.execution_runtime.register_tool(ArtifactContentSearchTool(service=service))
-    context.execution_runtime.register_tool(ArtifactTranscribeTool(service=service))
-    provider = ArtifactIntrospectionProvider(service=service)
+    provider = ArtifactIntrospectionProvider(service=service, execution_runtime=context.execution_runtime)
     prompt_provider = ArtifactPromptFragmentProvider(service=service)
     handle = ModuleHandle(
         module_id="artifact",
@@ -197,13 +213,3 @@ def register_with_core(context: "MainContext", service: ArtifactManager) -> Modu
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)
     return handle
-
-
-def _async_required(tool_name: str) -> CapabilityResult:
-    structured = {"reason": "async_required", "tool": tool_name}
-    return CapabilityResult(
-        status=RuntimeStatus.INVALID,
-        text=f"{tool_name} requires async turn context.",
-        structured=structured,
-        llm_text=render_titled_structured_for_llm("Artifact tool unavailable", structured),
-    )

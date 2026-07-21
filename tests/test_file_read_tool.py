@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pal.execution.file_edit import FileEditTool
 from pal.execution.file_read import (
@@ -16,6 +17,7 @@ from pal.execution.file_read import (
     FileReadTool,
 )
 from pal.execution.file_state import FileStateCache
+from pal.execution.generated_tool_models import ExecutionFileCapabilitiesFileCapabilityMixinReadInput
 from pal.shared import RuntimeStatus
 
 
@@ -125,6 +127,40 @@ class CacheIntegrationTests(_TempFileMixin, unittest.TestCase):
         self.assertIn("patch", edit_result.structured)
         self.assertEqual(path.read_text(), "goodbye world\n")
 
+    def test_tilde_read_authorizes_edit_without_absolute_reread(self) -> None:
+        path = self._write_tmp("tilde_flow.txt", "hello world\n")
+
+        with mock.patch.dict("os.environ", {"HOME": self._tmpdir}):
+            read_result = self.tool.invoke({"file_path": "~/tilde_flow.txt"})
+            edit_result = FileEditTool(cache=self.cache).invoke(
+                {
+                    "file_path": "~/tilde_flow.txt",
+                    "old_string": "hello",
+                    "new_string": "goodbye",
+                }
+            )
+
+        self.assertEqual(read_result.status, RuntimeStatus.OK)
+        self.assertEqual(edit_result.status, RuntimeStatus.OK)
+        self.assertEqual(edit_result.structured["file_path"], str(path.resolve()))
+        self.assertEqual(path.read_text(encoding="utf-8"), "goodbye world\n")
+
+    def test_tilde_read_and_absolute_edit_share_snapshot(self) -> None:
+        path = self._write_tmp("mixed_path_flow.txt", "alpha beta\n")
+
+        with mock.patch.dict("os.environ", {"HOME": self._tmpdir}):
+            self.tool.invoke({"file_path": "~/mixed_path_flow.txt"})
+            edit_result = FileEditTool(cache=self.cache).invoke(
+                {
+                    "file_path": str(path),
+                    "old_string": "alpha",
+                    "new_string": "gamma",
+                }
+            )
+
+        self.assertEqual(edit_result.status, RuntimeStatus.OK)
+        self.assertEqual(path.read_text(encoding="utf-8"), "gamma beta\n")
+
     def test_partial_read_caches_bytes_but_does_not_grant_mutation(self) -> None:
         content = "\n".join(f"line {i}" for i in range(50))
         path = self._write_tmp("full_cache.txt", content)
@@ -192,13 +228,9 @@ class ErrorHandlingTests(_TempFileMixin, unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
-    def test_tool_name(self) -> None:
-        tool = FileReadTool()
-        self.assertEqual(tool.name, "op_file_read")
-
-    def test_args_schema_has_required(self) -> None:
-        tool = FileReadTool()
-        self.assertIn("file_path", tool.args_schema.get("required", []))
+    def test_input_model_has_required_file_path(self) -> None:
+        schema = ExecutionFileCapabilitiesFileCapabilityMixinReadInput.model_json_schema(mode="validation")
+        self.assertIn("file_path", schema.get("required", []))
 
 
 if __name__ == "__main__":

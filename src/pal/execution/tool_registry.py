@@ -6,55 +6,22 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Any, Literal, Union
+from typing import Any
 
 from jsonschema import Draft202012Validator
-from pydantic import BaseModel, ConfigDict, Field, create_model
+from pydantic import BaseModel
 
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
 from pal.execution.tool_facade import (
     EffectKind,
-    EmptyToolInput,
-    Idempotency,
     InvocationMode,
     McpToolOutput,
-    PagingMode,
-    RetryPolicy,
     Tool,
     ToolExecutionSemantics,
     ToolGuidance,
     compile_tool_description,
 )
 from pal.shared.capability_forest import BoundCapabilityAction, MountedSubtreeHandle, SINGLETON_TARGET
-
-
-_FIXED_DIRECT_ALIASES = {"search_tools", "read_tool", "call_tool", "read_tool_result"}
-
-# Direct exposure is an explicit product decision.  Everything else defaults to
-# indirect discovery/call, including every MCP tool.
-_BUILTIN_DIRECT_CANONICAL_PATHS = {
-    "op_tool_search",
-    "op_tool_read",
-    "op_tool_call",
-    "op_tool_result_page",
-    "op_exec_shell",
-    "op_file_read",
-    "op_file_edit",
-    "op_file_write",
-    "op_path_delete",
-    "op_git",
-    "op_behavior_advise",
-    "op_behavior_save",
-    "op_behavior_affordance_update",
-    "op_behavior_affordance_delete",
-    "op_memory_recall",
-    "op_memory_write",
-    "op_memory_update",
-    "op_memory_delete",
-    "op_channel_send_attachment",
-    "op_web_search",
-    "op_web_read",
-}
 
 
 class FrozenDict(dict):
@@ -94,6 +61,8 @@ class CompiledToolRecord:
     descriptor_name: str
     module_id: str
     family: str
+    namespace: str
+    tags: tuple[str, ...]
     source: str
     search_text: str
     description: str
@@ -273,6 +242,10 @@ def compile_registry_generation(
             "search_text": record.search_text,
             "invocation_mode": record.execution.invocation_mode.value,
             "input_shape": record.compact_input_shape(),
+            "namespace": record.namespace,
+            "family": record.family,
+            "module_id": record.module_id,
+            "tags": list(record.tags),
         }
         if record.execution.invocation_mode is InvocationMode.DIRECT:
             provider_specs[alias] = {
@@ -306,6 +279,10 @@ def compile_registry_generation(
             "search_text": record.search_text,
             "invocation_mode": record.execution.invocation_mode.value,
             "input_shape": record.compact_input_shape(),
+            "namespace": record.namespace,
+            "family": record.family,
+            "module_id": record.module_id,
+            "tags": list(record.tags),
         }
         if record.execution.invocation_mode is InvocationMode.DIRECT:
             provider_specs[alias] = {
@@ -400,15 +377,15 @@ def subtree_for_tool(tool: Tool) -> MountedSubtreeHandle:
         source=tool.source,
         display_name=tool.alias,
         target_id=tool.target_id,
-        parameters_schema=tool.InputModel.model_json_schema(mode="validation"),
-        result_schema=tool.OutputModel.model_json_schema(mode="validation"),
+        InputModel=tool.InputModel,
+        OutputModel=tool.OutputModel,
+        guidance=tool.guidance,
+        execution=tool.execution,
+        search_text=tool.search_text,
+        examples=tuple(dict(item) for item in tool.examples),
         metadata={
             **dict(tool.metadata),
             "alias": tool.alias,
-            "search_text": tool.search_text,
-            "guidance": tool.guidance.model_dump(mode="json"),
-            "execution_semantics": tool.execution.model_dump(mode="json"),
-            "examples": [dict(item) for item in tool.examples],
             "facade_tool": True,
         },
         module_id=tool.module_id or "standalone_tools",
@@ -451,7 +428,10 @@ def _compile_record(
     if alias.startswith(("op_", "intro_")):
         raise ValueError(f"tool alias {alias!r} uses the reserved canonical-path namespace")
     canonical_path = str(descriptor.canonical_path or descriptor.name).strip()
-    is_mcp = isinstance(metadata.get("mcp"), dict) and metadata["mcp"].get("kind") == "tool"
+    is_mcp = (
+        isinstance(metadata.get("mcp"), dict)
+        and metadata["mcp"].get("kind") in {"tool", "prompt_render"}
+    )
 
     if facade_tool is not None:
         input_model = facade_tool.InputModel
@@ -465,36 +445,32 @@ def _compile_record(
     elif is_mcp:
         input_model = None
         output_model = None
-        input_schema = dict(descriptor.parameters_schema or {"type": "object", "properties": {}})
-        output_schema = dict(descriptor.result_schema or McpToolOutput.model_json_schema(mode="validation"))
+        input_schema = dict(descriptor.mcp_input_schema or {"type": "object", "properties": {}})
+        output_schema = dict(descriptor.mcp_output_schema or McpToolOutput.model_json_schema(mode="validation"))
         Draft202012Validator.check_schema(input_schema)
         Draft202012Validator.check_schema(output_schema)
         examples = ()
-        guidance = _guidance_from_descriptor(descriptor)
-        execution = _execution_from_descriptor(descriptor, alias=alias, is_mcp=True)
-        search_text = str(metadata.get("search_text") or _default_search_text(descriptor, alias)).strip()
+        if descriptor.guidance is None or descriptor.execution is None:
+            raise TypeError(f"MCP capability {alias!r} requires guidance and execution semantics")
+        guidance = descriptor.guidance
+        execution = descriptor.execution
+        search_text = str(descriptor.search_text or _default_search_text(descriptor, alias)).strip()
     else:
-        input_schema_source = _tool_schema(implementation, "args_schema") or descriptor.parameters_schema
-        output_schema_source = _tool_schema(implementation, "result_schema") or descriptor.result_schema
-        input_model = model_from_json_schema(
-            f"{_model_name(alias)}Input",
-            dict(input_schema_source or {"type": "object", "properties": {}}),
-            input_contract=True,
-        )
-        output_model = model_from_json_schema(
-            f"{_model_name(alias)}Output",
-            dict(output_schema_source or {"type": "object", "properties": {}}),
-            input_contract=False,
-        )
+        input_model = descriptor.InputModel
+        output_model = descriptor.OutputModel
+        if input_model is None or output_model is None:
+            raise TypeError(f"internal capability {alias!r} requires InputModel and OutputModel")
         input_schema = input_model.model_json_schema(mode="validation")
         output_schema = output_model.model_json_schema(mode="validation")
-        configured_examples = metadata.get("examples") or getattr(implementation, "examples", ()) or ()
+        configured_examples = descriptor.examples
         examples = tuple(dict(item) for item in configured_examples if isinstance(item, dict))
         if input_schema.get("properties") and not examples:
             examples = (_example_from_schema(input_schema),)
-        guidance = _guidance_from_descriptor(descriptor)
-        execution = _execution_from_descriptor(descriptor, alias=alias, is_mcp=False)
-        search_text = str(metadata.get("search_text") or _default_search_text(descriptor, alias)).strip()
+        if descriptor.guidance is None or descriptor.execution is None:
+            raise TypeError(f"internal capability {alias!r} requires guidance and execution semantics")
+        guidance = descriptor.guidance
+        execution = descriptor.execution
+        search_text = str(descriptor.search_text or _default_search_text(descriptor, alias)).strip()
 
     example = dict(examples[0]) if examples else None
     for candidate in examples:
@@ -517,6 +493,8 @@ def _compile_record(
         descriptor_name=descriptor.name,
         module_id=descriptor.module_id,
         family=descriptor.family,
+        namespace=str(metadata.get("namespace") or ""),
+        tags=tuple(str(item).strip() for item in metadata.get("tags", ()) if str(item).strip()),
         source=descriptor.source,
         search_text=search_text,
         description=description,
@@ -530,173 +508,8 @@ def _compile_record(
         binding=binding,
         facade_tool=facade_tool,
         is_mcp=is_mcp,
-        requires_effect_receipt=facade_tool is not None and execution.effect_kind is not EffectKind.NONE,
+        requires_effect_receipt=execution.effect_kind is not EffectKind.NONE,
     )
-
-
-def model_from_json_schema(
-    name: str,
-    schema: dict[str, Any],
-    *,
-    input_contract: bool,
-) -> type[BaseModel]:
-    Draft202012Validator.check_schema(schema)
-    if schema.get("type") not in {None, "object"}:
-        raise ValueError(f"Pal tool {name} schema must have object root")
-    properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        properties = {}
-    required = set(schema.get("required") or ())
-    fields: dict[str, Any] = {}
-    for field_name, field_schema in properties.items():
-        normalized = field_schema if isinstance(field_schema, dict) else {}
-        annotation = _annotation_from_schema(f"{name}{_model_name(field_name)}", normalized)
-        default: Any
-        if field_name in required:
-            default = ...
-        elif "default" in normalized:
-            default = normalized["default"]
-        else:
-            default = None
-        constraints = _field_constraints(normalized)
-        fields[str(field_name)] = (annotation, Field(default, **constraints))
-    extra = "forbid" if input_contract or schema.get("additionalProperties") is False else "allow"
-    return create_model(
-        name,
-        __config__=ConfigDict(strict=True, extra=extra),
-        **fields,
-    )
-
-
-def _annotation_from_schema(name: str, schema: dict[str, Any]) -> Any:
-    if "const" in schema:
-        return Literal.__getitem__((schema["const"],))
-    enum = schema.get("enum")
-    if isinstance(enum, list) and enum:
-        return Literal.__getitem__(tuple(enum))
-    variants = schema.get("oneOf") or schema.get("anyOf")
-    if isinstance(variants, list) and variants:
-        annotations = tuple(
-            _annotation_from_schema(f"{name}Variant{index}", item if isinstance(item, dict) else {})
-            for index, item in enumerate(variants)
-        )
-        return Union[annotations]  # type: ignore[arg-type]
-    schema_type = schema.get("type")
-    if isinstance(schema_type, list):
-        annotations = tuple(_annotation_from_schema(name, {**schema, "type": item}) for item in schema_type)
-        return Union[annotations]  # type: ignore[arg-type]
-    if schema_type == "string":
-        return str
-    if schema_type == "integer":
-        return int
-    if schema_type == "number":
-        return float
-    if schema_type == "boolean":
-        return bool
-    if schema_type == "null":
-        return type(None)
-    if schema_type == "array":
-        item_schema = schema.get("items") if isinstance(schema.get("items"), dict) else {}
-        return list[_annotation_from_schema(f"{name}Item", item_schema)]
-    if schema_type == "object" or isinstance(schema.get("properties"), dict):
-        properties = schema.get("properties")
-        if not properties and schema.get("additionalProperties") is not False:
-            additional = schema.get("additionalProperties")
-            item_type = _annotation_from_schema(f"{name}Value", additional) if isinstance(additional, dict) else Any
-            return dict[str, item_type]
-        return model_from_json_schema(name, schema, input_contract=schema.get("additionalProperties") is False)
-    return Any
-
-
-def _field_constraints(schema: dict[str, Any]) -> dict[str, Any]:
-    mapping = {
-        "minimum": "ge",
-        "maximum": "le",
-        "exclusiveMinimum": "gt",
-        "exclusiveMaximum": "lt",
-        "minLength": "min_length",
-        "maxLength": "max_length",
-        "pattern": "pattern",
-        "minItems": "min_length",
-        "maxItems": "max_length",
-        "multipleOf": "multiple_of",
-        "description": "description",
-    }
-    return {target: schema[source] for source, target in mapping.items() if source in schema}
-
-
-def _guidance_from_descriptor(descriptor: CapabilityDescriptor) -> ToolGuidance:
-    raw = descriptor.metadata.get("guidance") if isinstance(descriptor.metadata, dict) else None
-    if isinstance(raw, ToolGuidance):
-        return raw
-    if isinstance(raw, dict):
-        return ToolGuidance.model_validate(raw)
-    purpose = str(descriptor.description or descriptor.display_name or descriptor.name).strip()
-    return ToolGuidance(
-        purpose=purpose,
-        use_when=purpose,
-        do_not_use_when="Do not use when another tool's stated purpose matches the task more precisely.",
-        failure_next_steps="Correct invalid input; otherwise inspect the returned recovery affordances before retrying.",
-    )
-
-
-def _execution_from_descriptor(
-    descriptor: CapabilityDescriptor,
-    *,
-    alias: str,
-    is_mcp: bool,
-) -> ToolExecutionSemantics:
-    raw = descriptor.metadata.get("execution_semantics") if isinstance(descriptor.metadata, dict) else None
-    if isinstance(raw, ToolExecutionSemantics):
-        return raw
-    if isinstance(raw, dict):
-        # Metadata is a serialized registry source, not a tool invocation.
-        # Enum values therefore arrive as JSON strings and are decoded before
-        # the strict runtime contract is used.
-        return ToolExecutionSemantics.model_validate(raw, strict=False)
-    canonical = str(descriptor.canonical_path or descriptor.name)
-    mode = InvocationMode.DIRECT if alias in _FIXED_DIRECT_ALIASES or canonical in _BUILTIN_DIRECT_CANONICAL_PATHS else InvocationMode.INDIRECT
-    if is_mcp:
-        annotations = dict(dict(descriptor.metadata.get("mcp") or {}).get("annotations") or {})
-        declared = str(annotations.get("invocation_mode") or descriptor.metadata.get("invocation_mode") or "").strip()
-        mode = InvocationMode.DIRECT if declared == InvocationMode.DIRECT.value else InvocationMode.INDIRECT
-        read_only = bool(annotations.get("readOnlyHint"))
-        effect = EffectKind.EXTERNAL_READ if read_only else EffectKind.EXTERNAL_WRITE
-        idempotency = Idempotency.IDEMPOTENT if read_only or bool(annotations.get("idempotentHint")) else Idempotency.NON_IDEMPOTENT
-        retry = RetryPolicy.AUTOMATIC if read_only else RetryPolicy.RECONCILE_FIRST
-        return ToolExecutionSemantics(
-            invocation_mode=mode,
-            effect_kind=effect,
-            idempotency=idempotency,
-            retry_policy=retry,
-            paging=PagingMode.SUPPORTED,
-        )
-    effect = _infer_effect_kind(canonical)
-    non_idempotent = effect in {EffectKind.EXTERNAL_WRITE, EffectKind.CONTROL}
-    return ToolExecutionSemantics(
-        invocation_mode=mode,
-        effect_kind=effect,
-        idempotency=Idempotency.NON_IDEMPOTENT if non_idempotent else Idempotency.IDEMPOTENT,
-        retry_policy=RetryPolicy.RECONCILE_FIRST if non_idempotent else RetryPolicy.AUTOMATIC,
-        paging=PagingMode.SUPPORTED,
-    )
-
-
-def _infer_effect_kind(canonical: str) -> EffectKind:
-    lowered = canonical.lower()
-    if canonical in {"op_tool_search", "op_tool_read", "op_tool_result_page"} or any(
-        token in lowered for token in ("_show", "_list", "_read", "_search", "_status", "_inspect", "_health")
-    ):
-        return EffectKind.LOCAL_READ
-    if canonical in {"op_web_search", "op_web_read", "op_memory_recall"}:
-        return EffectKind.EXTERNAL_READ
-    if canonical in {"op_channel_send_attachment"}:
-        return EffectKind.EXTERNAL_WRITE
-    if any(token in lowered for token in ("_attach", "_detach", "_enable", "_disable", "_restart", "_cancel")):
-        return EffectKind.CONTROL
-    if any(token in lowered for token in ("_write", "_edit", "_delete", "_update", "_save", "_set_", "_create")):
-        return EffectKind.LOCAL_WRITE
-    return EffectKind.NONE
 
 
 def _default_search_text(descriptor: CapabilityDescriptor, alias: str) -> str:
@@ -711,11 +524,6 @@ def _default_search_text(descriptor: CapabilityDescriptor, alias: str) -> str:
         )
         if str(value or "").strip()
     )
-
-
-def _tool_schema(implementation: Any, attribute: str) -> dict[str, Any]:
-    value = getattr(implementation, attribute, None) if implementation is not None else None
-    return dict(value) if isinstance(value, dict) else {}
 
 
 def _example_from_schema(
@@ -819,11 +627,6 @@ def _resolve_example_schema(schema: dict[str, Any], root_schema: dict[str, Any])
     return resolved
 
 
-def _model_name(value: str) -> str:
-    words = re.findall(r"[A-Za-z0-9]+", str(value or ""))
-    return "".join(word[:1].upper() + word[1:] for word in words) or "Tool"
-
-
 def _freeze_mapping(value: dict[Any, Any]) -> MappingProxyType:
     return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
 
@@ -836,8 +639,9 @@ def _freeze_descriptor(descriptor: CapabilityDescriptor) -> CapabilityDescriptor
     return replace(
         descriptor,
         aliases=tuple(descriptor.aliases),
-        parameters_schema=_deep_freeze(descriptor.parameters_schema),
-        result_schema=_deep_freeze(descriptor.result_schema),
+        examples=tuple(_deep_freeze(dict(item)) for item in descriptor.examples),
+        mcp_input_schema=_deep_freeze(descriptor.mcp_input_schema),
+        mcp_output_schema=_deep_freeze(descriptor.mcp_output_schema),
         metadata=_deep_freeze(descriptor.metadata),
     )
 
@@ -946,6 +750,5 @@ __all__ = [
     "FrozenCapabilityRegistry",
     "ToolRegistryGeneration",
     "compile_registry_generation",
-    "model_from_json_schema",
     "subtree_for_tool",
 ]

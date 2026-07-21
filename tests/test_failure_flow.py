@@ -7,7 +7,9 @@ from unittest.mock import patch
 
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.turns import _render_failure_primary_input
-from pal.execution import CapabilityDescriptor, CapabilityResult
+from pal.execution import CapabilityResult
+from pal.execution.tool_facade import EmptyToolInput, OpaqueToolOutput, Tool, ToolGuidance
+from pal.execution.tool_semantics import DIRECT_NONE
 from pal.failure import FAILURE_VERIFICATION_FAILED, FailureDraft, FailureSignal
 from pal.failure.handler import FailureEventHandler
 from pal.foundation import EventEnvelope
@@ -273,8 +275,8 @@ class FailureFlowTests(unittest.TestCase):
         llm = _ToolLoopFailureLLM()
         core.context.port_registry["llm:llm"] = llm
 
-        def safe_probe(call):
-            _ = call
+        def safe_probe(value: EmptyToolInput):
+            _ = value
             return CapabilityResult(
                 status=RuntimeStatus.OK,
                 text="capability definition",
@@ -283,7 +285,7 @@ class FailureFlowTests(unittest.TestCase):
                     "capability": {
                         "name": "run_shell",
                         "description": "very long shell tool description",
-                        "parameters_schema": {
+                        "input_schema": {
                             "type": "object",
                             "properties": {
                                 "cmd": {
@@ -297,25 +299,24 @@ class FailureFlowTests(unittest.TestCase):
                 },
             )
 
-        core.context.execution_runtime.register_capability(
-            CapabilityDescriptor(
-                name="safe_probe",
+        core.context.execution_runtime.register_tool(
+            Tool(
+                alias="safe_probe",
                 canonical_path="op_test_safe_probe",
                 family="failure_test",
-                description="safe mode diagnostic probe",
                 source="test",
-                parameters_schema={"type": "object", "properties": {}},
-                metadata={
-                    "execution_semantics": {
-                        "invocation_mode": "direct",
-                        "effect_kind": "none",
-                        "idempotency": "idempotent",
-                        "retry_policy": "automatic",
-                        "paging": "never",
-                    }
-                },
-            ),
-            safe_probe,
+                InputModel=EmptyToolInput,
+                OutputModel=OpaqueToolOutput,
+                guidance=ToolGuidance(
+                    purpose="Inspect a deterministic safe-mode probe.",
+                    use_when="the failure flow needs a side-effect-free diagnostic",
+                    do_not_use_when="the runtime is not in this failure-flow test",
+                    failure_next_steps="surface the diagnostic failure",
+                ),
+                execution=DIRECT_NONE,
+                search_text="safe mode deterministic diagnostic probe",
+                handler=safe_probe,
+            )
         )
         draft = core.failure_orchestrator.failure_runtime().begin_draft(
             FailureSignal(
@@ -351,7 +352,7 @@ class FailureFlowTests(unittest.TestCase):
             self.assertNotIn("<identity>", request.messages[0]["content"])
             self.assertNotIn("<runtime_overlay>", request.messages[0]["content"])
             rendered = json.dumps(request.messages, ensure_ascii=False)
-            self.assertNotIn("parameters_schema", rendered)
+            self.assertNotIn("input_schema", rendered)
             self.assertNotIn("full schema must not enter verify prompt", rendered)
 
         verify_request = llm.requests[1]
@@ -383,7 +384,7 @@ class FailureFlowTests(unittest.TestCase):
                         "capability": {
                             "name": "run_shell",
                             "description": "very long shell tool description",
-                            "parameters_schema": {
+                            "input_schema": {
                                 "type": "object",
                                 "properties": {
                                     "cmd": {
@@ -420,7 +421,7 @@ class FailureFlowTests(unittest.TestCase):
         self.assertIn('"name": "run_shell"', rendered)
         self.assertIn('"kind": "tool_inventory"', rendered)
         self.assertIn('"tool_count": 30', rendered)
-        self.assertNotIn("parameters_schema", rendered)
+        self.assertNotIn("input_schema", rendered)
         self.assertNotIn("do not leak this full schema", rendered)
         self.assertNotIn("very long shell tool description", rendered)
 

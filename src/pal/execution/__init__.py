@@ -1,6 +1,5 @@
 from pal.execution.contracts import (
     CapabilityCall,
-    CapabilityCallable,
     CapabilityDescriptor,
     CapabilityResult,
     ExecutionRuntimePort,
@@ -23,7 +22,6 @@ from pal.execution.tool_facade import (
 __all__ = [
     "ApprovalExecutionDecorator",
     "CapabilityCall",
-    "CapabilityCallable",
     "CapabilityDescriptor",
     "CapabilityResult",
     "CompleteResult",
@@ -47,10 +45,6 @@ __all__ = [
     "Plugin",
     "RejectedResult",
     "ShellExecTool",
-    "ToolCallTool",
-    "ToolReadTool",
-    "ToolResultPageTool",
-    "ToolSearchTool",
     "Tool",
     "ToolExecutionSemantics",
     "ToolGuidance",
@@ -103,19 +97,10 @@ def __getattr__(name: str):
         from pal.execution.channel_attachment import ChannelSendAttachmentTool
 
         return ChannelSendAttachmentTool
-    if name in {"ToolCallTool", "ToolSearchTool", "ToolReadTool", "inspect_tools"}:
-        from pal.execution.tool_search import ToolCallTool, ToolReadTool, ToolSearchTool, inspect_tools
+    if name == "inspect_tools":
+        from pal.execution.tool_search import inspect_tools
 
-        return {
-            "ToolCallTool": ToolCallTool,
-            "ToolSearchTool": ToolSearchTool,
-            "ToolReadTool": ToolReadTool,
-            "inspect_tools": inspect_tools,
-        }[name]
-    if name == "ToolResultPageTool":
-        from pal.execution.tool_result_pager import ToolResultPageTool
-
-        return ToolResultPageTool
+        return inspect_tools
     if name == "FileReadTool":
         from pal.execution.file_read import FileReadTool
 

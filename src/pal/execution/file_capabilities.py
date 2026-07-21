@@ -1,27 +1,46 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput,
+    ExecutionFileCapabilitiesFileCapabilityMixinDeleteOutput,
+    ExecutionFileCapabilitiesFileCapabilityMixinEditInput,
+    ExecutionFileCapabilitiesFileCapabilityMixinEditOutput,
+    ExecutionFileCapabilitiesFileCapabilityMixinReadInput,
+    ExecutionFileCapabilitiesFileCapabilityMixinReadOutput,
+    ExecutionFileCapabilitiesFileCapabilityMixinStateInput,
+    ExecutionFileCapabilitiesFileCapabilityMixinStateOutput,
+    ExecutionFileCapabilitiesFileCapabilityMixinWriteInput,
+    ExecutionFileCapabilitiesFileCapabilityMixinWriteOutput,
+)
+
 from pal.execution.file_tool_contracts import (
     FILE_EDIT_DESCRIPTION,
-    FILE_EDIT_RESULT_SCHEMA,
     FILE_READ_DESCRIPTION,
-    FILE_READ_RESULT_SCHEMA,
     FILE_WRITE_DESCRIPTION,
-    FILE_WRITE_RESULT_SCHEMA,
-    file_edit_args_schema,
-    file_read_args_schema,
-    file_write_args_schema,
+)
+from pal.execution.file_edit import FileEditTool
+from pal.execution.file_read import FileReadTool
+from pal.execution.file_state import FileStateCache, FileStateTool
+from pal.execution.file_write import FileWriteTool
+from pal.execution.path_delete import PathDeleteTool
+from pal.execution.tool_semantics import (
+    DIRECT_LOCAL_READ,
+    DIRECT_LOCAL_WRITE,
+    INDIRECT_LOCAL_READ,
+    INDIRECT_LOCAL_WRITE,
 )
 from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, RuntimeStatus, capability_action
 
 
-def _tool_capability_result(runtime, tool_name: str, args: dict[str, object]) -> IntrospectionResult:
-    result = runtime.execute_tool(type("ToolCall", (), {"name": tool_name, "args": dict(args)})())
-    return IntrospectionResult(
-        status=RuntimeStatus.OK if result.ok else RuntimeStatus.ERROR,
-        text=result.text,
-        structured=result.structured,
-        llm_text=result.llm_text,
-    )
+_FILE_STATE_CACHE = FileStateCache()
+
+
+def get_file_state_cache() -> FileStateCache:
+    return _FILE_STATE_CACHE
+
+
+def _tool_capability_result(tool: object, args: dict[str, object]) -> IntrospectionResult:
+    return tool.invoke(dict(args))
 
 
 class FileCapabilityMixin:
@@ -32,12 +51,13 @@ class FileCapabilityMixin:
         action_name="read",
         description=FILE_READ_DESCRIPTION,
         aliases=("file_read",),
-        args_schema=file_read_args_schema(),
-        result_schema=FILE_READ_RESULT_SCHEMA,
+        InputModel=ExecutionFileCapabilitiesFileCapabilityMixinReadInput,
+        OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinReadOutput,
+        execution=DIRECT_LOCAL_READ,
         metadata={"canonical_path": "op_file_read"},
     )
     def file_read(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "op_file_read", call.args)
+        return _tool_capability_result(FileReadTool(cache=_FILE_STATE_CACHE), call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -46,12 +66,13 @@ class FileCapabilityMixin:
         action_name="edit",
         description=FILE_EDIT_DESCRIPTION,
         aliases=("file_edit",),
-        args_schema=file_edit_args_schema(),
-        result_schema=FILE_EDIT_RESULT_SCHEMA,
+        InputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditInput,
+        OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditOutput,
+        execution=DIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_file_edit"},
     )
     def file_edit(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "op_file_edit", call.args)
+        return _tool_capability_result(FileEditTool(cache=_FILE_STATE_CACHE), call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -60,12 +81,13 @@ class FileCapabilityMixin:
         action_name="write",
         description=FILE_WRITE_DESCRIPTION,
         aliases=("file_write",),
-        args_schema=file_write_args_schema(),
-        result_schema=FILE_WRITE_RESULT_SCHEMA,
+        InputModel=ExecutionFileCapabilitiesFileCapabilityMixinWriteInput,
+        OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinWriteOutput,
+        execution=DIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_file_write"},
     )
     def file_write(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "op_file_write", call.args)
+        return _tool_capability_result(FileWriteTool(cache=_FILE_STATE_CACHE), call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -77,37 +99,13 @@ class FileCapabilityMixin:
             "or expected_sha256 must match the current file bytes. Directories require recursive=true."
         ),
         aliases=("path_delete",),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Path to delete."},
-                "expected_sha256": {
-                    "type": "string",
-                    "description": "Optional current SHA-256 digest for regular files. If supplied, a prior file_read snapshot is not required.",
-                },
-                "recursive": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Required for directory deletion. Regular file deletion does not require this.",
-                },
-            },
-            "required": ["file_path"],
-        },
-        result_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string"},
-                "deleted": {"type": "boolean"},
-                "path_kind": {"type": "string"},
-                "recursive": {"type": "boolean"},
-                "sha256": {"type": "string"},
-                "error_code": {"type": "string"},
-            },
-        },
+        InputModel=ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput,
+        OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinDeleteOutput,
+        execution=INDIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_path_delete"},
     )
     def path_delete(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "op_path_delete", call.args)
+        return _tool_capability_result(PathDeleteTool(cache=_FILE_STATE_CACHE), call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -119,27 +117,10 @@ class FileCapabilityMixin:
             "Use this to check whether a file has a current cached read snapshot before op_file_edit."
         ),
         aliases=("file_state",),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "Optional file path to check against the read-before-edit cache.",
-                },
-            },
-        },
-        result_schema={
-            "type": "object",
-            "properties": {
-                "cached_file_count": {"type": "integer"},
-                "file_path": {"type": "string"},
-                "cached": {"type": "boolean"},
-                "valid": {"type": "boolean"},
-                "full_view": {"type": "boolean"},
-                "content_length": {"type": "integer"},
-            },
-        },
+        InputModel=ExecutionFileCapabilitiesFileCapabilityMixinStateInput,
+        OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinStateOutput,
+        execution=INDIRECT_LOCAL_READ,
         metadata={"canonical_path": "op_file_state"},
     )
     def file_state(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "op_file_state", call.args)
+        return _tool_capability_result(FileStateTool(cache=_FILE_STATE_CACHE), call.args)

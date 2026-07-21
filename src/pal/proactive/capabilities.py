@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput,
+    ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput,
+    ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput,
+    ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput,
+    ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput,
+    ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput,
+    ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput,
+    ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput,
+)
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -236,14 +247,7 @@ class ProactiveIntrospectionProvider:
         scope="proactive",
         action_name="list_runs",
         description="List recent runs for a proactive task",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "target_id": {"type": "string"},
-                "limit": {"type": "integer"},
-            },
-            "required": ["target_id"],
-        },
+        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput,
     )
     def list_runs(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_proactive_target(call)
@@ -281,20 +285,7 @@ class ProactiveIntrospectionProvider:
             "Create or replace a proactive task for future work: one-time reminders, scheduled jobs, recurring reports, "
             "periodic checks, or proactive push notifications."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "proactive_id": {"type": "string", "description": "Stable identifier for this proactive task."},
-                "goal": {"type": "string"},
-                "method": {"type": "string"},
-                "skill_refs": {"type": "array", "items": {"type": "string"}},
-                "out_channel_id": {"type": "string", "description": "Use channel_list to find available endpoint IDs"},
-                "enabled": {"type": "boolean"},
-                "out_reply_target": {"type": "object", "description": "Query channel endpoint auth_state for routing info (session_id, request_id)"},
-                "schedule": {"type": "object", "description": "Scheduling config. cadence='cron': {cadence,cron,timezone} where cron is standard 5-field expression. cadence='once': {cadence,run_at_utc}. cadence='manual': no schedule. Example reminder: {\"cadence\":\"once\",\"run_at_utc\":\"2026-05-12T09:00:00Z\"}. Example recurring push: {\"cadence\":\"cron\",\"cron\":\"0 9 * * *\",\"timezone\":\"Asia/Shanghai\"}"},
-            },
-            "required": ["proactive_id", "goal"],
-        },
+        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput,
     )
     def create(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("proactive_id") or "").strip()
@@ -348,11 +339,7 @@ class ProactiveIntrospectionProvider:
         action_name="delete",
         description="Delete (destroy) a proactive task",
         aliases=(),
-        args_schema={
-            "type": "object",
-            "properties": {"target_id": {"type": "string"}},
-            "required": ["target_id"],
-        },
+        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput,
     )
     def delete(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("target_id") or "").strip()
@@ -384,11 +371,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="enable",
         description="Enable a proactive task",
-        args_schema={
-            "type": "object",
-            "properties": {"target_id": {"type": "string"}},
-            "required": ["target_id"],
-        },
+        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=True)
@@ -399,11 +382,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="disable",
         description="Disable a proactive task",
-        args_schema={
-            "type": "object",
-            "properties": {"target_id": {"type": "string"}},
-            "required": ["target_id"],
-        },
+        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput,
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=False)
@@ -414,14 +393,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="set_output_channel",
         description="Set or clear the output channel for a proactive task",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "target_id": {"type": "string"},
-                "out_channel_id": {"type": "string"},
-            },
-            "required": ["target_id"],
-        },
+        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput,
     )
     def set_output_channel(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("target_id") or "").strip()
@@ -460,14 +432,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="set_output_target",
         description="Set or clear the output reply target for a proactive task",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "target_id": {"type": "string"},
-                "out_reply_target": {"type": "object", "description": "Reply routing info: session_id, request_id"},
-            },
-            "required": ["target_id"],
-        },
+        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput,
     )
     def set_output_target(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("target_id") or "").strip()
@@ -504,14 +469,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="update_schedule",
         description="Update the schedule for a proactive task",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "target_id": {"type": "string"},
-                "schedule": {"type": "object", "description": "Scheduling config. cadence='cron': {cadence,cron,timezone} where cron is standard 5-field expression. cadence='once': {cadence,run_at_utc}. cadence='manual': no schedule. Example reminder: {\"cadence\":\"once\",\"run_at_utc\":\"2026-05-12T09:00:00Z\"}. Example recurring push: {\"cadence\":\"cron\",\"cron\":\"0 9 * * *\",\"timezone\":\"Asia/Shanghai\"}"},
-            },
-            "required": ["target_id", "schedule"],
-        },
+        InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput,
     )
     def update_schedule(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("target_id") or "").strip()

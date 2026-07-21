@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
+    WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput,
+    WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput,
+    WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput,
+    WebFetchCapabilitiesWebFetchIntrospectionProviderSetAuthMaterialInput,
+    WebFetchCapabilitiesWebFetchIntrospectionProviderSetConfigInput,
+)
+from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
+
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.shared import (
@@ -19,7 +29,7 @@ from pal.web_fetch.browser_service import BrowserServiceManager
 from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT, WebFetchRequest
 from pal.web_fetch.models import WebFetchProviderModel
 from pal.web_fetch.service import WebFetchService
-from pal.web_fetch.tools import WebScreenshotTool, web_screenshot_args_schema, web_screenshot_result_schema
+from pal.web_fetch.tools import WebScreenshotTool
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -72,6 +82,7 @@ class WebFetchModuleSnapshot:
 @dataclass
 class WebFetchIntrospectionProvider:
     service: WebFetchService
+    artifact_manager: Any | None = None
     module_id: str = "web_fetch"
     mounted: bool = True
     degraded: bool = False
@@ -192,7 +203,7 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_active_provider",
         description="Set the configured active web fetch provider",
-        args_schema={"type": "object", "properties": {"active_provider_id": {"type": "string"}}, "required": ["active_provider_id"]},
+        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("active_provider_id") or "").strip()
@@ -217,37 +228,8 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="read",
         description="Fetch a webpage using the configured browser fetch provider and internal fallback",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "Absolute webpage URL to fetch."},
-                "timeout_ms": {
-                    "type": "integer",
-                    "minimum": 1000,
-                    "description": "Fetch timeout in milliseconds. Leave unset for the default unless the page is known to be slow.",
-                },
-                "max_chars": {
-                    "type": "integer",
-                    "minimum": 1000,
-                    "description": "Maximum rendered text characters returned to the model. Use the default unless a longer page excerpt is needed.",
-                },
-                "max_raw_chars": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Maximum raw HTML characters retained in structured output. Leave unset for normal reading.",
-                },
-                "max_links": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Maximum extracted links to include. Use 0 when links are irrelevant.",
-                },
-                "user_agent": {
-                    "type": "string",
-                    "description": "Optional browser user agent override. Leave unset unless a site requires a specific user agent.",
-                },
-            },
-            "required": ["url"],
-        },
+        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
+        execution=DIRECT_EXTERNAL_READ,
         metadata={"canonical_path": "op_web_read", "omit_family_in_canonical": True},
     )
     def read(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -307,17 +289,17 @@ class WebFetchIntrospectionProvider:
             "Render a URL in the browser and save a PNG screenshot as an artifact. "
             "Returns artifact_id and local_cached_path. Use only when visual page evidence is needed."
         ),
-        args_schema=web_screenshot_args_schema(),
-        result_schema=web_screenshot_result_schema(),
+        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput,
+        OutputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput,
         metadata={"canonical_path": "op_web_screenshot", "omit_family_in_canonical": True, "async_required": True},
     )
-    def screenshot(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        return IntrospectionResult(
-            status=RuntimeStatus.INVALID,
-            text="web_screenshot requires async turn context",
-            structured={"reason": "async_required"},
-            llm_text="web_screenshot requires async turn context.",
+    async def screenshot(self, call: IntrospectionCall) -> IntrospectionResult:
+        return await WebScreenshotTool(
+            service=self.service,
+            artifact_manager=self.artifact_manager,
+        ).ainvoke(
+            dict(call.args),
+            turn_id=str(call.meta.get("turn_id") or "") or None,
         )
 
     @capability_action(
@@ -346,7 +328,7 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_auth_material",
         description="Update web fetch provider auth material without exposing secrets",
-        args_schema={"type": "object", "properties": {"material": {"type": "object", "description": "Provider-specific auth credentials (key-value pairs)"}}, "required": ["material"]},
+        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetAuthMaterialInput,
     )
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -373,7 +355,7 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_config",
         description="Merge config into a web fetch provider settings blob",
-        args_schema={"type": "object", "properties": {"config": {"type": "object", "description": "Provider-specific settings (key-value pairs)"}}, "required": ["config"]},
+        InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetConfigInput,
     )
     def set_config(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -461,13 +443,10 @@ def inspect_web_fetch(provider: WebFetchIntrospectionProvider) -> WebFetchModule
 
 
 def register_with_core(context: MainContext, service: WebFetchService) -> ModuleHandle:
-    context.execution_runtime.register_tool(
-        WebScreenshotTool(
-            service=service,
-            artifact_manager=context.port_registry.get("artifact:artifact"),
-        )
+    provider = WebFetchIntrospectionProvider(
+        service=service,
+        artifact_manager=context.port_registry.get("artifact:artifact"),
     )
-    provider = WebFetchIntrospectionProvider(service=service)
     handle = ModuleHandle(
         module_id="web_fetch",
         tier=MODULE_TIER_DETACHABLE,

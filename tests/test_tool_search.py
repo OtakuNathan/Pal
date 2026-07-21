@@ -2,289 +2,125 @@ from __future__ import annotations
 
 import unittest
 
-from pal.execution.tool_search import ToolSearchTool
+from pal.core.runtime import PalCore
+from pal.execution.capabilities import register_with_core as register_execution_with_core
+from pal.execution.tool_facade import (
+    EffectKind,
+    EmptyToolInput,
+    EmptyToolOutput,
+    Idempotency,
+    InvocationMode,
+    PagingMode,
+    RetryPolicy,
+    Tool,
+    ToolExecutionSemantics,
+    ToolGuidance,
+)
+from pal.llm.contracts import CanonicalToolCall
+
+
+def search_fixture_tool(
+    *,
+    alias: str,
+    text: str,
+    mode: InvocationMode,
+    family: str,
+    module_id: str,
+    tags: tuple[str, ...],
+) -> Tool:
+    return Tool(
+        alias=alias,
+        canonical_path=f"op_test_{alias}",
+        InputModel=EmptyToolInput,
+        OutputModel=EmptyToolOutput,
+        guidance=ToolGuidance(
+            purpose=text,
+            use_when=text,
+            do_not_use_when="another test tool is a closer match",
+            failure_next_steps="search again with a narrower filter",
+        ),
+        execution=ToolExecutionSemantics(
+            invocation_mode=mode,
+            effect_kind=EffectKind.NONE,
+            idempotency=Idempotency.IDEMPOTENT,
+            retry_policy=RetryPolicy.AUTOMATIC,
+            paging=PagingMode.NEVER,
+        ),
+        search_text=text,
+        handler=lambda _value: {},
+        family=family,
+        module_id=module_id,
+        metadata={"namespace": "operation", "tags": tags},
+    )
 
 
 class ToolSearchTests(unittest.TestCase):
-    def test_search_deduplicates_compact_hits_by_visible_name(self) -> None:
-        class FakeRuntime:
-            def list_capability_specs(self):
-                return [
-                    {
-                        "name": "demo_show",
-                        "canonical_path": "demo_show",
-                        "description": "Show demo public metadata",
-                        "family": "introspection",
-                        "module_id": "demo",
-                        "aliases": [],
-                        "call_names": ["demo_show"],
-                        "target_id": f"endpoint_{index}",
-                    }
-                    for index in range(3)
-                ]
-
-        result = ToolSearchTool(FakeRuntime()).invoke({"query": "demo public", "top_k": 10})
-
-        self.assertEqual(result.structured["total_count"], 1)
-        self.assertEqual(result.structured["returned_count"], 1)
-        self.assertFalse(result.structured["truncated"])
-        hit = result.structured["hits"][0]
-        self.assertEqual(hit["name"], "demo_show")
-        self.assertEqual(hit["description"], "Show demo public metadata")
-        self.assertEqual(hit["required_params"], [])
-        self.assertNotIn("canonical_path", hit)
-        self.assertNotIn("namespace", hit)
-        self.assertNotIn("surface", hit)
-        self.assertNotIn("target_ids", hit)
-        self.assertNotIn("module_id", hit)
-        self.assertNotIn("call_names", hit)
-
-    def test_empty_search_returns_top_hits_without_facets_by_default(self) -> None:
-        class FakeRuntime:
-            def list_capability_specs(self):
-                return [
-                    {
-                        "name": f"demo_{index}",
-                        "canonical_path": f"demo_{index}",
-                        "description": f"Demo capability {index}",
-                        "family": "operation",
-                        "module_id": "demo" if index < 20 else "other",
-                        "aliases": [],
-                        "call_names": [f"demo_{index}"],
-                    }
-                    for index in range(30)
-                ]
-
-        result = ToolSearchTool(FakeRuntime()).invoke({"top_k": 10})
-
-        self.assertEqual(len(result.structured["hits"]), 10)
-        self.assertEqual(result.structured["total_count"], 30)
-        self.assertEqual(result.structured["returned_count"], 10)
-        self.assertTrue(result.structured["truncated"])
-        self.assertEqual(result.structured["applied_filters"], {})
-        self.assertNotIn("facets", result.structured)
-
-    def test_search_returns_deduped_facets_when_requested(self) -> None:
-        class FakeRuntime:
-            def list_capability_specs(self):
-                return [
-                    {
-                        "name": "demo_show",
-                        "canonical_path": "demo_show",
-                        "description": "Show demo public metadata",
-                        "family": "introspection",
-                        "module_id": "demo",
-                        "aliases": [],
-                        "call_names": ["demo_show"],
-                        "target_id": f"endpoint_{index}",
-                    }
-                    for index in range(3)
-                ]
-
-        result = ToolSearchTool(FakeRuntime()).invoke({"query": "demo public", "top_k": 10, "facets": True})
-
-        self.assertEqual(result.structured["total_count"], 1)
-        self.assertEqual(result.structured["returned_count"], 1)
-        self.assertIn({"module_id": "demo", "count": 1}, result.structured["facets"]["modules"])
-        self.assertIn({"family": "introspection", "count": 1}, result.structured["facets"]["families"])
-        self.assertIn({"namespace": "introspection", "count": 1}, result.structured["facets"]["namespaces"])
-
-    def test_search_accepts_name_and_include_facets_aliases(self) -> None:
-        class FakeRuntime:
-            def list_capability_specs(self):
-                return [
-                    {
-                        "name": "demo_show",
-                        "canonical_path": "demo_show",
-                        "description": "Show demo public metadata",
-                        "family": "introspection",
-                        "module_id": "demo",
-                        "aliases": [],
-                        "call_names": ["demo_show"],
-                    }
-                ]
-
-        result = ToolSearchTool(FakeRuntime()).invoke({"name": "demo public", "include_facets": True})
-
-        self.assertEqual(result.structured["applied_filters"]["query"], "demo public")
-        self.assertIn("facets", result.structured)
-
-    def test_module_filter_lists_one_module_without_query(self) -> None:
-        class FakeRuntime:
-            def list_capability_specs(self):
-                return [
-                    {
-                        "name": "alpha_one",
-                        "canonical_path": "alpha_one",
-                        "description": "Alpha one",
-                        "family": "operation",
-                        "module_id": "alpha",
-                        "parameters_schema": {"type": "object", "required": ["value"], "properties": {"value": {"type": "string"}}},
-                        "aliases": [],
-                        "call_names": ["alpha_one"],
-                    },
-                    {
-                        "name": "beta_one",
-                        "canonical_path": "beta_one",
-                        "description": "Beta one",
-                        "family": "operation",
-                        "module_id": "beta",
-                        "aliases": [],
-                        "call_names": ["beta_one"],
-                    },
-                ]
-
-        result = ToolSearchTool(FakeRuntime()).invoke({"module_id": "alpha"})
-
-        self.assertEqual(result.structured["total_count"], 1)
-        self.assertEqual(result.structured["hits"][0]["name"], "alpha_one")
-        self.assertEqual(result.structured["hits"][0]["required_params"], ["value"])
-        self.assertNotIn("module_id", result.structured["hits"][0])
-        self.assertNotIn("call_names", result.structured["hits"][0])
-
-    def test_namespace_filter_separates_introspection_from_operations(self) -> None:
-        class FakeRuntime:
-            def list_capability_specs(self):
-                return [
-                    {
-                        "name": "llm_active",
-                        "canonical_path": "llm_active",
-                        "description": "Show active llm endpoint metadata",
-                        "family": "introspection",
-                        "module_id": "llm",
-                        "aliases": [],
-                        "call_names": ["llm_active"],
-                    },
-                    {
-                        "name": "llm_set_active_endpoint",
-                        "canonical_path": "llm_set_active_endpoint",
-                        "description": "Switch the active llm endpoint",
-                        "family": "management",
-                        "module_id": "llm",
-                        "aliases": [],
-                        "call_names": ["llm_set_active_endpoint"],
-                        "metadata": {"namespace": "operation"},
-                    },
-                ]
-
-        result = ToolSearchTool(FakeRuntime()).invoke(
-            {"query": "llm endpoint", "namespace": "introspection", "top_k": 10}
+    def setUp(self) -> None:
+        self.core = PalCore()
+        register_execution_with_core(self.core.context)
+        self.core.publish_module_capabilities("execution")
+        runtime = self.core.context.execution_runtime
+        runtime.register_tool(
+            search_fixture_tool(
+                alias="web_lookup",
+                text="search public web pages internet research 网页搜索",
+                mode=InvocationMode.DIRECT,
+                family="web",
+                module_id="web_search",
+                tags=("network", "research"),
+            )
+        )
+        runtime.register_tool(
+            search_fixture_tool(
+                alias="memory_lookup",
+                text="recall durable memory facts and prior cases 记忆召回",
+                mode=InvocationMode.INDIRECT,
+                family="memory",
+                module_id="memory",
+                tags=("recall", "durable"),
+            )
         )
 
-        self.assertEqual([item["name"] for item in result.structured["hits"]], ["llm_active"])
-        self.assertEqual(result.structured["applied_filters"]["namespace"], "introspection")
+    def tearDown(self) -> None:
+        self.core.context.execution_runtime.shutdown()
 
-    def test_namespace_is_inferred_from_query_terms(self) -> None:
-        class FakeRuntime:
-            def list_capability_specs(self):
-                return [
-                    {
-                        "name": "llm_active",
-                        "canonical_path": "llm_active",
-                        "description": "Show active llm endpoint metadata",
-                        "family": "introspection",
-                        "module_id": "llm",
-                        "aliases": [],
-                        "call_names": ["llm_active"],
-                    },
-                    {
-                        "name": "llm_set_active_endpoint",
-                        "canonical_path": "llm_set_active_endpoint",
-                        "description": "Switch the active llm endpoint",
-                        "family": "management",
-                        "module_id": "llm",
-                        "aliases": [],
-                        "call_names": ["llm_set_active_endpoint"],
-                        "metadata": {"namespace": "operation"},
-                    },
-                ]
-
-        result = ToolSearchTool(FakeRuntime()).invoke({"query": "llm endpoint config introspection", "top_k": 10})
-
-        self.assertEqual([item["name"] for item in result.structured["hits"]], ["llm_active"])
-        self.assertEqual(result.structured["applied_filters"]["namespace"], "introspection")
-
-    def test_management_lifecycle_and_maintenance_capabilities_are_visible_to_discovery(self) -> None:
-        visible_create = {
-            "name": "proactive_create",
-            "canonical_path": "proactive_create",
-            "description": "Create a proactive task",
-            "family": "management",
-            "module_id": "proactive",
-            "aliases": [],
-            "call_names": ["proactive_create"],
-            "metadata": {"namespace": "operation", "action": "create"},
-        }
-        visible_enable = {
-            "name": "proactive_enable",
-            "canonical_path": "proactive_enable",
-            "description": "Enable a proactive task",
-            "family": "management",
-            "module_id": "proactive",
-            "aliases": [],
-            "call_names": ["proactive_enable"],
-            "metadata": {"namespace": "operation", "action": "enable"},
-        }
-        llm_switch = {
-            "name": "llm_set_active_endpoint",
-            "canonical_path": "llm_set_active_endpoint",
-            "description": "Switch the active llm endpoint",
-            "family": "management",
-            "module_id": "llm",
-            "aliases": [],
-            "call_names": ["llm_set_active_endpoint"],
-            "metadata": {"namespace": "operation", "action": "set_active_endpoint"},
-        }
-        additional_specs = [
-            {
-                "name": "web_search_set_config",
-                "canonical_path": "web_search_set_config",
-                "description": "Set web search provider config",
-                "family": "management",
-                "module_id": "web_search",
-                "aliases": [],
-                "call_names": ["web_search_set_config"],
-                "metadata": {"namespace": "operation", "action": "set_config"},
-            },
-            {
-                "name": "demo_attach",
-                "canonical_path": "demo_attach",
-                "description": "Attach demo module",
-                "family": "lifecycle",
-                "module_id": "demo",
-                "aliases": [],
-                "call_names": ["demo_attach"],
-                "metadata": {"namespace": "operation", "action": "attach"},
-            },
-            {
-                "name": "demo_refresh",
-                "canonical_path": "demo_refresh",
-                "description": "Refresh demo indexes",
-                "family": "maintenance",
-                "module_id": "demo",
-                "aliases": [],
-                "call_names": ["demo_refresh"],
-                "metadata": {"namespace": "operation", "action": "refresh"},
-            },
-        ]
-
-        class FakeRuntime:
-            def list_capability_specs(self):
-                return [visible_create, visible_enable, llm_switch, *additional_specs]
-
-        result = ToolSearchTool(FakeRuntime()).invoke({"top_k": 10})
-
-        self.assertEqual(
-            [item["name"] for item in result.structured["hits"]],
-            [
-                "proactive_create",
-                "proactive_enable",
-                "llm_set_active_endpoint",
-                "web_search_set_config",
-                "demo_attach",
-                "demo_refresh",
-            ],
+    def search(self, **args: object) -> dict[str, object]:
+        result = self.core.context.execution_runtime.execute_tool(
+            CanonicalToolCall(name="search_tools", args=dict(args))
         )
+        self.assertTrue(result.ok, result.text)
+        return dict(result.structured or {})
+
+    def test_exact_alias_ranks_first_and_returns_compact_contract(self) -> None:
+        payload = self.search(query="web_lookup", top_k=10)
+        hit = payload["hits"][0]
+        self.assertEqual(hit["alias"], "web_lookup")
+        self.assertGreaterEqual(hit["score"], 100)
+        self.assertEqual(hit["invocation_mode"], "direct")
+        self.assertIn("input_shape", hit)
+        self.assertNotIn("description", hit)
+
+    def test_filters_apply_to_generation_metadata(self) -> None:
+        payload = self.search(
+            namespace="action",
+            module_id="memory",
+            family="memory",
+            tags=["durable"],
+        )
+        self.assertEqual([hit["alias"] for hit in payload["hits"]], ["memory_lookup"])
+        self.assertEqual(payload["applied_filters"]["namespace"], "operation")
+
+    def test_facets_count_filtered_candidates(self) -> None:
+        payload = self.search(query="lookup", top_k=1, facets=True)
+        self.assertTrue(payload["truncated"])
+        self.assertIn("facets", payload)
+        modules = {item["module_id"]: item["count"] for item in payload["facets"]["modules"]}
+        self.assertEqual(modules["memory"], 1)
+        self.assertEqual(modules["web_search"], 1)
+
+    def test_jieba_terms_find_chinese_search_text(self) -> None:
+        payload = self.search(query="记忆召回")
+        self.assertEqual(payload["hits"][0]["alias"], "memory_lookup")
 
 
 if __name__ == "__main__":

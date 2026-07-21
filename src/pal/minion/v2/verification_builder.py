@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    MinionV2VerificationBuilderOpMinionReviewConclusionInput,
+    MinionV2VerificationBuilderOpMinionReviewSurfaceInput,
+    MinionV2VerificationBuilderOpMinionStandaloneReviewSubmitInput,
+    MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput,
+    MinionV2VerificationBuilderOpMinionVerificationDraftStatusInput,
+    MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput,
+    MinionV2VerificationBuilderOpMinionVerificationRemoveFindingInput,
+    MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput,
+    MinionV2VerificationBuilderOpMinionVerificationScratchWriteInput,
+    MinionV2VerificationBuilderOpMinionVerificationSetSummaryInput,
+    MinionV2VerificationBuilderOpMinionVerificationSubmitInput,
+    MinionV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput,
+)
+
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -8,6 +23,11 @@ from typing import Any, Mapping
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.review_findings import (
+    ADD_FINDING_CAPABILITY,
+    finding_severity,
+    structured_findings,
+)
 from pal.minion.v2.semantic_evidence import (
     record_unavailable_evidence,
     recorded_cases,
@@ -53,11 +73,7 @@ _COMMON_VERIFICATION_CAPABILITIES = frozenset(
         "op_minion_verification_run_warning_check",
         "op_minion_verification_run_lsp_check",
         "op_minion_verification_check_unavailable",
-        "op_minion_verification_report_module_defect",
-        "op_minion_verification_report_dependency_defect",
-        "op_minion_verification_report_contract_defect",
-        "op_minion_verification_report_architecture_defect",
-        "op_minion_verification_report_integration_defect",
+        ADD_FINDING_CAPABILITY,
         "op_minion_verification_set_summary",
         "op_minion_verification_draft_status",
         "op_minion_verification_remove_case",
@@ -73,11 +89,7 @@ _EXECUTION_CAPABILITIES = (
     "op_minion_verification_check_unavailable",
 )
 _FINDING_CAPABILITIES = (
-    "op_minion_verification_report_module_defect",
-    "op_minion_verification_report_dependency_defect",
-    "op_minion_verification_report_contract_defect",
-    "op_minion_verification_report_architecture_defect",
-    "op_minion_verification_report_integration_defect",
+    ADD_FINDING_CAPABILITY,
     "op_minion_verification_set_summary",
 )
 VERIFICATION_BUILDER_CAPABILITIES = (
@@ -150,27 +162,6 @@ _UNAVAILABLE_SCHEMA = {
     "required": ["name", "obligation", "reason"],
     "additionalProperties": False,
 }
-_FINDING_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "case": {"type": "string", "minLength": 1},
-        "finding_section": {
-            "type": "string",
-            "enum": ["ownership", "lifecycle", "state_machine", "invariant", "interface", "compatibility", "delivery", "implementation"],
-        },
-        "summary": {"type": "string", "minLength": 1},
-        "failure_reason": {"type": "string", "minLength": 1},
-        "severity": {"type": "string", "enum": ["blocker", "major", "minor"]},
-        "suggested_repair_boundary": {"type": "array", "items": {"type": "string"}},
-        "target_module": {"type": "string"},
-        "path": {"type": "string"},
-        "symbol": {"type": "string"},
-        "contract_section": {"type": "string"},
-        "invariants": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["case", "finding_section", "summary", "failure_reason", "severity"],
-    "additionalProperties": False,
-}
 _SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {"summary": {"type": "string", "minLength": 1}},
@@ -206,16 +197,6 @@ _NAMED_CASE_SCHEMA = {
     "required": ["name", "reason"],
     "additionalProperties": False,
 }
-_FINDING_CASE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "case": {"type": "string", "minLength": 1},
-        "summary": {"type": "string", "minLength": 1},
-        "reason": {"type": "string", "minLength": 1},
-    },
-    "required": ["case", "summary", "reason"],
-    "additionalProperties": False,
-}
 
 _DEFECT_PRECEDENCE = {
     "module_defect": 0,
@@ -223,13 +204,14 @@ _DEFECT_PRECEDENCE = {
     "dependency_defect": 2,
     "contract_defect": 3,
     "architecture_defect": 4,
+    "requirements_defect": 5,
 }
 
 VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_scratch_write": {
         "name": "op_verification_scratch_write",
         "description": "Write one verifier-owned test/probe file under the bound scratch directory. This cannot modify product source.",
-        "parameters_schema": _SCRATCH_SCHEMA,
+        "InputModel": MinionV2VerificationBuilderOpMinionVerificationScratchWriteInput,
     },
     **{
         name: {
@@ -238,73 +220,59 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "Run and durably register one semantic verification case. Use a readable case name and put any source citation in the description or path; "
                 "the Manager owns stdout/stderr Artifacts and does not ask you to construct a report object."
             ),
-            "parameters_schema": _RUN_SCHEMA,
+            "InputModel": MinionV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput,
         }
         for name in _RUN_TO_KIND_TAG
     },
     "op_minion_verification_run_lsp_check": {
         "name": "op_verification_run_lsp_check",
         "description": "Run and durably register LSP diagnostics for one source file when a matching server is available.",
-        "parameters_schema": _LSP_SCHEMA,
+        "InputModel": MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput,
     },
     "op_minion_verification_check_unavailable": {
         "name": "op_verification_check_unavailable",
         "description": "Record focused_tests, warning_clean, consumer_probe, public_surface_dogfood, lsp, historical_regressions, or platform_probe as UNKNOWN with a concrete environmental reason. This never manufactures PASS evidence.",
-        "parameters_schema": _UNAVAILABLE_SCHEMA,
-    },
-    **{
-        name: {
-            "name": "op_" + name.removeprefix("op_minion_"),
-            "description": "Report one evidence-backed typed defect against an already recorded case. finding_section is ownership, lifecycle, state_machine, invariant, interface, compatibility, delivery, or implementation; severity is blocker, major, or minor. One call records one semantic finding.",
-            "parameters_schema": _FINDING_SCHEMA,
-        }
-        for name in (
-            "op_minion_verification_report_module_defect",
-            "op_minion_verification_report_dependency_defect",
-            "op_minion_verification_report_contract_defect",
-            "op_minion_verification_report_architecture_defect",
-            "op_minion_verification_report_integration_defect",
-        )
+        "InputModel": MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput,
     },
     "op_minion_verification_set_summary": {
         "name": "op_verification_set_summary",
         "description": "Set the concise verifier summary after running cases.",
-        "parameters_schema": _SUMMARY_SCHEMA,
+        "InputModel": MinionV2VerificationBuilderOpMinionVerificationSetSummaryInput,
     },
     "op_minion_verification_draft_status": {
         "name": "op_verification_draft_status",
         "description": "Read a compact status of the current verification Draft, including case names, statuses, active findings, and remaining policy obligations.",
-        "parameters_schema": _NO_ARGS_SCHEMA,
+        "InputModel": MinionV2VerificationBuilderOpMinionVerificationDraftStatusInput,
     },
     "op_minion_verification_remove_case": {
         "name": "op_verification_remove_case",
         "description": "Explicitly withdraw one recorded case by semantic name and give an audit reason. All findings attached to it are withdrawn with it. Do not use this to hide a failing case; rerun the case after a real fix instead.",
-        "parameters_schema": _NAMED_CASE_SCHEMA,
+        "InputModel": MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput,
     },
     "op_minion_verification_remove_finding": {
         "name": "op_verification_remove_finding",
-        "description": "Explicitly withdraw exactly one finding by case name and exact finding summary, with an audit reason. The case evidence and any other findings remain. Do not withdraw a finding merely to make submission pass.",
-        "parameters_schema": _FINDING_CASE_SCHEMA,
+        "description": "Explicitly withdraw one finding by finding_key with an audit reason. Do not withdraw a finding merely to make submission pass.",
+        "InputModel": MinionV2VerificationBuilderOpMinionVerificationRemoveFindingInput,
     },
     "op_minion_verification_submit": {
         "name": "op_verification_submit",
         "description": "Submit recorded verification evidence and findings. Takes no arguments; Manager infers verdict and routing from immutable results.",
-        "parameters_schema": _NO_ARGS_SCHEMA,
+        "InputModel": MinionV2VerificationBuilderOpMinionVerificationSubmitInput,
     },
     "op_minion_review_surface": {
         "name": "op_review_surface",
         "description": "Record one standalone-review surface. kind is reviewed, test_gap, unreviewed, or residual_risk.",
-        "parameters_schema": _SURFACE_SCHEMA,
+        "InputModel": MinionV2VerificationBuilderOpMinionReviewSurfaceInput,
     },
     "op_minion_review_conclusion": {
         "name": "op_review_conclusion",
         "description": "Set the standalone review conclusion. verdict is approved, changes_requested, or blocked.",
-        "parameters_schema": _CONCLUSION_SCHEMA,
+        "InputModel": MinionV2VerificationBuilderOpMinionReviewConclusionInput,
     },
     "op_minion_standalone_review_submit": {
         "name": "op_review_submit",
         "description": "Submit the standalone review. Takes no arguments; Manager compiles recorded cases, findings, surfaces, and conclusion.",
-        "parameters_schema": _NO_ARGS_SCHEMA,
+        "InputModel": MinionV2VerificationBuilderOpMinionStandaloneReviewSubmitInput,
     },
 }
 
@@ -428,13 +396,6 @@ def compile_verification_invocation_tool_contract(
     ]
     implementation_targets = accepted_modules or ([module_name] if module_name else [])
     all_targets = sorted(set(implementation_targets + dependencies + consumed_modules))
-    allowed_targets = {
-        "module_defect": implementation_targets,
-        "dependency_defect": sorted(set(dependencies + consumed_modules)),
-        "contract_defect": all_targets,
-        "architecture_defect": all_targets,
-        "integration_defect": ["integration"] if module_name == "integration" else [],
-    }
     policy = effective_verification_policy(
         work_view=work_view,
         verification_policy=verification_policy,
@@ -454,8 +415,6 @@ def compile_verification_invocation_tool_contract(
         allowed_capabilities.add("op_minion_verification_run_platform_probe")
     if not historical_regressions:
         allowed_capabilities.discard("op_minion_verification_run_historical_regression")
-    if not allowed_targets["integration_defect"]:
-        allowed_capabilities.discard("op_minion_verification_report_integration_defect")
     contract: dict[str, Any] = {
         "contract_version": "1",
         "module_name": module_name,
@@ -465,7 +424,6 @@ def compile_verification_invocation_tool_contract(
         "verification_policy": policy,
         "allowed_capabilities": sorted(allowed_capabilities),
         "allowed_obligations": list(policy["allowed_obligations"]),
-        "allowed_defect_targets": allowed_targets,
         "required_historical_regressions": historical_regressions,
     }
     boundary_text = json.dumps(
@@ -501,22 +459,15 @@ def compile_verification_invocation_tool_contract(
             "A repeated FAIL may be submitted immediately with a structured finding. Required historical regressions: "
             + json.dumps(historical_regressions, ensure_ascii=False, sort_keys=True)
         )
-    for capability in (
-        "op_minion_verification_report_module_defect",
-        "op_minion_verification_report_dependency_defect",
-        "op_minion_verification_report_contract_defect",
-        "op_minion_verification_report_architecture_defect",
-        "op_minion_verification_report_integration_defect",
-    ):
-        defect_kind = capability.removeprefix("op_minion_verification_report_")
-        overrides[capability] = (
-            "Record one independently actionable finding for an existing case. A case may expose several findings; record each "
-            "material defect separately. The finding inherits the case's locations and invariants unless "
-            "you supply a narrower path/symbol/contract section. Exact semantic duplicates are ignored. Findings may cite only "
-            "FAIL or UNKNOWN cases. "
-            f"Defect kind: {defect_kind}. Allowed target_module values: "
-            f"{json.dumps(allowed_targets.get(defect_kind) or [], ensure_ascii=False)}."
-        )
+    overrides[ADD_FINDING_CAPABILITY] = (
+        "Record or replace one independently actionable, evidence-backed finding. Use a stable snake_case finding_key, "
+        "p0/p1/p2 priority, a self-contained summary, and exact task_source or workspace locations when available. "
+        "Complete the breadth-first audit first and batch independent add_finding calls in one tool round when possible. "
+        "Use module_defect for the current implementation, dependency_defect for upstream code, contract_defect for a "
+        "frozen boundary, architecture_defect for ownership/topology, requirements_defect for conflicting task sources, "
+        "and integration_defect for cross-module product behavior. Bound semantic modules: "
+        f"{json.dumps(all_targets, ensure_ascii=False)}."
+    )
     contract["description_overrides"] = overrides
     contract["fingerprint"] = hashlib.sha256(
         json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -526,14 +477,17 @@ def compile_verification_invocation_tool_contract(
 
 def dominant_verification_defect_kind(findings: list[Mapping[str, Any]]) -> str:
     kinds = {
-        str(item.get("defect_kind") or "").strip()
+        str(item.get("finding_kind") or item.get("defect_kind") or "").strip()
         for item in findings
-        if str(item.get("defect_kind") or "").strip()
+        if str(item.get("finding_kind") or item.get("defect_kind") or "").strip()
     }
     return max(kinds, key=lambda item: _DEFECT_PRECEDENCE.get(item, -1)) if kinds else ""
 
 for _tool_name, _tool_spec in VERIFICATION_BUILDER_TOOL_SPECS.items():
-    assert_authoring_schema_budget(_tool_spec["parameters_schema"], owner=_tool_name)
+    assert_authoring_schema_budget(
+        _tool_spec["InputModel"].model_json_schema(mode="validation", union_format="primitive_type_array"),
+        owner=_tool_name,
+    )
 
 
 def is_verification_builder_capability(name: str) -> bool:
@@ -586,8 +540,6 @@ async def verification_builder_tool_result(
     try:
         if name == "op_minion_verification_scratch_write":
             return _scratch_write(call, workspace, draft_kind=draft_kind)
-        if name.startswith("op_minion_verification_report_"):
-            return _record_finding(call, workspace, draft_kind=draft_kind)
         if name == "op_minion_verification_set_summary":
             return _set_summary(call, workspace, draft_kind=draft_kind)
         if name == "op_minion_verification_draft_status":
@@ -642,87 +594,6 @@ def _scratch_write(call: CanonicalToolCall, workspace: Mapping[str, Any], *, dra
     return _ok(call, f"scratch file written: {relative}", result)
 
 
-def _record_finding(call: CanonicalToolCall, workspace: Mapping[str, Any], *, draft_kind: str) -> CanonicalToolResult:
-    args = dict(call.args or {})
-    case_name = str(args.get("case") or "").strip()
-    context, store = _store_context(workspace, draft_kind=draft_kind)
-    snapshot = store.read(context, seed=_empty_payload())
-    cases_by_name = {
-        str(item.get("name")): dict(item) for item in recorded_cases(snapshot.payload)
-    }
-    if case_name not in cases_by_name:
-        raise ValueError(
-            "finding must cite an exact recorded case name; known cases: "
-            + ", ".join(sorted(cases_by_name))
-        )
-    defect_kind = call.name.removeprefix("op_minion_verification_report_")
-    target_module = _resolve_finding_target(
-        workspace,
-        defect_kind=defect_kind,
-        requested=str(args.get("target_module") or "").strip(),
-    )
-    case = cases_by_name[case_name]
-    if str(case.get("status") or "") not in {"FAIL", "UNKNOWN"}:
-        raise ValueError("finding may cite only a FAIL or UNKNOWN verification case")
-    locations = [dict(item) for item in list(case.get("locations") or [])]
-    explicit_location = _single_location(args)
-    if explicit_location:
-        locations = _unique_mappings([*locations, *explicit_location])
-    invariants = [str(item) for item in list(case.get("invariants") or []) if str(item).strip()]
-    explicit_invariants = [
-        str(item).strip()
-        for item in list(args.get("invariants") or [])
-        if str(item).strip()
-    ]
-    invariants = list(dict.fromkeys([*invariants, *explicit_invariants]))
-    finding = {
-        "case": case_name,
-        "finding_section": str(args.get("finding_section") or "implementation"),
-        "summary": str(args.get("summary") or "").strip(),
-        "failure_reason": str(args.get("failure_reason") or "").strip(),
-        "requirements": [dict(item) for item in list(case.get("requirements") or [])],
-        "locations": locations,
-        "invariants": invariants,
-        "severity": str(args.get("severity") or "major"),
-        "suggested_repair_boundary": [str(item) for item in list(args.get("suggested_repair_boundary") or [])],
-        "defect_kind": defect_kind,
-        "target_module": target_module,
-    }
-    if not finding["summary"] or not finding["failure_reason"]:
-        raise ValueError("finding requires summary and failure_reason")
-    finding_fingerprint = _semantic_finding_fingerprint(finding)
-    finding["_finding_fingerprint"] = finding_fingerprint
-
-    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-        findings = [dict(item) for item in list(payload.get("findings") or [])]
-        if any(
-            str(item.get("_finding_fingerprint") or _semantic_finding_fingerprint(item))
-            == finding_fingerprint
-            for item in findings
-        ):
-            return payload, {
-                "recorded": False,
-                "deduplicated": True,
-                "finding": _public_finding(finding),
-            }
-        findings.append(finding)
-        payload["findings"] = findings
-        return payload, {
-            "recorded": True,
-            "deduplicated": False,
-            "finding": _public_finding(finding),
-        }
-
-    result = store.mutate(
-        context,
-        operation_key=str(call.call_id or f"finding:{case_name}:{len(snapshot.payload.get('findings') or [])}"),
-        request=args,
-        reducer=reducer,
-        seed=_empty_payload(),
-    )
-    return _ok(call, "verification finding recorded", result)
-
-
 def _draft_status(
     call: CanonicalToolCall,
     workspace: Mapping[str, Any],
@@ -734,7 +605,7 @@ def _draft_status(
     context, store = _store_context(workspace, draft_kind=draft_kind)
     snapshot = store.read(context, seed=_empty_payload())
     cases = recorded_cases(snapshot.payload)
-    findings = [dict(item) for item in list(snapshot.payload.get("findings") or [])]
+    findings = structured_findings(snapshot.payload)
     tags = {
         str(tag)
         for item in cases
@@ -764,8 +635,9 @@ def _draft_status(
         ],
         "findings": [
             {
-                "case": str(item.get("case") or ""),
-                "defect_kind": str(item.get("defect_kind") or ""),
+                "finding_key": str(item.get("finding_key") or ""),
+                "finding_kind": str(item.get("finding_kind") or ""),
+                "priority": str(item.get("priority") or ""),
                 "summary": str(item.get("summary") or ""),
             }
             for item in findings
@@ -794,11 +666,6 @@ def _remove_case(
         removed = cases.pop(name, None) is not None
         evidence["cases"] = cases
         payload["evidence"] = evidence
-        payload["findings"] = [
-            dict(item)
-            for item in list(payload.get("findings") or [])
-            if str(dict(item).get("case") or "") != name
-        ]
         return payload, {"removed": removed, "case": name, "reason": reason}
 
     result = store.mutate(
@@ -818,50 +685,39 @@ def _remove_finding(
     draft_kind: str,
 ) -> CanonicalToolResult:
     args = dict(call.args or {})
-    case_name = str(args.get("case") or "").strip()
-    summary = str(args.get("summary") or "").strip()
+    finding_key = str(args.get("finding_key") or "").strip()
     reason = str(args.get("reason") or "").strip()
-    if not case_name or not summary:
-        raise ValueError("removing a finding requires case and exact summary")
+    if not finding_key:
+        raise ValueError("removing a finding requires finding_key")
     if not reason:
         raise ValueError("removing a verification finding requires an audit reason")
     context, store = _store_context(workspace, draft_kind=draft_kind)
 
     def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
         findings = [dict(item) for item in list(payload.get("findings") or [])]
-        matches = [
-            item
-            for item in findings
-            if str(item.get("case") or "") == case_name
-            and str(item.get("summary") or "") == summary
-        ]
+        matches = [item for item in findings if str(item.get("finding_key") or "") == finding_key]
         if not matches:
-            candidates = [
-                str(item.get("summary") or "")
-                for item in findings
-                if str(item.get("case") or "") == case_name
-            ]
+            candidates = [str(item.get("finding_key") or "") for item in findings]
             raise ValueError(
-                "no finding matches the exact case and summary; candidate summaries: "
+                "no finding matches finding_key; candidate keys: "
                 + json.dumps(candidates, ensure_ascii=False)
             )
         retained = [item for item in findings if item is not matches[0]]
         payload["findings"] = retained
         return payload, {
             "removed": True,
-            "case": case_name,
-            "summary": summary,
+            "finding_key": finding_key,
             "reason": reason,
         }
 
     result = store.mutate(
         context,
-        operation_key=str(call.call_id or f"remove-finding:{case_name}:{hashlib.sha256(summary.encode('utf-8')).hexdigest()[:12]}"),
+        operation_key=str(call.call_id or f"remove-finding:{finding_key}"),
         request=args,
         reducer=reducer,
         seed=_empty_payload(),
     )
-    return _ok(call, f"verification finding removed for case: {case_name}", result)
+    return _ok(call, f"verification finding removed: {finding_key}", result)
 
 
 def _set_summary(call: CanonicalToolCall, workspace: Mapping[str, Any], *, draft_kind: str) -> CanonicalToolResult:
@@ -940,6 +796,8 @@ def _submit(
         conclusion = dict(summary.get("conclusion") or {})
         if not conclusion:
             raise ValueError("standalone review requires review_conclusion before submit")
+        if str(conclusion.get("verdict") or "") == "approved" and findings:
+            raise ValueError("approved standalone review requires an empty finding Draft")
         output = {
             "verdict": str(conclusion.get("verdict") or ""),
             "scope": {"description": str(conclusion.get("scope") or "")},
@@ -973,23 +831,10 @@ def _submit(
         if defect_kind:
             output["defect_kind"] = defect_kind
             dominant_findings = [
-                item for item in findings if str(item.get("defect_kind") or "") == defect_kind
+                item for item in findings if str(item.get("finding_kind") or "") == defect_kind
             ]
-            target = next(
-                (
-                    str(item.get("target_module") or "")
-                    for item in dominant_findings
-                    if item.get("target_module")
-                ),
-                "",
-            )
-            if defect_kind == "dependency_defect" and target:
-                output["dependency_module"] = target
-            elif defect_kind == "module_defect" and target:
-                output["affected_module"] = target
             first = dominant_findings[0]
-            output["severity"] = str(first.get("severity") or "major")
-            output["suggested_repair_boundary"] = list(first.get("suggested_repair_boundary") or [])
+            output["severity"] = finding_severity(first)
         output["policy_exceptions"] = _policy_exceptions(cases)
         filename = "verification_plan.json"
         title = "V2 semantic verification plan"
@@ -1144,21 +989,15 @@ def _preflight_verification_submission(
             "verification submission contains obligations outside this node's scope: "
             + ", ".join(sorted(unexpected))
         )
-    findings_by_case = {
-        str(item.get("case") or "")
-        for item in list(value.get("findings") or [])
-        if str(item.get("case") or "")
-    }
-    failed_without_findings = [
+    failed_cases = [
         str(item.get("name") or "")
         for item in list(value.get("recorded_results") or [])
         if str(item.get("status") or "") == "FAIL"
-        and str(item.get("name") or "") not in findings_by_case
     ]
-    if failed_without_findings:
+    if failed_cases and not list(value.get("findings") or []):
         errors.append(
-            "every FAIL case requires at least one structured finding: "
-            + ", ".join(sorted(failed_without_findings))
+            "FAIL evidence requires at least one add_finding call: "
+            + ", ".join(sorted(failed_cases))
         )
     raise_submission_errors(errors, owner="verification_submit")
     return reference_warnings
@@ -1263,7 +1102,7 @@ def _default_summary(cases: list[Mapping[str, Any]], findings: list[Mapping[str,
     counts = {status: sum(1 for item in cases if str(item.get("status")) == status) for status in ("PASS", "FAIL", "UNKNOWN")}
     finding_counts: dict[str, int] = {}
     for item in findings:
-        kind = str(item.get("defect_kind") or "unclassified")
+        kind = str(item.get("finding_kind") or "unclassified")
         finding_counts[kind] = finding_counts.get(kind, 0) + 1
     suffix = ", ".join(f"{kind}={count}" for kind, count in sorted(finding_counts.items()))
     return (
@@ -1271,29 +1110,6 @@ def _default_summary(cases: list[Mapping[str, Any]], findings: list[Mapping[str,
         f"{counts['UNKNOWN']} UNKNOWN; {len(findings)} findings"
         + (f" ({suffix})." if suffix else ".")
     )
-
-
-def _semantic_finding_fingerprint(item: Mapping[str, Any]) -> str:
-    semantic = {
-        str(key): value
-        for key, value in dict(item).items()
-        if not str(key).startswith("_")
-    }
-    return hashlib.sha256(
-        json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-
-
-def _unique_mappings(values: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for value in values:
-        item = dict(value)
-        key = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        if key not in seen:
-            seen.add(key)
-            result.append(item)
-    return result
 
 
 def _draft_kind(workspace: Mapping[str, Any]) -> str:
@@ -1308,47 +1124,6 @@ def _store_context(workspace: Mapping[str, Any], *, draft_kind: str) -> tuple[Su
 
 def _empty_payload() -> dict[str, Any]:
     return {"definitions": {"scratch_files": []}, "evidence": {"cases": {}}, "findings": [], "summary": {}}
-
-
-def _single_location(args: Mapping[str, Any]) -> list[dict[str, str]]:
-    path = str(args.get("path") or "").strip()
-    if not path:
-        return []
-    return [{"path": path, **({"symbol": str(args.get("symbol"))} if args.get("symbol") else {}), **({"section": str(args.get("contract_section"))} if args.get("contract_section") else {})}]
-
-
-def _resolve_finding_target(
-    workspace: Mapping[str, Any],
-    *,
-    defect_kind: str,
-    requested: str,
-) -> str:
-    binding = dict(workspace.get("minion_v2") or {})
-    contract = dict(binding.get("verification_tool_contract") or {})
-    if not contract:
-        return requested
-    allowed = [
-        str(item)
-        for item in list(
-            dict(contract.get("allowed_defect_targets") or {}).get(defect_kind) or []
-        )
-        if str(item).strip()
-    ]
-    if requested:
-        if requested not in allowed:
-            rendered = ", ".join(allowed) or "<none>"
-            raise ValueError(
-                f"target_module {requested!r} is invalid for {defect_kind}; allowed targets: {rendered}"
-            )
-        return requested
-    if len(allowed) == 1:
-        return allowed[0]
-    if defect_kind in {"module_defect", "dependency_defect"} and len(allowed) > 1:
-        raise ValueError(
-            f"{defect_kind} requires target_module because several targets are bound: "
-            + ", ".join(allowed)
-        )
-    return ""
 
 
 def _assert_tool_contract_allows(

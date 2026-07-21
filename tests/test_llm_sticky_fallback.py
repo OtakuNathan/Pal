@@ -360,14 +360,14 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                     CapabilityCall(name="op_tool_search", args={"query": "active llm endpoint", "top_k": 10})
                 )
                 self.assertEqual(search.status, "ok")
-                hit_names = [item["name"] for item in search.structured["hits"]]
+                hit_names = [item["alias"] for item in search.structured["hits"]]
                 self.assertIn("llm_set_active_endpoint", hit_names)
 
                 read = core.context.execution_runtime.execute(
                     CapabilityCall(name="op_tool_read", args={"name": "llm_set_active_endpoint"})
                 )
                 self.assertEqual(read.status, "ok")
-                self.assertEqual(read.structured["capability"]["required_params"], ["active_endpoint_id"])
+                self.assertEqual(read.structured["input_schema"]["required"], ["active_endpoint_id"])
 
                 call = core.context.execution_runtime.execute(
                     CapabilityCall(

@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
+    WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput,
+    WebSearchCapabilitiesWebSearchIntrospectionProviderSetAuthMaterialInput,
+    WebSearchCapabilitiesWebSearchIntrospectionProviderSetConfigInput,
+)
+from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -189,7 +197,7 @@ class WebSearchIntrospectionProvider:
         family="management",
         action_name="set_active_provider",
         description="Set the configured active web search provider",
-        args_schema={"type": "object", "properties": {"active_provider_id": {"type": "string"}}, "required": ["active_provider_id"]},
+        InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("active_provider_id") or "").strip()
@@ -214,30 +222,8 @@ class WebSearchIntrospectionProvider:
         scope="module",
         action_name="query",
         description="Search the web with the configured web search provider and internal fallback",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Focused web search query. Include concrete names, dates, versions, or source terms when known.",
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "description": "Maximum search results to return. Use 3-5 for normal lookup; larger only when comparing sources.",
-                },
-                "region": {
-                    "type": "string",
-                    "description": "Optional search region/country code supported by the provider. Leave empty unless the user asks for regional results.",
-                },
-                "safe_search": {
-                    "type": "string",
-                    "description": "Optional provider safe-search setting. Leave empty unless the user or task requires a specific setting.",
-                },
-            },
-            "required": ["query"],
-        },
+        InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
+        execution=DIRECT_EXTERNAL_READ,
         metadata={"canonical_path": "op_web_search", "omit_family_in_canonical": True},
     )
     def query(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -300,7 +286,7 @@ class WebSearchIntrospectionProvider:
         family="management",
         action_name="set_auth_material",
         description="Update web search provider auth material without exposing secrets",
-        args_schema={"type": "object", "properties": {"material": {"type": "object", "description": "Provider-specific auth credentials (key-value pairs)"}}, "required": ["material"]},
+        InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetAuthMaterialInput,
     )
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -327,7 +313,7 @@ class WebSearchIntrospectionProvider:
         family="management",
         action_name="set_config",
         description="Merge config into a web search provider settings blob",
-        args_schema={"type": "object", "properties": {"config": {"type": "object", "description": "Provider-specific settings (key-value pairs)"}}, "required": ["config"]},
+        InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetConfigInput,
     )
     def set_config(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)

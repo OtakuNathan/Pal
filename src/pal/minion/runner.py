@@ -83,8 +83,6 @@ from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.llm_broker import MinionBrokerLLMRuntime
 from pal.minion.profiles import filter_minion_allowed_capabilities
 from pal.minion.scoped_execution import (
-    MINION_DIRECT_WORK_TOOL_SURFACE,
-    MINION_DISCOVERY_TOOL_SURFACE,
     MinionScopedExecutionRuntime,
     _effective_capability_name,
     _effective_tool_args,
@@ -118,9 +116,6 @@ from pal.shared import (
     SourceKind,
     MinionInvocationPack,
     default_tool_result_text,
-    llm_tool_name,
-    replace_internal_tool_names,
-    replace_internal_tool_names_in_value,
 )
 from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository, WebFetchService, register_with_core as register_web_fetch_with_core
 from pal.web_search import WebSearchProviderRepository, WebSearchService, register_with_core as register_web_search_with_core
@@ -1347,18 +1342,20 @@ class MinionRunner:
         resolve_name = getattr(execution_runtime, "resolve_llm_tool_name", None)
         if not callable(resolve_name):
             resolve_name = lambda name: str(name or "").strip()
+        provider_call = tool_call
         admission = admit_minion_tool_call(
-            tool_call,
+            provider_call,
             allowed_items,
             resolve_name=resolve_name,
             require_effective_target=True,
         )
-        tool_call = self._tool_call_with_minion_defaults(admission.call)
+        policy_call = self._tool_call_with_minion_defaults(admission.call)
+        tool_call = _provider_call_with_effective_args(provider_call, policy_call)
         target_name = admission.target_name
         if not admission.ok:
             self.blocked_summary = f"{admission.message}: {target_name}"
             return admission.to_result()
-        policy_error = self._runner_owned_git_command_error(target_name, tool_call)
+        policy_error = self._runner_owned_git_command_error(target_name, policy_call)
         if policy_error:
             return CanonicalToolResult(
                 name=tool_call.name,
@@ -1369,7 +1366,7 @@ class MinionRunner:
                 llm_text=policy_error,
                 status=RuntimeStatus.ERROR,
             )
-        policy_error = self._dedicated_shell_command_error(target_name, tool_call)
+        policy_error = self._dedicated_shell_command_error(target_name, policy_call)
         if policy_error:
             return CanonicalToolResult(
                 name=tool_call.name,
@@ -1380,7 +1377,7 @@ class MinionRunner:
                 llm_text=policy_error,
                 status=RuntimeStatus.FORBIDDEN,
             )
-        policy_error = self._read_only_git_command_error(target_name, tool_call)
+        policy_error = self._read_only_git_command_error(target_name, policy_call)
         if policy_error:
             return CanonicalToolResult(
                 name=tool_call.name,
@@ -1391,7 +1388,7 @@ class MinionRunner:
                 llm_text=policy_error,
                 status=RuntimeStatus.ERROR,
             )
-        policy_error = self._read_only_shell_command_error(target_name, tool_call)
+        policy_error = self._read_only_shell_command_error(target_name, policy_call)
         if policy_error:
             return CanonicalToolResult(
                 name=tool_call.name,
@@ -1423,10 +1420,10 @@ class MinionRunner:
             self.blocked_summary = f"approval {decision} for {target_name}"
             result.structured["capability"] = target_name
         self._record_web_research_usage(target_name)
-        violation = self._record_shell_audit_violation(target_name, tool_call, before_snapshot)
+        violation = self._record_shell_audit_violation(target_name, policy_call, before_snapshot)
         if violation:
             result = _tool_result_with_shell_mutation_violation(result, violation)
-        self._record_review_tool_evidence(target_name, tool_call, result)
+        self._record_review_tool_evidence(target_name, policy_call, result)
         return result
 
     def _sandboxed(self) -> bool:
@@ -2417,49 +2414,32 @@ async def _minion_noop_failure_handler(*args: Any, **kwargs: Any) -> _MinionFail
 
 
 def _llm_tools_for_allowed(execution_runtime: Any, allowed_capabilities: list[str]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    effective_allowed = getattr(execution_runtime, "allowed_capabilities", None) or allowed_capabilities
-    filtered = filter_minion_allowed_capabilities(list(effective_allowed or []))
-    tool_surface = _minion_llm_tool_surface(filtered)
-    for name in tool_surface:
-        canonical = str(name or "").strip()
-        if not canonical or canonical in seen:
-            continue
-        spec = execution_runtime.get_capability_spec(canonical)
-        if spec is None:
-            continue
-        seen.add(canonical)
-        result.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": str(spec.get("name") or canonical).strip(),
-                    "description": replace_internal_tool_names(
-                        spec.get("description") or spec.get("display_name") or canonical
-                    ),
-                    "parameters": replace_internal_tool_names_in_value(
-                        dict(spec.get("parameters_schema") or {"type": "object", "properties": {}})
-                    ),
-                },
-            }
-        )
-    return result
+    _ = allowed_capabilities
+    build = getattr(execution_runtime, "build_llm_tool_contracts", None)
+    if not callable(build):
+        raise TypeError("Minion execution runtime must expose immutable generation tool contracts")
+    return list(build())
 
 
+def _provider_call_with_effective_args(
+    provider_call: CanonicalToolCall,
+    effective_call: CanonicalToolCall,
+) -> CanonicalToolCall:
+    """Apply Manager defaults without leaking canonical paths back to the facade."""
 
-def _minion_llm_tool_surface(allowed_capabilities: list[str]) -> list[str]:
-    ordered = [
-        name
-        for name in (*MINION_DISCOVERY_TOOL_SURFACE, *MINION_DIRECT_WORK_TOOL_SURFACE)
-        if name in allowed_capabilities
-    ]
-    seen = set(ordered)
-    for name in allowed_capabilities:
-        if name not in seen:
-            ordered.append(name)
-            seen.add(name)
-    return ordered
+    args = dict(effective_call.args or {})
+    if effective_call.name == "op_tool_call":
+        provider_args = dict(provider_call.args or {})
+        for key in ("name", "capability", "tool"):
+            provider_target = str(provider_args.get(key) or "").strip()
+            if provider_target:
+                args[key] = provider_target
+                break
+    return CanonicalToolCall(
+        name=provider_call.name,
+        args=args,
+        call_id=provider_call.call_id,
+    )
 
 
 def _tool_result_with_shell_mutation_violation(result: CanonicalToolResult, violation: dict[str, Any]) -> CanonicalToolResult:

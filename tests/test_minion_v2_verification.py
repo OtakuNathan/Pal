@@ -24,6 +24,7 @@ from pal.minion.v2.contracts import AggregateSnapshot
 from pal.minion.v2.integration import IntegrationOwnershipDefect, IntegrationService
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.service import MinionV2WorkflowService
+from pal.minion.v2.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result
 from pal.minion.v2.verification import (
     DefectKind,
     DefectPropagationService,
@@ -204,7 +205,8 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         self.assertEqual(submission["outcome"], "pass")
         self.assertEqual(submission["changed_test_paths"], ["tests/test_router.py"])
-        self.assertNotIn("findings", submission)
+        self.assertEqual(submission["findings"], [])
+        self.assertNotIn("findings_markdown", submission)
 
         contract = compile_swe_verification_tool_contract(
             {
@@ -264,7 +266,15 @@ class MinionV2VerificationTests(unittest.TestCase):
             {
                 "artifact_kind": "semantic_repair_packet",
                 "module_name": "router",
-                "findings_markdown": "Empty input is accepted unexpectedly.",
+                "findings": [
+                    {
+                        "finding_key": "empty_input_accepted",
+                        "finding_kind": "module_defect",
+                        "priority": "p1",
+                        "summary": "Empty input is accepted unexpectedly.",
+                        "locations": [],
+                    }
+                ],
                 "test_delta_ref": test_delta_ref.to_dict(),
             },
             artifact_type="RepairPacketArtifact",
@@ -448,7 +458,15 @@ class MinionV2VerificationTests(unittest.TestCase):
             {
                 "artifact_kind": "semantic_repair_packet",
                 "module_name": "router",
-                "findings_markdown": "The full pipeline exposes an upstream defect.",
+                "findings": [
+                    {
+                        "finding_key": "pipeline_upstream_defect",
+                        "finding_kind": "dependency_defect",
+                        "priority": "p1",
+                        "summary": "The full pipeline exposes an upstream defect.",
+                        "locations": [],
+                    }
+                ],
                 "test_delta_ref": test_delta_ref.to_dict(),
             },
             artifact_type="RepairPacketArtifact",
@@ -831,13 +849,16 @@ class MinionV2VerificationTests(unittest.TestCase):
         produced: list[dict[str, object]] | None = None,
     ):
         self.call_index += 1
+        call = CanonicalToolCall(
+            name=name,
+            args=args or {},
+            call_id=f"verification-call-{self.call_index}",
+        )
+        if name == ADD_FINDING_CAPABILITY:
+            return add_finding_tool_result(call, workspace)
         return asyncio.run(
             verification_builder_tool_result(
-                CanonicalToolCall(
-                    name=name,
-                    args=args or {},
-                    call_id=f"verification-call-{self.call_index}",
-                ),
+                call,
                 workspace,
                 produced if produced is not None else [],
                 original_adapter=self.adapter,
@@ -904,8 +925,8 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_verifier_submit_schema_is_the_only_completion_shape(self) -> None:
         schema = VERIFICATION_BUILDER_TOOL_SPECS["op_minion_verification_submit"][
-            "parameters_schema"
-        ]
+            "InputModel"
+        ].model_json_schema(mode="validation")
         self.assertEqual(schema["properties"], {})
         self.assertFalse(schema["additionalProperties"])
         self.assertNotIn("required", schema)
@@ -1340,14 +1361,13 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(failed.ok, failed.text)
         finding = self._verification_call(
             workspace,
-            "op_minion_verification_report_module_defect",
+            ADD_FINDING_CAPABILITY,
             {
-                "case": "empty_input_is_stable",
-                "finding_section": "implementation",
+                "finding_key": "empty_input_is_stable",
+                "finding_kind": "module_defect",
+                "priority": "p1",
                 "summary": "The historical failure remains reproducible.",
-                "failure_reason": "The preserved regression still exits non-zero.",
-                "severity": "major",
-                "target_module": "router",
+                "locations": [{"scope": "workspace", "file": "src/router.py", "line": 1}],
             },
         )
         self.assertTrue(finding.ok, finding.text)
@@ -1902,9 +1922,9 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_mixed_defects_keep_all_findings_and_route_highest_scope(self) -> None:
         findings = [
-            {"case": "runtime case", "defect_kind": "module_defect"},
-            {"case": "contract case", "defect_kind": "contract_defect"},
-            {"case": "dependency case", "defect_kind": "dependency_defect"},
+            {"finding_key": "runtime_case", "finding_kind": "module_defect"},
+            {"finding_key": "contract_case", "finding_kind": "contract_defect"},
+            {"finding_key": "dependency_case", "finding_kind": "dependency_defect"},
         ]
         self.assertEqual(
             dominant_verification_defect_kind(findings), "contract_defect"
@@ -1927,19 +1947,18 @@ class MinionV2VerificationTests(unittest.TestCase):
                 {"name": name, "command": "exit 7", "path": "src/router.py"},
             )
             self.assertTrue(recorded.ok, recorded.text)
-        for tool, case in (
-            ("op_minion_verification_report_module_defect", "runtime shape"),
-            ("op_minion_verification_report_contract_defect", "contract shape"),
+        for finding_kind, case in (
+            ("module_defect", "runtime shape"),
+            ("contract_defect", "contract shape"),
         ):
             finding = self._verification_call(
                 workspace,
-                tool,
+                ADD_FINDING_CAPABILITY,
                 {
-                    "case": case,
-                    "finding_section": "interface",
+                    "finding_key": case.replace(" ", "_"),
+                    "finding_kind": finding_kind,
+                    "priority": "p1",
                     "summary": f"{case} failed",
-                    "failure_reason": "The reproduced probe exited nonzero.",
-                    "severity": "major",
                 },
             )
             self.assertTrue(finding.ok, finding.text)
@@ -1953,7 +1972,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(compiled["defect_kind"], "contract_defect")
         self.assertEqual(len(compiled["findings"]), 2)
         self.assertEqual(
-            {item["defect_kind"] for item in compiled["findings"]},
+            {item["finding_kind"] for item in compiled["findings"]},
             {"module_defect", "contract_defect"},
         )
 
@@ -2031,25 +2050,23 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(first.ok, first.text)
         module_finding = self._verification_call(
             workspace,
-            "op_minion_verification_report_module_defect",
+            ADD_FINDING_CAPABILITY,
             {
-                "case": "priority shape",
-                "finding_section": "implementation",
+                "finding_key": "fractional_priority_accepted",
+                "finding_kind": "module_defect",
+                "priority": "p1",
                 "summary": "Fractional priority is accepted.",
-                "failure_reason": "The public constructor returned success.",
-                "severity": "major",
             },
         )
         self.assertTrue(module_finding.ok, module_finding.text)
         contract_finding = self._verification_call(
             workspace,
-            "op_minion_verification_report_contract_defect",
+            ADD_FINDING_CAPABILITY,
             {
-                "case": "priority shape",
-                "finding_section": "interface",
+                "finding_key": "priority_shape_underspecified",
+                "finding_kind": "contract_defect",
+                "priority": "p1",
                 "summary": "Priority shape is underspecified.",
-                "failure_reason": "The frozen contract does not constrain numeric shape.",
-                "severity": "major",
             },
         )
         self.assertTrue(contract_finding.ok, contract_finding.text)
@@ -2060,28 +2077,26 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(len(status.structured["cases"]), 1)
         self.assertEqual(len(status.structured["findings"]), 2)
         self.assertEqual(
-            {item["defect_kind"] for item in status.structured["findings"]},
+            {item["finding_kind"] for item in status.structured["findings"]},
             {"module_defect", "contract_defect"},
         )
         duplicate = self._verification_call(
             workspace,
-            "op_minion_verification_report_module_defect",
+            ADD_FINDING_CAPABILITY,
             {
-                "case": "priority shape",
-                "finding_section": "implementation",
-                "summary": "Fractional priority is accepted.",
-                "failure_reason": "The public constructor returned success.",
-                "severity": "major",
+                "finding_key": "fractional_priority_accepted",
+                "finding_kind": "module_defect",
+                "priority": "p0",
+                "summary": "Fractional priority is accepted and corrupts ordering.",
             },
         )
         self.assertTrue(duplicate.ok, duplicate.text)
-        self.assertTrue(duplicate.structured["deduplicated"])
+        self.assertTrue(duplicate.structured["replaced"])
         removed = self._verification_call(
             workspace,
             "op_minion_verification_remove_finding",
             {
-                "case": "priority shape",
-                "summary": "Priority shape is underspecified.",
+                "finding_key": "priority_shape_underspecified",
                 "reason": "The finding was classified against the wrong contract layer.",
             },
         )
@@ -2091,7 +2106,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         self.assertEqual(
             [item["summary"] for item in after_removal.structured["findings"]],
-            ["Fractional priority is accepted."],
+            ["Fractional priority is accepted and corrupts ordering."],
         )
         removed_case = self._verification_call(
             workspace,
@@ -2103,7 +2118,10 @@ class MinionV2VerificationTests(unittest.TestCase):
             workspace, "op_minion_verification_draft_status"
         )
         self.assertEqual(final.structured["cases"], [])
-        self.assertEqual(final.structured["findings"], [])
+        self.assertEqual(
+            [item["finding_key"] for item in final.structured["findings"]],
+            ["fractional_priority_accepted"],
+        )
 
     def test_retry_fence_preserves_failed_evidence_and_finding_for_submit(self) -> None:
         stage_dir = self.runtime_root / "artifact-stage"
@@ -2119,13 +2137,12 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(failed.ok, failed.text)
         finding = self._verification_call(
             workspace,
-            "op_minion_verification_report_module_defect",
+            ADD_FINDING_CAPABILITY,
             {
-                "case": "released resource rejects use",
-                "finding_section": "implementation",
+                "finding_key": "released_resource_remains_usable",
+                "finding_kind": "module_defect",
+                "priority": "p1",
                 "summary": "Released resource remains usable.",
-                "failure_reason": "The adversarial probe exited with failure.",
-                "severity": "major",
             },
         )
         self.assertTrue(finding.ok, finding.text)
@@ -2282,7 +2299,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, VerificationStatus.PASS)
 
-    def test_rerun_keeps_finding_until_case_passes(self) -> None:
+    def test_rerun_keeps_finding_until_reviewer_withdraws_it(self) -> None:
         workspace = self._bind_workspace(
             {"repo_path": str(self.runtime_root)},
             role="verifier",
@@ -2291,13 +2308,12 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(failed.ok, failed.text)
         finding = self._verification_call(
             workspace,
-            "op_minion_verification_report_module_defect",
+            ADD_FINDING_CAPABILITY,
             {
-                "case": "released resource rejects use",
-                "finding_section": "implementation",
+                "finding_key": "released_resource_remains_usable",
+                "finding_kind": "module_defect",
+                "priority": "p1",
                 "summary": "Released resource remains usable.",
-                "failure_reason": "The adversarial probe exited with failure.",
-                "severity": "major",
             },
         )
         self.assertTrue(finding.ok, finding.text)
@@ -2321,7 +2337,16 @@ class MinionV2VerificationTests(unittest.TestCase):
             passed_status.structured["cases"],
             [{"name": "released resource rejects use", "status": "PASS"}],
         )
-        self.assertEqual(passed_status.structured["findings"], [])
+        self.assertEqual(len(passed_status.structured["findings"]), 1)
+        withdrawn = self._verification_call(
+            retry_workspace,
+            "op_minion_verification_remove_finding",
+            {
+                "finding_key": "released_resource_remains_usable",
+                "reason": "The rerun proves the defect is no longer present.",
+            },
+        )
+        self.assertTrue(withdrawn.ok, withdrawn.text)
 
     def test_withdrawing_finding_requires_audit_reason(self) -> None:
         workspace = self._bind_workspace(
@@ -2331,7 +2356,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         result = self._verification_call(
             workspace,
             "op_minion_verification_remove_finding",
-            {"case": "missing", "summary": "missing finding"},
+            {"finding_key": "missing_finding", "reason": ""},
         )
         self.assertFalse(result.ok)
         self.assertIn("audit reason", result.llm_text)
@@ -2361,7 +2386,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             ["z historical first", "a adversarial second"],
         )
 
-    def test_finding_rejects_passing_case(self) -> None:
+    def test_finding_rejects_invalid_priority(self) -> None:
         workspace = self._bind_workspace(
             {"repo_path": str(self.runtime_root)}, role="verifier"
         )
@@ -2374,17 +2399,16 @@ class MinionV2VerificationTests(unittest.TestCase):
 
         finding = self._verification_call(
             workspace,
-            "op_minion_verification_report_module_defect",
+            ADD_FINDING_CAPABILITY,
             {
-                "case": "passing probe",
-                "finding_section": "implementation",
+                "finding_key": "passing_probe_claim",
+                "finding_kind": "module_defect",
+                "priority": "major",
                 "summary": "This must not be accepted.",
-                "failure_reason": "The cited probe passed.",
-                "severity": "major",
             },
         )
         self.assertFalse(finding.ok)
-        self.assertIn("FAIL or UNKNOWN", finding.llm_text)
+        self.assertIn("priority", finding.llm_text)
 
     def test_case_runner_persists_command_output(self) -> None:
         result = VerificationCaseRunner(self.store).run(
@@ -2482,16 +2506,13 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(failed.ok, failed.text)
         finding = self._verification_call(
             workspace,
-            "op_minion_verification_report_contract_defect",
+            ADD_FINDING_CAPABILITY,
             {
-                "case": "released resource rejects use",
-                "finding_section": "lifecycle",
+                "finding_key": "reset_semantics_missing",
+                "finding_kind": "contract_defect",
+                "priority": "p1",
                 "summary": "Reset semantics are missing from the product contract.",
-                "failure_reason": "The reproduced consumer observes reordered routes.",
-                "severity": "major",
-                "target_module": "router",
-                "requirement_section": "Lifecycle",
-                "requirement": "Released resources reject further use.",
+                "locations": [{"scope": "workspace", "file": "include/router.h", "line": 1, "symbol": "reset"}],
             },
         )
         self.assertTrue(finding.ok, finding.text)
@@ -2524,18 +2545,18 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "report_ref": {"sha256": "hidden-report-digest"},
                 "findings": [
                     {
-                        "case": "released resource rejects use",
-                        "finding_section": "lifecycle",
+                        "finding_key": "use_after_release_succeeds",
+                        "finding_kind": "contract_defect",
+                        "priority": "p0",
                         "summary": "Use after release succeeds.",
-                        "failure_reason": "The method returns success after release.",
-                        "requirements": [
+                        "locations": [
                             {
-                                "section": "Lifecycle",
-                                "requirement": "Released resources reject further use.",
+                                "scope": "workspace",
+                                "file": "src/resource.py",
+                                "line": 42,
+                                "symbol": "use",
                             }
                         ],
-                        "locations": [{"path": "src/resource.py", "symbol": "use"}],
-                        "severity": "high",
                     }
                 ],
                 "cases": [
@@ -2550,8 +2571,8 @@ class MinionV2VerificationTests(unittest.TestCase):
             }
         )
         self.assertIn("Use after release succeeds.", markdown)
-        self.assertIn("Lifecycle - Released resources reject further use.", markdown)
-        self.assertIn("src/resource.py::use", markdown)
+        self.assertIn("use_after_release_succeeds", markdown)
+        self.assertIn("src/resource.py:42::use", markdown)
         self.assertIn("released resource rejects use", markdown)
         self.assertNotIn("hidden-report-digest", markdown)
         self.assertNotIn("hidden-stdout-digest", markdown)

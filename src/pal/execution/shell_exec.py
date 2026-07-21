@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    ExecutionShellExecShellExecCapabilityMixinShellInput,
+    ExecutionShellExecShellExecCapabilityMixinShellOutput,
+)
+
 import asyncio
 import contextlib
 import os
@@ -10,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_semantics import DIRECT_CONTROL
 from pal.shared import (
     OPERATION_NAMESPACE,
     IntrospectionCall,
@@ -23,7 +29,7 @@ SHELL_EXEC_DESCRIPTION = (
     "Run shell; returns stdout, stderr, and exit status. "
     "Use for tests, builds, scripts, process probes, and package commands. "
     "Pal runtime, module, capability, minion state: use search_tools/read_tool/call_tool or the visible Pal tool before shell. "
-    "When visible, use op_tree for structured directory listings; "
+    "For bounded directory listings use `tree -a -L 3 --filelimit 200 --noreport <path>`; if tree is unavailable use `find <path> -maxdepth 3 -print | head -n 500`. "
     "op_search for repository text search; op_file_read for reading text files; op_file_edit for precise in-place edits after reading; "
     "op_file_write for creating or overwriting complete UTF-8 text files; op_path_delete for deleting files or directories; "
     "op_git for git status, diff, log, show, and audited git restore/revert. "
@@ -35,7 +41,8 @@ SHELL_EXEC_DESCRIPTION = (
 
 SHELL_EXEC_CMD_DESCRIPTION = (
     "Shell command to execute. Use only for command execution, tests, builds, scripts, process probes, and package commands. "
-    "If visible, prefer op_tree for listings, op_search for text search, op_file_read for file reads, op_file_edit for edits, "
+    "Use bounded `tree -a -L 3 --filelimit 200 --noreport` listings (or `find -maxdepth 3 -print | head -n 500` when tree is unavailable). "
+    "If visible, prefer op_search for text search, op_file_read for file reads, op_file_edit for edits, "
     "op_file_write for writes, op_path_delete for deletion, and op_git for git status/diff/log/show. "
     "Avoid cat/head/tail/grep/rg/sed/awk/tee/echo/printf redirection/rm/unlink/rmdir/git rm/find -delete for repo file operations when the matching capability is visible. "
     "For Pal runtime/module/minion/capability state or actions, use built-in Pal tools before shell. "
@@ -107,42 +114,10 @@ class _TrackedShellProcess:
 
 @dataclass
 class ShellExecTool:
-    name: str = "op_exec_shell"
-    display_name: str = "Shell Exec"
-    family: str = "system"
-    description: str = SHELL_EXEC_DESCRIPTION
-    tags: tuple[str, ...] = ("shell", "system", "exec")
-    keywords: tuple[str, ...] = ("command", "terminal", "bash", "zsh", "pwsh", "powershell", "run")
-    args_schema: dict[str, object] = None  # type: ignore[assignment]   
-    result_schema: dict[str, object] = None  # type: ignore[assignment]
     default_timeout_ms: int = 30_000
     shell_path: str = ""
 
     def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = {
-                "type": "object",
-                "properties": {
-                    "cmd": {"type": "string", "description": SHELL_EXEC_CMD_DESCRIPTION},
-                    "cwd": {"type": "string", "description": "Optional working directory."},
-                    "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional timeout in milliseconds."},
-                },
-                "required": ["cmd"],
-            }
-        if self.result_schema is None:
-            self.result_schema = {
-                "type": "object",
-                "properties": {
-                    "cmd": {"type": "string"},
-                    "cwd": {"type": "string"},
-                    "returncode": {"type": "integer"},
-                    "stdout": {"type": "string"},
-                    "stderr": {"type": "string"},
-                    "stdout_truncated": {"type": "boolean"},
-                    "stderr_truncated": {"type": "boolean"},
-                    "timeout_ms": {"type": "integer"},
-                },
-            }
         if not self.shell_path:
             self.shell_path = self._default_shell_path()
 
@@ -316,34 +291,9 @@ class ShellExecCapabilityMixin:
         action_name="shell",
         description=SHELL_EXEC_DESCRIPTION,
         aliases=(),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "cmd": {"type": "string", "description": SHELL_EXEC_CMD_DESCRIPTION},
-                "cwd": {"type": "string", "description": "Optional working directory."},
-                "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional timeout in milliseconds."},
-            },
-            "required": ["cmd"],
-        },
-        result_schema={
-            "type": "object",
-            "properties": {
-                "cmd": {"type": "string"},
-                "cwd": {"type": "string"},
-                "returncode": {"type": "integer"},
-                "stdout": {"type": "string"},
-                "stderr": {"type": "string"},
-                "stdout_truncated": {"type": "boolean"},
-                "stderr_truncated": {"type": "boolean"},
-                "timeout_ms": {"type": "integer"},
-            },
-        },
+        InputModel=ExecutionShellExecShellExecCapabilityMixinShellInput,
+        OutputModel=ExecutionShellExecShellExecCapabilityMixinShellOutput,
+        execution=DIRECT_CONTROL,
     )
     def shell(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self.runtime.execute_tool(type("ToolCall", (), {"name": "run_shell", "args": dict(call.args)})())
-        return IntrospectionResult(
-            status=RuntimeStatus.OK if result.ok else RuntimeStatus.ERROR,
-            text=result.text,
-            structured=result.structured,
-            llm_text=result.llm_text,
-        )
+        return ShellExecTool().invoke(dict(call.args))

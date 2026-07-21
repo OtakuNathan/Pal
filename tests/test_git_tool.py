@@ -6,7 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pal.core import PalCore
+from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.git_tool import GitTool, classify_git_command
+from pal.llm.contracts import CanonicalToolCall
 from pal.shared import RuntimeStatus
 
 
@@ -70,6 +73,28 @@ class GitToolTests(unittest.TestCase):
             self.assertEqual(result.structured["classification"]["operation_kind"], "read")
             self.assertIn("?? new.txt", result.structured["stdout"])
             self.assertIn("git status", result.llm_text)
+
+    def test_read_only_status_matches_immutable_facade_output_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git(root, "init")
+            (root / "new.txt").write_text("new\n", encoding="utf-8")
+            core = PalCore()
+            register_execution_with_core(core.context)
+            core.publish_module_capabilities("execution")
+
+            result = core.context.execution_runtime.execute_tool(
+                CanonicalToolCall(
+                    name="git",
+                    args={"cmd": "status --short", "cwd": str(root)},
+                )
+            )
+
+            self.assertTrue(result.ok, result.llm_text)
+            output = result.structured
+            self.assertEqual(output["cwd"], str(root))
+            self.assertEqual(output["tokens"], ["git", "status", "--short"])
+            self.assertIn("?? new.txt", output["stdout"])
 
     def test_restore_mutation_records_audit_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    PluginsL3StubsL3ProviderCapabilityMixinDeleteInput,
+    PluginsL3StubsL3ProviderCapabilityMixinRecallInput,
+    PluginsL3StubsL3ProviderCapabilityMixinRefreshIndexesInput,
+    PluginsL3StubsL3ProviderCapabilityMixinUpdateInput,
+    PluginsL3StubsL3ProviderCapabilityMixinWriteInput,
+)
+
 from dataclasses import dataclass, field
 
 from pal.memory.contracts import (
@@ -141,49 +149,7 @@ class _L3ProviderCapabilityMixin:
             "and fixes before improvising."
         ),
         metadata={"omit_family_in_canonical": True},
-        args_schema={
-            "type": "object",
-            "properties": {
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "One to three focused natural-language search strings for durable facts, preferences, project "
-                        "context, prior decisions, repair cases, or task experience. Include concrete names, modules, "
-                        "error text, symptoms, failed fixes, or user terms when known; do not paste large raw context."
-                    ),
-                },
-                "topic_scope": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Optional short topic keywords that narrow retrieval, such as a project, subsystem, preference "
-                        "area, or failure domain. This is semantic narrowing, not the storage scope."
-                    ),
-                },
-                "task_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional exact task, work order, run, or minion task identifier from current context. When provided, "
-                        "recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "description": "Maximum memories to return. Use 3-5 by default; use a larger value only when comparing several possible matches.",
-                },
-                "view": {
-                    "type": "string",
-                    "enum": ["summary", "origin"],
-                    "description": (
-                        "Use summary by default for normal work. Use origin only when provenance, source text, or extra "
-                        "detail is needed to resolve a conflict, update/delete a memory safely, or audit where the memory came from."
-                    ),
-                },
-            },
-        },
+        InputModel=PluginsL3StubsL3ProviderCapabilityMixinRecallInput,
     )
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
         task_id = _read_task_id(call.args)
@@ -222,22 +188,7 @@ class _L3ProviderCapabilityMixin:
         action_name="write",
         description="Commit durable memory",
         metadata={"omit_family_in_canonical": True},
-        args_schema={
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string", "enum": ["fact", "case"], "description": "fact or case; case requires star."},
-                "title": {"type": "string", "description": "Optional short label for this memory."},
-                "summary": {"type": "string", "description": "Prompt-ready memory text future Pal can read directly."},
-                "search_text": {"type": "string", "description": "Retrieval/source text with concrete details for indexing."},
-                "task_id": {
-                    "type": "string",
-                    "description": "Optional exact task/work order/run id; providing it binds the memory to task scope.",
-                },
-                "topics": {"type": "array", "items": {"type": "string"}, "description": "Optional short semantic topic tags."},
-                "star": MEMORY_STAR_SCHEMA,
-            },
-            "required": ["kind", "summary"],
-        },
+        InputModel=PluginsL3StubsL3ProviderCapabilityMixinWriteInput,
     )
     def commit_write(self, call: IntrospectionCall) -> IntrospectionResult:
         kind = str(call.args.get("kind") or "").strip()
@@ -295,24 +246,7 @@ class _L3ProviderCapabilityMixin:
         action_name="update",
         description="Update durable memory",
         metadata={"omit_family_in_canonical": True},
-        args_schema={
-            "type": "object",
-            "properties": {
-                "mem_ref": {
-                    "type": "string",
-                    "description": "Opaque memory ref returned by recall_memory, such as fact:fact_abc or case:case_abc. Copy the complete value including the fact: or case: prefix.",
-                },
-                "title": {"type": "string"},
-                "summary": {"type": "string"},
-                "search_text": {"type": "string"},
-                "topics": {"type": "array", "items": {"type": "string"}},
-                "star": {
-                    **MEMORY_STAR_SCHEMA,
-                    "description": "Optional full STAR replacement for a case memory. If provided, all four fields are required.",
-                },
-            },
-            "required": ["mem_ref"],
-        },
+        InputModel=PluginsL3StubsL3ProviderCapabilityMixinUpdateInput,
     )
     def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
@@ -359,17 +293,7 @@ class _L3ProviderCapabilityMixin:
             "Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record."
         ),
         metadata={"omit_family_in_canonical": True},
-        args_schema={
-            "type": "object",
-            "properties": {
-                "mem_ref": {
-                    "type": "string",
-                    "description": "Opaque memory ref returned by recall_memory, such as fact:fact_abc or case:case_abc. Copy the complete value including the fact: or case: prefix.",
-                },
-                "reason": {"type": "string", "description": "Brief reason for deletion"},
-            },
-            "required": ["mem_ref"],
-        },
+        InputModel=PluginsL3StubsL3ProviderCapabilityMixinDeleteInput,
     )
     def delete_memory(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.delete(
@@ -415,13 +339,7 @@ class _L3ProviderCapabilityMixin:
         action_name="refresh_indexes",
         description="Refresh provider indexes and embedding state",
         metadata={"omit_family_in_canonical": True},
-        args_schema={
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer"},
-                "retry_failed": {"type": "boolean"},
-            },
-        },
+        InputModel=PluginsL3StubsL3ProviderCapabilityMixinRefreshIndexesInput,
     )
     def refresh_indexes_action(self, call: IntrospectionCall) -> IntrospectionResult:
         limit = int(call.args.get("limit") or 8)

@@ -10,28 +10,6 @@ from pal.shared import RuntimeStatus, replace_internal_tool_names_in_value
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
-ADVISE_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "scenario": {"type": "string", "description": "Current situation Pal is facing; include the routing uncertainty or risky decision point."},
-        "intent": {"type": "string", "description": "Optional intended outcome."},
-        "turn_kind": {"type": "string", "description": "Turn type, such as chat, service, or minion."},
-        "constraints": {"type": "array", "items": {"type": "string"}},
-        "already_considered": {"type": "array", "items": {"type": "string"}},
-        "top_k": {"type": "integer", "minimum": 0, "default": 5},
-    },
-    "required": ["scenario"],
-}
-
-ADVISE_RESULT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "candidates": {"type": "array", "items": {"type": "object"}},
-        "fallback_used": {"type": "boolean"},
-        "router_error": {"type": "string"},
-    },
-}
-
 BEHAVIOR_ADVICE_DESCRIPTION = (
     "Ask Pal's behavior router which capabilities, skills, memory query hints, or route guidance may fit the current "
     "scenario. Behavior is Pal's condition-reflex layer: when situation X appears, consider route/action Y. "
@@ -62,93 +40,13 @@ BEHAVIOR_FORGET_DESCRIPTION = (
     "behavior guidance changed unless this tool confirms success."
 )
 
-AFFORDANCE_SUBMIT_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "scenario_text": {"type": "string", "description": "Scenario that should activate this affordance."},
-        "prompt_hint": {
-            "type": "string",
-            "description": "Short behavioral hint body Pal should remember. Do not repeat the title as a prefix.",
-        },
-        "title": {"type": "string", "description": "Optional short label for this behavior guidance."},
-        "activation_terms": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional concrete terms that help match this scenario later.",
-        },
-        "capability_refs": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional exact tool/capability names this behavior may route toward.",
-        },
-        "skill_refs": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional skill ids that may provide reference manuals for this scenario.",
-        },
-        "memory_query_hints": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Optional recall_memory query hints for facts/cases relevant to this behavior.",
-        },
-        "conflict_resolution": {
-            "type": "string",
-            "enum": ["ask", "merge", "overwrite", "skip"],
-            "default": "ask",
-            "description": (
-                "What to do when the same scenario already has behavior guidance. "
-                "Use ask by default so Pal asks the user whether to merge, overwrite, or leave it unchanged."
-            ),
-        },
-        "resident": {
-            "type": "boolean",
-            "default": False,
-            "description": (
-                "Set true only for behavior guidance that should be always visible in Pal's prompt. "
-                "Leave false for normal guidance that the behavior router recalls when the scenario matches."
-            ),
-        },
-    },
-    "required": ["scenario_text", "prompt_hint"],
-}
-
-AFFORDANCE_SUBMIT_RESULT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "affordance_id": {"type": "string"},
-        "learn_result": {"type": "string", "enum": ["learned", "merged", "overwritten", "skipped"]},
-        "source_kind": {"type": "string"},
-        "scenario_text": {"type": "string"},
-        "prompt_hint": {"type": "string"},
-        "reason": {"type": "string"},
-        "action_required": {"type": "string"},
-        "conflict_resolution_options": {"type": "array", "items": {"type": "string"}},
-        "candidates": {"type": "array", "items": {"type": "object"}},
-    },
-}
-
-
 @dataclass
 class BehaviorAdviceTool:
     service: BehaviorService
-    name: str = "op_behavior_advise"
-    display_name: str = "Behavior advice"
-    family: str = "behavior"
-    description: str = BEHAVIOR_ADVICE_DESCRIPTION
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("behavior", "affordance", "routing")
-    keywords: tuple[str, ...] = ("affordance", "skill", "capability", "scenario")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = ADVISE_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = ADVISE_RESULT_SCHEMA
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
-        structured = {"reason": "async_required", "tool": self.name}
+        structured = {"reason": "async_required", "tool": "advise_behavior"}
         return CapabilityResult(
             status=RuntimeStatus.INVALID,
             text="behavior_advise requires an active async turn context.",
@@ -173,20 +71,6 @@ class BehaviorAdviceTool:
 @dataclass
 class AffordanceSubmitTool:
     service: BehaviorService
-    name: str = "op_behavior_save"
-    display_name: str = "Learn behavior"
-    family: str = "behavior"
-    description: str = BEHAVIOR_LEARN_DESCRIPTION
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("behavior", "affordance", "learn")
-    keywords: tuple[str, ...] = ("affordance", "instructed", "learned", "behavior", "remember")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = AFFORDANCE_SUBMIT_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = AFFORDANCE_SUBMIT_RESULT_SCHEMA
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         return self._submit(args)
@@ -239,70 +123,9 @@ class AffordanceSubmitTool:
         )
 
 
-AFFORDANCE_UPDATE_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "affordance": {
-            "type": "string",
-            "description": "Original behavior guidance text to match. Pass the affordance text itself; Pal resolves the internal record.",
-        },
-        "affordance_id": {"type": "string", "description": "Legacy exact affordance_id. Prefer affordance text instead."},
-        "scenario_text": {
-            "type": "string",
-            "description": (
-                "Updated activation scenario text. Do not use this when replacing the visible behavior guidance "
-                "shown in <behavior_guidance>; use prompt_hint for that."
-            ),
-        },
-        "prompt_hint": {
-            "type": "string",
-            "description": (
-                "Updated visible behavior guidance body rendered in <behavior_guidance>. Use this when the user "
-                "asks to replace, edit, or update the guidance/original text. Do not repeat the title as a prefix."
-            ),
-        },
-        "title": {"type": "string"},
-        "activation_terms": {"type": "array", "items": {"type": "string"}},
-        "capability_refs": {"type": "array", "items": {"type": "string"}},
-        "skill_refs": {"type": "array", "items": {"type": "string"}},
-        "memory_query_hints": {"type": "array", "items": {"type": "string"}},
-        "resident": {
-            "type": "boolean",
-            "description": (
-                "Set true to make this guidance always visible in Pal's prompt, or false to keep it behavior-router recalled."
-            ),
-        },
-    },
-    "required": ["affordance"],
-}
-
-AFFORDANCE_UPDATE_RESULT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "affordance_id": {"type": "string"},
-        "affordance_hash": {"type": "string"},
-        "updated_fields": {"type": "array", "items": {"type": "string"}},
-    },
-}
-
-
 @dataclass
 class AffordanceUpdateTool:
     service: BehaviorService
-    name: str = "op_behavior_affordance_update"
-    display_name: str = "Update behavior"
-    family: str = "behavior"
-    description: str = BEHAVIOR_UPDATE_DESCRIPTION
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("behavior", "affordance", "update")
-    keywords: tuple[str, ...] = ("affordance", "update", "behavior", "edit")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = AFFORDANCE_UPDATE_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = AFFORDANCE_UPDATE_RESULT_SCHEMA
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         return self._update(args)
@@ -341,45 +164,9 @@ class AffordanceUpdateTool:
         )
 
 
-AFFORDANCE_DELETE_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "affordance": {
-            "type": "string",
-            "description": "Original behavior guidance text to match. Pass the affordance text itself; Pal resolves the internal record.",
-        },
-        "affordance_id": {"type": "string", "description": "Legacy exact affordance_id. Prefer affordance text instead."},
-    },
-    "required": ["affordance"],
-}
-
-AFFORDANCE_DELETE_RESULT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "affordance_id": {"type": "string"},
-        "affordance_hash": {"type": "string"},
-        "deleted": {"type": "boolean"},
-    },
-}
-
-
 @dataclass
 class AffordanceDeleteTool:
     service: BehaviorService
-    name: str = "op_behavior_affordance_delete"
-    display_name: str = "Forget behavior"
-    family: str = "behavior"
-    description: str = BEHAVIOR_FORGET_DESCRIPTION
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("behavior", "affordance", "forget")
-    keywords: tuple[str, ...] = ("affordance", "delete", "behavior", "forget")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = AFFORDANCE_DELETE_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = AFFORDANCE_DELETE_RESULT_SCHEMA
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         return self._delete(args)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import mimetypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,33 +13,6 @@ from pal.shared import RuntimeStatus
 
 @dataclass
 class ChannelSendAttachmentTool:
-    name: str = "op_channel_send_attachment"
-    display_name: str = "Send Attachment"
-    family: str = "channel"
-    description: str = "Send a local file attachment back to the channel that started the current turn."
-    tags: tuple[str, ...] = ("channel", "attachment", "file", "send")
-    keywords: tuple[str, ...] = ("send", "file", "attachment", "telegram", "document")
-    args_schema: dict[str, object] = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {
-            "path": {"type": "string", "description": "Local filesystem path to the file to send."},
-            "caption": {"type": "string", "description": "Optional caption to send with the attachment."},
-            "file_name": {"type": "string", "description": "Optional display filename."},
-            "mime_type": {"type": "string", "description": "Optional MIME type hint."},
-        },
-        "required": ["path"],
-    })
-    result_schema: dict[str, object] = field(default_factory=lambda: {
-        "type": "object",
-        "properties": {
-            "attachment_id": {"type": "string"},
-            "path": {"type": "string"},
-            "file_name": {"type": "string"},
-            "mime_type": {"type": "string"},
-            "reason": {"type": "string"},
-        },
-    })
-
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
         return CapabilityResult(

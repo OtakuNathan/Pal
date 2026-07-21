@@ -15,9 +15,10 @@ positives, deduplicate overlap, and state unreviewed surfaces or residual uncert
 If the request is review-only, produce the report and stop. Do not begin repair merely because a fix appears straightforward.
 """
 output_contract_fragment = """
-Write probes only through verification_scratch_write and execute them through the dedicated verification run tools. Record concrete defects with typed defect
-tools, review coverage/gaps through review_surface, and the final approved/changes_requested/blocked judgment through review_conclusion. Finish with review_submit
-with no arguments. The Manager compiles the report from the fenced Draft; never construct a nested report or expose internal identities.
+Write probes only through verification_scratch_write and execute them through the dedicated verification run tools. Complete the breadth-first audit first, then
+record concrete defects with add_finding using stable finding_key values and batch independent calls in one tool round. Record coverage/gaps through review_surface,
+and the final approved/changes_requested/blocked judgment through review_conclusion. Finish with review_submit with no arguments. approved requires an empty finding
+Draft. The Manager compiles the report from the fenced Draft; never write Markdown findings, construct a nested report, or expose internal identities.
 """
 capability_groups = ["software_verifier", "v2_standalone_review_builder"]
 

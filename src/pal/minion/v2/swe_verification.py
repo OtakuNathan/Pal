@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    MinionV2SweVerificationOpMinionVerificationPassInput,
+    MinionV2SweVerificationOpMinionVerificationRequestArchitectureRevisionInput,
+    MinionV2SweVerificationOpMinionVerificationRequestContractRevisionInput,
+    MinionV2SweVerificationOpMinionVerificationRequestDependencyRepairsInput,
+    MinionV2SweVerificationOpMinionVerificationRequestModuleRepairInput,
+    MinionV2SweVerificationOpMinionVerificationRequestRequirementsRevisionInput,
+    MinionV2SweVerificationOpMinionVerificationUnknownInput,
+)
+
 import hashlib
 import json
 import subprocess
@@ -8,6 +18,11 @@ from typing import Any, Mapping
 
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
+from pal.minion.v2.review_findings import (
+    ADD_FINDING_CAPABILITY,
+    empty_review_draft,
+    structured_findings,
+)
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
@@ -15,22 +30,6 @@ from pal.shared import RuntimeStatus
 
 
 _NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
-_FINDINGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "findings": {
-            "type": "string",
-            "minLength": 1,
-            "description": (
-                "One deduplicated Markdown report containing every material finding from this pass. "
-                "Use [BLOCKER], [MAJOR], or [MINOR] headings and include concrete behavior, reproducer, "
-                "expected result, actual result, impact, and useful semantic source/test locations."
-            ),
-        }
-    },
-    "required": ["findings"],
-    "additionalProperties": False,
-}
 _TARGETED_FINDINGS_SCHEMA = {
     "type": "object",
     "properties": {
@@ -41,9 +40,8 @@ _TARGETED_FINDINGS_SCHEMA = {
             "uniqueItems": True,
             "description": "Semantic module names from the bound contract dependency or scenario closure.",
         },
-        "findings": dict(_FINDINGS_SCHEMA["properties"]["findings"]),
     },
-    "required": ["modules", "findings"],
+    "required": ["modules"],
     "additionalProperties": False,
 }
 _UNKNOWN_SCHEMA = {
@@ -61,6 +59,7 @@ _UNKNOWN_SCHEMA = {
 
 
 SWE_VERIFICATION_CAPABILITIES = (
+    ADD_FINDING_CAPABILITY,
     "op_minion_verification_pass",
     "op_minion_verification_request_module_repair",
     "op_minion_verification_request_dependency_repairs",
@@ -78,43 +77,45 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "Submit PASS only after historical verifier regressions pass and you have added or materially strengthened "
             "adversarial tests for this exact candidate. The Manager validates test-scope changes and recorded tool evidence."
         ),
-        "parameters_schema": _NO_ARGS_SCHEMA,
+        "InputModel": MinionV2SweVerificationOpMinionVerificationPassInput,
     },
     "op_minion_verification_request_module_repair": {
         "name": "op_verification_request_module_repair",
-        "description": "Submit all reproduced defects owned by the current implementation module as one Markdown report.",
-        "parameters_schema": _FINDINGS_SCHEMA,
+        "description": "Submit module repair after every reproduced defect has been recorded with add_finding. Takes no arguments.",
+        "InputModel": MinionV2SweVerificationOpMinionVerificationRequestModuleRepairInput,
     },
     "op_minion_verification_request_dependency_repairs": {
         "name": "op_verification_request_dependency_repairs",
         "description": (
-            "Submit reproduced defects owned by one or more named upstream modules. Names must come from the bound dependency closure."
+            "Submit reproduced defects owned by one or more named upstream modules after recording each with add_finding. "
+            "Names must come from the bound dependency closure."
         ),
-        "parameters_schema": _TARGETED_FINDINGS_SCHEMA,
+        "InputModel": MinionV2SweVerificationOpMinionVerificationRequestDependencyRepairsInput,
     },
     "op_minion_verification_request_contract_revision": {
         "name": "op_verification_request_contract_revision",
-        "description": "Submit a frozen public contract or lifecycle/state-model defect that implementation repair cannot legally fix.",
-        "parameters_schema": _FINDINGS_SCHEMA,
+        "description": "Submit a frozen public contract or lifecycle/state-model defect already recorded with add_finding.",
+        "InputModel": MinionV2SweVerificationOpMinionVerificationRequestContractRevisionInput,
     },
     "op_minion_verification_request_architecture_revision": {
         "name": "op_verification_request_architecture_revision",
-        "description": "Submit a module-boundary, ownership, hidden-coupling, contract-dependency, or scenario-topology defect requiring architecture revision.",
-        "parameters_schema": _FINDINGS_SCHEMA,
+        "description": "Submit an add_finding-recorded module-boundary, ownership, hidden-coupling, dependency, or scenario-topology defect requiring architecture revision.",
+        "InputModel": MinionV2SweVerificationOpMinionVerificationRequestArchitectureRevisionInput,
     },
     "op_minion_verification_request_requirements_revision": {
         "name": "op_verification_request_requirements_revision",
         "description": (
-            "Submit a conflict or material omission in the original Requirements. Do not author replacement requirement records here."
+            "Submit a conflict or material omission in the original Requirements after recording it with add_finding. "
+            "Do not author replacement requirement records here."
         ),
-        "parameters_schema": _FINDINGS_SCHEMA,
+        "InputModel": MinionV2SweVerificationOpMinionVerificationRequestRequirementsRevisionInput,
     },
     "op_minion_verification_unknown": {
         "name": "op_verification_unknown",
         "description": (
             "Submit UNKNOWN only when a required platform or environment cannot be exercised. Manager policy decides whether it blocks."
         ),
-        "parameters_schema": _UNKNOWN_SCHEMA,
+        "InputModel": MinionV2SweVerificationOpMinionVerificationUnknownInput,
     },
 }
 
@@ -159,6 +160,13 @@ def compile_swe_verification_tool_contract(work_view: Mapping[str, Any]) -> dict
     )
     dependency_targets = sorted(set(dependencies + accepted_modules) - {module_name})
     descriptions: dict[str, str] = {}
+    descriptions[ADD_FINDING_CAPABILITY] = (
+        "Record or replace one evidence-backed verifier finding. Use module_defect for the current implementation, "
+        "dependency_defect for an upstream module, contract_defect for a frozen public contract, "
+        "architecture_defect for ownership/topology, requirements_defect for contradictory task sources, and "
+        "integration_defect for cross-module product behavior. Finish the breadth-first audit first and batch "
+        "independent add_finding calls in one tool round when possible."
+    )
     if dependency_targets:
         descriptions["op_minion_verification_request_dependency_repairs"] = (
             "Submit all reproduced upstream defects in one call. Allowed semantic module names: "
@@ -180,9 +188,15 @@ def swe_verification_tool_result(
     try:
         outcome = _OUTCOME_BY_CAPABILITY[call.name]
         args = dict(call.args or {})
-        findings = str(args.get("findings") or "").strip()
         reason = str(args.get("reason") or "").strip()
         target_modules = _validate_target_modules(workspace, args.get("modules") or [])
+        context = SubmissionDraftContext.from_workspace(
+            workspace,
+            draft_kind="verification",
+        )
+        store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
+        snapshot = store.read(context, seed=empty_review_draft())
+        findings = structured_findings(snapshot.payload)
         errors = _submission_errors(
             outcome=outcome,
             findings=findings,
@@ -199,20 +213,14 @@ def swe_verification_tool_result(
         ]
         changed_paths = _changed_paths(workspace)
         submission = {
-            "schema_version": "1",
+            "schema_version": "2",
             "outcome": outcome,
-            **({"findings_markdown": findings} if findings else {}),
+            "findings": findings,
             **({"reason": reason} if reason else {}),
             **({"target_modules": target_modules} if target_modules else {}),
             "changed_test_paths": changed_paths,
             "tool_receipts": receipts,
         }
-        context = SubmissionDraftContext.from_workspace(
-            workspace,
-            draft_kind="verification",
-        )
-        store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
-        snapshot = store.read(context, seed={})
         submission_ref: dict[str, Any]
         if store.uses_worker_gateway:
             receipt = store.mark_submitted(
@@ -287,7 +295,7 @@ def swe_verification_tool_result(
 def _submission_errors(
     *,
     outcome: str,
-    findings: str,
+    findings: list[Mapping[str, Any]],
     reason: str,
     workspace: Mapping[str, Any],
 ) -> list[str]:
@@ -309,7 +317,9 @@ def _submission_errors(
     if outcome == "pass" and not any(bool(item.get("ok")) for item in receipts):
         errors.append("PASS requires at least one successful recorded verification tool result")
     if outcome not in {"pass", "unknown"} and not findings:
-        errors.append("repair or revision outcomes require Markdown findings")
+        errors.append("repair or revision outcomes require at least one add_finding call")
+    if outcome in {"pass", "unknown"} and findings:
+        errors.append(f"{outcome.upper()} requires an empty finding Draft")
     if outcome == "unknown" and not reason:
         errors.append("UNKNOWN requires an environmental reason and follow-up verification plan")
     changed_paths = _changed_paths(workspace)

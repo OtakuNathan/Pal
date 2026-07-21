@@ -1,83 +1,12 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from pal.artifact.service import ArtifactManager
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
 from pal.shared.result_rendering import render_titled_structured_for_llm
-
-
-ARTIFACT_ID_SCHEMA = {"type": "string", "description": "Artifact id from Available Artifacts or artifact_search."}
-_OBJECT_RESULT_SCHEMA = {"type": "object"}
-
-
-ARTIFACT_TOOL_ARGS_SCHEMAS: dict[str, dict[str, Any]] = {
-    "op_artifact_list": {
-        "type": "object",
-        "properties": {"query_context": {"type": "string"}},
-    },
-    "op_artifact_info": {
-        "type": "object",
-        "properties": {"artifact_id": ARTIFACT_ID_SCHEMA},
-        "required": ["artifact_id"],
-    },
-    "op_artifact_read": {
-        "type": "object",
-        "properties": {
-            "artifact_id": ARTIFACT_ID_SCHEMA,
-            "representation": {
-                "type": "string",
-                "enum": ["auto", "text", "page_text", "chunk_text", "transcript", "metadata"],
-                "default": "auto",
-                "description": "Text-like representation only. Do not use this to inspect visual image pixels.",
-            },
-            "page": {"type": "integer"},
-            "chunk": {"type": "integer"},
-            "max_chars": {"type": "integer", "default": 12000},
-        },
-        "required": ["artifact_id"],
-    },
-    "op_artifact_search": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string"},
-            "kind": {"type": "string"},
-            "time_hint": {"type": "string", "default": "recent"},
-            "limit": {"type": "integer", "default": 5},
-        },
-    },
-    "op_artifact_select": {
-        "type": "object",
-        "properties": {"artifact_id": ARTIFACT_ID_SCHEMA},
-        "required": ["artifact_id"],
-    },
-    "op_artifact_grep": {
-        "type": "object",
-        "properties": {
-            "artifact_id": ARTIFACT_ID_SCHEMA,
-            "query": {"type": "string"},
-            "top_k": {"type": "integer", "default": 5},
-            "max_chars_per_result": {"type": "integer", "default": 2000},
-        },
-        "required": ["artifact_id", "query"],
-    },
-    "op_artifact_transcribe": {
-        "type": "object",
-        "properties": {"artifact_id": ARTIFACT_ID_SCHEMA},
-        "required": ["artifact_id"],
-    },
-}
-
-
-def artifact_args_schema(tool_name: str) -> dict[str, Any]:
-    return deepcopy(ARTIFACT_TOOL_ARGS_SCHEMAS.get(tool_name) or {"type": "object", "properties": {}})
-
-
-def artifact_result_schema(_: str) -> dict[str, Any]:
-    return deepcopy(_OBJECT_RESULT_SCHEMA)
 
 
 def _scope_from_runtime(runtime: Any, turn_id: str | None) -> str:
@@ -103,14 +32,6 @@ def _result(status: str, title: str, structured: dict[str, Any], text: str = "")
 @dataclass
 class ArtifactListTool:
     service: ArtifactManager
-    name: str = "op_artifact_list"
-    display_name: str = "List Artifacts"
-    family: str = "artifact"
-    description: str = "List recent tagged conversation artifacts visible to the current turn. Use this when the user refers to a prior attachment but no artifact is present in the prompt."
-    tags: tuple[str, ...] = ("artifact", "attachment", "list")
-    keywords: tuple[str, ...] = ("artifact", "attachment", "file", "recent")
-    args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_list"))
-    result_schema: dict[str, Any] = field(default_factory=lambda: artifact_result_schema("op_artifact_list"))
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
@@ -129,14 +50,6 @@ class ArtifactListTool:
 @dataclass
 class ArtifactInfoTool:
     service: ArtifactManager
-    name: str = "op_artifact_info"
-    display_name: str = "Artifact Info"
-    family: str = "artifact"
-    description: str = "Inspect metadata and available representations for one artifact id."
-    tags: tuple[str, ...] = ("artifact", "attachment", "info")
-    keywords: tuple[str, ...] = ("artifact", "metadata", "representation")
-    args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_info"))
-    result_schema: dict[str, Any] = field(default_factory=lambda: artifact_result_schema("op_artifact_info"))
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
@@ -154,14 +67,6 @@ class ArtifactInfoTool:
 @dataclass
 class ArtifactReadTool:
     service: ArtifactManager
-    name: str = "op_artifact_read"
-    display_name: str = "Read Artifact"
-    family: str = "artifact"
-    description: str = "Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels; use inline vision input for image contents."
-    tags: tuple[str, ...] = ("artifact", "attachment", "read")
-    keywords: tuple[str, ...] = ("artifact", "read", "pdf", "text", "transcript")
-    args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_read"))
-    result_schema: dict[str, Any] = field(default_factory=lambda: artifact_result_schema("op_artifact_read"))
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
@@ -187,14 +92,6 @@ class ArtifactReadTool:
 @dataclass
 class ArtifactSearchTool:
     service: ArtifactManager
-    name: str = "op_artifact_search"
-    display_name: str = "Search Artifacts"
-    family: str = "artifact"
-    description: str = "Search recent tagged conversation artifacts by filename, kind, caption, summary, or time hint. Use this instead of assuming a prior image/document is attached."
-    tags: tuple[str, ...] = ("artifact", "attachment", "search")
-    keywords: tuple[str, ...] = ("artifact", "search", "recent", "file")
-    args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_search"))
-    result_schema: dict[str, Any] = field(default_factory=lambda: artifact_result_schema("op_artifact_search"))
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
@@ -219,14 +116,6 @@ class ArtifactSearchTool:
 @dataclass
 class ArtifactSelectTool:
     service: ArtifactManager
-    name: str = "op_artifact_select"
-    display_name: str = "Select Artifact"
-    family: str = "artifact"
-    description: str = "Mark an artifact search result as selected and refresh its short-lived hot state."
-    tags: tuple[str, ...] = ("artifact", "select", "ttl")
-    keywords: tuple[str, ...] = ("artifact", "select", "refresh")
-    args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_select"))
-    result_schema: dict[str, Any] = field(default_factory=lambda: artifact_result_schema("op_artifact_select"))
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
@@ -244,17 +133,6 @@ class ArtifactSelectTool:
 @dataclass
 class ArtifactContentSearchTool:
     service: ArtifactManager
-    name: str = "op_artifact_grep"
-    display_name: str = "Grep Artifact"
-    family: str = "artifact"
-    description: str = (
-        "Search inside existing text representations of a known artifact, such as text files, PDF page text/chunks, "
-        "or an already-created transcript. Does not inspect image pixels or create transcripts from audio."
-    )
-    tags: tuple[str, ...] = ("artifact", "content", "search")
-    keywords: tuple[str, ...] = ("artifact", "content", "pdf", "transcript", "search")
-    args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_grep"))
-    result_schema: dict[str, Any] = field(default_factory=lambda: artifact_result_schema("op_artifact_grep"))
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
@@ -279,14 +157,6 @@ class ArtifactContentSearchTool:
 @dataclass
 class ArtifactTranscribeTool:
     service: ArtifactManager
-    name: str = "op_artifact_transcribe"
-    display_name: str = "Transcribe Artifact"
-    family: str = "artifact"
-    description: str = "Request transcription for an audio artifact. V1 returns needs_transcription when no ASR provider is registered."
-    tags: tuple[str, ...] = ("artifact", "audio", "transcribe")
-    keywords: tuple[str, ...] = ("artifact", "audio", "voice", "transcript")
-    args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_transcribe"))
-    result_schema: dict[str, Any] = field(default_factory=lambda: artifact_result_schema("op_artifact_transcribe"))
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args

@@ -12,6 +12,7 @@ from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
 from pal.minion.v2.contract_builder import (
+    ARCHITECT_BUILDER_CAPABILITIES,
     ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
     CONTRACT_BUILDER_CAPABILITIES,
     CONTRACT_SKETCH_BUILDER_CAPABILITIES,
@@ -26,6 +27,7 @@ from pal.minion.v2.skeleton_builder import (
     SKELETON_REVIEW_CAPABILITIES,
     is_skeleton_builder_capability,
 )
+from pal.minion.v2.review_findings import ADD_FINDING_CAPABILITY
 from pal.minion.v2.swe_verification import (
     SWE_VERIFICATION_CAPABILITIES,
     is_swe_verification_capability,
@@ -371,10 +373,10 @@ CORE_MINION_CAPABILITIES = (
 
 
 WORKSPACE_READ_CAPABILITIES = (
-    "op_tree",
     "op_search",
     "op_file_read",
     "op_git",
+    "op_exec_shell",
 )
 
 
@@ -383,7 +385,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "tool_discovery": ("op_tool_search", "op_tool_read"),
     "capability_call": ("op_tool_call",),
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
-    "v2_contract_sketch_builder": CONTRACT_SKETCH_BUILDER_CAPABILITIES,
+    "v2_contract_sketch_builder": ARCHITECT_BUILDER_CAPABILITIES,
     "v2_architecture_review_builder": ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
     "v2_architecture_skeleton_builder": ARCHITECTURE_SKELETON_CAPABILITIES,
     "v2_skeleton_review_builder": SKELETON_REVIEW_CAPABILITIES,
@@ -391,6 +393,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "v2_verification_builder": VERIFICATION_BUILDER_CAPABILITIES,
     "v2_swe_verification": (
         *SWE_VERIFICATION_CAPABILITIES,
+        ADD_FINDING_CAPABILITY,
         "op_minion_verification_scratch_write",
     ),
     "v2_standalone_review_builder": STANDALONE_REVIEW_BUILDER_CAPABILITIES,
@@ -494,6 +497,7 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         *SKELETON_BUILDER_CAPABILITIES,
         *VERIFICATION_TOOL_CAPABILITIES,
         *SWE_VERIFICATION_CAPABILITIES,
+        ADD_FINDING_CAPABILITY,
     }
 )
 

@@ -15,6 +15,7 @@ from pal.minion.v2.contracts import ActionEnvelope, AggregateType
 from pal.minion.v2.execution import DagScheduler, ExecutionCompiler, UnitWorkViewBuilder
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_SKELETON_ARTIFACT,
@@ -941,7 +942,14 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
 
     def test_skeleton_builder_schema_contains_semantics_not_manager_identity(self) -> None:
-        encoded = json.dumps(SKELETON_BUILDER_TOOL_SPECS, sort_keys=True)
+        projected_specs = {
+            canonical_path: {
+                **{key: value for key, value in spec.items() if key != "InputModel"},
+                "input_schema": spec["InputModel"].model_json_schema(mode="validation"),
+            }
+            for canonical_path, spec in SKELETON_BUILDER_TOOL_SPECS.items()
+        }
+        encoded = json.dumps(projected_specs, sort_keys=True)
         self.assertIn("contract_paths", encoded)
         self.assertIn("op_minion_architecture_module_upsert", encoded)
         self.assertIn("op_minion_architecture_submit", encoded)
@@ -1025,7 +1033,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             (Path(workspace["artifact_stage_dir"]) / "architecture_submission.json").exists()
         )
 
-    def test_architecture_review_fail_keeps_semantic_locations_in_markdown(self) -> None:
+    def test_architecture_review_fail_keeps_structured_locations(self) -> None:
         requirements_path = self.runtime_root / "review-requirements.json"
         architecture_path = self.runtime_root / "review-architecture.json"
         requirements_path.write_text(json.dumps(self.requirements), encoding="utf-8")
@@ -1042,25 +1050,28 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "artifact_dir": str(self.runtime_root / "review-artifacts"),
             "artifact_stage_dir": str(self.runtime_root / "review-stage"),
         }, role="architecture_reviewer")
-        result = self._builder_call(
+        finding = self._builder_call(
             workspace,
-            "op_minion_architecture_review_fail",
+            ADD_FINDING_CAPABILITY,
             {
-                "findings": (
-                    "## [MAJOR] invented_router contract is incomplete\n\n"
-                    "Requirement: Route matching must be deterministic.\n\n"
-                    "Evidence: `README.md` does not expose the required consumer contract."
-                ),
+                "finding_key": "invented_router_contract_incomplete",
+                "finding_kind": "contract_defect",
+                "priority": "p1",
+                "summary": "invented_router does not expose the required deterministic consumer contract.",
+                "locations": [{"scope": "workspace", "file": "README.md", "line": 1}],
             },
         )
+        self.assertTrue(finding.ok, finding.text)
+        result = self._builder_call(workspace, "op_minion_architecture_review_fail")
         self.assertTrue(result.ok, result.text)
         artifact = json.loads(
             (Path(workspace["artifact_stage_dir"]) / "architecture_review.json").read_text(
                 encoding="utf-8"
             )
         )
-        self.assertIn("invented_router", artifact["findings_markdown"])
-        self.assertNotIn("findings", artifact)
+        self.assertEqual(artifact["findings"][0]["finding_key"], "invented_router_contract_incomplete")
+        self.assertEqual(artifact["findings"][0]["locations"][0]["file"], "README.md")
+        self.assertNotIn("findings_markdown", artifact)
 
     def test_architecture_review_finding_accepts_semantic_task_source_citation(self) -> None:
         requirements_path = self.runtime_root / "review-requirements.json"
@@ -1071,17 +1082,19 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "artifact_dir": str(self.runtime_root / "review-artifacts"),
             "artifact_stage_dir": str(self.runtime_root / "review-stage"),
         }, role="architecture_reviewer")
-        result = self._builder_call(
+        finding = self._builder_call(
             workspace,
-            "op_minion_architecture_review_fail",
+            ADD_FINDING_CAPABILITY,
             {
-                "findings": (
-                    "## [BLOCKER] Requirement narrowed\n\n"
-                    "The binding source `sources/TASK.md` requires deterministic routing, "
-                    "but the Skeleton omits that behavior."
-                ),
+                "finding_key": "deterministic_routing_omitted",
+                "finding_kind": "requirements_defect",
+                "priority": "p0",
+                "summary": "The Skeleton omits deterministic routing required by the task source.",
+                "locations": [{"scope": "task_source", "file": "sources/TASK.md", "line": 3}],
             },
         )
+        self.assertTrue(finding.ok, finding.llm_text)
+        result = self._builder_call(workspace, "op_minion_architecture_review_fail")
         self.assertTrue(result.ok, result.llm_text)
         artifact = json.loads(
             (Path(workspace["artifact_stage_dir"]) / "architecture_review.json").read_text(
@@ -1089,7 +1102,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             )
         )
         self.assertEqual(artifact["verdict"], "FAIL")
-        self.assertIn("sources/TASK.md", artifact["findings_markdown"])
+        self.assertEqual(artifact["findings"][0]["locations"][0]["file"], "sources/TASK.md")
 
     def test_architecture_review_submit_needs_no_positive_audit_bookkeeping(self) -> None:
         workspace = self._review_builder_workspace()
@@ -1108,17 +1121,19 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_architecture_review_finding_compiles_fail(self) -> None:
         workspace = self._review_builder_workspace()
-        submitted = self._builder_call(
+        recorded = self._builder_call(
             workspace,
-            "op_minion_architecture_review_fail",
+            ADD_FINDING_CAPABILITY,
             {
-                "findings": (
-                    "## [MAJOR] router result flow is missing\n\n"
-                    "Requirement: Route matching must be deterministic.\n\n"
-                    "Evidence: `include/router.h` does not expose the consumer-visible result flow."
-                ),
+                "finding_key": "router_result_flow_missing",
+                "finding_kind": "contract_defect",
+                "priority": "p1",
+                "summary": "router does not expose the consumer-visible result flow.",
+                "locations": [{"scope": "workspace", "file": "include/router.h", "line": 1}],
             },
         )
+        self.assertTrue(recorded.ok, recorded.llm_text)
+        submitted = self._builder_call(workspace, "op_minion_architecture_review_fail")
         self.assertTrue(submitted.ok, submitted.llm_text)
         artifact = json.loads(
             (Path(workspace["artifact_stage_dir"]) / "architecture_review.json").read_text(
@@ -1126,7 +1141,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             )
         )
         self.assertEqual(artifact["verdict"], "FAIL")
-        self.assertIn("router", artifact["findings_markdown"])
+        self.assertEqual(artifact["findings"][0]["finding_key"], "router_result_flow_missing")
 
     def test_architecture_review_tool_contract_binds_only_module_catalog(self) -> None:
         contract = compile_architecture_review_invocation_tool_contract(
@@ -2208,12 +2223,15 @@ class MinionV2SkeletonTests(unittest.TestCase):
         produced: list[dict[str, object]] | None = None,
     ):
         self.builder_call_index += 1
+        call = CanonicalToolCall(
+            name=name,
+            args=args or {},
+            call_id=f"builder-call-{self.builder_call_index}",
+        )
+        if name == ADD_FINDING_CAPABILITY:
+            return add_finding_tool_result(call, workspace)
         return skeleton_builder_tool_result(
-            CanonicalToolCall(
-                name=name,
-                args=args or {},
-                call_id=f"builder-call-{self.builder_call_index}",
-            ),
+            call,
             workspace,
             produced if produced is not None else [],
         )

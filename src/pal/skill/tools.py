@@ -10,89 +10,6 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.skill.service import SkillService
 
 
-SKILL_ASSIMILATE_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "source_text": {"type": "string", "description": "Text or SKILL.md content to turn into an optional Pal operation manual candidate."},
-        "source_format": {"type": "string", "enum": ["plain_text", "skill_md"], "default": "plain_text"},
-        "intent": {"type": "string", "enum": ["learn", "summarize", "sanitize"], "default": "learn"},
-        "desired_skill_id": {"type": "string"},
-        "source_refs": {"type": "array", "items": {"type": "string"}},
-        "source_metadata": {"type": "object"},
-    },
-    "required": ["source_text"],
-}
-
-SKILL_COMMIT_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "candidate_id": {
-            "type": "string",
-            "description": "Pending skill candidate id to save. Prefer this when the user provides candidate_id; no candidate object is needed.",
-        },
-        "candidate": {
-            "type": "object",
-            "description": "Inline candidate object. Use only when no candidate_id is available.",
-        },
-        "replace": {"type": "boolean", "default": False},
-    },
-}
-
-SKILL_UPDATE_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "skill_id": {"type": "string"},
-        "patch": {"type": "object"},
-    },
-    "required": ["skill_id", "patch"],
-}
-
-SKILL_DISABLE_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {"skill_id": {"type": "string"}},
-    "required": ["skill_id"],
-}
-
-SKILL_INJECT_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {"skill_id": {"type": "string", "description": "Skill id to inject."}},
-    "required": ["skill_id"],
-}
-
-SKILL_INJECT_RESULT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "skill_id": {"type": "string"},
-        "title": {"type": "string"},
-        "summary": {"type": "string"},
-        "use_when": {"type": "string"},
-        "avoid_when": {"type": "string"},
-        "applicability_star": {"type": "object"},
-        "manual_text": {"type": "string"},
-        "capability_refs": {"type": "array", "items": {"type": "string"}},
-    },
-}
-
-SKILL_SEARCH_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "query": {"type": "string", "description": "Current scenario, user request, or explicit skill name to match."},
-        "status": {"type": "string", "default": "active"},
-        "top_k": {"type": "integer", "minimum": 1, "default": 5},
-    },
-    "required": ["query"],
-}
-
-SKILL_READ_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "skill_id": {"type": "string"},
-        "include_manual": {"type": "boolean", "default": False},
-    },
-    "required": ["skill_id"],
-}
-
-
 def skill_summary_dict(skill) -> dict[str, Any]:
     return {
         "skill_id": skill.skill_id,
@@ -130,27 +47,10 @@ def skill_read_dict(skill, *, include_manual: bool = False) -> dict[str, Any]:
 @dataclass
 class SkillAssimilateTool:
     service: SkillService
-    name: str = "op_skill_assimilate"
-    display_name: str = "Assimilate skill"
-    family: str = "skill"
-    description: str = (
-        "Create a sanitized Pal skill candidate from plain text or SKILL.md content. Use for explicit learn, summarize, "
-        "sanitize, import, or reusable-procedure requests. Does not commit or persist the skill."
-    )
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("skill", "learn", "sanitize")
-    keywords: tuple[str, ...] = ("skill", "learn", "summarize", "sanitize")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = SKILL_ASSIMILATE_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = {"type": "object"}
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
-        structured = {"reason": "async_required", "tool": self.name}
+        structured = {"reason": "async_required", "tool": "skill_assimilate"}
         return CapabilityResult(
             status=RuntimeStatus.INVALID,
             text="skill_assimilate requires an active async turn context.",
@@ -182,23 +82,6 @@ class SkillAssimilateTool:
 @dataclass
 class SkillCommitTool:
     service: SkillService
-    name: str = "op_skill_commit"
-    display_name: str = "Commit skill"
-    family: str = "skill"
-    description: str = (
-        "Commit a sanitized skill candidate and its thin affordance. Use only when the user explicitly asks to save or "
-        "commit a candidate; do not commit for candidate, draft, summary, or review-only requests."
-    )
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("skill", "write")
-    keywords: tuple[str, ...] = ("skill", "commit", "save")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = SKILL_COMMIT_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = {"type": "object"}
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         try:
@@ -230,20 +113,6 @@ class SkillCommitTool:
 @dataclass
 class SkillUpdateTool:
     service: SkillService
-    name: str = "op_skill_update"
-    display_name: str = "Update skill"
-    family: str = "skill"
-    description: str = "Update a normalized skill and refresh its thin affordance."
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("skill", "write")
-    keywords: tuple[str, ...] = ("skill", "update", "edit")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = SKILL_UPDATE_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = {"type": "object"}
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         try:
@@ -268,20 +137,6 @@ class SkillUpdateTool:
 @dataclass
 class SkillDisableTool:
     service: SkillService
-    name: str = "op_skill_disable"
-    display_name: str = "Disable skill"
-    family: str = "skill"
-    description: str = "Disable a normalized skill without deleting its history."
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("skill", "write")
-    keywords: tuple[str, ...] = ("skill", "disable")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = SKILL_DISABLE_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = {"type": "object"}
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         skill_id = str(args.get("skill_id") or "").strip()
@@ -306,25 +161,6 @@ class SkillDisableTool:
 @dataclass
 class SkillSearchTool:
     service: SkillService
-    name: str = "op_skill_search"
-    display_name: str = "Search skills"
-    family: str = "skill"
-    description: str = (
-        "Search optional Pal skill manuals for an explicit named skill request or a reusable workflow, review method, "
-        "debugging method, platform procedure, or task playbook. Skills are reference manuals, not a replacement for "
-        "minion/profile delegation. Does not return manuals; call skill_inject next to use a matched active skill. "
-        "Advisor skill refs are candidates, not automatic injections."
-    )
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("skill", "search")
-    keywords: tuple[str, ...] = ("skill", "search", "find", "match")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = SKILL_SEARCH_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = {"type": "object"}
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         query = str(args.get("query") or "").strip().lower()
@@ -381,20 +217,6 @@ class SkillSearchTool:
 @dataclass
 class SkillReadTool:
     service: SkillService
-    name: str = "op_skill_read"
-    display_name: str = "Read skill"
-    family: str = "skill"
-    description: str = "Read normalized Pal skill manual metadata, optionally including manual text."
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("skill", "read")
-    keywords: tuple[str, ...] = ("skill", "read", "inspect")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = SKILL_READ_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = {"type": "object"}
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         skill_id = str(args.get("skill_id") or "").strip()
@@ -420,23 +242,6 @@ class SkillReadTool:
 @dataclass
 class SkillInjectTool:
     service: SkillService
-    name: str = "op_skill_inject"
-    display_name: str = "Skill injection"
-    family: str = "skill"
-    description: str = (
-        "Inject a registered active skill manual into the current tool observation as reference material. "
-        "Search alone is not using a skill; call this before applying a matched active skill to the task."
-    )
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("skill",)
-    keywords: tuple[str, ...] = ("skill", "manual", "procedure")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = SKILL_INJECT_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = SKILL_INJECT_RESULT_SCHEMA
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         return self._inject(args)

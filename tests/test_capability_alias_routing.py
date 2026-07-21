@@ -3,62 +3,79 @@ from __future__ import annotations
 import unittest
 
 from pal.core import PalCore as _PalCoreBootstrap
-from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
+from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
-from pal.execution.tool_facade import CompleteResult, RejectedResult
+from pal.execution.tool_facade import (
+    CompleteResult,
+    EffectKind,
+    Idempotency,
+    InvocationMode,
+    PagingMode,
+    RejectedResult,
+    RetryPolicy,
+    StrictToolModel,
+    Tool,
+    ToolExecutionSemantics,
+    ToolGuidance,
+)
 from pal.llm.contracts import CanonicalToolCall
 from pal.shared import RuntimeStatus, SINGLETON_TARGET
 
 
-def echo_descriptor(
+class EchoInput(StrictToolModel):
+    value: str
+
+
+class EchoOutput(StrictToolModel):
+    echo: str
+
+
+def echo_tool(
     *,
-    name: str = "echo",
+    alias: str = "echo",
     canonical_path: str = "op_test_echo",
     target_id: str | None = None,
-    aliases: tuple[str, ...] = (),
-    metadata: dict[str, object] | None = None,
-) -> CapabilityDescriptor:
-    return CapabilityDescriptor(
-        name=name,
+) -> Tool:
+    return Tool(
+        alias=alias,
         canonical_path=canonical_path,
         family="test",
-        description="Echo test input",
         source="test",
-        target_id=target_id,
-        aliases=aliases,
-        parameters_schema={
-            "type": "object",
-            "properties": {"value": {"type": "string"}},
-            "required": ["value"],
-            "additionalProperties": False,
-        },
-        result_schema={
-            "type": "object",
-            "properties": {"echo": {"type": "string"}},
-            "required": ["echo"],
-            "additionalProperties": False,
-        },
-        metadata=dict(metadata or {}),
+        target_id=target_id or SINGLETON_TARGET,
+        InputModel=EchoInput,
+        OutputModel=EchoOutput,
+        guidance=ToolGuidance(
+            purpose="Echo test input",
+            use_when="testing exact alias routing",
+            do_not_use_when="outside this test",
+            failure_next_steps="correct the alias or input",
+        ),
+        execution=ToolExecutionSemantics(
+            invocation_mode=InvocationMode.INDIRECT,
+            effect_kind=EffectKind.NONE,
+            idempotency=Idempotency.IDEMPOTENT,
+            retry_policy=RetryPolicy.AUTOMATIC,
+            paging=PagingMode.NEVER,
+        ),
+        search_text="echo exact alias routing test",
+        handler=echo_handler,
+        examples=({"value": "test"},),
     )
 
 
-def echo_binding(call: CapabilityCall) -> CapabilityResult:
-    value = str(call.args.get("value") or "")
+def echo_handler(value: EchoInput) -> CapabilityResult:
     return CapabilityResult(
         status=RuntimeStatus.OK,
-        text=value,
-        structured={"echo": value},
-        llm_text=value,
+        text=value.value,
+        structured={"echo": value.value},
+        llm_text=value.value,
     )
 
 
 class CapabilityAliasRoutingTests(unittest.TestCase):
     def test_only_exact_alias_is_public_and_canonical_stays_manager_internal(self) -> None:
         runtime = ExecutionRuntime()
-        runtime.register_capability(
-            echo_descriptor(aliases=("repeat",)),
-            echo_binding,
-        )
+        runtime.register_tool(echo_tool())
         try:
             direct = runtime.execute_tool(CanonicalToolCall(name="echo", args={"value": "direct"}))
             exact = runtime.invoke_indirect_tool(CanonicalToolCall(name="echo", args={"value": "alias"}))
@@ -83,10 +100,10 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
 
     def test_unregister_replaces_generation_without_mutating_old_snapshot(self) -> None:
         runtime = ExecutionRuntime()
-        runtime.register_capability(echo_descriptor(), echo_binding)
+        runtime.register_tool(echo_tool())
         old_generation = runtime.registry_generation
         try:
-            runtime.unregister_capability("echo")
+            runtime.unregister_tool("echo")
 
             self.assertIsNot(runtime.registry_generation, old_generation)
             self.assertIn("echo", old_generation.indirect_aliases)
@@ -99,19 +116,15 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
 
     def test_generation_wide_alias_conflict_is_atomic(self) -> None:
         runtime = ExecutionRuntime()
-        runtime.register_capability(
-            echo_descriptor(name="first", metadata={"alias": "shared"}),
-            echo_binding,
-        )
+        runtime.register_tool(echo_tool(alias="shared"))
         before = runtime.registry_generation
-        conflicting = echo_descriptor(
-            name="second",
+        conflicting = echo_tool(
+            alias="shared",
             canonical_path="op_test_second",
-            metadata={"alias": "shared"},
         )
         try:
             with self.assertRaisesRegex(ValueError, "tool alias conflict"):
-                runtime.register_capability(conflicting, echo_binding)
+                runtime.register_tool(conflicting)
 
             self.assertIs(runtime.registry_generation, before)
             self.assertIn("shared", runtime.registry_generation.indirect_aliases)
@@ -122,12 +135,12 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
     def test_targeted_aliases_are_exact_and_do_not_create_a_base_fallback(self) -> None:
         runtime = ExecutionRuntime()
         for target_id in ("worker_a", "worker_b"):
-            runtime.register_capability(
-                echo_descriptor(
-                    name=f"echo__{target_id}",
+            runtime.register_tool(
+                echo_tool(
+                    alias=f"echo__{target_id}",
+                    canonical_path=f"op_test_echo__{target_id}",
                     target_id=target_id,
-                ),
-                echo_binding,
+                )
             )
         try:
             selected = runtime.invoke_indirect_tool(
@@ -149,9 +162,8 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
         before = runtime.registry_generation
         try:
             with self.assertRaisesRegex(ValueError, "invalid tool alias"):
-                runtime.register_capability(
-                    echo_descriptor(name="echo::worker-a", target_id="worker-a"),
-                    echo_binding,
+                runtime.register_tool(
+                    echo_tool(alias="echo::worker-a", target_id="worker-a")
                 )
             self.assertIs(runtime.registry_generation, before)
         finally:

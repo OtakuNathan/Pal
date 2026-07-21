@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    ChannelCapabilitiesChannelIntrospectionProviderAttachInput,
+    ChannelCapabilitiesChannelIntrospectionProviderDetachInput,
+    ChannelCapabilitiesChannelIntrospectionProviderDisableInput,
+    ChannelCapabilitiesChannelIntrospectionProviderEnableInput,
+    ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput,
+    ChannelCapabilitiesChannelIntrospectionProviderRescanInput,
+    ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput,
+    ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentOutput,
+    ChannelCapabilitiesChannelIntrospectionProviderSetAuthMaterialInput,
+)
+from pal.execution.tool_semantics import INDIRECT_EXTERNAL_WRITE
+from pal.execution.channel_attachment import ChannelSendAttachmentTool
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -197,35 +211,21 @@ class ChannelIntrospectionProvider:
         family="channel",
         action_name="send_attachment",
         description="Send a local file attachment back to the channel that started the current turn.",
-        aliases=("send_attachment", "op_channel_send_attachment"),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Local filesystem path to the file to send."},
-                "caption": {"type": "string", "description": "Optional caption to send with the attachment."},
-                "file_name": {"type": "string", "description": "Optional display filename."},
-                "mime_type": {"type": "string", "description": "Optional MIME type hint."},
-            },
-            "required": ["path"],
-        },
-        result_schema={
-            "type": "object",
-            "properties": {
-                "attachment_id": {"type": "string"},
-                "path": {"type": "string"},
-                "file_name": {"type": "string"},
-                "mime_type": {"type": "string"},
-                "reason": {"type": "string"},
-            },
-        },
+        aliases=("send_attachment",),
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput,
+        OutputModel=ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentOutput,
+        execution=INDIRECT_EXTERNAL_WRITE,
     )
-    def send_attachment(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        return IntrospectionResult(
-            status=RuntimeStatus.INVALID,
-            text="channel_send_attachment requires current async turn context",
-            structured={"reason": "async_required"},
-            llm_text="Use channel_send_attachment as a direct tool call during an active turn.",
+    async def send_attachment(self, call: IntrospectionCall) -> IntrospectionResult:
+        execution_runtime = (
+            self.main_context.execution_runtime
+            if self.main_context is not None
+            else None
+        )
+        return await ChannelSendAttachmentTool().ainvoke(
+            dict(call.args),
+            runtime=execution_runtime,
+            turn_id=str(call.meta.get("turn_id") or "") or None,
         )
 
     @capability_action(
@@ -234,11 +234,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="enable",
         description="Enable a channel endpoint",
-        args_schema={
-            "type": "object",
-            "properties": {"target_id": {"type": "string"}},
-            "required": ["target_id"],
-        },
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderEnableInput,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=True)
@@ -249,11 +245,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="disable",
         description="Disable a channel endpoint",
-        args_schema={
-            "type": "object",
-            "properties": {"target_id": {"type": "string"}},
-            "required": ["target_id"],
-        },
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderDisableInput,
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=False)
@@ -264,11 +256,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="attach",
         description="Attach a channel endpoint",
-        args_schema={
-            "type": "object",
-            "properties": {"target_id": {"type": "string"}},
-            "required": ["target_id"],
-        },
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderAttachInput,
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._attach_endpoint_provider(str(call.args.get("target_id") or "").strip())
@@ -279,11 +267,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="detach",
         description="Detach a channel endpoint",
-        args_schema={
-            "type": "object",
-            "properties": {"target_id": {"type": "string"}},
-            "required": ["target_id"],
-        },
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderDetachInput,
     )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_attached(call, attached=False)
@@ -295,15 +279,7 @@ class ChannelIntrospectionProvider:
         action_name="rescan",
         description="Rescan channel providers and update the channel provider registry.",
         aliases=("channel_provider_rescan", "refresh_channel_providers"),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "attach_enabled_endpoints": {
-                    "type": "boolean",
-                    "description": "Whether to attach enabled endpoints after provider discovery.",
-                }
-            },
-        },
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderRescanInput,
     )
     def rescan_providers(self, call: IntrospectionCall) -> IntrospectionResult:
         attach_enabled = bool(call.args.get("attach_enabled_endpoints", False))
@@ -326,11 +302,7 @@ class ChannelIntrospectionProvider:
             "Use channel provider rescan to discover newly available providers."
         ),
         aliases=("channel_reload_endpoint", "reload_channel_provider"),
-        args_schema={
-            "type": "object",
-            "properties": {"target_id": {"type": "string"}},
-            "required": ["target_id"],
-        },
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput,
     )
     def reload_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._restart_endpoint(str(call.args.get("target_id") or "").strip())
@@ -374,13 +346,7 @@ class ChannelIntrospectionProvider:
         family="endpoint",
         action_name="set_auth_material",
         description="Apply endpoint authorization material without exposing secrets",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "material": {"type": "object", "description": "Provider-specific auth credentials (key-value pairs)"},
-            },
-            "required": ["material"],
-        },
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderSetAuthMaterialInput,
     )
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)

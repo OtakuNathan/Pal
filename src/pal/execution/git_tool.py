@@ -185,51 +185,7 @@ class GitCommandPolicy:
 
 @dataclass
 class GitTool:
-    name: str = "op_git"
-    display_name: str = "Git"
-    family: str = "system"
-    description: str = GIT_TOOL_DESCRIPTION
-    tags: tuple[str, ...] = ("git", "repository", "diff", "history", "system")
-    keywords: tuple[str, ...] = ("git", "status", "diff", "log", "show", "restore", "revert")
     default_timeout_ms: int = 30_000
-    args_schema: dict[str, Any] = field(default_factory=dict)
-    result_schema: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.args_schema:
-            self.args_schema = {
-                "type": "object",
-                "properties": {
-                    "cmd": {"type": "string", "description": GIT_TOOL_CMD_DESCRIPTION},
-                    "cwd": {"type": "string", "description": "Optional repository working directory."},
-                    "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional timeout in milliseconds."},
-                },
-                "required": ["cmd"],
-                "additionalProperties": False,
-            }
-        if not self.result_schema:
-            self.result_schema = {
-                "type": "object",
-                "properties": {
-                    "cmd": {"type": "string"},
-                    "tokens": {"type": "array", "items": {"type": "string"}},
-                    "cwd": {"type": "string"},
-                    "classification": {"type": "object"},
-                    "returncode": {"type": "integer"},
-                    "stdout": {"type": "string"},
-                    "stderr": {"type": "string"},
-                    "changed_files": {"type": "array", "items": {"type": "string"}},
-                    "audit_id": {"type": "string"},
-                    "before_head": {"type": "string"},
-                    "after_head": {"type": "string"},
-                    "before_status": {"type": "string"},
-                    "after_status": {"type": "string"},
-                    "diff_stat": {"type": "string"},
-                    "undo_hint": {"type": "string"},
-                    "error_code": {"type": "string"},
-                },
-            }
-
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         return self._invoke(args, budget=None)
 

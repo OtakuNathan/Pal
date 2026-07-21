@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    MinionV2SkeletonBuilderOpMinionArchitectureAskUserInput,
+    MinionV2SkeletonBuilderOpMinionArchitectureModuleRemoveInput,
+    MinionV2SkeletonBuilderOpMinionArchitectureModuleUpsertInput,
+    MinionV2SkeletonBuilderOpMinionArchitectureReviewFailInput,
+    MinionV2SkeletonBuilderOpMinionArchitectureReviewPassInput,
+    MinionV2SkeletonBuilderOpMinionArchitectureScenarioRemoveInput,
+    MinionV2SkeletonBuilderOpMinionArchitectureScenarioUpsertInput,
+    MinionV2SkeletonBuilderOpMinionArchitectureSubmitInput,
+)
+
 import base64
 import json
 import subprocess
@@ -10,6 +21,11 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.review_findings import (
+    ADD_FINDING_CAPABILITY,
+    empty_review_draft,
+    structured_findings,
+)
 from pal.minion.v2.submission_preflight import (
     bound_reference_payload,
     raise_submission_errors,
@@ -42,6 +58,7 @@ ARCHITECTURE_SKELETON_CAPABILITIES = (
     "op_minion_architecture_submit",
 )
 SKELETON_REVIEW_CAPABILITIES = (
+    ADD_FINDING_CAPABILITY,
     "op_minion_architecture_review_pass",
     "op_minion_architecture_review_fail",
 )
@@ -100,69 +117,56 @@ _ARCHITECT_QUESTION_SCHEMA = {
     "required": ["title", "question", "option_1", "option_2", "option_3"],
     "additionalProperties": False,
 }
-_REVIEW_FAIL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "findings": {
-            "type": "string",
-            "minLength": 1,
-            "description": (
-                "One concise Markdown report containing every material finding. Give each finding a "
-                "[BLOCKER], [MAJOR], or [MINOR] heading followed by affected semantic modules, the "
-                "binding Requirement/Contract, evidence, expected behavior, actual defect, and impact."
-            ),
-        }
-    },
-    "required": ["findings"],
-    "additionalProperties": False,
-}
 _NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 
 SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_architecture_module_upsert": {
         "name": "op_architecture_module_upsert",
         "description": "Create or fully replace one semantic module. contract_dependencies describe the acyclic production/protocol consumption graph; they do not delay Coder startup. implementation modules default to review_guarded when contract_mode is omitted. Use file_frozen only for a physically separate protocol/interface/schema file. Contract paths may never be owned by test scopes. contract_only modules are already complete in the Skeleton, are automatically file_frozen, and have no writable scopes. Product semantics live in the Skeleton source and are reviewed independently.",
-        "parameters_schema": _MODULE_UPSERT_SCHEMA,
+        "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureModuleUpsertInput,
     },
     "op_minion_architecture_module_remove": {
         "name": "op_architecture_module_remove",
         "description": "Remove one semantic module during a scoped revision. Dependencies must be corrected before submit.",
-        "parameters_schema": _NAME_SCHEMA,
+        "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureModuleRemoveInput,
     },
     "op_minion_architecture_scenario_upsert": {
         "name": "op_architecture_scenario_upsert",
         "description": "Create or fully replace one required end-to-end scenario. Name the exact implementation modules used by a real product entrypoint, the externally observable behavior it proves, and the execution environment. This is a semantic verification scenario, not a synthetic all-module join and not a test-case implementation.",
-        "parameters_schema": _SCENARIO_UPSERT_SCHEMA,
+        "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureScenarioUpsertInput,
     },
     "op_minion_architecture_scenario_remove": {
         "name": "op_architecture_scenario_remove",
         "description": "Remove one end-to-end scenario by semantic name during architecture revision.",
-        "parameters_schema": _NAME_SCHEMA,
+        "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureScenarioRemoveInput,
     },
     "op_minion_architecture_ask_user": {
         "name": "op_architecture_ask_user",
         "description": "Ask one material Requirement, preference, or high-impact architecture question without ending the Architect invocation. Supply a short title, a precise question, and three option strings; each option must contain a readable choice and its impact/tradeoff. The channel also permits a custom free-text answer. Omit timeout_seconds to wait until answer, pause, or cancel. The answer becomes an immutable task-source amendment shared with Reviewer, Coder, and Verifier.",
-        "parameters_schema": _ARCHITECT_QUESTION_SCHEMA,
+        "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureAskUserInput,
     },
     "op_minion_architecture_submit": {
         "name": "op_architecture_submit",
         "description": "Preflight and submit the current code skeleton, semantic Contract Dependency Graph, and end-to-end scenarios. Takes no arguments. Manager checks only deterministic structure, path safety, Git state, and snapshot stability; Architecture Reviewer owns all semantic review.",
-        "parameters_schema": _NO_ARGS_SCHEMA,
+        "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureSubmitInput,
     },
     "op_minion_architecture_review_pass": {
         "name": "op_architecture_review_pass",
         "description": "Submit PASS only after one breadth-first review of every immutable task source, module contract, semantic dependency, and end-to-end scenario finds no material defect.",
-        "parameters_schema": _NO_ARGS_SCHEMA,
+        "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureReviewPassInput,
     },
     "op_minion_architecture_review_fail": {
         "name": "op_architecture_review_fail",
-        "description": "Submit FAIL once with every material semantic defect in one Markdown report. Each heading must use [BLOCKER], [MAJOR], or [MINOR] and include affected semantic modules, Requirement/Contract, concrete evidence, expected behavior, actual defect, and impact. Do not submit one finding at a time and do not include opaque IDs.",
-        "parameters_schema": _REVIEW_FAIL_SCHEMA,
+        "description": "Submit FAIL after every material defect has been recorded with add_finding. Takes no arguments.",
+        "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureReviewFailInput,
     },
 }
 
 for _tool_name, _tool_spec in SKELETON_BUILDER_TOOL_SPECS.items():
-    assert_authoring_schema_budget(_tool_spec["parameters_schema"], owner=_tool_name)
+    assert_authoring_schema_budget(
+        _tool_spec["InputModel"].model_json_schema(mode="validation", union_format="primitive_type_array"),
+        owner=_tool_name,
+    )
 
 
 def compile_architecture_review_invocation_tool_contract(
@@ -175,12 +179,17 @@ def compile_architecture_review_invocation_tool_contract(
     scenarios = dict(architecture.get("scenarios") or {})
     module_names = sorted(str(name) for name in modules)
     overrides = {
-        "op_minion_architecture_review_fail": (
-            "Submit one Markdown report containing every material defect found in the complete breadth-first review. "
-            "Use [BLOCKER], [MAJOR], or [MINOR] headings, exact semantic module/scenario names, the binding task-source text, "
-            "concrete evidence, expected behavior, actual defect, and impact. Available modules="
+        ADD_FINDING_CAPABILITY: (
+            "Record one actionable architecture-review defect. Use requirements_defect for contradictory or "
+            "unimplementable task-source semantics, contract_defect for an invalid public shape, and "
+            "architecture_defect for topology, ownership, lifecycle, or scenario defects. Complete the "
+            "breadth-first audit first, then issue all independent add_finding calls in one tool batch when possible. "
+            "Available modules="
             f"{json.dumps(module_names, ensure_ascii=False)}; scenarios="
             f"{json.dumps(sorted(str(name) for name in scenarios), ensure_ascii=False)}."
+        ),
+        "op_minion_architecture_review_fail": (
+            "Submit FAIL with no arguments only after all material defects are present in the structured finding Draft."
         ),
         "op_minion_architecture_review_pass": (
             "Submit PASS only after independently reading every bound task source and reviewing every module and end-to-end scenario. "
@@ -584,19 +593,23 @@ def _compile_architecture_review(
 ) -> tuple[dict[str, Any], int]:
     name = str(call.name or "")
     args = dict(call.args or {})
-    if name == "op_minion_architecture_review_pass" and args:
-        raise ValueError("architecture_review_pass takes no arguments")
-    findings = str(args.get("findings") or "").strip()
-    if name == "op_minion_architecture_review_fail" and not findings:
-        raise ValueError("architecture_review_fail requires one complete Markdown report")
+    if args:
+        raise ValueError(f"{name} takes no arguments")
     context = SubmissionDraftContext.from_workspace(workspace, draft_kind="architecture_review")
     snapshot = SubmissionDraftStore(Path(str(workspace["runtime_root"]))).read(
         context,
         seed=_architecture_review_seed(),
     )
+    findings = structured_findings(snapshot.payload)
+    verdict = "FAIL" if name == "op_minion_architecture_review_fail" else "PASS"
+    if verdict == "FAIL" and not findings:
+        raise ValueError("architecture_review_fail requires at least one add_finding call")
+    if verdict == "PASS" and findings:
+        raise ValueError("architecture_review_pass requires an empty finding Draft")
     output = {
-        "verdict": "FAIL" if name == "op_minion_architecture_review_fail" else "PASS",
-        "findings_markdown": findings,
+        "schema_version": "2",
+        "verdict": verdict,
+        "findings": findings,
         "review_scope": _compiled_review_scope(workspace),
     }
     _validate_review_shape(output)
@@ -605,12 +618,7 @@ def _compile_architecture_review(
 
 
 def _architecture_review_seed() -> dict[str, Any]:
-    return {
-        "definitions": {},
-        "evidence": {},
-        "findings": [],
-        "summary": {},
-    }
+    return empty_review_draft()
 
 
 def _compiled_review_scope(workspace: Mapping[str, Any]) -> dict[str, Any]:
@@ -872,17 +880,13 @@ def _git_output(repo_path: Path, *args: str) -> str:
 
 def _validate_review_shape(payload: Mapping[str, Any]) -> None:
     verdict = str(payload.get("verdict") or "")
-    findings = str(payload.get("findings_markdown") or "").strip()
+    findings = structured_findings(payload)
     if verdict not in {"PASS", "FAIL"}:
         raise ValueError("verdict must be PASS or FAIL")
     if verdict == "PASS" and findings:
         raise ValueError("PASS cannot contain findings")
     if verdict == "FAIL" and not findings:
         raise ValueError("FAIL requires findings")
-    if verdict == "FAIL" and not any(
-        marker in findings for marker in ("[BLOCKER]", "[MAJOR]", "[MINOR]")
-    ):
-        raise ValueError("FAIL findings must use [BLOCKER], [MAJOR], or [MINOR] headings")
 
 
 def _preflight_review_submission(

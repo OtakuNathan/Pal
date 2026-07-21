@@ -112,7 +112,13 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
             path.write_text("artifact", encoding="utf-8")
 
             result = await core.context.execution_runtime.execute_tool_async(
-                CanonicalToolCall(name="send_channel_attachment", args={"path": str(path), "caption": "Artifact"}),
+                CanonicalToolCall(
+                    name="call_tool",
+                    args={
+                        "name": "send_channel_attachment",
+                        "args": {"path": str(path), "caption": "Artifact"},
+                    },
+                ),
                 turn_id=continuation.turn_id,
             )
 
@@ -127,7 +133,10 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self._start_turn(core, endpoint)
 
         missing_turn = await core.context.execution_runtime.execute_tool_async(
-            CanonicalToolCall(name="send_channel_attachment", args={"path": "missing.txt"}),
+            CanonicalToolCall(
+                name="call_tool",
+                args={"name": "send_channel_attachment", "args": {"path": "missing.txt"}},
+            ),
             turn_id=None,
         )
 
@@ -213,7 +222,7 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("\n  Detail:", rendered)
         self.assertNotIn("OK; Detail", rendered)
 
-    def test_send_attachment_is_resident_and_discoverable_llm_tool(self) -> None:
+    def test_send_attachment_is_indirect_and_discoverable(self) -> None:
         core, _, _ = self._build_core_with_channel()
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("channel")
@@ -223,7 +232,7 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
             for contract in core.tool_surface.build_llm_tool_contracts()
         }
 
-        self.assertIn("send_channel_attachment", names)
+        self.assertNotIn("send_channel_attachment", names)
         search = core.context.execution_runtime.execute_tool(
             CanonicalToolCall(name="search_tools", args={"query": "send attachment", "top_k": 5})
         )
@@ -239,7 +248,13 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
             path.write_text("artifact", encoding="utf-8")
 
             result = await core.context.execution_runtime.execute_tool_async(
-                CanonicalToolCall(name="send_channel_attachment", args={"path": str(path), "caption": "Alias"}),
+                CanonicalToolCall(
+                    name="call_tool",
+                    args={
+                        "name": "send_channel_attachment",
+                        "args": {"path": str(path), "caption": "Alias"},
+                    },
+                ),
                 turn_id=continuation.turn_id,
             )
 
@@ -249,7 +264,7 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(endpoint.attachments), 1)
             self.assertEqual(endpoint.attachments[0][1].caption, "Alias")
 
-    async def test_call_tool_rejects_direct_send_attachment(self) -> None:
+    async def test_call_tool_invokes_indirect_send_attachment(self) -> None:
         core, channel_runtime, endpoint = self._build_core_with_channel()
         continuation = self._start_turn(core, endpoint)
         with tempfile.TemporaryDirectory() as tmp:
@@ -267,10 +282,10 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
                 turn_id=continuation.turn_id,
             )
 
-            self.assertFalse(result.ok)
-            self.assertEqual(result.status, "wrong_invocation_mode")
+            self.assertTrue(result.ok)
+            self.assertEqual(result.status, "ok")
             channel_runtime.sync_endpoints()
-            self.assertEqual(len(endpoint.attachments), 0)
+            self.assertEqual(len(endpoint.attachments), 1)
 
 
 if __name__ == "__main__":

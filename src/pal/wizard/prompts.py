@@ -585,7 +585,7 @@ def run_llm_endpoint_preflight(
             "function": {
                 "name": "pal_preflight_probe",
                 "description": "Validate that this endpoint can emit a tool call.",
-                "parameters": {
+                "input_schema": {
                     "type": "object",
                     "properties": {"ok": {"type": "boolean"}},
                     "required": ["ok"],

@@ -6,12 +6,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pal.core import PalCore
+from pal.execution import register_with_core as register_execution_with_core
 from pal.minion.catalog import MinionCatalogService
 from pal.minion.profiles import MinionProfileRegistry, resolve_pinned_minion_pack
 from pal.minion.scoped_execution import MinionScopedExecutionRuntime
 from pal.minion.workspace_tools import _normalized_reference_paths
-from pal.execution.contracts import CapabilityDescriptor, CapabilityResult
+from pal.execution.contracts import CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
+from pal.execution.tool_facade import EmptyToolInput, OpaqueToolOutput, Tool, ToolGuidance
+from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.adapters import prepare_v2_role_workspace, prepare_v2_workspace_environment
 from pal.minion.v2.architecture import ArchitectureArtifactService
@@ -240,8 +244,8 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             scoped.get_capability_spec("verification_submit")["name"],
             "verification_submit",
         )
-        self.assertFalse(spec["parameters_schema"]["additionalProperties"])
-        self.assertEqual(spec["parameters_schema"]["properties"], {})
+        self.assertFalse(spec["input_schema"]["additionalProperties"])
+        self.assertEqual(spec["input_schema"]["properties"], {})
 
         result = asyncio.run(
             scoped.execute_tool_async(
@@ -377,6 +381,24 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertFalse(sibling_attempt.ok)
         self.assertIn("outside the declared immutable input", sibling_attempt.llm_text)
 
+    def test_workspace_tool_replaces_inherited_descriptor_once(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+
+        scoped = MinionScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_file_read"],
+            workspace={"repo_path": str(self.root)},
+        )
+
+        generation = scoped.registry_generation
+        self.assertEqual(list(generation.direct_aliases).count("read_file"), 1)
+        self.assertEqual(
+            generation.direct_aliases["read_file"].canonical_path,
+            "op_file_read",
+        )
+
     def test_reference_normalization_preserves_semantic_reference_name(self) -> None:
         bound = self.root / "bound-input.json"
         bound.write_text('{"value":true}\n', encoding="utf-8")
@@ -406,6 +428,9 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("independent adversarial verification", behavior)
         self.assertIn("not a completion or acceptance claim", behavior)
         self.assertIn("test_debugging", coder.allowed_skills)
+        architect = self._pack("software_engineering.v2_architect")
+        self.assertIn("op_exec_shell", architect.allowed_capabilities)
+        self.assertNotIn("op_tree", architect.allowed_capabilities)
         self.assertIn("op_lsp_definition", coder.allowed_capabilities)
         self.assertIn("op_lsp_references", coder.allowed_capabilities)
         self.assertIn("op_lsp_diagnostics", coder.allowed_capabilities)
@@ -488,7 +513,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         for group in tool_groups:
             for capability, spec in group.items():
                 with self.subTest(capability=capability):
-                    for name in property_names(spec["parameters_schema"]):
+                    for name in property_names(spec["InputModel"].model_json_schema(mode="validation")):
                         lowered = name.casefold()
                         self.assertNotIn(lowered, forbidden_exact)
                         self.assertFalse(lowered.endswith("_id"), name)
@@ -581,15 +606,24 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         researcher = self._pack("software_engineering.v2_architect")
         override = str(researcher.resolved_profile["capability_description_overrides"]["op_web_search"])
         base = ExecutionRuntime()
-        base.register_capability(
-            CapabilityDescriptor(
-                name="web_search",
+        base.register_tool(
+            Tool(
+                alias="web_search",
                 canonical_path="op_web_search",
                 family="web",
                 source="test",
-                description="generic web description",
-            ),
-            lambda _call: CapabilityResult(status=RuntimeStatus.OK, text="ok"),
+                InputModel=EmptyToolInput,
+                OutputModel=OpaqueToolOutput,
+                guidance=ToolGuidance(
+                    purpose="generic web description",
+                    use_when="generic web description",
+                    do_not_use_when="Do not use for local-only research.",
+                    failure_next_steps="Correct input or inspect the returned failure.",
+                ),
+                execution=DIRECT_EXTERNAL_READ,
+                search_text="generic web search research",
+                handler=lambda _value: CapabilityResult(status=RuntimeStatus.OK, text="ok", llm_text="ok"),
+            )
         )
         scoped = MinionScopedExecutionRuntime(
             base,

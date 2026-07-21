@@ -35,6 +35,19 @@ from pal.core import (
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution import CapabilityCall, CapabilityDescriptor, CapabilityResult, ToolCallBudget, register_with_core as register_execution_with_core
+from pal.execution.tool_facade import (
+    EffectKind,
+    Idempotency,
+    InvocationMode,
+    OpaqueToolOutput,
+    PagingMode,
+    RetryPolicy,
+    StrictToolModel,
+    Tool,
+    ToolExecutionSemantics,
+    ToolGuidance,
+    ToolHandlerResult,
+)
 from pal.failure import (
     FAILURE_VERIFICATION_FAILED,
     FAILURE_VERIFICATION_OK,
@@ -136,18 +149,6 @@ class StubEndpoint(ChannelEndpointQueueBase):
 class EchoTool:
     name = "echo"
     description = "Echo test arguments back as a stable result."
-    args_schema = {
-        "type": "object",
-        "properties": {
-            "value": {"type": "string"},
-        },
-    }
-    result_schema = {
-        "type": "object",
-        "properties": {
-            "echo": {"type": "object"},
-        },
-    }
 
     def invoke(self, args: dict[str, object]) -> CapabilityResult:
         return CapabilityResult(status="ok", llm_text="stable-result", text="stable-result", structured={"echo": args})
@@ -156,18 +157,6 @@ class EchoTool:
 class VerboseTool:
     name = "verbose"
     description = "Return a placeholder summary plus rich llm_text."
-    args_schema = {
-        "type": "object",
-        "properties": {
-            "value": {"type": "string"},
-        },
-    }
-    result_schema = {
-        "type": "object",
-        "properties": {
-            "payload": {"type": "object"},
-        },
-    }
 
     def invoke(self, args: dict[str, object]) -> CapabilityResult:
         return CapabilityResult(
@@ -181,8 +170,6 @@ class VerboseTool:
 class HugeTool:
     name = "huge"
     description = "Return a very large llm_text payload."
-    args_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
-    result_schema = {"type": "object", "properties": {"payload": {"type": "object"}}}
 
     def __init__(self, *, size: int = 4000) -> None:
         self.size = size
@@ -200,8 +187,6 @@ class HugeTool:
 class HeadTailHugeTool:
     name = "head_tail_huge"
     description = "Return a large payload with distinct head and tail markers."
-    args_schema = {"type": "object", "properties": {}}
-    result_schema = {"type": "object", "properties": {}}
 
     def invoke(self, args: dict[str, object]) -> CapabilityResult:
         _ = args
@@ -217,8 +202,6 @@ class HeadTailHugeTool:
 class MalformedTool:
     name = "malformed"
     description = "Return an object whose llm_text is empty to simulate a bad plugin result."
-    args_schema = {"type": "object", "properties": {}}
-    result_schema = {"type": "object", "properties": {}}
 
     def invoke(self, args: dict[str, object]):
         class BadResult:
@@ -234,43 +217,50 @@ class MalformedTool:
 class RaisingTool:
     name = "boom"
     description = "Raise a runtime error for tool isolation tests."
-    args_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
-    result_schema = {"type": "object", "properties": {}}
 
     def invoke(self, args: dict[str, object]) -> CapabilityResult:
         raise RuntimeError(f"boom: {args!r}")
 
 
+class FixtureToolInput(StrictToolModel):
+    value: str | None = None
+
+
 def register_test_tool(runtime, tool) -> str:
     alias = str(tool.name)
     canonical_path = alias if alias.startswith(("op_", "intro_")) else f"op_test_{alias}"
-    tool.name = canonical_path
-    runtime.register_tool(tool)
-    runtime.register_capability(
-        CapabilityDescriptor(
-            name=alias,
+    def invoke(value: FixtureToolInput):
+        result = tool.invoke(value.model_dump(mode="python", exclude_none=True))
+        if isinstance(result, CapabilityResult):
+            return ToolHandlerResult(
+                output=dict(result.structured or {}),
+                llm_text=result.llm_text,
+            )
+        return result
+
+    runtime.register_tool(
+        Tool(
+            alias=alias,
             canonical_path=canonical_path,
-            family="test",
-            description=str(tool.description),
-            source="test",
-            aliases=(alias,),
-            parameters_schema=dict(tool.args_schema),
-            result_schema=dict(tool.result_schema),
-            metadata={
-                "execution_semantics": {
-                    "invocation_mode": "direct",
-                    "effect_kind": "none",
-                    "idempotency": "idempotent",
-                    "retry_policy": "automatic",
-                    "paging": "supported",
-                }
-            },
-        ),
-        lambda _call: CapabilityResult(
-            status=RuntimeStatus.ERROR,
-            text="test tool binding was not selected",
-            llm_text="test tool binding was not selected",
-        ),
+            InputModel=FixtureToolInput,
+            OutputModel=OpaqueToolOutput,
+            guidance=ToolGuidance(
+                purpose=str(tool.description),
+                use_when="running this focused runtime test",
+                do_not_use_when="outside this test",
+                failure_next_steps="inspect the returned tagged failure",
+            ),
+            execution=ToolExecutionSemantics(
+                invocation_mode=InvocationMode.DIRECT,
+                effect_kind=EffectKind.NONE,
+                idempotency=Idempotency.IDEMPOTENT,
+                retry_policy=RetryPolicy.AUTOMATIC,
+                paging=PagingMode.SUPPORTED,
+            ),
+            search_text=f"{alias} {tool.description}",
+            handler=invoke,
+            examples=({},),
+        )
     )
     return canonical_path
 
@@ -608,20 +598,18 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(result.status, RuntimeStatus.INVALID)
         self.assertIn("No Minion workflow", result.llm_text)
 
-    def test_execution_registers_shell_exec_builtin_tool(self) -> None:
+    def test_execution_compiles_one_facade_generation_without_legacy_tool_registrations(self) -> None:
         core = PalCore()
 
         register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
 
-        self.assertIn("op_exec_shell", core.context.execution_runtime.tools)
-        self.assertIn("op_tool_search", core.context.execution_runtime.tools)
-        self.assertIn("op_tool_read", core.context.execution_runtime.tools)
-        self.assertIn("op_tool_result_page", core.context.execution_runtime.tools)
-        self.assertIn("op_file_read", core.context.execution_runtime.tools)
-        self.assertIn("op_file_edit", core.context.execution_runtime.tools)
-        self.assertIn("op_file_write", core.context.execution_runtime.tools)
-        self.assertIn("op_path_delete", core.context.execution_runtime.tools)
-        self.assertIn("op_file_state", core.context.execution_runtime.tools)
+        generation = core.context.execution_runtime.registry_generation
+        self.assertEqual(dict(core.context.execution_runtime.tools), {})
+        for alias in ("run_shell", "search_tools", "read_tool", "read_tool_result", "read_file", "edit_file", "write_file"):
+            self.assertIn(alias, generation.direct_aliases)
+        self.assertIn("delete_path", generation.indirect_aliases)
+        self.assertIn("file_state", generation.indirect_aliases)
 
     def test_shell_exec_builtin_tool_runs_commands(self) -> None:
         core = PalCore()
@@ -635,7 +623,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.structured["returncode"], 0)
         self.assertEqual(str(result.structured["stdout"]).strip(), "pong")
-        self.assertEqual(result.text, "pong")
+        self.assertTrue(result.text.startswith("pong"))
+        self.assertEqual(result.invocation_result.effect.value, "applied")
 
     def test_shell_exec_builtin_tool_allows_file_operations(self) -> None:
         core = PalCore()
@@ -719,7 +708,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 family="operation",
                 action_name="ping",
                 aliases=("demo_ping",),
-                args_schema={"type": "object", "properties": {}},
             )
             def ping(self, call: CapabilityCall) -> CapabilityResult:
                 _ = call
@@ -750,18 +738,17 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(via_router.status, "ok")
 
         search = core.context.execution_runtime.execute(CapabilityCall(name="op_tool_search", args={"query": "demo ping"}))
-        hit = next(item for item in search.structured["hits"] if item["name"] == "demo_ping")
-        self.assertEqual(set(hit), {"name", "description", "required_params"})
-        found_read = core.context.execution_runtime.execute(CapabilityCall(name="op_tool_read", args={"name": hit["name"]}))
+        hit = next(item for item in search.structured["hits"] if item["alias"] == "demo_ping")
+        self.assertIn("input_shape", hit)
+        found_read = core.context.execution_runtime.execute(CapabilityCall(name="op_tool_read", args={"name": hit["alias"]}))
         self.assertEqual(found_read.status, "ok")
-        self.assertEqual(found_read.structured["capability"]["name"], "demo_ping")
-        self.assertNotIn("call_names", found_read.structured["capability"])
-        self.assertNotIn("result_schema", found_read.structured["capability"])
+        self.assertEqual(found_read.structured["alias"], "demo_ping")
+        self.assertNotIn("canonical_path", found_read.structured)
         found_call = core.context.execution_runtime.execute(
-            CapabilityCall(name="op_tool_call", args={"name": hit["name"]})
+            CapabilityCall(name="op_tool_call", args={"name": hit["alias"]})
         )
         self.assertEqual(found_call.status, "ok")
-        self.assertEqual(found_call.text, "pong")
+        self.assertTrue(found_call.text.startswith("pong"))
 
     def test_execution_tool_failures_are_isolated(self) -> None:
         core = PalCore()
@@ -788,7 +775,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         tools = result.structured["tools"]
         shell = next(tool for tool in tools if tool["name"] == "run_shell")
         self.assertIn("description", shell)
-        self.assertIn("cmd", shell["args_schema"]["properties"])
+        self.assertIn("cmd", shell["input_schema"]["properties"])
         self.assertNotIn("op_", shell["description"])
 
     def test_tool_search_discovers_shell_exec_by_natural_language(self) -> None:
@@ -806,7 +793,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         shell_hit = next(item for item in result.structured["hits"] if item["alias"] == "run_shell")
         self.assertIn("cmd", shell_hit["input_shape"]["required"])
         self.assertNotIn("canonical_path", shell_hit)
-        self.assertNotIn("module_id", shell_hit)
+        self.assertEqual(shell_hit["module_id"], "execution")
+        self.assertEqual(shell_hit["family"], "exec")
+        self.assertGreater(shell_hit["score"], 0)
         self.assertNotIn("call_names", shell_hit)
         self.assertGreaterEqual(result.structured["total_count"], result.structured["returned_count"])
         self.assertNotIn("facets", result.structured)
@@ -923,7 +912,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         capability = result.structured
         self.assertEqual(capability["alias"], "run_shell")
         self.assertIn("shell", result.llm_text)
-        self.assertIn("tree for structured directory listings", capability["description"])
+        self.assertIn("tree -a -L 3 --filelimit 200 --noreport", capability["description"])
         self.assertIn("Pal runtime, module, capability, minion", capability["description"])
         self.assertIn("use search_tools/read_tool/call_tool", capability["description"])
         self.assertIn("cmd", capability["input_schema"]["properties"])
@@ -938,7 +927,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("output_schema", capability)
         self.assertIn(
             "returncode",
-            core.context.execution_runtime.get_capability_spec("op_exec_shell")["result_schema"]["properties"],
+            core.context.execution_runtime.get_capability_spec("op_exec_shell")["output_schema"]["properties"],
         )
 
     def test_tool_read_invalid_result_carries_llm_text(self) -> None:
@@ -986,8 +975,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "invalid")
-        self.assertEqual(result.text, "name missing")
-        self.assertEqual(result.llm_text, "name missing")
+        self.assertEqual(result.text, "name is required")
+        self.assertIn("use search_tools", result.llm_text)
 
     def test_turn_runtime_passes_tool_descriptions_and_input_schemas_to_llm(self) -> None:
         runtime_root, database = self._create_database()
@@ -1036,7 +1025,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("read_file", exposed_names)
             self.assertIn("edit_file", exposed_names)
             self.assertIn("write_file", exposed_names)
-            self.assertIn("delete_path", exposed_names)
+            self.assertNotIn("delete_path", exposed_names)
             self.assertIn("call_tool", exposed_names)
             self.assertIn("recall_memory", exposed_names)
             self.assertIn("remember_memory", exposed_names)
@@ -1108,6 +1097,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         core = PalCore()
         register_core_with_core(core)
+        register_execution_with_core(core.context)
         register_execution_with_core(core.context)
         memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
         register_memory_with_core(core.context, memory_service)
@@ -2040,7 +2030,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         tool_names = [item["function"]["name"] for item in core.tool_surface.build_llm_tool_contracts()]
 
         self.assertEqual(result.status, "ok")
-        self.assertIn("memory_active_provider", [item["name"] for item in result.structured["hits"]])
+        self.assertIn("memory_active_provider", [item["alias"] for item in result.structured["hits"]])
         self.assertNotIn("memory_active_provider", tool_names)
 
     def test_tool_result_page_is_resident_llm_tool(self) -> None:
@@ -2231,7 +2221,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             CapabilityCall(name="op_tool_search", args={"query": "delete proactive", "top_k": 5})
         )
         self.assertEqual(search.status, "ok")
-        hit_names = [item["name"] for item in search.structured["hits"]]
+        hit_names = [item["alias"] for item in search.structured["hits"]]
         self.assertIn("proactive_delete", hit_names)
 
         created = core.context.execution_runtime.execute(
@@ -2314,10 +2304,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.publish_module_capabilities("channel")
 
             descriptor = core.context.capability_registry.descriptors["channel_endpoint_inspect__socket_main"]
-            target_schema = descriptor.parameters_schema["properties"]["target_id"]
+            input_schema = descriptor.InputModel.model_json_schema(mode="validation")
+            target_schema = input_schema["properties"]["target_id"]
 
-            self.assertEqual(target_schema["enum"], ["socket_main"])
-            self.assertIn("target_id", descriptor.parameters_schema["required"])
+            self.assertEqual(target_schema["const"], "socket_main")
+            self.assertIn("target_id", input_schema["required"])
 
             missing_target = core.context.execution_runtime.execute(
                 CapabilityCall(name="intro_endpoint_channel_inspect")
@@ -2745,6 +2736,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_l3_recall_tool_protocol_uses_minimal_observation_text(self) -> None:
         core = PalCore()
         register_core_with_core(core)
+        register_execution_with_core(core.context)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
         memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
@@ -2763,6 +2755,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             ]
         )
         register_l3_with_core(core.context, mock_l3)
+        core.publish_module_capabilities("execution")
         core.publish_module_capabilities(mock_l3.module_id)
         scripted_llm = ScriptedLLMRuntime(
             [
@@ -2771,8 +2764,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     provider_specific_fields={"reasoning_content": "hidden recall reasoning"},
                     tool_calls=[
                         CanonicalToolCall(
-                            name="memory_provider_recall__mock_l3",
-                            args={"target_id": "mock_l3", "queries": ["test_user"], "view": "summary"},
+                            name="call_tool",
+                            args={
+                                "name": "memory_provider_recall__mock_l3",
+                                "args": {"target_id": "mock_l3", "queries": ["test_user"], "view": "summary"},
+                            },
                         )
                     ],
                     finish_reason="tool_calls",
@@ -3136,7 +3132,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(result.structured["kind"], "paged")
         self.assertIn("HEAD-SIGNAL", result.llm_text)
         self.assertTrue(later.ok)
-        self.assertIn("<tool_result_page", later.llm_text)
+        self.assertEqual(later.structured["page"], page_count)
+        self.assertIn("page_text", later.structured)
         self.assertIn("TAIL-SIGNAL", later.llm_text)
         self.assertNotIn("backing_path", later.llm_text)
 
@@ -3171,11 +3168,17 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertFalse(tail.structured["has_more_after"])
         self.assertTrue(tail.structured["has_more_before"])
         self.assertIn("TAIL-SIGNAL", tail.llm_text)
-        self.assertIn("older_page: read_tool_result", tail.llm_text)
+        self.assertEqual(
+            tail.invocation_result.affordances[0].arguments,
+            {"result_ref": "call_tail_anchor", "page": 2, "anchor": "tail"},
+        )
         self.assertTrue(second_from_tail.ok)
         self.assertEqual(second_from_tail.structured["anchor"], "tail")
         self.assertEqual(second_from_tail.structured["anchor_page"], 2)
-        self.assertIn("newer_page: read_tool_result", second_from_tail.llm_text)
+        self.assertEqual(
+            second_from_tail.invocation_result.affordances[0].arguments,
+            {"result_ref": "call_tail_anchor", "page": 1, "anchor": "tail"},
+        )
 
     def test_execution_runtime_tool_result_page_expires_after_retention_turns(self) -> None:
         core = PalCore()
@@ -3197,7 +3200,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
 
         self.assertFalse(expired.ok)
-        self.assertEqual(expired.structured["details"]["reason"], "not_found_or_expired")
+        self.assertEqual(expired.structured["details"]["reason"], "result_handle_expired")
 
     def test_turn_runtime_recompacts_when_generate_requests_budget_for_fallback_endpoint(self) -> None:
         class FallbackBudgetLLMRuntime:
@@ -3644,15 +3647,19 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             ]
         )
         register_l3_with_core(core.context, mock_l3)
+        core.publish_module_capabilities("execution")
         core.publish_module_capabilities(mock_l3.module_id)
 
         result = core.context.execution_runtime.execute_tool(
             CanonicalToolCall(
-                name="memory_provider_recall__mock_l3",
+                name="call_tool",
                 args={
-                    "target_id": "mock_l3",
-                    "queries": ["用户是谁", "用户身份", "用户个人信息", "用户偏好"],
-                    "limit": 10,
+                    "name": "memory_provider_recall__mock_l3",
+                    "args": {
+                        "target_id": "mock_l3",
+                        "queries": ["用户是谁", "用户身份", "用户个人信息", "用户偏好"],
+                        "limit": 10,
+                    },
                 },
             ),
             budget=ToolCallBudget(max_output_chars=12_000),

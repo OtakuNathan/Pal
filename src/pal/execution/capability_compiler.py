@@ -1,17 +1,31 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import inspect
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
+
+from pydantic import Field, create_model
 
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
+from pal.execution.tool_facade import (
+    EffectKind,
+    EffectOutcome,
+    EffectReceipt,
+    Idempotency,
+    InvocationMode,
+    PagingMode,
+    RetryPolicy,
+    ToolExecutionSemantics,
+    ToolGuidance,
+)
 from pal.shared import (
     BoundCapabilityAction,
     CapabilityActionBlueprint,
     CapabilityNodeBlueprint,
     HydratedCapabilityNode,
     MountedSubtreeHandle,
+    RuntimeStatus,
     SINGLETON_TARGET,
     llm_tool_name,
 )
@@ -92,8 +106,12 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                     target_kind=node.target_kind,
                     target_id=target.target_id,
                     target_label=target.target_label,
-                    parameters_schema=_parameters_schema(action_blueprint, target),
-                    result_schema=deepcopy(action_blueprint.result_schema),
+                    InputModel=_bound_input_model(action_blueprint, target, descriptor_name),
+                    OutputModel=action_blueprint.OutputModel,
+                    guidance=action_blueprint.guidance or _default_guidance(action_blueprint, module_id),
+                    execution=action_blueprint.execution or _default_execution(action_blueprint),
+                    search_text=action_blueprint.search_text,
+                    examples=_bound_examples(action_blueprint, target),
                     metadata={
                         "namespace": action_blueprint.namespace,
                         "scope": node_blueprint.scope,
@@ -109,7 +127,7 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                     canonical_path=canonical_path,
                     target_id=target.target_id,
                     descriptor=descriptor,
-                    callable=_bind_callable(handler, target),
+                    callable=_bind_callable(handler, target, descriptor.execution),
                 )
                 subtree.descriptors.append(descriptor)
                 subtree.bound_actions.append(bound_action)
@@ -241,26 +259,73 @@ def _abbreviate_canonical_family(value: str) -> str:
     return _CANONICAL_FAMILY_ABBREVIATIONS.get(value, value)
 
 
-def _parameters_schema(action_blueprint: CapabilityActionBlueprint, target: HydrationTarget) -> dict[str, Any]:
-    schema = deepcopy(action_blueprint.args_schema) or {"type": "object", "properties": {}, "required": []}
-    schema.setdefault("type", "object")
-    properties = schema.setdefault("properties", {})
-    required = list(schema.setdefault("required", []))
-    if target.target_id != SINGLETON_TARGET:
-        # Instance-level actions must always expose target_id to the LLM-facing
-        # schema so execution never has to guess which leaf node was intended.
-        properties["target_id"] = {
-            "type": "string",
-            "enum": [target.target_id],
-            "description": f"Target identifier for {target.target_label}.",
-        }
-        if "target_id" not in required:
-            required.append("target_id")
-        schema["required"] = required
-    return schema
+def _bound_input_model(
+    action_blueprint: CapabilityActionBlueprint,
+    target: HydrationTarget,
+    descriptor_name: str,
+):
+    if target.target_id == SINGLETON_TARGET:
+        return action_blueprint.InputModel
+    target_literal = Literal.__getitem__((target.target_id,))
+    return create_model(
+        f"{_model_name(descriptor_name)}Input",
+        __base__=action_blueprint.InputModel,
+        target_id=(
+            target_literal,
+            Field(description=f"Target identifier for {target.target_label}."),
+        ),
+    )
 
 
-def _bind_callable(handler, target: HydrationTarget):
+def _bound_examples(
+    action_blueprint: CapabilityActionBlueprint,
+    target: HydrationTarget,
+) -> tuple[dict[str, Any], ...]:
+    if target.target_id == SINGLETON_TARGET:
+        return tuple(dict(item) for item in action_blueprint.examples)
+    return tuple({**dict(item), "target_id": target.target_id} for item in action_blueprint.examples)
+
+
+def _default_guidance(action_blueprint: CapabilityActionBlueprint, module_id: str) -> ToolGuidance:
+    purpose = str(
+        action_blueprint.description
+        or f"{action_blueprint.action_name} {module_id} {action_blueprint.scope}"
+    ).strip()
+    return ToolGuidance(
+        purpose=purpose,
+        use_when=purpose,
+        do_not_use_when="Do not use when another tool's stated purpose matches the task more precisely.",
+        failure_next_steps="Correct invalid input; otherwise follow the returned recovery affordances before retrying.",
+    )
+
+
+def _default_execution(action_blueprint: CapabilityActionBlueprint) -> ToolExecutionSemantics:
+    if action_blueprint.namespace == "introspection":
+        effect = EffectKind.LOCAL_READ
+        idempotency = Idempotency.IDEMPOTENT
+        retry = RetryPolicy.AUTOMATIC
+    else:
+        effect = EffectKind.LOCAL_WRITE
+        idempotency = Idempotency.NON_IDEMPOTENT
+        retry = RetryPolicy.RECONCILE_FIRST
+    return ToolExecutionSemantics(
+        invocation_mode=InvocationMode.INDIRECT,
+        effect_kind=effect,
+        idempotency=idempotency,
+        retry_policy=retry,
+        paging=PagingMode.SUPPORTED,
+    )
+
+
+def _model_name(value: str) -> str:
+    return "".join(part[:1].upper() + part[1:] for part in re.split(r"[^A-Za-z0-9]+", value) if part) or "Bound"
+
+
+def _bind_callable(
+    handler: Any,
+    target: HydrationTarget,
+    execution: ToolExecutionSemantics,
+):
     def bound(call: CapabilityCall) -> CapabilityResult:
         args = dict(call.args)
         if target.target_id != SINGLETON_TARGET:
@@ -270,6 +335,33 @@ def _bind_callable(handler, target: HydrationTarget):
             args=args,
             meta={**dict(call.meta), "resolved_target": target.payload, "resolved_target_id": target.target_id},
         )
-        return handler(bound_call)
+        result = handler(bound_call)
+        if inspect.isawaitable(result):
+            async def finish() -> CapabilityResult:
+                return _attach_effect_receipt(await result, execution)
+
+            return finish()  # type: ignore[return-value]
+        return _attach_effect_receipt(result, execution)
 
     return bound
+
+
+def _attach_effect_receipt(
+    result: CapabilityResult,
+    execution: ToolExecutionSemantics,
+) -> CapabilityResult:
+    receipt = getattr(result, "effect_receipt", None)
+    if execution.effect_kind is not EffectKind.NONE and result.status == RuntimeStatus.OK and receipt is None:
+        receipt = EffectReceipt(
+            outcome=EffectOutcome.APPLIED,
+            receipt={"capability_handler_completed": True},
+        )
+    if isinstance(result, CapabilityResult):
+        return replace(result, effect_receipt=receipt)
+    return CapabilityResult(
+        status=result.status,
+        text=str(getattr(result, "text", "") or ""),
+        structured=getattr(result, "structured", None),
+        llm_text=str(getattr(result, "llm_text", "") or ""),
+        effect_receipt=receipt,
+    )

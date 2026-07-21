@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
+    PluginsCapabilitiesPluginsIntrospectionProviderDetachInput,
+    PluginsCapabilitiesPluginsIntrospectionProviderDisableInput,
+    PluginsCapabilitiesPluginsIntrospectionProviderEnableInput,
+)
+
 from dataclasses import dataclass
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
@@ -69,7 +76,7 @@ class PluginsIntrospectionProvider:
             "temporarily; if the result is forbidden with reason=plugin_disabled, call plugin_enable for that plugin_id."
         ),
         aliases=("attach plugin", "load enabled plugin"),
-        args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},
+        InputModel=PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.attach(str(call.args.get("plugin_id") or ""))
@@ -86,7 +93,7 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="detach",
         description="Detach a plugin from the current runtime",
-        args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},
+        InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDetachInput,
     )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.detach(str(call.args.get("plugin_id") or ""))
@@ -104,7 +111,7 @@ class PluginsIntrospectionProvider:
         action_name="enable",
         description="Enable and attach a plugin that is currently disabled, including disabled first-party plugins such as mcp.",
         aliases=("enable plugin", "turn on plugin", "enable mcp plugin", "turn on mcp"),
-        args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},
+        InputModel=PluginsCapabilitiesPluginsIntrospectionProviderEnableInput,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.enable(str(call.args.get("plugin_id") or ""))
@@ -121,7 +128,7 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="disable",
         description="Disable a plugin",
-        args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},
+        InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDisableInput,
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.disable(str(call.args.get("plugin_id") or ""))

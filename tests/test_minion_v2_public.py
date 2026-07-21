@@ -2587,7 +2587,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             )
             schemas = json.dumps(
                 {
-                    descriptor.canonical_path: descriptor.parameters_schema
+                    descriptor.canonical_path: descriptor.InputModel.model_json_schema(mode="validation")
                     for descriptor in core.context.capability_registry.descriptors.values()
                     if descriptor.module_id == "minion"
                 },

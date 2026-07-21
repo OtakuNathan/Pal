@@ -344,9 +344,7 @@ def _openai_tools_to_dynamic_tools(tools: Any) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "description": str(function.get("description") or name),
-                "inputSchema": function.get("input_schema")
-                or function.get("parameters")
-                or {"type": "object"},
+                "inputSchema": function.get("parameters") or {"type": "object"},
             }
         )
     return dynamic_tools
@@ -364,7 +362,7 @@ def _responses_tools_to_dynamic_tools(tools: Any) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "description": str(tool.get("description") or name),
-                "inputSchema": tool.get("input_schema") or tool.get("parameters") or {"type": "object"},
+                "inputSchema": tool.get("parameters") or {"type": "object"},
             }
         )
     return dynamic_tools

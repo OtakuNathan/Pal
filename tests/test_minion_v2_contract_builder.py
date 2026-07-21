@@ -16,6 +16,7 @@ from pal.minion.v2.candidate_builder import CANDIDATE_BUILDER_TOOL_SPECS
 from pal.minion.v2.skeleton_builder import SKELETON_BUILDER_TOOL_SPECS
 from pal.minion.v2.verification_builder import VERIFICATION_BUILDER_TOOL_SPECS
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.execution.runtime import ExecutionRuntime
 
@@ -60,8 +61,11 @@ class ContractBuilderTests(unittest.TestCase):
     def call(self, stage: str, name: str, args: dict | None = None):
         self.call_index += 1
         self.workspace["contract_builder_stage"] = stage
+        call = CanonicalToolCall(name=name, args=args or {}, call_id=f"call-{self.call_index}")
+        if name == ADD_FINDING_CAPABILITY:
+            return add_finding_tool_result(call, self.workspace)
         return contract_builder_tool_result(
-            CanonicalToolCall(name=name, args=args or {}, call_id=f"call-{self.call_index}"),
+            call,
             self.workspace,
             self.produced,
         )
@@ -197,25 +201,22 @@ class ContractBuilderTests(unittest.TestCase):
         self.assertFalse(rejected.ok)
         self.assertIn("dependency cycle", rejected.text)
 
-    def test_review_finding_uses_semantic_target_and_manager_resolves_identity(self) -> None:
+    def test_review_finding_is_structured_and_manager_infers_fail(self) -> None:
         base = self._complete_base_contract()
         self.workspace.update(
             {
                 "contract_review_base_payload": base,
             }
         )
+        self.workspace["minion_v2"]["role"] = "architecture_reviewer"
         finding = self.call(
             "architecture_review",
-            "op_minion_contract_review_finding",
+            ADD_FINDING_CAPABILITY,
             {
+                "finding_key": "report_ownership_incomplete",
                 "finding_kind": "contract_defect",
+                "priority": "p1",
                 "summary": "The ownership rule does not cover the returned report value.",
-                "severity": "error",
-                "target_section": "unit",
-                "target_name": "report",
-                "fields": ["ownership"],
-                "operation": "update",
-                "related_names": ["report::report_report"],
             },
         )
         self.assertTrue(finding.ok, finding.text)
@@ -225,8 +226,8 @@ class ContractBuilderTests(unittest.TestCase):
             (Path(self.workspace["artifact_stage_dir"]) / "architecture_review.json").read_text()
         )
         self.assertEqual(artifact["verdict"], "FAIL")
-        target = artifact["findings"][0]["revision_targets"][0]
-        self.assertEqual(target, {"section": "unit", "id": "report", "fields": ["ownership"], "operation": "update"})
+        self.assertEqual(artifact["findings"][0]["finding_key"], "report_ownership_incomplete")
+        self.assertEqual(artifact["findings"][0]["priority"], "p1")
 
     def test_revision_scope_rejects_unrelated_semantic_change(self) -> None:
         base = self._complete_base_contract()
@@ -267,6 +268,24 @@ class ContractBuilderTests(unittest.TestCase):
         self.assertIsNone(scoped.get_capability_spec("op_minion_contract_read"))
         self.assertIsNone(scoped.get_capability_spec("op_minion_contract_add_unit_outlines_batch"))
 
+    def test_add_finding_is_role_bound_and_includes_a_valid_example(self) -> None:
+        self.workspace["minion_v2"]["role"] = "architecture_reviewer"
+        scoped = MinionScopedExecutionRuntime(
+            ExecutionRuntime(),
+            [ADD_FINDING_CAPABILITY],
+            workspace=self.workspace,
+        )
+
+        provider = scoped.build_llm_tool_contracts()[0]["function"]
+
+        self.assertEqual(provider["name"], "add_finding")
+        self.assertEqual(
+            provider["input_schema"]["properties"]["finding_kind"]["enum"],
+            ["requirements_defect", "contract_defect", "architecture_defect"],
+        )
+        self.assertIn("Valid example:", provider["description"])
+        self.assertNotIn("Input schema:", provider["description"])
+
     def test_authoring_enums_are_named_in_tool_descriptions(self) -> None:
         gaps: list[str] = []
 
@@ -293,7 +312,7 @@ class ContractBuilderTests(unittest.TestCase):
         for name, spec in _WORKSPACE_TOOL_SPECS.items():
             if name in authoring_specs:
                 inspect(
-                    spec.get("parameters_schema") or {},
+                    spec["InputModel"].model_json_schema(mode="validation"),
                     description=str(spec.get("description") or ""),
                     path=name,
                 )

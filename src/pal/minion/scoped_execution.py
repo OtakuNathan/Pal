@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    MinionScopedExecutionOpMinionArtifactEditInput,
+    MinionScopedExecutionOpMinionArtifactWriteInput,
+    MinionScopedExecutionOpSearchInput,
+)
+
 import asyncio
 import hashlib
 import inspect
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Literal
 from uuid import uuid4
 
-from pal.execution import CapabilityDescriptor, CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
+from pydantic import create_model
 from pal.execution.tool_facade import (
     EffectKind,
     EffectOutcome,
@@ -26,9 +33,7 @@ from pal.execution.tool_facade import (
     ToolGuidance,
     ToolHandlerResult,
 )
-from pal.execution.tool_registry import _example_from_schema, model_from_json_schema
-from pal.execution.tool_result_pager import ToolResultPageTool
-from pal.execution.tool_search import ToolCallTool, ToolReadTool, ToolSearchTool
+from pal.execution.tool_registry import _example_from_schema
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
 from pal.minion.tool_admission import (
@@ -55,6 +60,12 @@ from pal.minion.v2.skeleton_builder import (
     is_skeleton_builder_capability,
     skeleton_builder_tool_result,
 )
+from pal.minion.v2.review_findings import (
+    ADD_FINDING_CAPABILITY,
+    ADD_FINDING_TOOL_SPEC,
+    add_finding_tool_result,
+    is_review_finding_capability,
+)
 from pal.minion.v2.swe_verification import (
     SWE_VERIFICATION_CAPABILITIES,
     SWE_VERIFICATION_TOOL_SPECS,
@@ -74,6 +85,7 @@ from pal.minion.workspace_file_tools import (
 )
 from pal.minion.workspace_tools import _append_unique_artifact, _workspace_tool_result
 from pal.shared import (
+    MountedSubtreeHandle,
     RuntimeStatus,
     default_tool_result_text,
     llm_tool_name,
@@ -113,7 +125,6 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_file_state",
     "op_git",
     "op_exec_shell",
-    "op_tree",
     "op_search",
     "op_minion_artifact_write",
     "op_minion_artifact_edit",
@@ -122,6 +133,7 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     *SKELETON_BUILDER_CAPABILITIES,
     *VERIFICATION_TOOL_CAPABILITIES,
     *SWE_VERIFICATION_CAPABILITIES,
+    ADD_FINDING_CAPABILITY,
     "op_web_search",
     "op_web_read",
     "op_memory_recall",
@@ -130,67 +142,27 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
 
 
 _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
-    "op_tree": {
-        "name": "op_tree",
-        "description": "List project or declared read-only reference paths without shell traversal.",
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "default": "."},
-                "root": {"type": "string"},
-                "reference_name": {"type": "string"},
-                "max_depth": {"type": "integer", "default": 2},
-                "limit": {"type": "integer", "default": 200},
-            },
-        },
-    },
     "op_search": {
         "name": "op_search",
         "description": "Search text in the project or a declared read-only truth-source reference.",
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "path": {"type": "string", "default": "."},
-                "root": {"type": "string"},
-                "reference_name": {"type": "string"},
-                "limit": {"type": "integer", "default": 50},
-            },
-            "required": ["query"],
-        },
+        "InputModel": MinionScopedExecutionOpSearchInput,
     },
     "op_minion_artifact_write": {
         "name": "op_minion_artifact_write",
         "description": "Write the profile-declared structured output artifact. Architecture roles must use their bound Contract Builder instead.",
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "relative_path": {"type": "string"},
-                "content": {},
-                "artifact_type": {"type": "string"},
-                "role": {"type": "string"},
-            },
-            "required": ["relative_path", "content"],
-        },
+        "InputModel": MinionScopedExecutionOpMinionArtifactWriteInput,
     },
     "op_minion_artifact_edit": {
         "name": "op_minion_artifact_edit",
         "description": "Edit an existing profile output artifact by exact text replacement.",
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "relative_path": {"type": "string"},
-                "old_string": {"type": "string"},
-                "new_string": {"type": "string"},
-            },
-            "required": ["relative_path", "old_string", "new_string"],
-        },
+        "InputModel": MinionScopedExecutionOpMinionArtifactEditInput,
     },
     **WORKSPACE_FILE_TOOL_SPECS,
     **CONTRACT_BUILDER_TOOL_SPECS,
     **CANDIDATE_BUILDER_TOOL_SPECS,
     **SKELETON_BUILDER_TOOL_SPECS,
     **VERIFICATION_BUILDER_TOOL_SPECS,
+    ADD_FINDING_CAPABILITY: ADD_FINDING_TOOL_SPEC,
 }
 
 _WORKSPACE_TOOL_SPECS.update(SWE_VERIFICATION_TOOL_SPECS)
@@ -200,13 +172,49 @@ class _WorkflowToolOutput(StrictToolModel):
     payload: dict[str, Any]
 
 
+def _scoped_workspace_tool_spec(
+    name: str,
+    spec: dict[str, Any],
+    *,
+    workspace: dict[str, Any],
+) -> dict[str, Any]:
+    value = dict(spec)
+    if name != ADD_FINDING_CAPABILITY:
+        return value
+    role = str(dict(workspace.get("minion_v2") or {}).get("role") or "")
+    examples = tuple(dict(item) for item in list(value.get("examples") or []))
+    if role == "architecture_reviewer":
+        base_model = value["InputModel"]
+        fields = {
+            field_name: (
+                Literal[
+                    "requirements_defect",
+                    "contract_defect",
+                    "architecture_defect",
+                ]
+                if field_name == "finding_kind"
+                else model_field.annotation,
+                model_field,
+            )
+            for field_name, model_field in base_model.model_fields.items()
+        }
+        value["InputModel"] = create_model(
+            "ScopedArchitectureReviewAddFindingInput",
+            __base__=StrictToolModel,
+            **fields,
+        )
+        value["examples"] = examples[:1]
+    elif examples:
+        value["examples"] = examples[1:2]
+    for example in tuple(value.get("examples") or ()):
+        value["InputModel"].model_validate(example, strict=True)
+    return value
+
+
 def _immutable_workflow_tool(*, name: str, spec: dict[str, Any], handler: Any) -> Tool:
-    schema = dict(spec.get("parameters_schema") or {"type": "object", "properties": {}})
-    input_model = model_from_json_schema(
-        f"Workflow{re.sub(r'[^A-Za-z0-9]+', ' ', name).title().replace(' ', '')}Input",
-        schema,
-        input_contract=True,
-    )
+    input_model = spec.get("InputModel")
+    if not isinstance(input_model, type) or not issubclass(input_model, StrictToolModel):
+        raise TypeError(f"workflow tool {name!r} requires a strict Pydantic InputModel")
     configured_alias = str(spec.get("alias") or "").strip()
     alias = configured_alias or llm_tool_name(name)
     if alias.startswith("minion_"):
@@ -216,6 +224,18 @@ def _immutable_workflow_tool(*, name: str, spec: dict[str, Any], handler: Any) -
     purpose = str(spec.get("description") or name).strip()
     effect_kind = _workflow_effect_kind(name)
     mutating = effect_kind in {EffectKind.LOCAL_WRITE, EffectKind.EXTERNAL_WRITE, EffectKind.CONTROL}
+    idempotency = Idempotency(
+        str(
+            spec.get("idempotency")
+            or (Idempotency.NON_IDEMPOTENT.value if mutating else Idempotency.IDEMPOTENT.value)
+        )
+    )
+    retry_policy = RetryPolicy(
+        str(
+            spec.get("retry_policy")
+            or (RetryPolicy.RECONCILE_FIRST.value if mutating else RetryPolicy.AUTOMATIC.value)
+        )
+    )
 
     async def invoke(value: Any, **kwargs: Any) -> ToolHandlerResult:
         args = value.model_dump(mode="python", exclude_none=True)
@@ -260,15 +280,20 @@ def _immutable_workflow_tool(*, name: str, spec: dict[str, Any], handler: Any) -
         execution=ToolExecutionSemantics(
             invocation_mode=InvocationMode.DIRECT,
             effect_kind=effect_kind,
-            idempotency=Idempotency.NON_IDEMPOTENT if mutating else Idempotency.IDEMPOTENT,
-            retry_policy=RetryPolicy.RECONCILE_FIRST if mutating else RetryPolicy.AUTOMATIC,
+            idempotency=idempotency,
+            retry_policy=retry_policy,
             paging=PagingMode.SUPPORTED,
         ),
         search_text=f"{alias} {purpose}",
         handler=invoke,
-        examples=(_example_from_schema(input_model.model_json_schema(mode="validation")),)
-        if input_model.model_json_schema(mode="validation").get("properties")
-        else (),
+        examples=(
+            tuple(dict(item) for item in list(spec.get("examples") or []))
+            or (
+                (_example_from_schema(input_model.model_json_schema(mode="validation")),)
+                if input_model.model_json_schema(mode="validation").get("properties")
+                else ()
+            )
+        ),
         module_id="workflow_scoped",
         family="workflow",
         source="workflow:scoped-worker",
@@ -277,7 +302,22 @@ def _immutable_workflow_tool(*, name: str, spec: dict[str, Any], handler: Any) -
 
 def _workflow_effect_kind(name: str) -> EffectKind:
     lowered = name.lower()
-    if any(token in lowered for token in ("_write", "_edit", "_commit", "_submit", "_delete", "_update")):
+    if any(
+        token in lowered
+        for token in (
+            "_add_",
+            "_write",
+            "_edit",
+            "_commit",
+            "_submit",
+            "_delete",
+            "_update",
+            "_remove_",
+            "_record_",
+            "_report_",
+            "_set_",
+        )
+    ):
         return EffectKind.LOCAL_WRITE
     if any(token in lowered for token in ("_ask_user", "_cancel", "_approve")):
         return EffectKind.CONTROL
@@ -287,37 +327,69 @@ def _workflow_effect_kind(name: str) -> EffectKind:
 
 
 class _ExecutionOverlay:
-    def __init__(self, delegate: Any) -> None:
+    def __init__(
+        self,
+        delegate: Any,
+        allowed_capabilities: list[str],
+        *,
+        workspace: dict[str, Any],
+        description_overrides: dict[str, str],
+    ) -> None:
         self.delegate = delegate
         self.runtime = ExecutionRuntime(
             runtime_root=getattr(delegate, "runtime_root", None),
             sync_executor=getattr(delegate, "sync_executor", None),
         )
+        self._mount_allowed_generation(
+            allowed_capabilities,
+            workspace=workspace,
+            description_overrides=description_overrides,
+        )
+
+    def _mount_allowed_generation(
+        self,
+        allowed_capabilities: list[str],
+        *,
+        workspace: dict[str, Any],
+        description_overrides: dict[str, str],
+    ) -> None:
+        generation = getattr(self.delegate, "registry_generation", None)
+        if generation is None:
+            return
+        allowed = set(allowed_capabilities)
+        subtree = MountedSubtreeHandle(module_id="minion_allowed")
+        registered_tools: set[str] = set()
+        for record in (*generation.direct_aliases.values(), *generation.indirect_aliases.values()):
+            if record.canonical_path not in allowed:
+                continue
+            # Workspace and role-native tools deliberately replace the main
+            # runtime implementation with a sandbox-aware handler.  Do not
+            # also copy the inherited descriptor into this generation: the
+            # immutable replacement is registered below as one whole Tool.
+            if record.canonical_path in _WORKSPACE_TOOL_SPECS:
+                continue
+            if record.facade_tool is not None:
+                if record.canonical_path not in registered_tools:
+                    self.runtime.register_tool(record.facade_tool)
+                    registered_tools.add(record.canonical_path)
+                continue
+            descriptor = _scope_descriptor(
+                record.binding.descriptor,
+                workspace=workspace,
+                description_overrides=description_overrides,
+            )
+            binding = replace(record.binding, descriptor=descriptor)
+            subtree.descriptors.append(descriptor)
+            subtree.bound_actions.append(binding)
+            subtree.bound_action_keys.append((record.binding.canonical_path, record.binding.target_id))
+            subtree.search_record_ids.append(record.binding.descriptor.name)
+        if subtree.descriptors:
+            self.runtime.mount_subtree(SimpleNamespace(mounted_subtree=subtree))
 
     def register_tool(self, tool: Any) -> None:
-        if isinstance(tool, Tool):
-            self.runtime.register_tool(tool)
-            return
-        canonical = str(tool.name)
-        public_name = llm_tool_name(getattr(tool, "public_name", "") or canonical)
+        if not isinstance(tool, Tool):
+            raise TypeError("scoped execution accepts only immutable Tool registrations")
         self.runtime.register_tool(tool)
-        self.runtime.register_capability(
-            CapabilityDescriptor(
-                name=public_name,
-                canonical_path=canonical,
-                display_name=str(getattr(tool, "display_name", "") or canonical),
-                family=str(getattr(tool, "family", "") or "minion"),
-                description=replace_internal_tool_names(
-                    _replace_worker_internal_tool_names(getattr(tool, "description", "") or canonical)
-                ),
-                source="workflow:scoped-worker",
-                aliases=tuple(getattr(tool, "aliases", ()) or ()),
-                parameters_schema=dict(getattr(tool, "args_schema", {}) or {}),
-                result_schema=dict(getattr(tool, "result_schema", {}) or {}),
-                module_id="workflow_scoped",
-            ),
-            lambda _call: CapabilityResult(status=RuntimeStatus.ERROR, text="missing async binding"),
-        )
 
     def resolve_llm_tool_name(self, name: object) -> str:
         raw = str(name or "")
@@ -328,19 +400,10 @@ class _ExecutionOverlay:
         return str(resolver(raw) if callable(resolver) else raw)
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
-        values = list(getattr(self.delegate, "list_capability_specs", lambda: [])() or [])
-        known = {str(item.get("canonical_path") or item.get("name") or "") for item in values if isinstance(item, dict)}
-        values.extend(
-            item for item in self.runtime.list_capability_specs() if str(item.get("canonical_path") or item.get("name") or "") not in known
-        )
-        return [dict(item) for item in values if isinstance(item, dict)]
+        return [dict(item) for item in self.runtime.list_capability_specs()]
 
     def get_capability_spec(self, name: str) -> dict[str, Any] | None:
-        local = self.runtime.get_capability_spec(name)
-        if local is not None:
-            return dict(local)
-        getter = getattr(self.delegate, "get_capability_spec", None)
-        value = getter(name) if callable(getter) else None
+        value = self.runtime.get_capability_spec(name)
         return dict(value) if isinstance(value, dict) else None
 
     async def execute_tool_async(self, call: CanonicalToolCall, **kwargs: Any) -> CanonicalToolResult:
@@ -396,36 +459,44 @@ class MinionScopedExecutionRuntime:
 
     def __post_init__(self) -> None:
         self._original_runtime = self.base_runtime if callable(getattr(self.base_runtime, "execute_tool_async", None)) else ExecutionRuntime()
-        self.base_runtime = _ExecutionOverlay(self._original_runtime)
         self.allowed_capabilities = filter_minion_allowed_capabilities(list(self.allowed_capabilities or []))
+        if self.allowed_capabilities and "op_tool_result_page" not in self.allowed_capabilities:
+            self.allowed_capabilities.append("op_tool_result_page")
         self.capability_description_overrides = {
             str(key).strip(): str(value).strip()
             for key, value in dict(self.capability_description_overrides or {}).items()
             if str(key).strip() and str(value).strip()
         }
-        if self.allowed_capabilities and "op_tool_result_page" not in self.allowed_capabilities:
-            self.allowed_capabilities.append("op_tool_result_page")
+        self.base_runtime = _ExecutionOverlay(
+            self._original_runtime,
+            self.allowed_capabilities,
+            workspace=self.workspace,
+            description_overrides=self.capability_description_overrides,
+        )
         self._original_adapter = _OriginalAdapter(self)
         self._register_tools()
 
     def _register_tools(self) -> None:
         allowed = set(self.allowed_capabilities)
-        if "op_tool_search" in allowed:
-            self.base_runtime.register_tool(ToolSearchTool(runtime=self))
-        if "op_tool_read" in allowed:
-            self.base_runtime.register_tool(ToolReadTool(runtime=self))
-        if "op_tool_result_page" in allowed:
-            self.base_runtime.register_tool(ToolResultPageTool(runtime=self))
-        if "op_tool_call" in allowed:
-            self.base_runtime.register_tool(ToolCallTool(runtime=self))
-        for name, spec in _WORKSPACE_TOOL_SPECS.items():
+        for name, raw_spec in _WORKSPACE_TOOL_SPECS.items():
             if name not in allowed or is_minion_capability_denied(name):
                 continue
+            spec = _scoped_workspace_tool_spec(name, raw_spec, workspace=self.workspace)
             handler = self._handler(name)
             if handler is not None:
                 self.base_runtime.register_tool(_immutable_workflow_tool(name=name, spec=spec, handler=handler))
 
+    @property
+    def registry_generation(self):
+        return self.base_runtime.runtime.registry_generation
+
+    def build_llm_tool_contracts(self) -> list[dict[str, Any]]:
+        generation = self.registry_generation
+        return [dict(generation.provider_specs[alias]) for alias in sorted(generation.provider_specs)]
+
     def _handler(self, name: str) -> Any | None:
+        if is_review_finding_capability(name):
+            return lambda call, _ctx: add_finding_tool_result(call, self.workspace)
         if is_swe_verification_capability(name):
             return lambda call, _ctx: swe_verification_tool_result(
                 call,
@@ -468,7 +539,7 @@ class MinionScopedExecutionRuntime:
                 budget=ctx.get("budget"),
                 turn_id=str(ctx.get("turn_id") or "") or None,
             )
-        if name in {"op_tree", "op_search", "op_minion_artifact_write", "op_minion_artifact_edit"}:
+        if name in {"op_search", "op_minion_artifact_write", "op_minion_artifact_edit"}:
             return lambda call, _ctx: asyncio.to_thread(_workspace_tool_result, call, self.workspace)
         return None
 
@@ -566,6 +637,50 @@ def _supported_kwargs(callable_obj: Any, values: dict[str, Any]) -> dict[str, An
     return {key: value for key, value in values.items() if key in signature.parameters}
 
 
+def _scope_descriptor(
+    descriptor: Any,
+    *,
+    workspace: dict[str, Any],
+    description_overrides: dict[str, str],
+) -> Any:
+    canonical = str(descriptor.canonical_path or descriptor.name)
+    purpose = str(description_overrides.get(canonical) or descriptor.description).strip()
+    input_model = descriptor.InputModel
+    examples = tuple(dict(item) for item in descriptor.examples)
+    role = str(dict(workspace.get("minion_v2") or {}).get("role") or "")
+    hidden: set[str] = set()
+    if role in {"verifier", "scenario_verifier"}:
+        if canonical.startswith("op_lsp_"):
+            hidden.update({"workspace_root", "server_id"})
+        if canonical == "op_exec_shell":
+            hidden.update({"cwd", "workdir"})
+    if hidden and isinstance(input_model, type):
+        fields = {
+            name: (field.annotation, field)
+            for name, field in input_model.model_fields.items()
+            if name not in hidden
+        }
+        input_model = create_model(
+            f"Scoped{input_model.__name__}",
+            __base__=StrictToolModel,
+            **fields,
+        )
+        examples = tuple(
+            {key: value for key, value in item.items() if key not in hidden}
+            for item in examples
+        )
+    guidance = descriptor.guidance
+    if guidance is not None and purpose != descriptor.description:
+        guidance = guidance.model_copy(update={"purpose": purpose, "use_when": purpose})
+    return replace(
+        descriptor,
+        description=purpose,
+        InputModel=input_model,
+        guidance=guidance,
+        examples=examples,
+    )
+
+
 def _manager_call_to_facade(runtime: Any, call: CanonicalToolCall) -> CanonicalToolCall:
     """Translate Manager-internal canonical addressing at the facade boundary.
 
@@ -625,14 +740,14 @@ def _scrub_spec(
     value["description"] = replace_internal_tool_names(
         _replace_worker_internal_tool_names(override or value.get("description") or canonical)
     )
-    for key in ("parameters_schema", "result_schema"):
+    for key in ("input_schema", "output_schema"):
         if key in value:
             value[key] = replace_internal_tool_names_in_value(
                 _replace_worker_internal_tool_names_in_value(dict(value.get(key) or {}))
             )
     role = str(dict((workspace or {}).get("minion_v2") or {}).get("role") or "")
     if role in {"verifier", "scenario_verifier"}:
-        schema = dict(value.get("parameters_schema") or {})
+        schema = dict(value.get("input_schema") or {})
         properties = dict(schema.get("properties") or {})
         hidden: set[str] = set()
         if canonical.startswith("op_lsp_"):
@@ -647,7 +762,7 @@ def _scrub_spec(
                 schema["required"] = [
                     item for item in list(schema.get("required") or []) if item not in hidden
                 ]
-            value["parameters_schema"] = schema
+            value["input_schema"] = schema
     return value
 
 

@@ -6,6 +6,7 @@ import os
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pal.execution.file_state import FileStateCache
 
@@ -211,6 +212,27 @@ class FileStateCacheResolveTests(unittest.TestCase):
             self.assertEqual(cache.get_valid(str(path)), "content")
         finally:
             path.unlink(missing_ok=True)
+
+    def test_tilde_and_absolute_paths_share_one_key(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "state.txt"
+            path.write_text("content", encoding="utf-8")
+            cache = FileStateCache()
+
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                cache.mark_read("~/state.txt", "content")
+
+                self.assertEqual(cache.get_valid(path), "content")
+                self.assertIn("~/state.txt", cache)
+                self.assertIn(path, cache)
+                self.assertEqual(len(cache), 1)
+
+                cache.invalidate(path)
+                cache.mark_read(path, "content")
+                self.assertEqual(cache.get_valid("~/state.txt"), "content")
+                self.assertEqual(len(cache), 1)
 
 
 if __name__ == "__main__":

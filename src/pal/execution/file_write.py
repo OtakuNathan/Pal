@@ -8,12 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.file_state import FileStateCache
-from pal.execution.file_tool_contracts import (
-    FILE_WRITE_DESCRIPTION,
-    FILE_WRITE_RESULT_SCHEMA,
-    file_write_args_schema,
-)
+from pal.execution.file_state import FileStateCache, resolve_file_path
 from pal.shared import RuntimeStatus
 
 
@@ -54,25 +49,7 @@ _ERROR_LLMS: dict[str, str] = {
 class FileWriteTool:
     """Create a missing file or replace a fully-read existing file."""
 
-    name: str = "op_file_write"
-    display_name: str = "File Write"
-    family: str = "system"
-    description: str = (
-        "Use this instead of shell redirection when it is visible. "
-        + FILE_WRITE_DESCRIPTION
-    )
-    tags: tuple[str, ...] = ("file", "write", "create", "overwrite", "system")
-    keywords: tuple[str, ...] = ("write", "create", "save", "file", "new", "overwrite")
     cache: FileStateCache = field(default_factory=FileStateCache)
-    args_schema: dict[str, Any] = field(default_factory=dict)
-    result_schema: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.args_schema:
-            self.args_schema = file_write_args_schema()
-        if not self.result_schema:
-            self.result_schema = dict(FILE_WRITE_RESULT_SCHEMA)
-
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         file_path = str(args.get("file_path") or "").strip()
         content = args.get("content")
@@ -87,7 +64,7 @@ class FileWriteTool:
             return content_err
 
         try:
-            resolved = Path(file_path).expanduser().resolve()
+            resolved = resolve_file_path(file_path)
         except (OSError, ValueError) as exc:
             return _err(RuntimeStatus.INVALID, ERR_WRITE_FAILED, file_path=file_path, details=str(exc))
 

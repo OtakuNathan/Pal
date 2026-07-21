@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.file_state import FileStateCache
+from pal.execution.file_state import FileStateCache, resolve_file_path
 from pal.shared import RuntimeStatus
 
 
@@ -49,51 +49,7 @@ _ERROR_LLMS: dict[str, str] = {
 class PathDeleteTool:
     """Delete a file or directory through a structured, auditable entrypoint."""
 
-    name: str = "op_path_delete"
-    display_name: str = "Path Delete"
-    family: str = "system"
-    description: str = (
-        "Use this first for deleting files or directories; do not use op_exec_shell with rm/unlink/rmdir/git rm/find -delete when this tool is visible. "
-        "Delete a file or directory. Regular files must have a current prior file_read snapshot, "
-        "or expected_sha256 must match the current file bytes. Directories require recursive=true."
-    )
-    tags: tuple[str, ...] = ("path", "file", "directory", "delete", "remove", "system", "write")
-    keywords: tuple[str, ...] = ("delete", "remove", "unlink", "rm", "path", "file", "directory")
     cache: FileStateCache = field(default_factory=FileStateCache)
-    args_schema: dict[str, Any] = field(default_factory=dict)
-    result_schema: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.args_schema:
-            self.args_schema = {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string", "description": "Path to delete."},
-                    "expected_sha256": {
-                        "type": "string",
-                        "description": "Optional current SHA-256 digest for regular files. If supplied, a prior file_read snapshot is not required.",
-                    },
-                    "recursive": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "Required for directory deletion. Regular file deletion does not require this.",
-                    },
-                },
-                "required": ["file_path"],
-            }
-        if not self.result_schema:
-            self.result_schema = {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "deleted": {"type": "boolean"},
-                    "path_kind": {"type": "string"},
-                    "recursive": {"type": "boolean"},
-                    "sha256": {"type": "string"},
-                    "error_code": {"type": "string"},
-                },
-            }
-
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         file_path = str(args.get("file_path") or "").strip()
         expected_sha256 = str(args.get("expected_sha256") or "").strip().lower()
@@ -104,7 +60,7 @@ class PathDeleteTool:
             return _err(RuntimeStatus.INVALID, ERR_INVALID_SHA256, file_path=file_path)
 
         try:
-            resolved = Path(file_path).expanduser().resolve()
+            resolved = resolve_file_path(file_path)
         except (OSError, ValueError) as exc:
             return _err(RuntimeStatus.INVALID, ERR_DELETE_FAILED, file_path=file_path, details=str(exc))
 

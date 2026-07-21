@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    McpPluginMcpManagerPluginProviderAttachInput,
+    McpPluginMcpManagerPluginProviderDetachInput,
+    McpPluginMcpManagerPluginProviderImagePrepareInput,
+    McpPluginMcpManagerPluginProviderReadInput,
+)
+
 import base64
 import contextlib
 import mimetypes
@@ -107,7 +114,7 @@ class McpManagerPluginProvider:
         scope="mcp_server",
         action_name="read",
         description="Read one MCP server metadata and discovery snapshot",
-        args_schema={"type": "object", "properties": {"server_id": {"type": "string"}}, "required": ["server_id"]},
+        InputModel=McpPluginMcpManagerPluginProviderReadInput,
     )
     def read_server(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self._request_or_error("read_server", {"server_id": str(call.args.get("server_id") or "")})
@@ -169,7 +176,7 @@ class McpManagerPluginProvider:
         family="server",
         action_name="attach",
         description="Attach one configured MCP server inside the manager",
-        args_schema={"type": "object", "properties": {"server_id": {"type": "string"}}, "required": ["server_id"]},
+        InputModel=McpPluginMcpManagerPluginProviderAttachInput,
     )
     def attach_server(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -187,7 +194,7 @@ class McpManagerPluginProvider:
         family="server",
         action_name="detach",
         description="Detach one MCP server inside the manager",
-        args_schema={"type": "object", "properties": {"server_id": {"type": "string"}}, "required": ["server_id"]},
+        InputModel=McpPluginMcpManagerPluginProviderDetachInput,
     )
     def detach_server(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -204,16 +211,7 @@ class McpManagerPluginProvider:
         family="mcp",
         action_name="image_prepare",
         description="Prepare an image artifact/path/url for external MCP tool arguments as URL, local path, or base64 data",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "artifact_id": {"type": "string"},
-                "path": {"type": "string"},
-                "url": {"type": "string"},
-                "mode": {"type": "string", "enum": ["auto", "url", "path", "base64", "data_url"]},
-            },
-            "required": [],
-        },
+        InputModel=McpPluginMcpManagerPluginProviderImagePrepareInput,
     )
     def image_prepare(self, call: CapabilityCall) -> CapabilityResult:
         try:

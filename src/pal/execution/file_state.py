@@ -16,6 +16,25 @@ from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
 
 
+def resolve_file_path(file_path: str | Path) -> Path:
+    """Return one filesystem identity for every accepted path spelling."""
+    return Path(file_path).expanduser().resolve()
+
+
+def file_cache_key(file_path: str | Path) -> str:
+    """Return the canonical key shared by all read-before-mutate tools."""
+    try:
+        return str(resolve_file_path(file_path))
+    except (OSError, RuntimeError, ValueError):
+        # Keep cache inspection and invalidation total even for malformed or
+        # temporarily unresolvable paths.  expanduser still runs when possible
+        # so ``~`` never gains a second, cwd-relative cache identity.
+        try:
+            return str(Path(file_path).expanduser().absolute())
+        except (OSError, RuntimeError, ValueError):
+            return str(file_path)
+
+
 @dataclass(frozen=True)
 class FileState:
     """Snapshot of a file as seen when it was read."""
@@ -29,7 +48,7 @@ class FileState:
 class FileStateCache:
     """LRU cache (max 1000 entries) that tracks file read state.
 
-    Keys are resolved absolute paths (``Path.resolve()``).  Each entry
+    Keys are user-expanded, resolved absolute paths.  Each entry
     stores the content and the nanosecond-resolution modification time
     (``st_mtime_ns``) so that ``get_valid`` can automatically invalidate
     stale entries when the on-disk mtime has changed.
@@ -135,10 +154,7 @@ class FileStateCache:
 
     @staticmethod
     def _resolve(file_path: str | Path) -> str:
-        try:
-            return str(Path(file_path).resolve())
-        except (OSError, ValueError):
-            return str(file_path)
+        return file_cache_key(file_path)
 
     @staticmethod
     def _get_mtime_ns(resolved_path: str) -> int:
@@ -158,43 +174,6 @@ class FileStateTool:
     """Inspect the shared read-before-edit file cache."""
 
     cache: FileStateCache = field(default_factory=FileStateCache)
-    name: str = "op_file_state"
-    display_name: str = "File State"
-    family: str = "system"
-    description: str = (
-        "Use this first when you need to check whether a file has a current read snapshot before editing, writing, or deleting it. "
-        "Inspect whether a file has a current complete cached read snapshot for safe mutation. "
-        "This does not return cached file contents."
-    )
-    tags: tuple[str, ...] = ("file", "state", "cache", "system")
-    keywords: tuple[str, ...] = ("file", "state", "cache", "read", "edit", "stale")
-    args_schema: dict[str, Any] = field(default_factory=dict)
-    result_schema: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.args_schema:
-            self.args_schema = {
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Optional file path to check against the read-before-edit cache.",
-                    },
-                },
-            }
-        if not self.result_schema:
-            self.result_schema = {
-                "type": "object",
-                "properties": {
-                    "cached_file_count": {"type": "integer"},
-                    "file_path": {"type": "string"},
-                    "cached": {"type": "boolean"},
-                    "valid": {"type": "boolean"},
-                    "full_view": {"type": "boolean"},
-                    "content_length": {"type": "integer"},
-                },
-            }
-
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         file_path = str(args.get("file_path") or "").strip()
         payload: dict[str, Any] = {"cached_file_count": len(self.cache)}

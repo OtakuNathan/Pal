@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from pal.execution.tool_facade import Tool
+from pydantic import BaseModel
+
+from pal.execution.tool_facade import (
+    EffectReceipt,
+    EmptyToolInput,
+    OpaqueToolOutput,
+    Tool,
+    ToolExecutionSemantics,
+    ToolGuidance,
+)
 
 
 @dataclass(frozen=True)
@@ -19,8 +27,14 @@ class CapabilityDescriptor:
     target_kind: str = ""
     target_id: str = ""
     target_label: str = ""
-    parameters_schema: dict[str, Any] = field(default_factory=dict)
-    result_schema: dict[str, Any] = field(default_factory=dict)
+    InputModel: type[BaseModel] | None = EmptyToolInput
+    OutputModel: type[BaseModel] | None = OpaqueToolOutput
+    guidance: ToolGuidance | None = None
+    execution: ToolExecutionSemantics | None = None
+    search_text: str = ""
+    examples: tuple[dict[str, Any], ...] = ()
+    mcp_input_schema: dict[str, Any] = field(default_factory=dict)
+    mcp_output_schema: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     lifecycle_scope: str = "runtime"
     module_id: str = ""
@@ -40,13 +54,11 @@ class CapabilityResult:
     llm_text: str
     text: str = ""
     structured: dict[str, Any] | None = None
+    effect_receipt: EffectReceipt | None = None
 
     def __post_init__(self) -> None:
         if not str(self.llm_text or "").strip():
             raise ValueError("CapabilityResult.llm_text must be non-empty")
-
-
-CapabilityCallable = Callable[[CapabilityCall], CapabilityResult]
 
 
 @dataclass(frozen=True)
@@ -70,12 +82,6 @@ class Plugin(Protocol):
 
 
 class ExecutionRuntimePort(Protocol):
-    def register_capability(self, descriptor: CapabilityDescriptor, callable: CapabilityCallable) -> None:
-        ...
-
-    def unregister_capability(self, name: str) -> None:
-        ...
-
     def register_provider_ref(self, provider_id: str, provider: Any) -> None:
         ...
 

@@ -121,12 +121,12 @@ class PalV2BootstrapTests(unittest.TestCase):
         self._runtime_handles.append(handle)
         return handle
 
-    def _find_search_hit_by_canonical(self, core, search, canonical_path: str) -> dict:
+    def _find_search_hit_by_alias(self, core, search, alias: str) -> dict:
         _ = core
         for item in search.structured["hits"]:
-            if item.get("name") == canonical_path:
+            if item.get("alias") == alias:
                 return item
-        self.fail(f"search result did not include readable capability {canonical_path}")
+        self.fail(f"search result did not include alias {alias}")
 
     def _write_demo_runtime_channel_provider(self) -> None:
         provider_dir = self.runtime_root / "channel" / "providers" / "demo_runtime"
@@ -2261,10 +2261,10 @@ class PalV2BootstrapTests(unittest.TestCase):
         search = handle.core.context.execution_runtime.execute(
             CapabilityCall(name="op_tool_search", args={"query": "start minion workflow"})
         )
-        minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_start_workflow")
-        self.assertEqual(minion_hit["name"], "minion_start_workflow")
-        self.assertNotIn("module_id", minion_hit)
-        self.assertIn("required_params", minion_hit)
+        minion_hit = self._find_search_hit_by_alias(handle.core, search, "minion_start_workflow")
+        self.assertEqual(minion_hit["alias"], "minion_start_workflow")
+        self.assertEqual(minion_hit["module_id"], "minion")
+        self.assertIn("input_shape", minion_hit)
 
     def test_stub_runtime_provisions_builtin_plugins_for_fresh_compose(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_stub_builtin_test_"))
@@ -2279,12 +2279,12 @@ class PalV2BootstrapTests(unittest.TestCase):
             self.assertIn("minion_start_workflow", handle.core.context.capability_registry.descriptors)
             self.assertNotIn("minion_dispatch_workflow", handle.core.context.capability_registry.descriptors)
             search = handle.core.context.execution_runtime.execute(
-                CapabilityCall(name="op_tool_search", args={"query": "minion"})
+                CapabilityCall(name="op_tool_search", args={"query": "start minion workflow"})
             )
-            minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_start_workflow")
-            self.assertEqual(minion_hit["name"], "minion_start_workflow")
-            self.assertNotIn("module_id", minion_hit)
-            self.assertIn("required_params", minion_hit)
+            minion_hit = self._find_search_hit_by_alias(handle.core, search, "minion_start_workflow")
+            self.assertEqual(minion_hit["alias"], "minion_start_workflow")
+            self.assertEqual(minion_hit["module_id"], "minion")
+            self.assertIn("input_shape", minion_hit)
         finally:
             provisioned.database.close()
             shutil.rmtree(root, ignore_errors=True)

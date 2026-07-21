@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseInput,
+    BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseOutput,
+    BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteInput,
+    BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteOutput,
+    BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitInput,
+    BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitOutput,
+    BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateInput,
+    BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateOutput,
+)
+from pal.execution.tool_semantics import DIRECT_LOCAL_READ, DIRECT_UNSAFE_LOCAL_WRITE
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pal.behavior.service import BehaviorService
 from pal.behavior.tools import (
-    ADVISE_ARGS_SCHEMA,
-    ADVISE_RESULT_SCHEMA,
-    AFFORDANCE_DELETE_ARGS_SCHEMA,
-    AFFORDANCE_DELETE_RESULT_SCHEMA,
-    AFFORDANCE_SUBMIT_ARGS_SCHEMA,
-    AFFORDANCE_SUBMIT_RESULT_SCHEMA,
-    AFFORDANCE_UPDATE_ARGS_SCHEMA,
-    AFFORDANCE_UPDATE_RESULT_SCHEMA,
     BEHAVIOR_ADVICE_DESCRIPTION,
     BEHAVIOR_FORGET_DESCRIPTION,
     BEHAVIOR_LEARN_DESCRIPTION,
@@ -87,19 +91,13 @@ class BehaviorIntrospectionProvider:
         family="behavior",
         action_name="advise",
         description=BEHAVIOR_ADVICE_DESCRIPTION,
-        args_schema=ADVISE_ARGS_SCHEMA,
-        result_schema=ADVISE_RESULT_SCHEMA,
+        InputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseInput,
+        OutputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAdviseOutput,
+        execution=DIRECT_LOCAL_READ,
         metadata={"async_required": True},
     )
-    def advise(self, call: CapabilityCall) -> CapabilityResult:
-        _ = call
-        structured = {"reason": "async_required", "tool": "op_behavior_advise"}
-        return CapabilityResult(
-            status=RuntimeStatus.INVALID,
-            text="behavior_advise requires an active async turn context.",
-            structured=structured,
-            llm_text=render_titled_structured_for_llm("Behavior advice unavailable", structured),
-        )
+    async def advise(self, call: CapabilityCall) -> CapabilityResult:
+        return await BehaviorAdviceTool(service=self.service).ainvoke(call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -107,8 +105,9 @@ class BehaviorIntrospectionProvider:
         family="behavior",
         action_name="affordance_submit",
         description=BEHAVIOR_LEARN_DESCRIPTION,
-        args_schema=AFFORDANCE_SUBMIT_ARGS_SCHEMA,
-        result_schema=AFFORDANCE_SUBMIT_RESULT_SCHEMA,
+        InputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitInput,
+        OutputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitOutput,
+        execution=DIRECT_UNSAFE_LOCAL_WRITE,
         metadata={"canonical_path": "op_behavior_save"},
     )
     def submit_affordance(self, call: CapabilityCall) -> CapabilityResult:
@@ -120,8 +119,9 @@ class BehaviorIntrospectionProvider:
         family="behavior",
         action_name="affordance_update",
         description=BEHAVIOR_UPDATE_DESCRIPTION,
-        args_schema=AFFORDANCE_UPDATE_ARGS_SCHEMA,
-        result_schema=AFFORDANCE_UPDATE_RESULT_SCHEMA,
+        InputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateInput,
+        OutputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateOutput,
+        execution=DIRECT_UNSAFE_LOCAL_WRITE,
     )
     def update_affordance(self, call: CapabilityCall) -> CapabilityResult:
         return AffordanceUpdateTool(service=self.service).invoke(call.args)
@@ -132,8 +132,9 @@ class BehaviorIntrospectionProvider:
         family="behavior",
         action_name="affordance_delete",
         description=BEHAVIOR_FORGET_DESCRIPTION,
-        args_schema=AFFORDANCE_DELETE_ARGS_SCHEMA,
-        result_schema=AFFORDANCE_DELETE_RESULT_SCHEMA,
+        InputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteInput,
+        OutputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteOutput,
+        execution=DIRECT_UNSAFE_LOCAL_WRITE,
     )
     def delete_affordance(self, call: CapabilityCall) -> CapabilityResult:
         return AffordanceDeleteTool(service=self.service).invoke(call.args)
@@ -144,10 +145,6 @@ def register_with_core(context: "MainContext", service: BehaviorService) -> Modu
 
     service.execution_runtime = service.execution_runtime or context.execution_runtime
     service.prompt_fragment_registry = service.prompt_fragment_registry or context.prompt_fragment_registry
-    context.execution_runtime.register_tool(BehaviorAdviceTool(service=service))
-    context.execution_runtime.register_tool(AffordanceSubmitTool(service=service))
-    context.execution_runtime.register_tool(AffordanceUpdateTool(service=service))
-    context.execution_runtime.register_tool(AffordanceDeleteTool(service=service))
     provider = BehaviorIntrospectionProvider(service=service)
     prompt_provider = BehaviorPromptFragmentProvider(service=service)
     handle = ModuleHandle(

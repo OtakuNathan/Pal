@@ -8,12 +8,13 @@ import site
 import sys
 import sysconfig
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pal.foundation.log_paths import pal_log_root
 from pal.foundation.sidecar import python_subprocess_env
 from pal.minion.ipc import minion_worker_port_path, minion_worker_socket_path
+from pal.minion.workspace_tools import _normalized_reference_paths
 from pal.shared import RUN_SHELL_SCOPE_HINT, MinionInvocationPack, format_dedicated_tool_route_hints
 
 
@@ -22,6 +23,7 @@ PAL_MINION_SANDBOX_MIN_FREE_MB_ENV = "PAL_MINION_SANDBOX_MIN_FREE_MB"
 PAL_MINION_SANDBOX_MAX_RUN_DIRS_ENV = "PAL_MINION_SANDBOX_MAX_RUN_DIRS"
 DEFAULT_MINION_SANDBOX_MIN_FREE_MB = 256
 DEFAULT_MINION_SANDBOX_MAX_RUN_DIRS = 128
+MINION_SANDBOX_REFERENCE_ROOT = PurePosixPath("/pal/references")
 
 MINION_SANDBOX_BLACKLIST_COMMANDS = (
     "sudo",
@@ -116,7 +118,7 @@ def with_minion_sandbox_metadata(runtime_root: Path, pack: MinionInvocationPack,
     workspace_path = _workspace_path_from_pack(pack)
     scratch_dir = minion_sandbox_scratch_dir(runtime_root, run_id)
     deny_dir = Path(runtime_root) / "data" / "minion" / "sandbox" / "deny-bin"
-    metadata["sandbox"] = MinionSandboxSpec(
+    sandbox_metadata = MinionSandboxSpec(
         enabled=True,
         backend=backend,
         runtime_root=Path(runtime_root),
@@ -131,7 +133,98 @@ def with_minion_sandbox_metadata(runtime_root: Path, pack: MinionInvocationPack,
         ),
         git_metadata_bind_paths=_git_worktree_metadata_bind_paths(workspace_path),
     ).to_metadata()
-    return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
+    existing_reference_binds = [
+        dict(item or {})
+        for item in list(sandbox_config.get("reference_binds") or [])
+        if isinstance(item, dict)
+    ]
+    if existing_reference_binds:
+        workspace = _reconcile_projected_reference_paths(
+            dict(pack.workspace or {}),
+            existing_reference_binds,
+        )
+        reference_binds = existing_reference_binds
+    else:
+        workspace, reference_binds = _project_sandbox_references(dict(pack.workspace or {}))
+    sandbox_metadata["reference_binds"] = reference_binds
+    metadata["sandbox"] = sandbox_metadata
+    return MinionInvocationPack.from_dict(
+        {**pack.to_dict(), "workspace": workspace, "metadata": metadata}
+    )
+
+
+def _project_sandbox_references(
+    workspace: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    projected_workspace = dict(workspace or {})
+    projected_references: list[dict[str, Any]] = []
+    reference_binds: list[dict[str, Any]] = []
+    targets: set[str] = set()
+    for reference in _normalized_reference_paths(projected_workspace):
+        item = dict(reference)
+        if bool(item.get("bound_input")):
+            projected_references.append(item)
+            continue
+        name = str(item.get("name") or "reference").strip()
+        target = str(MINION_SANDBOX_REFERENCE_ROOT / _safe_reference_component(name))
+        if target in targets:
+            raise RuntimeError(f"sandbox reference path collision: {name}")
+        targets.add(target)
+        bind = {
+            "name": name,
+            "source_path": str(item.get("path") or ""),
+            "target_path": target,
+            "include": list(item.get("include") or []),
+            "required": bool(item.get("required", True)),
+        }
+        reference_binds.append(bind)
+        item["path"] = _projected_reference_path(bind)
+        projected_references.append(item)
+    projected_workspace["reference_paths"] = projected_references
+    return projected_workspace, reference_binds
+
+
+def _reconcile_projected_reference_paths(
+    workspace: dict[str, Any],
+    reference_binds: list[dict[str, Any]],
+) -> dict[str, Any]:
+    projected = dict(workspace or {})
+    binds_by_name = {
+        str(item.get("name") or ""): dict(item)
+        for item in reference_binds
+        if str(item.get("name") or "")
+    }
+    references: list[dict[str, Any]] = []
+    for raw in list(projected.get("reference_paths") or []):
+        item = dict(raw or {})
+        bind = binds_by_name.get(str(item.get("name") or ""))
+        if bind is not None and not bool(item.get("bound_input")):
+            item["path"] = _projected_reference_path(bind)
+        references.append(item)
+    projected["reference_paths"] = references
+    return projected
+
+
+def _projected_reference_path(reference_bind: dict[str, Any]) -> str:
+    target = PurePosixPath(str(reference_bind.get("target_path") or ""))
+    includes = [
+        str(item).replace("\\", "/").strip()
+        for item in list(reference_bind.get("include") or [])
+        if str(item).strip()
+    ]
+    if len(includes) == 1 and not any(char in includes[0] for char in "*?["):
+        source_file = Path(str(reference_bind.get("source_path") or "")).expanduser() / includes[0]
+        if source_file.is_file():
+            return str(target.joinpath(*PurePosixPath(includes[0]).parts))
+    return str(target)
+
+
+def _safe_reference_component(value: str) -> str:
+    safe = [
+        char.lower() if char.isalnum() else char if char in {"-", "_"} else "_"
+        for char in str(value or "")
+    ]
+    return ("".join(safe).strip("_-") or "reference")[:80]
 
 
 def minion_sandbox_is_enabled(pack: MinionInvocationPack | dict[str, Any] | None) -> bool:
@@ -441,12 +534,14 @@ def _build_bwrap_invocation(
         git_marker = workspace_path / ".git"
         if git_marker.exists() or git_marker.is_symlink():
             _append_bind_path(args, git_marker, read_only=True)
-    for reference in list(pack.workspace.get("reference_paths") or []):
-        if bool(dict(reference or {}).get("bound_input")):
-            continue
-        reference_path = Path(str(dict(reference or {}).get("path") or "")).expanduser()
-        if reference_path.exists():
-            _append_bind_path(args, reference_path, read_only=True)
+    reference_binds = [
+        dict(item or {})
+        for item in list(sandbox.get("reference_binds") or [])
+        if isinstance(item, dict)
+    ]
+    if not reference_binds:
+        _, reference_binds = _project_sandbox_references(dict(pack.workspace or {}))
+    _append_reference_projection_binds(args, reference_binds)
     for command in blacklist:
         wrapper = deny_dir / command
         if not wrapper.exists():
@@ -457,6 +552,88 @@ def _build_bwrap_invocation(
     args.extend(["--chdir", _sandbox_cwd(pack), "--"])
     args.extend(argv)
     return args
+
+
+def _append_reference_projection_binds(
+    args: list[str],
+    references: list[dict[str, Any]],
+) -> None:
+    created_dirs: set[str] = set()
+    for reference in references:
+        source = Path(str(reference.get("source_path") or "")).expanduser()
+        target = PurePosixPath(str(reference.get("target_path") or ""))
+        required = bool(reference.get("required", True))
+        if not source.exists() or not source.is_dir():
+            if required:
+                raise RuntimeError(
+                    f"sandbox reference source is unavailable: {reference.get('name') or source}"
+                )
+            continue
+        if not target.is_absolute() or target.parent != MINION_SANDBOX_REFERENCE_ROOT:
+            raise RuntimeError(f"invalid sandbox reference target: {target}")
+        includes = [str(item).strip() for item in list(reference.get("include") or []) if str(item).strip()]
+        _append_virtual_dirs(args, target, created_dirs)
+        if not includes:
+            args.extend(["--ro-bind", str(source.resolve()), str(target)])
+            continue
+        args.extend(["--tmpfs", str(target)])
+        matches = _reference_projection_matches(source, includes)
+        if not matches and required:
+            raise RuntimeError(
+                f"sandbox reference include set is empty: {reference.get('name') or source}"
+            )
+        bound_directories: list[Path] = []
+        for relative, resolved in matches:
+            if any(relative == parent or relative.is_relative_to(parent) for parent in bound_directories):
+                continue
+            destination = target.joinpath(*relative.parts)
+            if resolved.is_dir():
+                _append_virtual_dirs(args, destination, created_dirs)
+                args.extend(["--ro-bind", str(resolved), str(destination)])
+                bound_directories.append(relative)
+            else:
+                _append_virtual_dirs(args, destination.parent, created_dirs)
+                args.extend(["--ro-bind", str(resolved), str(destination)])
+        args.extend(["--remount-ro", str(target)])
+
+
+def _reference_projection_matches(
+    source: Path,
+    includes: list[str],
+) -> list[tuple[Path, Path]]:
+    root = source.resolve()
+    matches: dict[Path, Path] = {}
+    for pattern in includes:
+        normalized = pattern.replace("\\", "/").strip()
+        parts = PurePosixPath(normalized).parts
+        if not normalized or normalized.startswith("/") or ".." in parts:
+            raise RuntimeError(f"invalid sandbox reference include pattern: {pattern}")
+        for candidate in source.glob(normalized):
+            try:
+                resolved = candidate.resolve(strict=True)
+                relative = candidate.relative_to(source)
+            except (OSError, ValueError):
+                continue
+            if not resolved.is_relative_to(root):
+                raise RuntimeError(f"sandbox reference include escapes its source root: {candidate}")
+            if relative.parts:
+                matches[relative] = resolved
+    return sorted(matches.items(), key=lambda item: (len(item[0].parts), str(item[0])))
+
+
+def _append_virtual_dirs(
+    args: list[str],
+    path: PurePosixPath,
+    created: set[str],
+) -> None:
+    current = PurePosixPath("/")
+    for part in path.parts[1:]:
+        current /= part
+        value = str(current)
+        if value in created:
+            continue
+        args.extend(["--dir", value])
+        created.add(value)
 
 
 def _append_runtime_root_binds(

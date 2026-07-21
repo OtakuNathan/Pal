@@ -19,7 +19,6 @@ from pal.execution.capability_compiler import compile_provider_subtree
 from pal.execution.contracts import (
     CapabilityCall,
     CapabilityDescriptor,
-    CapabilityCallable,
     CapabilityResult,
     ExecutionRuntimePort,
     ToolCallBudget,
@@ -64,6 +63,7 @@ from pal.shared import (
     RuntimeStatus,
     SINGLETON_TARGET,
 )
+from pal.shared.text_search import jieba_search_terms
 
 if TYPE_CHECKING:
     from pal.core.module_registry import ModuleHandle
@@ -128,74 +128,30 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def tools(self):
         return self._registry_generation.tool_implementations
 
-    def register_capability(self, descriptor: CapabilityDescriptor, callable: CapabilityCallable) -> None:
-        canonical_path = str(descriptor.canonical_path or descriptor.name).strip()
-        binding = self._binding_for_action(
-            BoundCapabilityAction(
-                canonical_path=canonical_path,
-                target_id=descriptor.target_id or SINGLETON_TARGET,
-                descriptor=descriptor,
-                callable=callable,
-            )
-        )
-        subtree = MountedSubtreeHandle(module_id=descriptor.module_id or "standalone")
-        subtree.descriptors.append(descriptor)
-        subtree.bound_actions.append(binding)
-        subtree.bound_action_keys.append((binding.canonical_path, binding.target_id))
-        subtree.search_record_ids.append(descriptor.name)
-        key = f"__standalone__:{descriptor.name}"
-        with self._registry_lock:
-            current = self._registry_generation
-            mounted = dict(current.mounted_subtrees)
-            if key in mounted:
-                raise ValueError(f"capability descriptor name already registered: {descriptor.name}")
-            mounted[key] = subtree
-            self._registry_generation = compile_registry_generation(
-                generation_id=current.generation_id + 1,
-                mounted_subtrees=mounted,
-                tool_implementations=dict(current.tool_implementations),
-            )
-            subtree.mounted = True
-
-    def unregister_capability(self, name: str) -> None:
-        normalized = str(name or "").strip()
-        with self._registry_lock:
-            current = self._registry_generation
-            descriptor = current.capability_index.records.get(normalized)
-            if descriptor is None:
-                resolved = self._resolve_descriptor(normalized)
-                descriptor = resolved if isinstance(resolved, CapabilityDescriptor) else None
-            if descriptor is None:
-                return
-            key = f"__standalone__:{descriptor.name}"
-            mounted = dict(current.mounted_subtrees)
-            if mounted.pop(key, None) is None:
-                return
-            self._registry_generation = compile_registry_generation(
-                generation_id=current.generation_id + 1,
-                mounted_subtrees=mounted,
-                tool_implementations=dict(current.tool_implementations),
-            )
-
     def register_provider_ref(self, provider_id: str, provider: Any) -> None:
         self.provider_registry[provider_id] = provider
 
     def unregister_provider_ref(self, provider_id: str) -> None:
         self.provider_registry.pop(provider_id, None)
 
-    def register_tool(self, tool: Any) -> None:
-        canonical_path = str(
-            tool.canonical_path if isinstance(tool, ImmutableTool) else getattr(tool, "name", "")
-        ).strip()
+    def register_tool(self, tool: ImmutableTool) -> None:
+        if not isinstance(tool, ImmutableTool):
+            raise TypeError("register_tool accepts only an immutable Tool facade")
+        canonical_path = str(tool.canonical_path).strip()
         if not canonical_path:
             raise ValueError("tool canonical path is required")
         with self._registry_lock:
             current = self._registry_generation
+            existing = current.record_for_alias(tool.alias)
+            if existing is not None and existing.canonical_path != canonical_path:
+                raise ValueError(
+                    f"tool alias conflict in generation: {tool.alias} -> "
+                    f"{existing.canonical_path}, {canonical_path}"
+                )
             implementations = dict(current.tool_implementations)
             implementations[canonical_path] = tool
             mounted = dict(current.mounted_subtrees)
-            if isinstance(tool, ImmutableTool):
-                mounted[f"__tool__:{canonical_path}"] = subtree_for_tool(tool)
+            mounted[f"__tool__:{canonical_path}"] = subtree_for_tool(tool)
             self._registry_generation = compile_registry_generation(
                 generation_id=current.generation_id + 1,
                 mounted_subtrees=mounted,
@@ -265,8 +221,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
             "description": record.description,
             "search_text": record.search_text,
             "invocation_mode": record.execution.invocation_mode.value,
-            "args_schema": dict(record.input_schema),
-            "result_schema": dict(record.output_schema),
+            "input_schema": dict(record.input_schema),
+            "output_schema": dict(record.output_schema),
         }
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
@@ -369,48 +325,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
         prepared = MountedSubtreeHandle(module_id=subtree.module_id)
         prepared.nodes.extend(subtree.nodes)
         prepared.descriptors.extend(subtree.descriptors)
-        prepared.bound_actions.extend(self._binding_for_action(action) for action in subtree.bound_actions)
+        prepared.bound_actions.extend(subtree.bound_actions)
         prepared.node_ids.extend(subtree.node_ids)
         prepared.bound_action_keys.extend(subtree.bound_action_keys)
         prepared.search_record_ids.extend(subtree.search_record_ids)
         return prepared
-
-    def _binding_for_action(self, action: BoundCapabilityAction) -> BoundCapabilityAction:
-        tool = self.tools.get(action.canonical_path)
-        if tool is None:
-            return action
-
-        def invoke_tool(call: CapabilityCall) -> CapabilityResult:
-            return tool.invoke(dict(call.args))
-
-        async_invoke = getattr(tool, "ainvoke", None)
-        async_callable = None
-        if callable(async_invoke):
-            async def invoke_tool_async(call: CapabilityCall) -> CapabilityResult:
-                tool_call = call.meta.get("tool_call")
-                if not isinstance(tool_call, CanonicalToolCall):
-                    tool_call = CanonicalToolCall(name=action.canonical_path, args=dict(call.args))
-                result = async_invoke(
-                    dict(call.args),
-                    **_tool_invoke_kwargs(
-                        async_invoke,
-                        runtime=self,
-                        turn_id=str(call.meta.get("turn_id") or "") or None,
-                        tool_call=tool_call,
-                        budget=call.meta.get("budget"),
-                        allow_tools=bool(call.meta.get("allow_tools", True)),
-                    ),
-                )
-                return await result if inspect.isawaitable(result) else result
-
-            async_callable = invoke_tool_async
-        return BoundCapabilityAction(
-            canonical_path=action.canonical_path,
-            target_id=action.target_id,
-            descriptor=action.descriptor,
-            callable=invoke_tool,
-            async_callable=async_callable,
-        )
 
     def invoke_direct_tool(
         self,
@@ -799,21 +718,85 @@ class ExecutionRuntime(ExecutionRuntimePort):
     @staticmethod
     def _search_generation(generation: ToolRegistryGeneration, args: dict[str, Any]) -> dict[str, Any]:
         query = str(args.get("query") or "").strip().lower()
+        namespace = str(args.get("namespace") or "").strip().lower()
+        namespace = {"inspect": "introspection", "action": "operation"}.get(namespace, namespace)
+        family = str(args.get("family") or "").strip().lower()
+        module_id = str(args.get("module_id") or "").strip().lower()
+        tags = {
+            str(item).strip().lower()
+            for item in list(args.get("tags") or ())
+            if str(item).strip()
+        }
+        include_facets = bool(args.get("facets", False))
         try:
             limit = max(1, int(args.get("top_k") or args.get("limit") or 10))
         except (TypeError, ValueError):
             limit = 10
-        terms = [item for item in query.split() if item]
+        terms = tuple(item.lower() for item in jieba_search_terms(query))
         scored: list[tuple[int, str, dict[str, Any]]] = []
         for alias, item in generation.search_records.items():
-            haystack = f"{alias} {item['search_text']}".lower()
-            score = sum(3 if term in alias.lower() else 1 for term in terms if term in haystack)
+            item_namespace = str(item.get("namespace") or "").lower()
+            item_family = str(item.get("family") or "").lower()
+            item_module = str(item.get("module_id") or "").lower()
+            item_tags = {str(tag).lower() for tag in item.get("tags", ())}
+            if namespace and item_namespace != namespace:
+                continue
+            if family and item_family != family:
+                continue
+            if module_id and item_module != module_id:
+                continue
+            if tags and not tags.issubset(item_tags):
+                continue
+            alias_text = alias.lower()
+            search_text = str(item["search_text"]).lower()
+            haystack = f"{alias_text} {search_text} {item_family} {item_module} {' '.join(item_tags)}"
+            score = 0
+            if query:
+                if alias_text == query:
+                    score += 100
+                elif alias_text.startswith(query):
+                    score += 40
+                if query in search_text:
+                    score += 20
+            for term in terms:
+                if term == alias_text:
+                    score += 30
+                elif term in alias_text:
+                    score += 12
+                if term in search_text:
+                    score += 5
+                if term in {item_family, item_module, *item_tags}:
+                    score += 3
             if terms and score == 0:
                 continue
-            scored.append((score, alias, dict(item)))
+            hit = dict(item)
+            hit["score"] = score
+            scored.append((score, alias, hit))
         scored.sort(key=lambda item: (-item[0], item[1]))
         hits = [item for _, _, item in scored[:limit]]
-        return {"hits": hits, "total_count": len(scored), "returned_count": len(hits)}
+        result: dict[str, Any] = {
+            "hits": hits,
+            "total_count": len(scored),
+            "returned_count": len(hits),
+            "top_k": limit,
+            "truncated": len(scored) > len(hits),
+            "applied_filters": {
+                key: value
+                for key, value in {
+                    "query": query,
+                    "namespace": namespace,
+                    "family": family,
+                    "module_id": module_id,
+                    "tags": sorted(tags) if tags else None,
+                }.items()
+                if value
+            },
+        }
+        if include_facets:
+            result["facets"] = _search_facets(item for _, _, item in scored)
+            if result["truncated"]:
+                result["usage_hint"] = "Narrow with namespace, module_id, family, or tags."
+        return result
 
     @staticmethod
     def _read_generation_tool(generation: ToolRegistryGeneration, alias: str) -> dict[str, Any] | None:
@@ -904,17 +887,22 @@ class ExecutionRuntime(ExecutionRuntimePort):
     ) -> Any:
         if record.facade_tool is not None:
             handler = record.facade_tool.handler
-            result = handler(
-                validated,
-                **_tool_invoke_kwargs(
-                    handler,
-                    runtime=self,
-                    turn_id=turn_id,
-                    tool_call=call,
-                    budget=budget,
-                    allow_tools=allow_tools,
-                ),
+            invoke_kwargs = _tool_invoke_kwargs(
+                handler,
+                runtime=self,
+                turn_id=turn_id,
+                tool_call=call,
+                budget=budget,
+                allow_tools=allow_tools,
             )
+            if inspect.iscoroutinefunction(handler):
+                result = handler(validated, **invoke_kwargs)
+            else:
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(
+                    self.sync_executor,
+                    lambda: handler(validated, **invoke_kwargs),
+                )
             return await result if inspect.isawaitable(result) else result
         args = validated.model_dump(mode="python", exclude_none=True) if isinstance(validated, BaseModel) else dict(validated)
         capability_call = CapabilityCall(
@@ -952,8 +940,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
             raw_status = getattr(raw, "status", RuntimeStatus.ERROR)
             raw_structured = getattr(raw, "structured", None)
             raw_text = str(getattr(raw, "text", "") or "")
+            raw_receipt = getattr(raw, "effect_receipt", None)
+            if isinstance(raw_receipt, EffectReceipt):
+                receipt = raw_receipt
             if raw_status != RuntimeStatus.OK:
-                outcome = EffectOutcome.NONE if record.execution.effect_kind is EffectKind.NONE else EffectOutcome.UNKNOWN
+                outcome = (
+                    EffectOutcome.NONE
+                    if record.execution.effect_kind is EffectKind.NONE
+                    else receipt.outcome
+                    if receipt is not None
+                    else EffectOutcome.UNKNOWN
+                )
                 return FailedResult(
                     error_code=str((raw_structured or {}).get("error_code") or raw_status or "handler_failed"),
                     error=raw_text or llm_text,
@@ -1311,6 +1308,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
             text=f"module {verb}: {module_id}",
             structured=payload,
             llm_text=f"Module {module_id} {verb} via core lifecycle.",
+            effect_receipt=EffectReceipt(
+                outcome=(
+                    EffectOutcome.APPLIED
+                    if status == RuntimeStatus.OK
+                    else EffectOutcome.NOT_APPLIED
+                ),
+                receipt=payload,
+            ),
         )
 
     def _resolve_descriptor(self, name: str, *, target_id: str = SINGLETON_TARGET) -> CapabilityDescriptor | CapabilityResult | None:
@@ -1498,6 +1503,36 @@ def _tool_invoke_kwargs(invoke: Any, **kwargs: Any) -> dict[str, Any]:
     return {key: value for key, value in kwargs.items() if key in parameters}
 
 
+def _search_facets(records: Any) -> dict[str, Any]:
+    counts: dict[str, dict[str, int]] = {
+        "namespaces": {},
+        "modules": {},
+        "families": {},
+    }
+    for record in records:
+        for bucket, key, field_name in (
+            ("namespaces", "namespace", "namespace"),
+            ("modules", "module_id", "module_id"),
+            ("families", "family", "family"),
+        ):
+            value = str(record.get(field_name) or "unknown")
+            counts[bucket][value] = counts[bucket].get(value, 0) + 1
+    return {
+        "namespaces": [
+            {"namespace": key, "count": count}
+            for key, count in sorted(counts["namespaces"].items())
+        ],
+        "modules": [
+            {"module_id": key, "count": count}
+            for key, count in sorted(counts["modules"].items())
+        ],
+        "families": [
+            {"family": key, "count": count}
+            for key, count in sorted(counts["families"].items())
+        ],
+    }
+
+
 def _capability_spec_payload(descriptor: CapabilityDescriptor) -> dict[str, Any]:
     canonical = descriptor.canonical_path or descriptor.name
     display = descriptor.display_name or descriptor.name
@@ -1515,8 +1550,16 @@ def _capability_spec_payload(descriptor: CapabilityDescriptor) -> dict[str, Any]
         "module_id": descriptor.module_id,
         "call_names": call_names,
         "aliases": list(descriptor.aliases),
-        "parameters_schema": dict(descriptor.parameters_schema or {"type": "object", "properties": {}}),
-        "result_schema": dict(descriptor.result_schema or {"type": "object", "properties": {}}),
+        "input_schema": dict(
+            descriptor.mcp_input_schema
+            if descriptor.InputModel is None
+            else descriptor.InputModel.model_json_schema(mode="validation")
+        ),
+        "output_schema": dict(
+            descriptor.mcp_output_schema
+            if descriptor.OutputModel is None
+            else descriptor.OutputModel.model_json_schema(mode="validation")
+        ),
         "source": descriptor.source,
         "target_kind": descriptor.target_kind,
         "target_id": descriptor.target_id,

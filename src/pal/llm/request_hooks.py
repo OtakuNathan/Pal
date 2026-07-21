@@ -49,7 +49,6 @@ _MESSAGE_HOOKS: dict[str, MessageHook] = {
 }
 _SHELL_TOOL_NAMES = {"run_shell"}
 _DEDICATED_REPO_TOOL_ORDER = (
-    "tree",
     "search",
     "read_file",
     "edit_file",

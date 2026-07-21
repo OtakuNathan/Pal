@@ -28,6 +28,7 @@ class DefectKind(StrEnum):
     CONTRACT = "contract_defect"
     ARCHITECTURE = "architecture_defect"
     INTEGRATION = "integration_defect"
+    REQUIREMENTS = "requirements_defect"
 
 
 class VerificationCaseKind(StrEnum):
@@ -582,7 +583,7 @@ def repair_bill_semantic_view(
             "target_modules": [
                 str(item) for item in list(bill.get("target_modules") or [])
             ],
-            "findings_markdown": str(bill.get("findings_markdown") or ""),
+            "findings": [dict(item) for item in list(bill.get("findings") or [])],
             "regression_commands": [
                 str(item)
                 for item in list(bill.get("regression_commands") or [])
@@ -591,6 +592,21 @@ def repair_bill_semantic_view(
             "verifier_test_paths": [
                 str(item) for item in list(bill.get("changed_test_paths") or [])
             ],
+        }
+    canonical_findings = [
+        semantic_finding_payload(dict(item))
+        for item in list(bill.get("findings") or [])
+        if isinstance(item, Mapping) and dict(item).get("finding_key")
+    ]
+    if canonical_findings:
+        return {
+            "artifact_kind": str(bill.get("artifact_kind") or "structured_repair_bill"),
+            "module_name": str(bill.get("module_name") or ""),
+            "route": str(bill.get("route") or "module_repair"),
+            "findings": canonical_findings,
+            "regression_test_obligation": str(
+                dict(bill.get("regression_test_obligation") or {}).get("instruction") or ""
+            ),
         }
     reproducer: dict[str, Any] = {}
     reproducer_ref = bill.get("minimal_reproducer_ref")
@@ -669,6 +685,14 @@ def repair_bill_semantic_view(
 
 def semantic_finding_payload(value: Mapping[str, Any]) -> dict[str, Any]:
     item = dict(value)
+    if item.get("finding_key"):
+        return {
+            "finding_key": str(item.get("finding_key") or ""),
+            "finding_kind": str(item.get("finding_kind") or ""),
+            "priority": str(item.get("priority") or ""),
+            "summary": str(item.get("summary") or ""),
+            "locations": [dict(entry) for entry in list(item.get("locations") or [])],
+        }
     return {
         "case": str(item.get("case_name") or ""),
         "finding_section": str(item.get("finding_section") or "implementation"),
@@ -704,8 +728,6 @@ def repair_checklist_items(value: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Compile semantic, model-facing repair work without exposing internal IDs."""
 
     bill = dict(value or {})
-    if str(bill.get("artifact_kind") or "") == "semantic_repair_packet":
-        return []
     raw_findings = [
         dict(item)
         for item in list(bill.get("findings") or [])
@@ -717,7 +739,8 @@ def repair_checklist_items(value: Mapping[str, Any]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     for finding in raw_findings:
         case_name = str(
-            finding.get("case")
+            finding.get("finding_key")
+            or finding.get("case")
             or finding.get("case_name")
             or bill.get("case_name")
             or ""
@@ -738,10 +761,11 @@ def repair_checklist_items(value: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "failure_reason": str(
                     finding.get("failure_reason")
                     or bill.get("failure_reason")
+                    or finding.get("summary")
                     or ""
                 ).strip(),
                 "severity": str(
-                    finding.get("severity") or bill.get("severity") or "major"
+                    finding.get("priority") or finding.get("severity") or bill.get("severity") or "p1"
                 ).strip(),
                 "requirements": [
                     dict(item)

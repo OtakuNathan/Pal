@@ -1,5 +1,25 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput,
+    MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput,
+    MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput,
+    MinionV2CapabilitiesMinionV2PublicProviderReadInput,
+    MinionV2CapabilitiesMinionV2PublicProviderRefreshInput,
+    MinionV2CapabilitiesMinionV2PublicProviderResetFamilyOverrideInput,
+    MinionV2CapabilitiesMinionV2PublicProviderResetProfileOverrideInput,
+    MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput,
+    MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput,
+    MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput,
+    MinionV2CapabilitiesMinionV2PublicProviderSearchInput,
+    MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput,
+    MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInput,
+    MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
+    MinionV2CapabilitiesMinionV2PublicProviderStatusInput,
+    MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput,
+    MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
+)
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -145,15 +165,7 @@ class MinionV2PublicProvider:
             "Read the effective Minion profile/family catalog from the attached sidecar. Builtins come from the installed package and explicit "
             "user overrides are marked separately. Use semantic names such as software_engineering.v2_coder; no runtime files or Manager IDs are exposed."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string", "enum": ["all", "profiles", "families"], "default": "all"},
-                "query": {"type": "string", "default": ""},
-                "include_definitions": {"type": "boolean", "default": False},
-            },
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderReadInput,
     )
     def read_catalog(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -181,18 +193,7 @@ class MinionV2PublicProvider:
             "Atomically patch one Minion profile inside the sidecar. The profile is selected by semantic name; omitted fields retain their current "
             "effective value and null removes an optional field. Existing workflows keep their pinned FamilyBindingArtifact, so this affects only future work."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "profile": {"type": "string", "description": "Semantic profile name, for example software_engineering.v2_coder."},
-                "changes": {
-                    **_PROFILE_OVERRIDE_CHANGES_SCHEMA,
-                    "description": "Typed merge patch for the profile definition; null removes an optional field.",
-                },
-            },
-            "required": ["profile", "changes"],
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInput,
     )
     def set_profile_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -210,12 +211,7 @@ class MinionV2PublicProvider:
         scope="minion_catalog",
         action_name="reset_profile_override",
         description="Remove one explicit profile override in the sidecar and restore the current package builtin when one exists.",
-        args_schema={
-            "type": "object",
-            "properties": {"profile": {"type": "string"}},
-            "required": ["profile"],
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderResetProfileOverrideInput,
     )
     def reset_profile_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -236,18 +232,7 @@ class MinionV2PublicProvider:
             "Atomically patch one data-driven Minion family inside the sidecar using its semantic family name. Role references and profile availability "
             "are validated before the override becomes visible to future workflows."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "family": {"type": "string", "description": "Semantic family name, for example software_engineering."},
-                "changes": {
-                    **_FAMILY_OVERRIDE_CHANGES_SCHEMA,
-                    "description": "Typed merge patch for the family definition; null removes an optional field.",
-                },
-            },
-            "required": ["family", "changes"],
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput,
     )
     def set_family_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -265,12 +250,7 @@ class MinionV2PublicProvider:
         scope="minion_catalog",
         action_name="reset_family_override",
         description="Remove one explicit family override in the sidecar and restore the current package builtin when one exists.",
-        args_schema={
-            "type": "object",
-            "properties": {"family": {"type": "string"}},
-            "required": ["family"],
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderResetFamilyOverrideInput,
     )
     def reset_family_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -291,7 +271,7 @@ class MinionV2PublicProvider:
             "Ask the attached Minion sidecar to reload package builtins, migrate any legacy managed seeds, validate explicit overrides, and return the "
             "new effective catalog generation. The Pal process does not read or modify Minion catalog files."
         ),
-        args_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderRefreshInput,
     )
     def refresh_catalog(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -312,53 +292,7 @@ class MinionV2PublicProvider:
             "review_then_execute with artifact for a named external architecture, execute_trusted only for a Manager-trusted named artifact, "
             "standalone_review for review-only, and review_and_repair for bounded repair. Never inspect or implement the target in the foreground first."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task": {"type": "string", "description": "Optional natural-language title of an existing Task."},
-                "title": {"type": "string"},
-                "family_id": {"type": "string", "default": "software_engineering"},
-                "operation": {
-                    "type": "string",
-                    "enum": ["new_requirement", "execute_trusted", "review_then_execute", "standalone_review", "review_and_repair"],
-                    "default": "new_requirement",
-                },
-                "goal": {"type": "string"},
-                "workspace": {
-                    "type": "object",
-                    "properties": {
-                        "kind": {"type": "string"},
-                        "repo_path": {"type": "string"},
-                        "repo_root": {"type": "string"},
-                        "primary_language": {"type": "string"},
-                    },
-                    "additionalProperties": True,
-                },
-                "source_files": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Workspace-relative UTF-8 Markdown or text files whose exact bytes are additional immutable task truth sources. "
-                        "The Manager does not extract, normalize, deduplicate, classify, or reinterpret them. Valid only for new_requirement."
-                    ),
-                },
-                "constraints": {
-                    "type": "array",
-                    "description": (
-                        "Optional machine/environment constraints for execution and fingerprinting. Product-visible obligations belong in the goal or source files; "
-                        "Minion orchestration policy belongs to the family binding."
-                    ),
-                },
-                "approved_evidence": {
-                    "type": "array",
-                    "description": "Already-approved evidence entries used when research_mode=none; source_kind must be approved, user_supplied, or input_artifact.",
-                },
-                "references": {"type": "array"},
-                "research_mode": {"type": "string", "enum": ["none", "local_only", "external_allowed"], "default": "local_only"},
-                "artifact": {"type": "string", "description": "Natural-language name previously given to op_minion_submit_artifact."},
-            },
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
     )
     def start_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -397,18 +331,7 @@ class MinionV2PublicProvider:
             "Publish a durable artifact under a natural-language name in the current actor/channel. This does not execute it. "
             "Later workflow calls refer to this name; the Manager owns its content hash and internal identity."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "artifact_type": {"type": "string"},
-                "schema_version": {"type": "string", "default": "1"},
-                "media_type": {"type": "string", "default": "application/json"},
-                "content": {},
-            },
-            "required": ["name", "artifact_type", "content"],
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput,
     )
     def submit_artifact(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -436,16 +359,7 @@ class MinionV2PublicProvider:
             "found, and when the current channel has no bound workflow. Returns semantic Task details and compact Workflow phase/liveness summaries "
             "without exposing Manager identities. An empty query lists the most recently updated Tasks."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "default": ""},
-                "family_id": {"type": "string"},
-                "include_archived": {"type": "boolean", "default": False},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
-            },
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderSearchInput,
     )
     def search_tasks(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -494,19 +408,7 @@ class MinionV2PublicProvider:
             "next legal actions, user-wait flag, timings, last progress, and liveness without exposing Manager identities. When human_review_available "
             "is true, call this same tool with view=human_review to read the durable Architecture Markdown, reviewer verdict/findings, and available actions."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task": {"type": "string"},
-                "view": {
-                    "type": "string",
-                    "enum": ["status", "human_review"],
-                    "default": "status",
-                    "description": "status returns the compact projection; human_review returns the durable pending review without internal ids or tokens.",
-                },
-            },
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderStatusInput,
     )
     def workflow_status(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -532,11 +434,7 @@ class MinionV2PublicProvider:
             "Resume a deliberately paused V2 workflow. TRIAGE_REQUIRED work must be handled explicitly with resolve_triage after its "
             "reported blocker has actually been addressed."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {"task": {"type": "string"}},
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput,
     )
     def resume_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -566,19 +464,7 @@ class MinionV2PublicProvider:
             "Family binding, requires Architecture Review and Human Accept, and reuses no Coder candidates. Use this when execution policy or "
             "Coder behavior changed but the accepted architecture remains the intended baseline."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task": {"type": "string"},
-                "reason": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Auditable reason the current execution must be discarded and restarted.",
-                },
-            },
-            "required": ["reason"],
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput,
     )
     def restart_execution(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -609,23 +495,7 @@ class MinionV2PublicProvider:
             "transition. Supply what was actually fixed or verified. This does not accept a candidate, waive verification, or skip a gate. "
             "When several items need triage, select exactly one by its semantic module or phase name, such as ohos_font or architecture."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task": {"type": "string"},
-                "subject": {
-                    "type": "string",
-                    "description": "Module or phase name. Optional only when the workflow has exactly one TRIAGE_REQUIRED item.",
-                },
-                "resolution": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Auditable summary of the external or manual action that removed the blocker.",
-                },
-            },
-            "required": ["resolution"],
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput,
     )
     def resolve_triage(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -655,35 +525,7 @@ class MinionV2PublicProvider:
             "Submit Accept/Edit/Reject for the current channel-bound architecture review. The Manager resolves the unique pending card and "
             "atomically validates its actor, channel, revision, and content before acting. Use this manual path when an inline card expired."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task": {"type": "string"},
-                "decision": {"type": "string", "enum": ["accept", "edit", "reject", "clarify"]},
-                "edit_scope": {
-                    "type": "string",
-                    "enum": ["architecture", "requirements"],
-                    "default": "architecture",
-                    "description": "For decision=edit, choose whether product Requirements change or only the architecture changes.",
-                },
-                "edit_instruction": {
-                    "type": "string",
-                    "description": "Required for architecture edits. This changes the architecture, not the immutable task source.",
-                },
-                "amendment": {
-                    "type": "string",
-                    "description": "Raw user amendment appended verbatim to the immutable task sources. Valid only for edit_scope=requirements.",
-                },
-                "source_files": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Workspace-relative UTF-8 files appended verbatim to the task sources for a requirements edit.",
-                },
-                "clarification_response": {"type": "string"},
-            },
-            "required": ["decision"],
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
     )
     def submit_human_decision(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -716,15 +558,7 @@ class MinionV2PublicProvider:
             "Use this when the user's response is not one of the inline options. The Architect remains running and receives "
             "the answer through its existing tool call."
         ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task": {"type": "string"},
-                "answer": {"type": "string", "minLength": 1},
-            },
-            "required": ["answer"],
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput,
     )
     def answer_question(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -752,16 +586,7 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="control_workflow",
         description="Request asynchronous pause or cancel for a V2 workflow. Child aggregates stop at safe points before the workflow settles.",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task": {"type": "string"},
-                "command": {"type": "string", "enum": ["pause", "cancel"]},
-                "reason": {"type": "string"},
-            },
-            "required": ["command"],
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput,
     )
     def control_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -788,11 +613,7 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="archive_workflow",
         description="Archive a terminal V2 workflow. Active workflows must be cancelled and settled first.",
-        args_schema={
-            "type": "object",
-            "properties": {"task": {"type": "string"}, "reason": {"type": "string"}},
-            "additionalProperties": False,
-        },
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput,
     )
     def archive_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:

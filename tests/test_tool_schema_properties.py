@@ -2,29 +2,39 @@ from __future__ import annotations
 
 import pytest
 from jsonschema import Draft202012Validator
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
+from typing import Literal
 
 hypothesis = pytest.importorskip("hypothesis")
 hypothesis_jsonschema = pytest.importorskip("hypothesis_jsonschema")
-from hypothesis import given
+from hypothesis import given, settings, strategies as st
 from hypothesis_jsonschema import from_schema
 
-from pal.execution.tool_registry import model_from_json_schema
+from pal.execution import generated_tool_models
+from pal.execution.tool_facade import StrictToolModel
 
 
-SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string", "minLength": 1, "maxLength": 20},
-        "count": {"type": "integer", "minimum": 1, "maximum": 5},
-        "mode": {"type": "string", "enum": ["one", "two"]},
-        "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
-    },
-    "required": ["name", "count", "mode"],
-    "additionalProperties": False,
-}
-MODEL = model_from_json_schema("PropertyInput", SCHEMA, input_contract=True)
+class PropertyInput(StrictToolModel):
+    name: str = Field(min_length=1, max_length=20)
+    count: int = Field(ge=1, le=5)
+    mode: Literal["one", "two"]
+    tags: list[str] | None = Field(default=None, max_length=3)
+
+
+MODEL = PropertyInput
 GENERATED_SCHEMA = MODEL.model_json_schema(mode="validation")
+DECLARED_INPUT_MODELS = tuple(
+    sorted(
+        (
+            (name, value)
+            for name, value in vars(generated_tool_models).items()
+            if name.endswith("Input")
+            and isinstance(value, type)
+            and issubclass(value, StrictToolModel)
+        ),
+        key=lambda item: item[0],
+    )
+)
 
 
 @given(from_schema(GENERATED_SCHEMA))
@@ -49,3 +59,23 @@ def test_pydantic_and_draft_2020_12_reject_the_same_invalid_values(value) -> Non
         MODEL.model_validate(value, strict=True)
     errors = list(Draft202012Validator(GENERATED_SCHEMA).iter_errors(value))
     assert errors
+
+
+@pytest.mark.parametrize("_name,model", DECLARED_INPUT_MODELS, ids=[name for name, _model in DECLARED_INPUT_MODELS])
+@settings(max_examples=3, deadline=None)
+@given(data=st.data())
+def test_every_declared_input_model_matches_its_draft_schema_for_generated_values(_name, model, data) -> None:
+    schema = model.model_json_schema(mode="validation")
+    value = data.draw(from_schema(schema))
+    pydantic_value = model.model_validate(value, strict=True).model_dump(mode="json", exclude_none=True)
+    Draft202012Validator(schema).validate(value)
+    assert isinstance(pydantic_value, dict)
+
+
+@pytest.mark.parametrize("_name,model", DECLARED_INPUT_MODELS, ids=[name for name, _model in DECLARED_INPUT_MODELS])
+def test_every_declared_input_model_and_schema_reject_extra_fields(_name, model) -> None:
+    schema = model.model_json_schema(mode="validation")
+    invalid = {"__unexpected_tool_argument__": True}
+    with pytest.raises(ValidationError):
+        model.model_validate(invalid, strict=True)
+    assert list(Draft202012Validator(schema).iter_errors(invalid))

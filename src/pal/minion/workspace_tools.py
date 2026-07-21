@@ -4,7 +4,6 @@ import contextlib
 import fnmatch
 import hashlib
 import mimetypes
-import os
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +24,7 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
             text = f"Artifact {action}: {artifact['relative_path']}"
         else:
             root, root_info = _workspace_root_with_info(workspace, call.args)
-            if call.name == "op_tree":
-                payload = _workspace_tree(root, call.args, root_info=root_info)
-                text = "\n".join(item["path"] for item in payload["items"])
-            elif call.name == "op_search":
+            if call.name == "op_search":
                 payload = _workspace_search(root, call.args, root_info=root_info)
                 text = "\n".join(f"{item['path']}:{item['line_number']}: {item['line']}" for item in payload["matches"])
             else:
@@ -436,48 +432,10 @@ def _workspace_should_skip_generated(path: Path, root: Path) -> bool:
 
 
 def _empty_workspace_tool_text(name: str, payload: dict[str, Any]) -> str:
-    if name == "op_tree":
-        return "No repo entries found."
     if name == "op_search":
         query = str(payload.get("query") or "").strip()
         return f"No repo matches found for query: {query}" if query else "No repo matches found."
     return "Repo tool completed with no textual output."
-
-
-def _workspace_tree(root: Path, args: dict[str, Any], *, root_info: dict[str, Any] | None = None) -> dict[str, Any]:
-    root_info = dict(root_info or {})
-    base = _workspace_path(root, args.get("path") or ".")
-    if not base.exists():
-        raise ValueError(f"repo path does not exist: {base.relative_to(root)}")
-    max_depth = max(0, min(_optional_positive_int(args.get("max_depth")) or 2, 8))
-    limit = max(1, min(_optional_positive_int(args.get("limit")) or 200, 1000))
-    items: list[dict[str, Any]] = []
-    if base.is_file():
-        stat = base.stat()
-        items.append({"path": str(base.relative_to(root)).replace("\\", "/"), "kind": "file", "size_bytes": stat.st_size})
-        return {**_workspace_root_payload(root, root_info), "items": items, "count": len(items)}
-    base_depth = len(base.relative_to(root).parts) if base != root else 0
-    for current, dirs, files in os.walk(base):
-        current_path = Path(current)
-        rel_parts = current_path.relative_to(root).parts if current_path != root else ()
-        depth = len(rel_parts) - base_depth
-        dirs[:] = [name for name in sorted(dirs) if name not in _WORKSPACE_SKIP_DIRS]
-        for name in dirs:
-            if len(items) >= limit:
-                return {**_workspace_root_payload(root, root_info), "items": items, "count": len(items), "truncated": True}
-            path = current_path / name
-            items.append({"path": str(path.relative_to(root)).replace("\\", "/"), "kind": "dir"})
-        for name in sorted(files):
-            if len(items) >= limit:
-                return {**_workspace_root_payload(root, root_info), "items": items, "count": len(items), "truncated": True}
-            path = current_path / name
-            if not _workspace_path_allowed_by_reference(path, root, root_info):
-                continue
-            with contextlib.suppress(OSError):
-                items.append({"path": str(path.relative_to(root)).replace("\\", "/"), "kind": "file", "size_bytes": path.stat().st_size})
-        if depth >= max_depth:
-            dirs[:] = []
-    return {**_workspace_root_payload(root, root_info), "items": items, "count": len(items)}
 
 
 def _workspace_search(root: Path, args: dict[str, Any], *, root_info: dict[str, Any] | None = None) -> dict[str, Any]:

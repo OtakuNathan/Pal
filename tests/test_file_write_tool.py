@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pal.execution.file_edit import FileEditTool
 from pal.execution.file_state import FileStateCache
+from pal.execution.generated_tool_models import ExecutionFileCapabilitiesFileCapabilityMixinWriteInput
 from pal.execution.file_write import (
     ERR_BINARY_CONTENT,
     ERR_CONTENT_TOO_LARGE,
@@ -173,11 +174,11 @@ class ValidationTests(_TempFileMixin, unittest.TestCase):
 class ToolProtocolTests(unittest.TestCase):
     def test_schema_has_no_mode(self) -> None:
         tool = FileWriteTool()
+        schema = ExecutionFileCapabilitiesFileCapabilityMixinWriteInput.model_json_schema(mode="validation")
 
-        self.assertEqual(tool.name, "op_file_write")
-        self.assertEqual(tool.family, "system")
-        self.assertEqual(tool.args_schema.get("required"), ["file_path", "content"])
-        self.assertNotIn("mode", tool.args_schema["properties"])
+        self.assertTrue(callable(tool.invoke))
+        self.assertEqual(schema.get("required"), ["file_path", "content"])
+        self.assertNotIn("mode", schema["properties"])
 
     def test_ainvoke_delegates_to_invoke(self) -> None:
         import asyncio

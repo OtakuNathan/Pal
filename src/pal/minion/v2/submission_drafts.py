@@ -765,8 +765,14 @@ def assert_authoring_schema_budget(schema: Mapping[str, Any], *, owner: str) -> 
             raise ValueError(f"{owner} schema depth exceeds 4")
         if not isinstance(node, Mapping):
             return
-        if "oneOf" in node or "anyOf" in node:
-            raise ValueError(f"{owner} may not use oneOf/anyOf")
+        if "oneOf" in node:
+            raise ValueError(f"{owner} may not use oneOf")
+        if "anyOf" in node:
+            variants = list(node.get("anyOf") or [])
+            non_null = [item for item in variants if not (isinstance(item, Mapping) and item.get("type") == "null")]
+            if len(variants) != 2 or len(non_null) != 1:
+                raise ValueError(f"{owner} may only use Pydantic nullable anyOf schemas")
+            visit(non_null[0], depth=depth)
         additional = node.get("additionalProperties")
         if isinstance(additional, Mapping):
             raise ValueError(f"{owner} may not use schema-valued additionalProperties")

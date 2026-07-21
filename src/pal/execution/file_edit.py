@@ -17,16 +17,10 @@ from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.file_state import FileStateCache
-from pal.execution.file_tool_contracts import (
-    FILE_EDIT_DESCRIPTION,
-    FILE_EDIT_RESULT_SCHEMA,
-    file_edit_args_schema,
-)
+from pal.execution.file_state import FileStateCache, resolve_file_path
 from pal.shared import RuntimeStatus
 
 
@@ -53,7 +47,7 @@ _ERROR_LLMS: dict[str, str] = {
 
 @dataclass
 class FileEditTool:
-    """File edit tool implementing the :class:`~pal.execution.contracts.Tool` protocol.
+    """Business handler for read-before-edit file mutations.
 
     Parameters
     ----------
@@ -62,28 +56,7 @@ class FileEditTool:
         externally (e.g. by a file-read tool) *before* ``invoke`` is called.
     """
 
-    name: str = "op_file_edit"
-    display_name: str = "File Edit"
-    family: str = "system"
-    description: str = (
-        "Use this instead of shell sed/awk or one-off rewrite scripts when it is visible. "
-        + FILE_EDIT_DESCRIPTION
-    )
-    tags: tuple[str, ...] = ("file", "edit", "system", "write")
-    keywords: tuple[str, ...] = ("edit", "modify", "replace", "patch", "diff", "file")
     cache: FileStateCache = field(default_factory=FileStateCache)
-    args_schema: dict[str, Any] = field(default_factory=dict)
-    result_schema: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.args_schema:
-            self.args_schema = file_edit_args_schema()
-        if not self.result_schema:
-            self.result_schema = dict(FILE_EDIT_RESULT_SCHEMA)
-
-    # ------------------------------------------------------------------
-    # Tool protocol
-    # ------------------------------------------------------------------
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         file_path = str(args.get("file_path") or "").strip()
@@ -122,7 +95,7 @@ class FileEditTool:
         # 1. Check that file has been read (cached).
         # Capture presence before get_valid(), because stale entries are
         # evicted as a side effect of validation.
-        had_record = _resolve(file_path) in self.cache
+        had_record = file_path in self.cache
         cached_state = self.cache.get_valid_state(file_path)
         if cached_state is None:
             if not had_record:
@@ -148,7 +121,8 @@ class FileEditTool:
         cached_content = cached_state.content
 
         try:
-            current_content = Path(file_path).expanduser().resolve().read_text(encoding="utf-8")
+            resolved = resolve_file_path(file_path)
+            current_content = resolved.read_text(encoding="utf-8")
         except OSError as exc:
             return _err(
                 RuntimeStatus.ERROR,
@@ -196,8 +170,7 @@ class FileEditTool:
 
         # 4. Write to disk.
         try:
-            path = Path(file_path).expanduser().resolve()
-            path.write_text(new_content, encoding="utf-8")
+            resolved.write_text(new_content, encoding="utf-8")
         except OSError as exc:
             return _err(
                 RuntimeStatus.ERROR,
@@ -207,17 +180,17 @@ class FileEditTool:
             )
 
         # 5. Update cache with new content/mtime so subsequent edits work.
-        self.cache.mark_read(file_path, new_content)
+        self.cache.mark_read(resolved, new_content)
 
         # 6. Generate unified diff patch.
-        patch = _unified_diff(file_path, cached_content, new_content)
+        patch = _unified_diff(str(resolved), cached_content, new_content)
 
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text=patch,
             llm_text=patch,
             structured={
-                "file_path": file_path,
+                "file_path": str(resolved),
                 "patch": patch,
                 "match_count": count if replace_all else 1,
             },
@@ -232,13 +205,6 @@ class FileEditTool:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
-
-
-def _resolve(file_path: str) -> str:
-    try:
-        return str(Path(file_path).resolve())
-    except (OSError, ValueError):
-        return file_path
 
 
 def _semantic_bool(value: Any) -> bool | None:

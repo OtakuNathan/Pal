@@ -3,63 +3,65 @@ from __future__ import annotations
 import asyncio
 import time
 import unittest
-from dataclasses import dataclass, field
-from typing import Any
 
 from pal.core import PalCore as _PalCoreBootstrap
-from pal.execution.contracts import CapabilityDescriptor, CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
+from pal.execution.tool_facade import (
+    EffectKind,
+    EmptyToolInput,
+    EmptyToolOutput,
+    Idempotency,
+    InvocationMode,
+    PagingMode,
+    RetryPolicy,
+    Tool,
+    ToolExecutionSemantics,
+    ToolGuidance,
+)
 from pal.llm.contracts import CanonicalToolCall
 from pal.shared import RuntimeStatus
 
 
-@dataclass
-class SlowSyncTool:
-    name: str = "op_test_slow_sync"
-    description: str = "slow sync test tool"
-    args_schema: dict[str, Any] = field(default_factory=dict)
-    result_schema: dict[str, Any] = field(default_factory=dict)
-    display_name: str = "Slow Sync"
-    family: str = "test"
-    tags: tuple[str, ...] = ()
-    keywords: tuple[str, ...] = ()
-
-    def invoke(self, args: dict[str, Any]) -> CapabilityResult:
+def slow_sync_tool() -> Tool:
+    def invoke(_args: EmptyToolInput) -> dict[str, object]:
         time.sleep(0.2)
-        return CapabilityResult(status=RuntimeStatus.OK, text="ok", llm_text="ok", structured={})
+        return {}
+
+    return Tool(
+        alias="slow_sync",
+        canonical_path="op_test_slow_sync",
+        InputModel=EmptyToolInput,
+        OutputModel=EmptyToolOutput,
+        guidance=ToolGuidance(
+            purpose="slow sync test tool",
+            use_when="testing sync executor offload",
+            do_not_use_when="outside this test",
+            failure_next_steps="inspect the test failure",
+        ),
+        execution=ToolExecutionSemantics(
+            invocation_mode=InvocationMode.DIRECT,
+            effect_kind=EffectKind.NONE,
+            idempotency=Idempotency.IDEMPOTENT,
+            retry_policy=RetryPolicy.AUTOMATIC,
+            paging=PagingMode.NEVER,
+        ),
+        search_text="slow sync",
+        handler=invoke,
+    )
 
 
 class ExecutionRuntimeAsyncTests(unittest.TestCase):
     def test_execute_tool_async_offloads_sync_tool_fallback(self) -> None:
         async def run() -> None:
             runtime = ExecutionRuntime(sync_executor_max_workers=1)
-            runtime.register_tool(SlowSyncTool())
-            runtime.register_capability(
-                CapabilityDescriptor(
-                    name="slow_sync",
-                    canonical_path="op_test_slow_sync",
-                    family="test",
-                    description="slow sync test tool",
-                    source="test",
-                    metadata={
-                        "execution_semantics": {
-                            "invocation_mode": "direct",
-                            "effect_kind": "none",
-                            "idempotency": "idempotent",
-                            "retry_policy": "automatic",
-                            "paging": "supported",
-                        }
-                    },
-                ),
-                lambda _call: CapabilityResult(status=RuntimeStatus.ERROR, text="wrong binder", llm_text="wrong binder"),
-            )
+            runtime.register_tool(slow_sync_tool())
             try:
                 task = asyncio.create_task(runtime.execute_tool_async(CanonicalToolCall(name="slow_sync", args={})))
                 await asyncio.sleep(0.02)
                 self.assertFalse(task.done())
                 result = await task
                 self.assertTrue(result.ok)
-                self.assertEqual(result.text, "ok")
+                self.assertEqual(result.text, "{}")
             finally:
                 runtime.shutdown()
 

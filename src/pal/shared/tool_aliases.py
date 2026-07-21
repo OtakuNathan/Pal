@@ -40,7 +40,6 @@ EXPLICIT_LLM_TOOL_ALIASES: dict[str, str] = {
 _INTERNAL_TOOL_NAME_RE = re.compile(r"\b(?:op|intro)_[A-Za-z0-9_]+\b")
 
 DEDICATED_TOOL_ROUTE_HINTS: tuple[tuple[str, str], ...] = (
-    ("op_tree", "structured repo listings"),
     ("op_search", "repository text search"),
     ("op_file_read", "reading repo text files"),
     ("op_file_edit", "precise repo text edits"),

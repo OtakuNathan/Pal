@@ -32,6 +32,11 @@ from pal.behavior import (
     skill,
 )
 from pal.behavior.prompt import BehaviorPromptFragmentProvider
+from pal.behavior.tools import (
+    BEHAVIOR_ADVICE_DESCRIPTION,
+    BEHAVIOR_LEARN_DESCRIPTION,
+    BEHAVIOR_UPDATE_DESCRIPTION,
+)
 from pal.channel import ChannelEnvelope, ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityDescriptor, register_with_core as register_execution_with_core
@@ -1138,15 +1143,15 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("affordances with affordance_id values", content)
         self.assertNotIn("op_memory_write", content)
 
-        advice_description = BehaviorAdviceTool(service=self.service).description
+        advice_description = BEHAVIOR_ADVICE_DESCRIPTION
         self.assertIn("condition-reflex layer", advice_description)
         self.assertIn("ambiguous, risky, multi-step", advice_description)
         self.assertIn("clear direct implementation command", advice_description)
         self.assertIn("Treat the result as routing resources, not orders", advice_description)
-        save_description = AffordanceSubmitTool(service=self.service).description
+        save_description = BEHAVIOR_LEARN_DESCRIPTION
         self.assertIn("Learn a future behavior rule", save_description)
         self.assertIn("use remember_memory for facts", save_description)
-        update_description = AffordanceUpdateTool(service=self.service).description
+        update_description = BEHAVIOR_UPDATE_DESCRIPTION
         self.assertIn("Pass the original rendered guidance line", update_description)
         self.assertIn("Do not claim behavior guidance changed unless this tool confirms success", update_description)
 

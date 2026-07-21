@@ -12,8 +12,9 @@ unsupported evidence claims, dependency assumptions, and historical RepairBills.
 FAIL reproduced defects. Use UNKNOWN only for an explicitly allowed unavailable fact or environment; never let a hard safety requirement pass as UNKNOWN.
 """
 output_contract_fragment = """
-Run reproducible checks and keep adversarial probes in the bound durable review scratch. Finish with exactly one semantic outcome tool containing one
-deduplicated Markdown findings report when repair or revision is required. Never construct VerificationPlan JSON or submit verdict/status fields;
+Run reproducible checks and keep adversarial probes in the bound durable review scratch. Complete the breadth-first audit first, then record each defect through
+add_finding; batch independent findings in one tool round when possible. Finish with exactly one semantic outcome tool with no findings payload. PASS requires
+an empty finding Draft. Never write Markdown findings, construct VerificationPlan JSON, or submit verdict/status fields;
 the Manager owns acceptance, hard-safety UNKNOWN policy, and routing after verifier quiescing and snapshotting.
 """
 capability_groups = ["lifestyle_verifier", "v2_swe_verification"]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,59 +13,10 @@ from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT, WebScreenshotR
 from pal.web_fetch.service import WebFetchService
 
 
-def web_screenshot_args_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "description": "URL to render and capture."},
-            "full_page": {"type": "boolean", "description": "Capture the full scrollable page instead of the viewport."},
-            "viewport_width": {"type": "integer", "minimum": 320, "description": "Browser viewport width in pixels."},
-            "viewport_height": {"type": "integer", "minimum": 320, "description": "Browser viewport height in pixels."},
-            "timeout_ms": {"type": "integer", "minimum": 1000, "description": "Navigation timeout in milliseconds."},
-            "user_agent": {"type": "string", "description": "Optional browser user agent."},
-        },
-        "required": ["url"],
-    }
-
-
-def web_screenshot_result_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "artifact_id": {"type": "string"},
-            "local_cached_path": {"type": "string"},
-            "mime_type": {"type": "string"},
-            "size_bytes": {"type": "integer"},
-            "sha256": {"type": "string"},
-            "requested_url": {"type": "string"},
-            "final_url": {"type": "string"},
-            "title": {"type": "string"},
-            "status_code": {"type": "integer"},
-            "full_page": {"type": "boolean"},
-            "viewport_width": {"type": "integer"},
-            "viewport_height": {"type": "integer"},
-            "registered_artifact": {"type": "boolean"},
-            "artifact": {"type": "object"},
-        },
-    }
-
-
 @dataclass
 class WebScreenshotTool:
     service: WebFetchService
     artifact_manager: Any | None = None
-    name: str = "op_web_screenshot"
-    display_name: str = "Web Screenshot"
-    family: str = "web"
-    description: str = (
-        "Render a URL in the browser and save a PNG screenshot as an artifact. "
-        "Returns the artifact id and local_cached_path for inspection, sharing, or vision tools."
-    )
-    tags: tuple[str, ...] = ("web", "browser", "screenshot", "artifact")
-    keywords: tuple[str, ...] = ("web", "browser", "screenshot", "image", "page", "visual")
-    args_schema: dict[str, Any] = field(default_factory=web_screenshot_args_schema)
-    result_schema: dict[str, Any] = field(default_factory=web_screenshot_result_schema)
-
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
         return CapabilityResult(

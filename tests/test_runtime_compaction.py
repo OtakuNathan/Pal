@@ -2,11 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from pal.channel import ChannelEnvelope, ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.control import ControlAction, ControlRoute
 from pal.core import MemoryCompactEffect, PalCore, TurnContinuation, register_with_core as register_core_with_core
-from pal.execution import CapabilityDescriptor, CapabilityResult
+from pal.execution import CapabilityResult
+from pal.execution.tool_facade import (
+    EffectKind,
+    EffectOutcome,
+    EffectReceipt,
+    Idempotency,
+    InvocationMode,
+    PagingMode,
+    RetryPolicy,
+    StrictToolModel,
+    Tool,
+    ToolExecutionSemantics,
+    ToolGuidance,
+    ToolHandlerResult,
+)
 from pal.foundation import EventEnvelope
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
 from pal.llm.runtime import LLMRuntime
@@ -15,19 +30,40 @@ from pal.minion.compact import compact_minion_memory_service
 from pal.shared import LLMFinishReason, PromptAssemblyContext, RuntimeStatus
 
 
-class EchoTool:
-    name = "op_test_echo"
-    description = "Echo test arguments back as a stable result."
-    args_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
-    result_schema = {"type": "object", "properties": {"echo": {"type": "object"}}}
+class EchoInput(StrictToolModel):
+    value: str
 
-    def invoke(self, args: dict[str, object]) -> CapabilityResult:
-        return CapabilityResult(
-            status="ok",
-            text="stable-result",
+
+class EchoOutput(StrictToolModel):
+    echo: dict[str, object]
+
+
+def echo_tool() -> Tool:
+    return Tool(
+        alias="echo",
+        canonical_path="op_test_echo",
+        InputModel=EchoInput,
+        OutputModel=EchoOutput,
+        guidance=ToolGuidance(
+            purpose="Echo test arguments back as a stable result.",
+            use_when="the compaction test needs a deterministic tool result",
+            do_not_use_when="outside this test",
+            failure_next_steps="inspect the test failure",
+        ),
+        execution=ToolExecutionSemantics(
+            invocation_mode=InvocationMode.DIRECT,
+            effect_kind=EffectKind.NONE,
+            idempotency=Idempotency.IDEMPOTENT,
+            retry_policy=RetryPolicy.AUTOMATIC,
+            paging=PagingMode.SUPPORTED,
+        ),
+        search_text="echo compaction test",
+        handler=lambda value: ToolHandlerResult(
+            output={"echo": value.model_dump(mode="python")},
             llm_text="stable-result",
-            structured={"echo": args},
-        )
+        ),
+        examples=({"value": "test"},),
+    )
 
 
 class _CompactingLLMRuntime:
@@ -175,31 +211,7 @@ def _build_core_with_compacting_llm(*, compact_on: str, memory_candidates: list[
     register_memory_with_core(core.context, memory_service)
     scripted_llm = _CompactingLLMRuntime(compact_on=compact_on, memory_candidates=memory_candidates)
     core.context.port_registry["llm:llm"] = scripted_llm
-    echo_tool = EchoTool()
-    core.context.execution_runtime.register_tool(echo_tool)
-    core.context.execution_runtime.register_capability(
-        CapabilityDescriptor(
-            name="echo",
-            canonical_path=echo_tool.name,
-            family="test",
-            description=echo_tool.description,
-            source="test",
-            metadata={
-                "execution_semantics": {
-                    "invocation_mode": "direct",
-                    "effect_kind": "none",
-                    "idempotency": "idempotent",
-                    "retry_policy": "automatic",
-                    "paging": "supported",
-                }
-            },
-        ),
-        lambda _call: CapabilityResult(
-            status="error",
-            text="resident tool binding missing",
-            llm_text="resident tool binding missing",
-        ),
-    )
+    core.context.execution_runtime.register_tool(echo_tool())
     return core, memory_service, scripted_llm
 
 
@@ -703,20 +715,18 @@ class RuntimeCompactionTests(unittest.TestCase):
         register_memory_with_core(core.context, MemoryService())
         calls = []
 
-        def record_memory_write(call):
+        async def record_memory_write(call):
             calls.append(call)
-            return CapabilityResult(status="ok", text="ok", llm_text="ok")
+            return CapabilityResult(
+                status="ok",
+                text="ok",
+                llm_text="ok",
+                effect_receipt=EffectReceipt(
+                    outcome=EffectOutcome.APPLIED,
+                    receipt={"recorded": True},
+                ),
+            )
 
-        core.context.execution_runtime.register_capability(
-            CapabilityDescriptor(
-                name="remember_memory",
-                canonical_path="op_memory_write",
-                family="memory",
-                description="record memory write",
-                source="test",
-            ),
-            record_memory_write,
-        )
         replies: list[str] = []
 
         async def capture_reply(route, text: str) -> None:
@@ -725,31 +735,35 @@ class RuntimeCompactionTests(unittest.TestCase):
 
         core._reply_to_route_async = capture_reply
 
-        asyncio.run(
-            core.handle_control_action_async(
-                ControlAction(
-                    action_kind="memory_candidate_decision",
-                    target_scope="memory",
-                    target_id="compact_test",
-                    route=ControlRoute(endpoint_id="memory", channel_kind="memory"),
-                    args={
-                        "decision": "accept",
-                        "source_kind": "pal_compact",
-                        "source_ref": "compact_test",
-                        "memory_candidates": [
-                            {
-                                "kind": "fact",
-                                "title": "Source excerpt fallback",
-                                "summary": "",
-                                "source_excerpt": "Use source excerpts when compact candidates lack search_text.",
-                                "topics": ["compact"],
-                                "payload": {"existing": "value"},
-                            }
-                        ],
-                    },
+        with (
+            patch.object(core.context.execution_runtime, "has_registered_capability", return_value=True),
+            patch.object(core.context.execution_runtime, "execute_async", new=record_memory_write),
+        ):
+            asyncio.run(
+                core.handle_control_action_async(
+                    ControlAction(
+                        action_kind="memory_candidate_decision",
+                        target_scope="memory",
+                        target_id="compact_test",
+                        route=ControlRoute(endpoint_id="memory", channel_kind="memory"),
+                        args={
+                            "decision": "accept",
+                            "source_kind": "pal_compact",
+                            "source_ref": "compact_test",
+                            "memory_candidates": [
+                                {
+                                    "kind": "fact",
+                                    "title": "Source excerpt fallback",
+                                    "summary": "",
+                                    "source_excerpt": "Use source excerpts when compact candidates lack search_text.",
+                                    "topics": ["compact"],
+                                    "payload": {"existing": "value"},
+                                }
+                            ],
+                        },
+                    )
                 )
             )
-        )
 
         self.assertIn("1 committed", replies[-1])
         self.assertEqual(len(calls), 1)

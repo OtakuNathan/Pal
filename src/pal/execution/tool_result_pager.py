@@ -11,9 +11,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from pal.execution.contracts import CapabilityResult
 from pal.llm.contracts import ToolResultHandle
-from pal.shared import RuntimeStatus
 
 
 DEFAULT_TOOL_RESULT_PAGE_SIZE = 4_000
@@ -249,132 +247,6 @@ class ToolResultPagerStore:
         return Path(runtime_root) / "data" / "tool_results" / "ephemeral"
 
 
-@dataclass
-class ToolResultPageTool:
-    runtime: object
-    name: str = "op_tool_result_page"
-    display_name: str = "Tool Result Page"
-    family: str = "discovery"
-    description: str = (
-        "Read a page of a prior large tool result. Use anchor='head' for normal forward pages or anchor='tail' "
-        "to inspect the newest/end of log-like output. Use the original tool_call_id as result_ref."
-    )
-    tags: tuple[str, ...] = ("tool-result", "pager", "read")
-    keywords: tuple[str, ...] = ("page", "result", "tool", "next")
-    args_schema: dict[str, object] = field(default_factory=dict)
-    result_schema: dict[str, object] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self.args_schema:
-            self.args_schema = {
-                "type": "object",
-                "properties": {
-                    "result_ref": {
-                        "type": "string",
-                        "description": "The result_ref shown in a prior tool result; this is the original tool_call_id.",
-                    },
-                    "page": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": (
-                            "1-based page number. With anchor='head', page=1 is the first page. "
-                            "With anchor='tail', page=1 is the last page and page=2 is second-to-last."
-                        ),
-                    },
-                    "anchor": {
-                        "type": "string",
-                        "enum": ["head", "tail"],
-                        "description": "Read from the start ('head') or end ('tail') of the paged result. Defaults to head.",
-                    },
-                    "tail": {
-                        "type": "boolean",
-                        "description": "Shorthand for anchor='tail'. Useful for log-like output.",
-                    },
-                    "page_size": {"type": "integer", "minimum": 256, "description": "Optional character page size."},
-                },
-                "required": ["result_ref"],
-            }
-        if not self.result_schema:
-            self.result_schema = {
-                "type": "object",
-                "properties": {
-                    "result_ref": {"type": "string"},
-                    "page": {"type": "integer"},
-                    "page_count": {"type": "integer"},
-                    "has_more": {"type": "boolean"},
-                    "has_more_before": {"type": "boolean"},
-                    "has_more_after": {"type": "boolean"},
-                    "anchor": {"type": "string"},
-                    "anchor_page": {"type": "integer"},
-                    "original_size": {"type": "integer"},
-                    "page_size": {"type": "integer"},
-                    "page_text": {"type": "string"},
-                    "affordances": {"type": "array", "items": {"type": "object"}},
-                },
-            }
-
-    def invoke(self, args: dict[str, object]) -> CapabilityResult:
-        result_ref = str(args.get("result_ref") or "").strip()
-        page = _positive_int(args.get("page"), default=1)
-        page_size = _positive_int(args.get("page_size"), default=0)
-        anchor = "tail" if _truthy(args.get("tail")) else _normalize_anchor(str(args.get("anchor") or "head"))
-        if not result_ref:
-            return _expired_page_result(result_ref=result_ref, reason="missing_result_ref")
-        page_result = self.runtime.read_tool_result_page(
-            result_ref=result_ref,
-            page=page or 1,
-            page_size=page_size or None,
-            anchor=anchor,
-        )
-        if page_result is None:
-            return _expired_page_result(result_ref=result_ref, reason="not_found_or_expired")
-        if page_result.page < 1 or page_result.page > page_result.page_count:
-            if page_result.anchor == "tail":
-                text = (
-                    f"tool result tail page {page_result.anchor_page} is out of range; "
-                    f"oldest tail page is {page_result.page_count}."
-                )
-            else:
-                text = f"tool result page {page_result.anchor_page} is out of range; last page is {page_result.page_count}."
-            return CapabilityResult(
-                status=RuntimeStatus.INVALID,
-                text=text,
-                llm_text=text,
-                structured={
-                    "reason": "page_out_of_range",
-                    "result_ref": result_ref,
-                    "page": page_result.page,
-                    "page_count": page_result.page_count,
-                    "anchor": page_result.anchor,
-                    "anchor_page": page_result.anchor_page,
-                },
-            )
-        llm_text = render_tool_result_page_for_llm(page_result, tag="tool_result_page")
-        return CapabilityResult(
-            status=RuntimeStatus.OK,
-            text=page_result.content,
-            llm_text=llm_text,
-            structured={
-                "result_ref": page_result.result_ref,
-                "page": page_result.page,
-                "page_count": page_result.page_count,
-                "has_more": page_result.has_more,
-                "has_more_before": page_result.has_more_before,
-                "has_more_after": page_result.has_more_after,
-                "anchor": page_result.anchor,
-                "anchor_page": page_result.anchor_page,
-                "start_offset": page_result.start_offset,
-                "end_offset": page_result.end_offset,
-                "original_size": page_result.original_size,
-                "page_size": page_result.page_size,
-            },
-        )
-
-    async def ainvoke(self, args: dict[str, object], **kwargs: object) -> CapabilityResult:
-        _ = kwargs
-        return self.invoke(args)
-
-
 def render_tool_result_page_for_llm(page: ToolResultPage, *, tag: str = "tool_result") -> str:
     attrs = {
         "result_ref": page.result_ref,
@@ -420,41 +292,8 @@ def render_tool_result_page_for_llm(page: ToolResultPage, *, tag: str = "tool_re
     return "\n".join(part for part in parts if part).strip()
 
 
-def _expired_page_result(*, result_ref: str, reason: str) -> CapabilityResult:
-    text = "tool result page not found or expired; rerun the original tool if needed"
-    return CapabilityResult(
-        status=RuntimeStatus.NOT_FOUND,
-        text=text,
-        llm_text=text,
-        structured={"reason": reason, "result_ref": result_ref},
-    )
-
-
-def _positive_int(value: object, *, default: int) -> int:
-    if value is None or value == "":
-        return default
-    if isinstance(value, bool):
-        return default
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def _truthy(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "tail"}
-    return bool(value)
-
-
 def _normalize_anchor(value: object) -> str:
-    text = str(value or "").strip().lower()
-    if text in {"tail", "end", "last", "bottom"}:
-        return "tail"
-    return "head"
+    return "tail" if str(value or "").strip().lower() in {"tail", "end", "last", "bottom"} else "head"
 
 
 def _safe_file_name(value: str) -> str:

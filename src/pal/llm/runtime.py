@@ -559,9 +559,7 @@ class OpenAIChatEndpointInvoker:
             else:
                 draft.max_tokens = request.max_output_tokens
         if isinstance(draft, OpenAIResponsesDraft):
-            tools = chat_tools_to_responses_tools(
-                _coerce_tools_for_openai_chat(request.tools, tool_name_aliases=tool_name_aliases)
-            )
+            tools = chat_tools_to_responses_tools(request.tools)
         else:
             tools = _coerce_tools_for_openai_chat(request.tools, tool_name_aliases=tool_name_aliases)
         if tools:
@@ -842,9 +840,7 @@ class AnthropicMessagesEndpointInvoker:
             request_kwargs["system"] = system
         if request.temperature is not None:
             request_kwargs["temperature"] = request.temperature
-        tools = chat_tools_to_anthropic_tools(
-            _coerce_tools_for_openai_chat(request.tools, tool_name_aliases=tool_name_aliases)
-        )
+        tools = chat_tools_to_anthropic_tools(request.tools)
         if tools:
             request_kwargs["tools"] = tools
         thinking = think_level_to_anthropic_thinking(
@@ -2253,7 +2249,6 @@ def _coerce_tools_for_openai_chat(
                     "name": _external_tool_name(name, tool_name_aliases),
                     "description": str(tool.get("description") or f"Tool {name}"),
                     "parameters": tool.get("input_schema")
-                    or tool.get("parameters")
                     or {"type": "object", "properties": {}},
                 },
             }

@@ -18,6 +18,7 @@ from pal.execution.file_edit import (
     FileEditTool,
 )
 from pal.execution.file_state import FileStateCache
+from pal.execution.generated_tool_models import ExecutionFileCapabilitiesFileCapabilityMixinEditInput
 from pal.shared import RuntimeStatus
 
 
@@ -350,18 +351,16 @@ class ValidationTests(_TempFileMixin, unittest.TestCase):
 
 
 class ToolProtocolTests(unittest.TestCase):
-    """Verify FileEditTool satisfies the Tool protocol."""
+    """Verify the file-edit handler and facade input contract agree."""
 
-    def test_tool_attributes(self) -> None:
+    def test_handler_and_bound_input_contract(self) -> None:
         tool = FileEditTool()
-        self.assertEqual(tool.name, "op_file_edit")
-        self.assertEqual(tool.family, "system")
-        self.assertIsInstance(tool.args_schema, dict)
-        self.assertIsInstance(tool.result_schema, dict)
-        self.assertIn("file_path", tool.args_schema.get("properties", {}))
-        self.assertIn("old_string", tool.args_schema.get("properties", {}))
-        self.assertIn("new_string", tool.args_schema.get("properties", {}))
-        self.assertIn("replace_all", tool.args_schema.get("properties", {}))
+        self.assertTrue(callable(tool.invoke))
+        properties = ExecutionFileCapabilitiesFileCapabilityMixinEditInput.model_json_schema(mode="validation")["properties"]
+        self.assertIn("file_path", properties)
+        self.assertIn("old_string", properties)
+        self.assertIn("new_string", properties)
+        self.assertIn("replace_all", properties)
 
     def test_ainvoke_delegates_to_invoke(self) -> None:
         import asyncio

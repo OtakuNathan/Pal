@@ -631,11 +631,11 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             profile_group="software_engineering",
             profile_name="v2_architect",
             minion_profile="software_engineering.v2_architect",
-            allowed_capabilities=["op_tree", "op_web_search", "op_web_read"],
+            allowed_capabilities=["op_exec_shell", "op_web_search", "op_web_read"],
         )
         local = apply_v2_research_capability_policy(pack, research_mode="local_only")
         external = apply_v2_research_capability_policy(pack, research_mode="external_allowed")
-        self.assertEqual(local.allowed_capabilities, ["op_tree"])
+        self.assertEqual(local.allowed_capabilities, ["op_exec_shell"])
         self.assertIn("op_web_search", external.allowed_capabilities)
 
     def _drive_revision_to_human_review(

@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    LspPluginLspManagerPluginProviderDefinitionInput,
+    LspPluginLspManagerPluginProviderDiagnosticsInput,
+    LspPluginLspManagerPluginProviderDoctorInput,
+    LspPluginLspManagerPluginProviderDocumentSymbolsInput,
+    LspPluginLspManagerPluginProviderHoverInput,
+    LspPluginLspManagerPluginProviderImplementationInput,
+    LspPluginLspManagerPluginProviderIncomingCallsInput,
+    LspPluginLspManagerPluginProviderOutgoingCallsInput,
+    LspPluginLspManagerPluginProviderPrepareCallHierarchyInput,
+    LspPluginLspManagerPluginProviderPrepareWorkspaceInput,
+    LspPluginLspManagerPluginProviderReferencesInput,
+    LspPluginLspManagerPluginProviderWorkspaceSymbolsInput,
+)
+
 import contextlib
 import subprocess
 import sys
@@ -244,7 +259,7 @@ class LspManagerPluginProvider:
             "selecting a project/worktree, and call it again when compile commands, include paths, SDK stubs, "
             "or language settings change. Later LSP tools reuse the manager-owned environment by workspace_root."
         ),
-        args_schema=_prepare_workspace_schema(),
+        InputModel=LspPluginLspManagerPluginProviderPrepareWorkspaceInput,
     )
     def prepare_workspace(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc(
@@ -252,47 +267,47 @@ class LspManagerPluginProvider:
             self._request_or_error("prepare_workspace", dict(call.args or {})),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor", description="Check one selected LSP server's binary, workspace, initialize, and diagnostics readiness", args_schema=_doctor_schema())
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor", description="Check one selected LSP server's binary, workspace, initialize, and diagnostics readiness", InputModel=LspPluginLspManagerPluginProviderDoctorInput)
     def doctor(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP doctor", self._request_or_error("doctor", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="diagnostics", description="Read diagnostics for a file from the selected LSP server", args_schema=_file_schema())
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="diagnostics", description="Read diagnostics for a file from the selected LSP server", InputModel=LspPluginLspManagerPluginProviderDiagnosticsInput)
     def diagnostics(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP diagnostics", self._request_or_error("diagnostics", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="hover", description="Read hover information at a file position", args_schema=_position_schema())
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="hover", description="Read hover information at a file position", InputModel=LspPluginLspManagerPluginProviderHoverInput)
     def hover(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP hover", self._request_or_error("hover", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="definition", description="Find definitions at a file position", args_schema=_position_schema())
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="definition", description="Find definitions at a file position", InputModel=LspPluginLspManagerPluginProviderDefinitionInput)
     def definition(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP definition", self._request_or_error("definition", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="implementation", description="Find implementations at a file position", args_schema=_position_schema())
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="implementation", description="Find implementations at a file position", InputModel=LspPluginLspManagerPluginProviderImplementationInput)
     def implementation(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP implementation", self._request_or_error("implementation", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="references", description="Find references at a file position", args_schema={**_position_schema(), "properties": {**_position_schema()["properties"], "include_declaration": {"type": "boolean", "default": True}}})
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="references", description="Find references at a file position", InputModel=LspPluginLspManagerPluginProviderReferencesInput)
     def references(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP references", self._request_or_error("references", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="prepare_call_hierarchy", description="Prepare call hierarchy items at a file position", args_schema=_position_schema())
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="prepare_call_hierarchy", description="Prepare call hierarchy items at a file position", InputModel=LspPluginLspManagerPluginProviderPrepareCallHierarchyInput)
     def prepare_call_hierarchy(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP prepare call hierarchy", self._request_or_error("prepare_call_hierarchy", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="incoming_calls", description="Find callers for the symbol at a file position using LSP call hierarchy", args_schema=_position_schema())
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="incoming_calls", description="Find callers for the symbol at a file position using LSP call hierarchy", InputModel=LspPluginLspManagerPluginProviderIncomingCallsInput)
     def incoming_calls(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP incoming calls", self._request_or_error("incoming_calls", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="outgoing_calls", description="Find callees for the symbol at a file position using LSP call hierarchy", args_schema=_position_schema())
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="outgoing_calls", description="Find callees for the symbol at a file position using LSP call hierarchy", InputModel=LspPluginLspManagerPluginProviderOutgoingCallsInput)
     def outgoing_calls(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP outgoing calls", self._request_or_error("outgoing_calls", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="document_symbols", description="List document symbols for a file", args_schema=_file_schema())
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="document_symbols", description="List document symbols for a file", InputModel=LspPluginLspManagerPluginProviderDocumentSymbolsInput)
     def document_symbols(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP document symbols", self._request_or_error("document_symbols", dict(call.args or {})))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="workspace_symbols", description="Search workspace symbols", args_schema={"type": "object", "properties": {"query": {"type": "string"}, "workspace_root": {"type": "string"}, "server_id": {"type": "string"}}, "required": ["query"]})
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="workspace_symbols", description="Search workspace symbols", InputModel=LspPluginLspManagerPluginProviderWorkspaceSymbolsInput)
     def workspace_symbols(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP workspace symbols", self._request_or_error("workspace_symbols", dict(call.args or {})))
 

@@ -33,7 +33,7 @@ from pal.execution.tool_facade import (
     derive_retry_directive,
 )
 from pal.llm.contracts import CanonicalToolCall
-from pal.execution.tool_registry import _example_from_schema, model_from_json_schema, subtree_for_tool
+from pal.execution.tool_registry import _example_from_schema, subtree_for_tool
 
 
 class EchoInput(StrictToolModel):
@@ -106,7 +106,16 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         search_record = self.core.context.execution_runtime.registry_generation.search_records["echo"]
         self.assertEqual(
             set(search_record),
-            {"alias", "search_text", "invocation_mode", "input_shape"},
+            {
+                "alias",
+                "search_text",
+                "invocation_mode",
+                "input_shape",
+                "namespace",
+                "family",
+                "module_id",
+                "tags",
+            },
         )
 
     def test_model_dict_and_json_outputs_use_one_adapter(self) -> None:
@@ -386,9 +395,7 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TypeError):
             generation.provider_specs["echo"]["function"]["name"] = "changed"
         with self.assertRaises(TypeError):
-            generation.capability_registry.descriptors["echo"].parameters_schema["properties"]["value"][
-                "type"
-            ] = "integer"
+            generation.capability_registry.descriptors["echo"].examples[0]["value"] = "changed"
         subtree = generation.mounted_subtrees["__tool__:op_test_echo"]
         with self.assertRaises(AttributeError):
             subtree.descriptors.append(generation.capability_registry.descriptors["echo"])
@@ -496,20 +503,13 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(expired.invocation_result.affordances)
 
     def test_dynamic_nested_example_resolves_pydantic_defs(self) -> None:
-        schema = {
-            "type": "object",
-            "properties": {
-                "changes": {
-                    "type": "object",
-                    "properties": {"enabled": {"type": "boolean"}},
-                    "required": ["enabled"],
-                    "additionalProperties": False,
-                }
-            },
-            "required": ["changes"],
-            "additionalProperties": False,
-        }
-        model = model_from_json_schema("NestedDynamicInput", schema, input_contract=True)
+        class NestedChanges(StrictToolModel):
+            enabled: bool
+
+        class NestedDynamicInput(StrictToolModel):
+            changes: NestedChanges
+
+        model = NestedDynamicInput
         generated = model.model_json_schema(mode="validation")
         example = _example_from_schema(generated)
         self.assertEqual(example, {"changes": {"enabled": False}})

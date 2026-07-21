@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    SkillCapabilitiesSkillIntrospectionProviderAssimilateInput,
+    SkillCapabilitiesSkillIntrospectionProviderAssimilateOutput,
+    SkillCapabilitiesSkillIntrospectionProviderCommitInput,
+    SkillCapabilitiesSkillIntrospectionProviderCommitOutput,
+    SkillCapabilitiesSkillIntrospectionProviderDisableInput,
+    SkillCapabilitiesSkillIntrospectionProviderDisableOutput,
+    SkillCapabilitiesSkillIntrospectionProviderInjectInput,
+    SkillCapabilitiesSkillIntrospectionProviderInjectOutput,
+    SkillCapabilitiesSkillIntrospectionProviderReadInput,
+    SkillCapabilitiesSkillIntrospectionProviderReadOutput,
+    SkillCapabilitiesSkillIntrospectionProviderSearchInput,
+    SkillCapabilitiesSkillIntrospectionProviderSearchOutput,
+    SkillCapabilitiesSkillIntrospectionProviderUpdateInput,
+    SkillCapabilitiesSkillIntrospectionProviderUpdateOutput,
+)
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -25,14 +42,6 @@ from pal.skill.builtin_skills import (
 from pal.skill.contracts import SkillDescriptor
 from pal.skill.service import SkillService
 from pal.skill.tools import (
-    SKILL_ASSIMILATE_ARGS_SCHEMA,
-    SKILL_COMMIT_ARGS_SCHEMA,
-    SKILL_DISABLE_ARGS_SCHEMA,
-    SKILL_INJECT_ARGS_SCHEMA,
-    SKILL_INJECT_RESULT_SCHEMA,
-    SKILL_READ_ARGS_SCHEMA,
-    SKILL_SEARCH_ARGS_SCHEMA,
-    SKILL_UPDATE_ARGS_SCHEMA,
     SkillAssimilateTool,
     SkillCommitTool,
     SkillDisableTool,
@@ -193,12 +202,12 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="assimilate",
         description="Create a sanitized Pal skill candidate from plain text or SKILL.md content. Does not commit.",
-        args_schema=SKILL_ASSIMILATE_ARGS_SCHEMA,
-        result_schema={"type": "object"},
+        InputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateInput,
+        OutputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateOutput,
         metadata={"async_required": True},
     )
-    def assimilate(self, call: CapabilityCall):
-        return SkillAssimilateTool(service=self.service).invoke(call.args)
+    async def assimilate(self, call: CapabilityCall):
+        return await SkillAssimilateTool(service=self.service).ainvoke(call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -206,8 +215,8 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="commit",
         description="Commit a sanitized skill candidate and its thin affordance.",
-        args_schema=SKILL_COMMIT_ARGS_SCHEMA,
-        result_schema={"type": "object"},
+        InputModel=SkillCapabilitiesSkillIntrospectionProviderCommitInput,
+        OutputModel=SkillCapabilitiesSkillIntrospectionProviderCommitOutput,
     )
     def commit(self, call: CapabilityCall):
         return SkillCommitTool(service=self.service).invoke(call.args)
@@ -218,8 +227,8 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="update",
         description="Update a normalized skill and refresh its thin affordance.",
-        args_schema=SKILL_UPDATE_ARGS_SCHEMA,
-        result_schema={"type": "object"},
+        InputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateInput,
+        OutputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateOutput,
     )
     def update(self, call: CapabilityCall):
         return SkillUpdateTool(service=self.service).invoke(call.args)
@@ -230,8 +239,8 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="disable",
         description="Disable a normalized skill without deleting history.",
-        args_schema=SKILL_DISABLE_ARGS_SCHEMA,
-        result_schema={"type": "object"},
+        InputModel=SkillCapabilitiesSkillIntrospectionProviderDisableInput,
+        OutputModel=SkillCapabilitiesSkillIntrospectionProviderDisableOutput,
     )
     def disable(self, call: CapabilityCall):
         return SkillDisableTool(service=self.service).invoke(call.args)
@@ -242,8 +251,8 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="search",
         description="Search normalized Pal skills for the current scenario or explicit skill name. Does not inject manuals.",
-        args_schema=SKILL_SEARCH_ARGS_SCHEMA,
-        result_schema={"type": "object"},
+        InputModel=SkillCapabilitiesSkillIntrospectionProviderSearchInput,
+        OutputModel=SkillCapabilitiesSkillIntrospectionProviderSearchOutput,
     )
     def search(self, call: CapabilityCall):
         return SkillSearchTool(service=self.service).invoke(call.args)
@@ -254,8 +263,8 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="read",
         description="Read normalized Pal skill metadata, optionally including manual text.",
-        args_schema=SKILL_READ_ARGS_SCHEMA,
-        result_schema={"type": "object"},
+        InputModel=SkillCapabilitiesSkillIntrospectionProviderReadInput,
+        OutputModel=SkillCapabilitiesSkillIntrospectionProviderReadOutput,
     )
     def read(self, call: CapabilityCall):
         return SkillReadTool(service=self.service).invoke(call.args)
@@ -266,8 +275,8 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="inject",
         description="Inject a registered active skill manual as a tool observation without executing capabilities.",
-        args_schema=SKILL_INJECT_ARGS_SCHEMA,
-        result_schema=SKILL_INJECT_RESULT_SCHEMA,
+        InputModel=SkillCapabilitiesSkillIntrospectionProviderInjectInput,
+        OutputModel=SkillCapabilitiesSkillIntrospectionProviderInjectOutput,
     )
     def inject(self, call: CapabilityCall):
         return SkillInjectTool(service=self.service).invoke(call.args)
@@ -276,13 +285,6 @@ class SkillIntrospectionProvider:
 def register_with_core(context: "MainContext", service: SkillService) -> ModuleHandle:
     from pal.skill.prompt import SkillPromptFragmentProvider
 
-    context.execution_runtime.register_tool(SkillAssimilateTool(service=service))
-    context.execution_runtime.register_tool(SkillCommitTool(service=service))
-    context.execution_runtime.register_tool(SkillUpdateTool(service=service))
-    context.execution_runtime.register_tool(SkillDisableTool(service=service))
-    context.execution_runtime.register_tool(SkillSearchTool(service=service))
-    context.execution_runtime.register_tool(SkillReadTool(service=service))
-    context.execution_runtime.register_tool(SkillInjectTool(service=service))
     provider = SkillIntrospectionProvider(service=service)
     prompt_provider = SkillPromptFragmentProvider()
     handle = ModuleHandle(

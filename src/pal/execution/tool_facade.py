@@ -7,7 +7,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Annotated, Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, TypeAdapter, ValidationError, model_validator
 
 
 class StrictToolModel(BaseModel):
@@ -22,6 +22,12 @@ class EmptyToolInput(StrictToolModel):
 
 class EmptyToolOutput(StrictToolModel):
     pass
+
+
+class OpaqueToolOutput(RootModel[dict[str, Any]]):
+    """Explicit dictionary output for capabilities without a narrower shape."""
+
+    model_config = ConfigDict(strict=True)
 
 
 class McpToolOutput(StrictToolModel):
@@ -230,7 +236,7 @@ class Tool:
         if alias == canonical_path:
             raise ValueError("tool alias must not expose canonical_path")
         if len(alias) > 64 or re.fullmatch(r"[A-Za-z0-9_-]+", alias) is None:
-            raise ValueError("tool alias must be 1-64 characters from [A-Za-z0-9_-]")
+            raise ValueError("invalid tool alias; expected 1-64 characters from [A-Za-z0-9_-]")
         if alias.startswith(("op_", "intro_")):
             raise ValueError("tool alias must not use the reserved canonical-path namespace")
         _validate_model_class("InputModel", self.InputModel)
@@ -358,7 +364,7 @@ def _validate_model_defaults(model: type[BaseModel]) -> None:
     config = model.model_config
     if config.get("strict") is not True:
         raise ValueError(f"{model.__name__} must set strict=True")
-    if config.get("extra") != "forbid":
+    if not issubclass(model, RootModel) and config.get("extra") != "forbid":
         raise ValueError(f"{model.__name__} must set extra='forbid'")
 
 
@@ -404,6 +410,7 @@ __all__ = [
     "Idempotency",
     "InvocationMode",
     "McpToolOutput",
+    "OpaqueToolOutput",
     "PagedResult",
     "PagingMode",
     "RejectedResult",

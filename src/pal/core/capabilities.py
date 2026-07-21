@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
+)
+
 from dataclasses import dataclass
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
@@ -57,10 +61,7 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="configure",
         description="Configure module-level state for core",
-        args_schema={
-            "type": "object",
-            "properties": {"mode": {"type": "string"}},
-        },
+        InputModel=CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
     )
     def configure(self, call: IntrospectionCall) -> IntrospectionResult:
         mode = call.args.get("mode")

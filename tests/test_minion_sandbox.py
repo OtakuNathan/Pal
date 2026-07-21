@@ -25,6 +25,7 @@ from pal.minion.llm_broker import (
     preflight_request_to_payload,
 )
 from pal.minion.runner import MinionRunner, MinionRuntimeBundle, _minion_temperature
+from pal.minion.prompt_adapter import render_minion_task_prompt
 from pal.minion.sandbox import (
     build_sandboxed_runner_invocation,
     ensure_sandbox_files,
@@ -245,6 +246,107 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertNotIn("OPENAI_API_KEY", env)
             self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
             self.assertIn("PYTHONPATH", env)
+
+    def test_reference_projection_uses_stable_read_only_sandbox_path(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_reference_") as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            repo = root / "repo"
+            reference = root / "reference"
+            repo.mkdir()
+            reference.mkdir()
+            (reference / "TASK.md").write_text("framepipe\n", encoding="utf-8")
+            (reference / "manifest.json").write_text('{"version":1}\n', encoding="utf-8")
+            (reference / "private.txt").write_text("not projected\n", encoding="utf-8")
+            pack = MinionInvocationPack(
+                invocation_id="reference_projection",
+                goal="inspect task",
+                workspace={
+                    "repo_path": str(repo),
+                    "reference_paths": [
+                        {
+                            "name": "task",
+                            "path": str(reference / "*.md"),
+                            "truth_source": True,
+                            "required": True,
+                        },
+                        {
+                            "name": "architecture_index",
+                            "path": str(reference / "manifest.json"),
+                            "truth_source": True,
+                            "required": True,
+                        },
+                    ],
+                },
+            )
+            with patch.dict(
+                os.environ,
+                {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "scratch")},
+            ):
+                pack = with_minion_sandbox_metadata(
+                    runtime_root,
+                    pack,
+                    run_id="reference_projection",
+                )
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=runtime_root,
+                    pack=pack,
+                    argv=[
+                        "/bin/sh",
+                        "-c",
+                        "tree -a -L 3 --filelimit 200 --noreport /pal/references/task; "
+                        "test -r /pal/references/task/TASK.md; "
+                        "test -f /pal/references/architecture_index/manifest.json; "
+                        "test ! -e /pal/references/task/private.txt; "
+                        "if printf changed > /pal/references/task/TASK.md 2>/dev/null; then exit 31; fi; "
+                        "if printf new > /pal/references/task/new.txt 2>/dev/null; then exit 32; fi",
+                    ],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
+
+            projected = dict(pack.workspace["reference_paths"][0])
+            self.assertEqual(projected["path"], "/pal/references/task")
+            self.assertEqual(
+                pack.workspace["reference_paths"][1]["path"],
+                "/pal/references/architecture_index/manifest.json",
+            )
+            rebound = with_minion_sandbox_metadata(
+                runtime_root,
+                pack,
+                run_id="reference_projection",
+            )
+            self.assertEqual(
+                rebound.workspace["reference_paths"][0]["path"],
+                "/pal/references/task",
+            )
+            self.assertEqual(
+                rebound.metadata["sandbox"]["reference_binds"][0]["source_path"],
+                str(reference),
+            )
+            prompt = render_minion_task_prompt(pack)
+            self.assertIn("reference:task: read-only semantic input", prompt)
+            self.assertIn("reference_name='task' plus a root-relative path", prompt)
+            self.assertIn("sandbox_path=/pal/references/task", prompt)
+            self.assertIn(
+                "tree -a -L 3 --filelimit 200 --noreport /pal/references/task",
+                prompt,
+            )
+
+            result = subprocess.run(
+                argv,
+                env=env,
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("TASK.md", result.stdout)
+            self.assertNotIn("private.txt", result.stdout)
+            self.assertEqual((reference / "TASK.md").read_text(encoding="utf-8"), "framepipe\n")
+            self.assertFalse((reference / "new.txt").exists())
 
     def test_read_only_workspace_is_mounted_read_only(self) -> None:
         if not shutil.which("bwrap"):
@@ -659,6 +761,61 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             self.assertTrue(result.ok, result.text)
             self.assertEqual(calls, ["cat README.md"])
             self.assertEqual(len([event for event in events if event["event_kind"] == "approval_requested"]), 1)
+
+        asyncio.run(scenario())
+
+    def test_runner_preserves_provider_alias_after_policy_admission(self) -> None:
+        async def scenario() -> None:
+            calls: list[str] = []
+            pack = MinionInvocationPack(
+                invocation_id="provider_alias",
+                goal="inspect task sources",
+                allowed_capabilities=["op_search"],
+            )
+
+            class AliasExecution:
+                def resolve_llm_tool_name(self, name):
+                    return {"search": "op_search"}.get(str(name), str(name))
+
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = kwargs
+                    calls.append(call.name)
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text="search ok",
+                        llm_text="search ok",
+                        structured={"matches": []},
+                        status=RuntimeStatus.OK,
+                    )
+
+            async def write_event(_event):
+                return None
+
+            async def read_decision(_timeout):
+                return None
+
+            runner = MinionRunner(
+                runtime_root=Path(tempfile.mkdtemp(prefix="pal_minion_provider_alias_")),
+                pack=pack,
+                minion_id="m_provider_alias",
+                run_id="r_provider_alias",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+
+            result = await runner._execute_allowed_tool(
+                AliasExecution(),
+                CanonicalToolCall(
+                    name="search",
+                    args={"query": "frame", "reference_name": "task"},
+                    call_id="call_search",
+                ),
+            )
+
+            self.assertTrue(result.ok, result.text)
+            self.assertEqual(calls, ["search"])
 
         asyncio.run(scenario())
 

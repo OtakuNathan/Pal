@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -103,9 +104,20 @@ def render_minion_task_prompt(pack: MinionInvocationPack) -> str:
         lines.extend(["", "## Immutable Inputs"])
         for item in references:
             name = str(item.get("name") or "")
+            if bool(item.get("bound_input")):
+                lines.append(
+                    f"- reference:{name}: read-only semantic input; inspect it with ordinary file/search tools "
+                    f"(truth_source={bool(item.get('truth_source'))})"
+                )
+                continue
+            path = str(item.get("path") or "").strip()
+            shell_path = shlex.quote(path) if path else f"/pal/references/{name}"
             lines.append(
-                f"- reference:{name}: read-only semantic input; inspect it with ordinary file/search tools "
-                f"(truth_source={bool(item.get('truth_source'))})"
+                f"- reference:{name}: read-only semantic input. For read_file/search, pass "
+                f"reference_name='{name}' plus a root-relative path; never pass the sandbox path to those tools. "
+                f"For run_shell only, sandbox_path={path or shell_path}; list it with "
+                f"`tree -a -L 3 --filelimit 200 --noreport {shell_path}` through run_shell "
+                f"(`find {shell_path} -maxdepth 3 -print | head -n 500` fallback; truth_source={bool(item.get('truth_source'))})"
             )
     lines.extend(
         [

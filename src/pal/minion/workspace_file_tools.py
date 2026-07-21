@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    MinionWorkspaceFileToolsOpFileEditInput,
+    MinionWorkspaceFileToolsOpFileReadInput,
+    MinionWorkspaceFileToolsOpFileStateInput,
+    MinionWorkspaceFileToolsOpFileWriteInput,
+    MinionWorkspaceFileToolsOpPathDeleteInput,
+)
+
 from pathlib import Path
 from typing import Any
 
@@ -7,9 +15,6 @@ from pal.execution.file_tool_contracts import (
     FILE_EDIT_DESCRIPTION,
     FILE_READ_DESCRIPTION,
     FILE_WRITE_DESCRIPTION,
-    file_edit_args_schema,
-    file_read_args_schema,
-    file_write_args_schema,
 )
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.shared import RuntimeStatus
@@ -32,7 +37,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             + " Paths are root-relative. Use root='reference:<name>' or reference_name='<name>' "
             "for declared read-only truth-source references; omit it for the project repo."
         ),
-        "parameters_schema": file_read_args_schema(scoped=True),
+        "InputModel": MinionWorkspaceFileToolsOpFileReadInput,
     },
     "op_file_edit": {
         "name": "op_file_edit",
@@ -40,7 +45,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "Use this instead of shell sed/awk or one-off rewrite scripts for repo files. "
             + FILE_EDIT_DESCRIPTION
         ),
-        "parameters_schema": file_edit_args_schema(scoped=True),
+        "InputModel": MinionWorkspaceFileToolsOpFileEditInput,
     },
     "op_file_write": {
         "name": "op_file_write",
@@ -48,7 +53,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "Use this instead of shell redirection for project repo files. "
             + FILE_WRITE_DESCRIPTION
         ),
-        "parameters_schema": file_write_args_schema(scoped=True),
+        "InputModel": MinionWorkspaceFileToolsOpFileWriteInput,
     },
     "op_path_delete": {
         "name": "op_path_delete",
@@ -57,23 +62,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "Regular files must first be read with op_file_read, "
             "or expected_sha256 must match the current file bytes. Directories require recursive=true."
         ),
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Repo-relative path to delete."},
-                "expected_sha256": {
-                    "type": "string",
-                    "description": "Optional current SHA-256 digest for regular files. If supplied, a prior op_file_read snapshot is not required.",
-                },
-                "recursive": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Required for directory deletion. Regular file deletion does not require this.",
-                },
-            },
-            "required": ["path"],
-            "additionalProperties": False,
-        },
+        "InputModel": MinionWorkspaceFileToolsOpPathDeleteInput,
     },
     "op_file_state": {
         "name": "op_file_state",
@@ -82,14 +71,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "Inspect whether a repo-relative file has a current cached read snapshot for safe op_file_edit, "
             "op_file_write, or op_path_delete use. This does not return cached file contents."
         ),
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Repo-relative file path, for example src/app.py."},
-            },
-            "required": ["path"],
-            "additionalProperties": False,
-        },
+        "InputModel": MinionWorkspaceFileToolsOpFileStateInput,
     },
 }
 
@@ -106,7 +88,7 @@ async def workspace_file_tool_result(
     try:
         root, root_info = _workspace_root_with_info(workspace, call.args)
         if str(root_info.get("root_kind") or "") == "reference" and call.name != "op_file_read":
-            raise ValueError("reference roots are read-only; use op_file_read, op_tree, or op_search for reference inspection")
+            raise ValueError("reference roots are read-only; use op_file_read, op_search, or run_shell for reference inspection")
         relative, absolute = _workspace_file_path(root, call.args)
         if not _workspace_path_allowed_by_reference(absolute, root, root_info):
             raise ValueError("path is outside the declared immutable input include set")

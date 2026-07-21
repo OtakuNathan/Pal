@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+from pal.execution.generated_tool_models import (
+    MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
+    MemoryCapabilitiesMemoryIntrospectionProviderRecallInput,
+    MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,
+    MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
+    MemoryCapabilitiesMemoryIntrospectionProviderWriteInput,
+)
+from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ, DIRECT_EXTERNAL_WRITE
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -231,58 +240,8 @@ class MemoryIntrospectionProvider:
             "exactly when using update_memory or forget_memory."
         ),
         metadata={"omit_family_in_canonical": True},
-        args_schema={
-            "type": "object",
-            "properties": {
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "One to three focused natural-language search strings for the remembered fact, preference, "
-                        "project context, prior decision, repair lesson, failure case, or candidate memory. Include concrete names, "
-                        "modules, error text, symptoms, failed fixes, or user terms when known. Do not paste large raw context; summarize the lookup target."
-                    ),
-                },
-                "topic_scope": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Optional short topic keywords that narrow retrieval, such as a project, subsystem, user preference "
-                        "area, or failure domain. This is semantic narrowing, not the storage scope; do not use system/task here."
-                    ),
-                },
-                "task_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional exact task, work order, run, or minion task identifier from current context. When provided, "
-                        "recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "description": "Maximum memories to return. Use 3-5 by default; use a larger value only when comparing several possible matches.",
-                },
-                "kind": {
-                    "type": "string",
-                    "enum": ["fact", "case"],
-                    "description": (
-                        "Optional memory type filter. Use fact for stable facts, preferences, project context, or prior "
-                        "decisions. Use case for prior failures, debugging attempts, repair lessons, task experience, "
-                        "or when current work hits an error and prior pitfall/fix experience may exist."
-                    ),
-                },
-                "view": {
-                    "type": "string",
-                    "enum": ["summary", "origin"],
-                    "description": (
-                        "Use summary by default for normal work. Use origin only when provenance, source text, or extra "
-                        "detail is needed to resolve a conflict, update/delete a memory safely, or audit where the memory came from."
-                    ),
-                },
-            },
-        },
+        InputModel=MemoryCapabilitiesMemoryIntrospectionProviderRecallInput,
+        execution=DIRECT_EXTERNAL_READ,
     )
     def recall(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self.service.l3_selector.resolve()
@@ -324,44 +283,8 @@ class MemoryIntrospectionProvider:
             "Use summary for prompt-ready memory text and search_text for source-of-truth retrieval text."
         ),
         metadata={"omit_family_in_canonical": True},
-        args_schema={
-            "type": "object",
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": ["fact", "case"],
-                    "description": (
-                        "Use fact for stable facts, preferences, project context, or decisions. "
-                        "Use case for reusable task/failure/repair lessons; case requires star."
-                    ),
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "Concise prompt-ready memory text future Pal can read directly.",
-                },
-                "search_text": {
-                    "type": "string",
-                    "description": (
-                        "Retrieval/source text with concrete names, symptoms, decisions, or wording. "
-                        "This can be longer than summary but should not be raw unrelated context."
-                    ),
-                },
-                "topics": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional short semantic topic tags such as project, subsystem, preference area, or failure domain.",
-                },
-                "task_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional exact task, work order, run, or minion task id from current context. "
-                        "Providing it binds this memory to that task scope. Do not invent task ids."
-                    ),
-                },
-                "star": MEMORY_STAR_SCHEMA,
-            },
-            "required": ["kind", "summary", "search_text"],
-        },
+        InputModel=MemoryCapabilitiesMemoryIntrospectionProviderWriteInput,
+        execution=DIRECT_EXTERNAL_WRITE,
     )
     def write(self, call: IntrospectionCall) -> IntrospectionResult:
         kind = str(call.args.get("kind") or "").strip()
@@ -433,30 +356,8 @@ class MemoryIntrospectionProvider:
             "such as fact: or case:. Do not invent or shorten mem_ref values."
         ),
         metadata={"omit_family_in_canonical": True},
-        args_schema={
-            "type": "object",
-            "properties": {
-                "mem_ref": {
-                    "type": "string",
-                    "description": "Opaque memory ref returned by recall_memory. Copy the complete value, including prefixes such as fact: or case:.",
-                },
-                "summary": {"type": "string"},
-                "search_text": {"type": "string"},
-                "topics": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional replacement topic tags for retrieval narrowing.",
-                },
-                "star": {
-                    **MEMORY_STAR_SCHEMA,
-                    "description": (
-                        "Optional full STAR replacement for a case memory. If provided, all four fields are required. "
-                        "Do not use star for fact memories."
-                    ),
-                },
-            },
-            "required": ["mem_ref"],
-        },
+        InputModel=MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
+        execution=DIRECT_EXTERNAL_WRITE,
     )
     def update(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
@@ -509,17 +410,8 @@ class MemoryIntrospectionProvider:
             "such as fact: or case:. Do not invent or shorten mem_ref values."
         ),
         metadata={"omit_family_in_canonical": True},
-        args_schema={
-            "type": "object",
-            "properties": {
-                "mem_ref": {
-                    "type": "string",
-                    "description": "Opaque memory ref returned by recall_memory. Copy the complete value, including prefixes such as fact: or case:.",
-                },
-                "reason": {"type": "string"},
-            },
-            "required": ["mem_ref"],
-        },
+        InputModel=MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
+        execution=DIRECT_EXTERNAL_WRITE,
     )
     def delete(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
@@ -539,13 +431,7 @@ class MemoryIntrospectionProvider:
         family="management",
         action_name="set_active_provider",
         description="Switch the active L3 provider for memory recall",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "active_provider_id": {"type": "string"},
-            },
-            "required": ["active_provider_id"],
-        },
+        InputModel=MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("active_provider_id") or "").strip()

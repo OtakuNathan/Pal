@@ -4,12 +4,9 @@ from pal.shared.contracts import (
     RUNTIME_ONLY_SURFACES,
 )
 from pal.shared.capability_forest import (
-    BoundActionIndex,
     BoundCapabilityAction,
     CapabilityActionBlueprint,
-    CapabilityForestRegistry,
     CapabilityNodeBlueprint,
-    CompiledCapabilityIndex,
     HydratedCapabilityNode,
     INTROSPECTION_NAMESPACE,
     MountedSubtreeHandle,
@@ -77,18 +74,15 @@ from pal.shared.messages import MinionApprovalDecision, MinionInvocationPack, Pr
 from pal.shared.payloads import extract_text_from_payload
 
 __all__ = [
-    "BoundActionIndex",
     "BoundCapabilityAction",
     "AgentOutputPort",
     "CapabilityActionBlueprint",
-    "CapabilityForestRegistry",
     "CapabilityNodeBlueprint",
     "ChannelAdapter",
     "ChannelDeliveryError",
     "ChannelEnvelope",
     "ChannelNormalizer",
     "ChannelRuntimePort",
-    "CompiledCapabilityIndex",
     "DURABLE_TRUTH_SURFACES",
     "EffectKind",
     "EventKind",

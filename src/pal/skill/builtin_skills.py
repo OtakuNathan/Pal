@@ -99,7 +99,12 @@ Example `capabilities.py`:
 from dataclasses import dataclass
 
 from pal.execution.contracts import CapabilityCall, CapabilityResult
+from pal.execution.tool_facade import StrictToolModel
 from pal.shared import OPERATION_NAMESPACE, RuntimeStatus, capability_action, capability_node
+
+
+class EchoInput(StrictToolModel):
+    message: str
 
 
 @capability_node(
@@ -119,11 +124,7 @@ class DemoProvider:
         family="demo",
         action_name="echo",
         description="Echo a short message.",
-        args_schema={
-            "type": "object",
-            "properties": {"message": {"type": "string"}},
-            "required": ["message"],
-        },
+        InputModel=EchoInput,
     )
     def echo(self, call: CapabilityCall) -> CapabilityResult:
         message = str(call.args.get("message") or "")
