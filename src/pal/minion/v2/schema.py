@@ -512,12 +512,17 @@ def _migrate_role_protocol_v18(connection: sqlite3.Connection) -> None:
     role_mode = """
         CASE role
             WHEN 'architect' THEN 'author'
+            WHEN 'v2_architect' THEN 'author'
             WHEN 'architecture_reviewer' THEN 'architecture'
+            WHEN 'v2_architecture_reviewer' THEN 'architecture'
             WHEN 'reviewer' THEN 'standalone'
+            WHEN 'v2_reviewer' THEN 'standalone'
             WHEN 'coder' THEN 'produce'
+            WHEN 'v2_coder' THEN 'produce'
             WHEN 'producer' THEN 'produce'
             WHEN 'repair' THEN 'repair'
             WHEN 'verifier' THEN 'module'
+            WHEN 'v2_verifier' THEN 'module'
             WHEN 'scenario_verifier' THEN 'scenario'
             ELSE ''
         END
@@ -525,22 +530,32 @@ def _migrate_role_protocol_v18(connection: sqlite3.Connection) -> None:
     canonical_role = """
         CASE role
             WHEN 'architecture_reviewer' THEN 'reviewer'
+            WHEN 'v2_architecture_reviewer' THEN 'reviewer'
+            WHEN 'v2_reviewer' THEN 'reviewer'
+            WHEN 'v2_architect' THEN 'architect'
             WHEN 'coder' THEN 'implementation'
+            WHEN 'v2_coder' THEN 'implementation'
             WHEN 'producer' THEN 'implementation'
             WHEN 'repair' THEN 'implementation'
             WHEN 'scenario_verifier' THEN 'verifier'
+            WHEN 'v2_verifier' THEN 'verifier'
             ELSE role
         END
     """
     profile = """
         CASE role
             WHEN 'architect' THEN 'software_engineering.v2_architect'
+            WHEN 'v2_architect' THEN 'software_engineering.v2_architect'
             WHEN 'architecture_reviewer' THEN 'software_engineering.v2_reviewer'
+            WHEN 'v2_architecture_reviewer' THEN 'software_engineering.v2_reviewer'
             WHEN 'reviewer' THEN 'software_engineering.v2_reviewer'
+            WHEN 'v2_reviewer' THEN 'software_engineering.v2_reviewer'
             WHEN 'coder' THEN 'software_engineering.v2_coder'
+            WHEN 'v2_coder' THEN 'software_engineering.v2_coder'
             WHEN 'producer' THEN 'software_engineering.v2_coder'
             WHEN 'repair' THEN 'software_engineering.v2_coder'
             WHEN 'verifier' THEN 'software_engineering.v2_verifier'
+            WHEN 'v2_verifier' THEN 'software_engineering.v2_verifier'
             WHEN 'scenario_verifier' THEN 'software_engineering.v2_verifier'
             ELSE 'software_engineering.v2_coder'
         END

@@ -367,6 +367,54 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             self.assertIn(f"minion_v2_role_{name}", names)
             self.assertNotIn(f"minion_v2_worker_{name}", names)
 
+    def test_v18_migrates_profile_named_legacy_invocations(self) -> None:
+        legacy_roles = (
+            ("v2_architect", "architect", "author", "software_engineering.v2_architect"),
+            (
+                "v2_architecture_reviewer",
+                "reviewer",
+                "architecture",
+                "software_engineering.v2_reviewer",
+            ),
+            ("v2_reviewer", "reviewer", "standalone", "software_engineering.v2_reviewer"),
+            ("v2_coder", "implementation", "produce", "software_engineering.v2_coder"),
+            ("v2_verifier", "verifier", "module", "software_engineering.v2_verifier"),
+        )
+        now = "2026-07-21T00:00:00+00:00"
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_schema_meta SET schema_value = '17' "
+                "WHERE schema_key = 'schema_version'"
+            )
+            for index, (legacy_role, _, _, _) in enumerate(legacy_roles):
+                connection.execute(
+                    """
+                    INSERT INTO minion_v2_role_invocations(
+                        invocation_id, workflow_id, aggregate_type, aggregate_id,
+                        lease_resource_key, fencing_token, role, prompt_pack_ref_json,
+                        status, created_at, updated_at
+                    ) VALUES (?, 'legacy-workflow', 'dag_node_run', 'legacy-node',
+                              ?, 1, ?, '{}', 'completed', ?, ?)
+                    """,
+                    (f"legacy-invocation-{index}", f"legacy-lease-{index}", legacy_role, now, now),
+                )
+
+        self.repository.ensure_schema()
+
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            migrated = connection.execute(
+                """
+                SELECT role, mode, executor_profile_id
+                FROM minion_v2_role_invocations
+                WHERE workflow_id = 'legacy-workflow'
+                ORDER BY invocation_id
+                """
+            ).fetchall()
+        self.assertEqual(
+            migrated,
+            [(role, mode, profile) for _, role, mode, profile in legacy_roles],
+        )
+
     def test_v18_pins_legacy_task_to_its_latest_workflow_family_binding(self) -> None:
         binding_ref = self.artifacts.put_json(
             {"schema_version": "3", "family_id": "software_engineering"},
