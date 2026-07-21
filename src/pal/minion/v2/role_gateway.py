@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from pal.minion.ipc import MinionRoleGatewayClient
+from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.artifacts import ArtifactRef
 from pal.minion.v2.submission_drafts import (
@@ -15,9 +15,6 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftStore,
 )
 from pal.minion.v2.role_protocol import RoleAssignmentState, stable_hash
-
-
-ROLE_GATEWAY_TOKEN_ENV = "PAL_MINION_ROLE_ASSIGNMENT_TOKEN"
 
 ROLE_SUBMISSION_ARTIFACT_TYPES = {
     "architecture": "ArchitectureRoleSubmissionArtifact",

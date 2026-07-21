@@ -16,6 +16,9 @@ from pal.foundation.sidecar import (
 )
 
 
+ROLE_GATEWAY_TOKEN_ENV = "PAL_MINION_ROLE_ASSIGNMENT_TOKEN"
+
+
 def minion_runtime_dir(runtime_root: Path) -> Path:
     return Path(runtime_root) / "data" / "minion"
 

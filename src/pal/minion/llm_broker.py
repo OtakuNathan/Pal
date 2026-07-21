@@ -14,7 +14,11 @@ from pal.llm.contracts import (
     LLMPreflightRequest,
 )
 from pal.stream_events import NormalizedLLMStreamEvent
-from pal.minion.ipc import MinionManagerClient, MinionRoleGatewayClient
+from pal.minion.ipc import (
+    ROLE_GATEWAY_TOKEN_ENV,
+    MinionManagerClient,
+    MinionRoleGatewayClient,
+)
 
 
 def llm_request_to_payload(request: CanonicalLLMRequest) -> dict[str, Any]:
@@ -178,7 +182,7 @@ class MinionBrokerLLMRuntime:
 
     @property
     def _client(self) -> MinionManagerClient | MinionRoleGatewayClient:
-        access_token = str(os.environ.get("PAL_MINION_ASSIGNMENT_TOKEN") or "").strip()
+        access_token = str(os.environ.get(ROLE_GATEWAY_TOKEN_ENV) or "").strip()
         if access_token:
             return MinionRoleGatewayClient(
                 runtime_root=Path(self.runtime_root),

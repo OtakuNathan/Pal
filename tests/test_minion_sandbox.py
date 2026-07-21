@@ -13,6 +13,7 @@ from unittest.mock import patch
 from pal.llm import EndpointResolver, LLMRuntime
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice, LLMPreflightRequest
 from pal.minion.manager import MinionManager, MinionRunState
+from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
 from pal.minion.llm_broker import (
     MinionBrokerLLMRuntime,
     llm_outcome_from_payload,
@@ -54,11 +55,28 @@ class MinionSandboxTests(unittest.TestCase):
             os.environ,
             {
                 "PAL_MINION_SANDBOXED": "1",
-                "PAL_MINION_ASSIGNMENT_TOKEN": "",
+                ROLE_GATEWAY_TOKEN_ENV: "",
             },
         ):
             with self.assertRaisesRegex(RuntimeError, "assignment-scoped"):
                 _ = runtime._client
+
+    def test_sandboxed_broker_uses_assignment_role_gateway_token(self) -> None:
+        runtime = MinionBrokerLLMRuntime(
+            Path("/tmp/pal-minion-broker-token"),
+            run_id="run-token",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "PAL_MINION_SANDBOXED": "1",
+                ROLE_GATEWAY_TOKEN_ENV: "assignment-only",
+            },
+        ):
+            client = runtime._client
+
+        self.assertIsInstance(client, MinionRoleGatewayClient)
+        self.assertEqual(client.access_token, "assignment-only")
 
     def test_minion_temperature_accepts_low_deterministic_profile_value(self) -> None:
         pack = MinionInvocationPack(invocation_id="temperature", goal="g", metadata={"temperature": 0.05})
@@ -149,7 +167,7 @@ class MinionSandboxTests(unittest.TestCase):
                         "OPENAI_API_KEY": "secret",
                         "NORMAL_VALUE": "kept",
                         "PAL_TOKEN": "secret",
-                        "PAL_MINION_ASSIGNMENT_TOKEN": "assignment-only",
+                        ROLE_GATEWAY_TOKEN_ENV: "assignment-only",
                     },
                     runtime_root=Path(tmp),
                     run_id="run_env",
@@ -159,7 +177,7 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(env["NORMAL_VALUE"], "kept")
             self.assertNotIn("OPENAI_API_KEY", env)
             self.assertNotIn("PAL_TOKEN", env)
-            self.assertEqual(env["PAL_MINION_ASSIGNMENT_TOKEN"], "assignment-only")
+            self.assertEqual(env[ROLE_GATEWAY_TOKEN_ENV], "assignment-only")
             self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
             self.assertEqual(env["PAL_DATABASE_READ_ONLY"], "1")
             self.assertEqual(env["PAL_MINION_SANDBOXED"], "1")
@@ -412,8 +430,10 @@ class MinionSandboxTests(unittest.TestCase):
                 runtime_root=root,
                 pack=pack,
                 argv=["python", "-c", "pass"],
-                env={"PATH": "/usr/bin:/bin", "PAL_MINION_ASSIGNMENT_TOKEN": "token"},
+                env={"PATH": "/usr/bin:/bin", ROLE_GATEWAY_TOKEN_ENV: "token"},
             )
+
+            self.assertEqual(_env[ROLE_GATEWAY_TOKEN_ENV], "token")
 
             triples = [argv[index : index + 3] for index in range(max(0, len(argv) - 2))]
             self.assertIn(["--ro-bind", str(pal_db), str(pal_db)], triples)
@@ -711,6 +731,38 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("imports-ok", result.stdout)
+
+    def test_sandboxed_broker_receives_role_gateway_token(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_role_token_") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            pack = MinionInvocationPack(
+                invocation_id="role-token",
+                goal="g",
+                workspace={"repo_path": str(repo)},
+                metadata={"sandbox": {"enabled": True, "backend": "bwrap", "run_id": "run_role_token"}},
+            )
+            script = (
+                "from pathlib import Path; "
+                "from pal.minion.llm_broker import MinionBrokerLLMRuntime; "
+                "client = MinionBrokerLLMRuntime(Path.cwd(), 'run-role-token')._client; "
+                "print(client.access_token)"
+            )
+
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")}):
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=root,
+                    pack=pack,
+                    argv=["python", "-c", script],
+                    env={"PATH": "/usr/bin:/bin", ROLE_GATEWAY_TOKEN_ENV: "assignment-only"},
+                )
+            result = subprocess.run(argv, env=env, cwd=str(repo), capture_output=True, text=True, timeout=20)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "assignment-only")
 
     def test_sandboxed_runner_honors_explicit_approval_policy(self) -> None:
         async def scenario() -> None:

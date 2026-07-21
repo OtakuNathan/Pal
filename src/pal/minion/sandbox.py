@@ -13,7 +13,11 @@ from typing import Any
 
 from pal.foundation.log_paths import pal_log_root
 from pal.foundation.sidecar import python_subprocess_env
-from pal.minion.ipc import minion_role_port_path, minion_role_socket_path
+from pal.minion.ipc import (
+    ROLE_GATEWAY_TOKEN_ENV,
+    minion_role_port_path,
+    minion_role_socket_path,
+)
 from pal.minion.workspace_tools import _normalized_reference_paths
 from pal.shared import RUN_SHELL_SCOPE_HINT, MinionInvocationPack, format_dedicated_tool_route_hints
 
@@ -331,7 +335,7 @@ def scrub_minion_sandbox_env(
     scratch_dir: str | Path | None = None,
 ) -> dict[str, str]:
     result: dict[str, str] = {}
-    assignment_token = str(dict(env or {}).get("PAL_MINION_ASSIGNMENT_TOKEN") or "")
+    assignment_token = str(dict(env or {}).get(ROLE_GATEWAY_TOKEN_ENV) or "")
     for key, value in dict(env or {}).items():
         upper = str(key or "").upper()
         if any(marker in upper for marker in _SECRET_ENV_MARKERS):
@@ -344,7 +348,7 @@ def scrub_minion_sandbox_env(
     result["PAL_MINION_LLM_BROKER"] = "1"
     result["PAL_DATABASE_READ_ONLY"] = "1"
     if assignment_token:
-        result["PAL_MINION_ASSIGNMENT_TOKEN"] = assignment_token
+        result[ROLE_GATEWAY_TOKEN_ENV] = assignment_token
     result["HOME"] = str(scratch / "home")
     result["TMPDIR"] = str(scratch / "tmp")
     result["XDG_CACHE_HOME"] = str(scratch / "cache")

@@ -162,10 +162,8 @@ from pal.minion.v2.semantic_orchestration.contracts import (
 from pal.minion.v2.semantic_orchestration.implementation import IMPLEMENTATION_EFFECT_ROUTES
 from pal.minion.v2.semantic_orchestration.review import REVIEW_EFFECT_ROUTES
 from pal.minion.v2.semantic_orchestration.verification import VERIFICATION_EFFECT_ROUTES
-from pal.minion.v2.role_gateway import (
-    ROLE_GATEWAY_TOKEN_ENV,
-    role_submission_artifact_type,
-)
+from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV
+from pal.minion.v2.role_gateway import role_submission_artifact_type
 from pal.minion.v2.role_protocol import (
     RoleAssignmentRequest,
     RoleAssignmentState,
