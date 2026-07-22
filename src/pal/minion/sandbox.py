@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import os
 import platform
+import shlex
 import shutil
 import site
 import sys
@@ -25,6 +26,7 @@ from pal.shared import MinionInvocationPack
 PAL_MINION_SANDBOX_SCRATCH_ROOT_ENV = "PAL_MINION_SANDBOX_SCRATCH_ROOT"
 PAL_MINION_SANDBOX_MIN_FREE_MB_ENV = "PAL_MINION_SANDBOX_MIN_FREE_MB"
 PAL_MINION_SANDBOX_MAX_RUN_DIRS_ENV = "PAL_MINION_SANDBOX_MAX_RUN_DIRS"
+PAL_MINION_RUNTIME_ROOT_ENV = "PAL_MINION_RUNTIME_ROOT"
 DEFAULT_MINION_SANDBOX_MIN_FREE_MB = 256
 DEFAULT_MINION_SANDBOX_MAX_RUN_DIRS = 128
 MINION_SANDBOX_REFERENCE_ROOT = PurePosixPath("/pal/references")
@@ -74,9 +76,9 @@ class MinionSandboxSpec:
     run_id: str
     workspace_path: Path | None = None
     scratch_dir: Path | None = None
-    deny_dir: Path | None = None
-    blacklist_commands: tuple[str, ...] = field(default_factory=lambda: MINION_SANDBOX_BLACKLIST_COMMANDS)
-    git_metadata_bind_paths: tuple[Path, ...] = field(default_factory=tuple)
+    blacklist_commands: tuple[str, ...] = field(
+        default_factory=lambda: MINION_SANDBOX_BLACKLIST_COMMANDS
+    )
 
     def to_metadata(self) -> dict[str, Any]:
         return {
@@ -86,7 +88,6 @@ class MinionSandboxSpec:
             "workspace_path": str(self.workspace_path or ""),
             "scratch_dir": str(self.scratch_dir or ""),
             "blacklist_commands": list(self.blacklist_commands),
-            "git_metadata_bind_paths": [str(path) for path in self.git_metadata_bind_paths],
             "network": "open",
             "secret_policy": "host_llm_broker",
         }
@@ -102,26 +103,15 @@ def sandbox_supported_backend() -> str:
 def with_minion_sandbox_metadata(runtime_root: Path, pack: MinionInvocationPack, *, run_id: str) -> MinionInvocationPack:
     metadata = dict(pack.metadata or {})
     sandbox_config = dict(metadata.get("sandbox") or {})
-    require_path_enforcement = bool((pack.workspace or {}).get("require_os_path_enforcement"))
     if _falsey(sandbox_config.get("enabled")) or _falsey(os.environ.get("PAL_MINION_SANDBOX")):
-        if require_path_enforcement:
-            raise RuntimeError("scoped writable Minion workspaces require an OS sandbox")
-        metadata["sandbox"] = {"enabled": False, "backend": "disabled"}
-        return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
+        raise RuntimeError("Minion execution requires an OS sandbox and cannot be disabled")
     backend = str(sandbox_config.get("backend") or os.environ.get("PAL_MINION_SANDBOX_BACKEND") or sandbox_supported_backend()).strip()
     if not backend:
-        if require_path_enforcement:
-            raise RuntimeError("scoped writable Minion workspaces require bubblewrap on Linux")
-        metadata["sandbox"] = {"enabled": True, "backend": "unavailable", "reason": "no supported minion sandbox backend found"}
-        return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
+        raise RuntimeError("Minion execution requires bubblewrap on Linux")
     if backend != "bwrap":
-        if require_path_enforcement:
-            raise RuntimeError("scoped writable Minion workspaces fail closed without the bubblewrap adapter")
-        metadata["sandbox"] = {"enabled": True, "backend": "unavailable", "reason": f"unsupported minion sandbox backend: {backend}"}
-        return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
+        raise RuntimeError(f"Minion execution requires the bubblewrap adapter; unsupported backend: {backend}")
     workspace_path = _workspace_path_from_pack(pack)
     scratch_dir = minion_sandbox_scratch_dir(runtime_root, run_id)
-    deny_dir = Path(runtime_root) / "data" / "minion" / "sandbox" / "deny-bin"
     sandbox_metadata = MinionSandboxSpec(
         enabled=True,
         backend=backend,
@@ -129,13 +119,14 @@ def with_minion_sandbox_metadata(runtime_root: Path, pack: MinionInvocationPack,
         run_id=run_id,
         workspace_path=workspace_path,
         scratch_dir=scratch_dir,
-        deny_dir=deny_dir,
         blacklist_commands=tuple(
             str(item).strip()
-            for item in list(sandbox_config.get("blacklist_commands") or MINION_SANDBOX_BLACKLIST_COMMANDS)
+            for item in list(
+                sandbox_config.get("blacklist_commands")
+                or MINION_SANDBOX_BLACKLIST_COMMANDS
+            )
             if str(item).strip()
         ),
-        git_metadata_bind_paths=_git_worktree_metadata_bind_paths(workspace_path),
     ).to_metadata()
     existing_reference_binds = [
         dict(item or {})
@@ -231,12 +222,6 @@ def _safe_reference_component(value: str) -> str:
     return ("".join(safe).strip("_-") or "reference")[:80]
 
 
-def minion_sandbox_is_enabled(pack: MinionInvocationPack | dict[str, Any] | None) -> bool:
-    metadata = dict(pack.metadata or {}) if isinstance(pack, MinionInvocationPack) else dict((pack or {}).get("metadata") or {})
-    sandbox = dict(metadata.get("sandbox") or {})
-    return bool(sandbox.get("enabled"))
-
-
 def minion_sandbox_scratch_dir(runtime_root: Path, run_id: str) -> Path:
     safe_run_id = _safe_component(run_id or "run")
     temp_root = _preferred_sandbox_scratch_root(runtime_root)
@@ -255,10 +240,7 @@ def build_sandboxed_runner_invocation(
     metadata = dict(pack.metadata or {})
     sandbox = dict(metadata.get("sandbox") or {})
     if not bool(sandbox.get("enabled")):
-        final_env = dict(env or python_subprocess_env())
-        _apply_workspace_execution_env(final_env, pack)
-        final_env["PAL_MINION_LLM_BROKER"] = "0"
-        return argv, final_env
+        raise RuntimeError("Minion runner invocation is missing its required OS sandbox")
     backend = str(sandbox.get("backend") or "").strip()
     if backend == "bwrap":
         final_env = scrub_minion_sandbox_env(
@@ -347,6 +329,7 @@ def scrub_minion_sandbox_env(
     result["PAL_MINION_SANDBOXED"] = "1"
     result["PAL_MINION_LLM_BROKER"] = "1"
     result["PAL_DATABASE_READ_ONLY"] = "1"
+    result[PAL_MINION_RUNTIME_ROOT_ENV] = str(Path(runtime_root).expanduser().resolve())
     if assignment_token:
         result[ROLE_GATEWAY_TOKEN_ENV] = assignment_token
     result["HOME"] = str(scratch / "home")
@@ -411,19 +394,33 @@ def ensure_sandbox_files(
     runtime_root: Path,
     *,
     run_id: str,
-    blacklist_commands: tuple[str, ...],
+    blacklist_commands: tuple[str, ...] = MINION_SANDBOX_BLACKLIST_COMMANDS,
     scratch_dir: str | Path | None = None,
 ) -> tuple[Path, Path]:
     sandbox_root = Path(runtime_root) / "data" / "minion" / "sandbox"
     scratch = _coerce_scratch_dir(runtime_root, run_id, scratch_dir)
     deny_dir = sandbox_root / "deny-bin"
-    for path in (scratch / "tmp", scratch / "home", scratch / "cache", scratch / "pycache", deny_dir):
+    for path in (
+        scratch / "tmp",
+        scratch / "home",
+        scratch / "cache",
+        scratch / "pycache",
+        deny_dir,
+    ):
         path.mkdir(parents=True, exist_ok=True)
     _prune_sandbox_run_dirs(scratch.parent, keep_run_id=_safe_component(run_id or "run"))
     for command in blacklist_commands:
+        if command == "git":
+            continue
         target = deny_dir / command
         target.write_text(_deny_wrapper_text(command), encoding="utf-8")
         target.chmod(0o755)
+    git_wrapper = deny_dir / "git"
+    git_wrapper.write_text(_git_wrapper_text(), encoding="utf-8")
+    git_wrapper.chmod(0o755)
+    git_internal_wrapper = deny_dir / "git-internal"
+    git_internal_wrapper.write_text(_git_internal_wrapper_text(), encoding="utf-8")
+    git_internal_wrapper.chmod(0o755)
     return scratch, deny_dir
 
 
@@ -465,7 +462,13 @@ def _build_bwrap_invocation(
     if not bwrap:
         raise RuntimeError("bubblewrap is required for Linux minion sandboxing")
     run_id = str(sandbox.get("run_id") or (pack.metadata or {}).get("run_id") or "run")
-    blacklist = tuple(str(item).strip() for item in list(sandbox.get("blacklist_commands") or MINION_SANDBOX_BLACKLIST_COMMANDS) if str(item).strip())
+    blacklist = tuple(
+        str(item).strip()
+        for item in list(
+            sandbox.get("blacklist_commands") or MINION_SANDBOX_BLACKLIST_COMMANDS
+        )
+        if str(item).strip()
+    )
     scratch, deny_dir = ensure_sandbox_files(
         runtime_root,
         run_id=run_id,
@@ -511,8 +514,6 @@ def _build_bwrap_invocation(
     read_only_workspace = str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo"
     write_scopes = [dict(item or {}) for item in list(pack.workspace.get("write_path_scopes") or [])]
     scoped_writable_workspace = bool(write_scopes)
-    for bind_path in _sandbox_git_metadata_bind_paths(sandbox):
-        _append_bind_path(args, bind_path, read_only=True)
     if workspace_path and workspace_path.exists():
         _append_bind_path(
             args,
@@ -547,12 +548,21 @@ def _build_bwrap_invocation(
         _, reference_binds = _project_sandbox_references(dict(pack.workspace or {}))
     _append_reference_projection_binds(args, reference_binds)
     for command in blacklist:
+        if command == "git":
+            continue
         wrapper = deny_dir / command
         if not wrapper.exists():
             continue
         for target in _command_targets(command):
             if target.exists():
                 args.extend(["--ro-bind", str(wrapper), str(target)])
+    git_wrapper = deny_dir / "git"
+    for target in _git_entrypoint_targets():
+        if target.exists():
+            args.extend(["--ro-bind", str(git_wrapper), str(target)])
+    git_internal_wrapper = deny_dir / "git-internal"
+    for target in _git_internal_targets():
+        args.extend(["--ro-bind", str(git_internal_wrapper), str(target)])
     args.extend(["--chdir", _sandbox_cwd(pack), "--"])
     args.extend(argv)
     return args
@@ -694,157 +704,16 @@ def _append_scoped_workspace_binds(
         target = (root / relative).resolve()
         if not target.is_relative_to(root):
             raise RuntimeError(f"OS write scope escapes its worktree: {relative}")
-        if kind == "file" and not target.is_file():
-            raise RuntimeError(f"OS writable file does not exist in the accepted skeleton: {relative}")
-        if kind == "directory" and not target.is_dir():
-            raise RuntimeError(f"OS writable directory does not exist in the accepted skeleton: {relative}")
+        if kind == "file":
+            if target.exists() and not target.is_file():
+                raise RuntimeError(f"OS writable file scope is not a file: {relative}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.touch(exist_ok=True)
+        if kind == "directory":
+            if target.exists() and not target.is_dir():
+                raise RuntimeError(f"OS writable directory scope is not a directory: {relative}")
+            target.mkdir(parents=True, exist_ok=True)
         _append_bind_path(args, target, read_only=False)
-
-
-def _sandbox_git_metadata_bind_paths(sandbox: dict[str, Any]) -> tuple[Path, ...]:
-    paths: list[Path] = []
-    for raw in list(sandbox.get("git_metadata_bind_paths") or []):
-        value = str(raw or "").strip()
-        if not value:
-            continue
-        path = Path(value).expanduser()
-        if path.exists():
-            paths.append(path.resolve())
-    return _dedupe_bind_roots(paths)
-
-
-def _git_worktree_metadata_bind_paths(workspace_path: Path | None) -> tuple[Path, ...]:
-    if not workspace_path:
-        return ()
-    workspace = Path(workspace_path).expanduser()
-    git_marker = workspace / ".git"
-    if git_marker.is_dir():
-        try:
-            git_dir = git_marker.resolve()
-        except OSError:
-            return ()
-    elif git_marker.is_file():
-        git_dir = _git_dir_from_pointer(workspace, git_marker)
-        if git_dir is None:
-            return ()
-    else:
-        return ()
-
-    common_dir = _git_common_dir_from_worktree_admin(git_dir)
-    object_roots: list[Path] = []
-    for metadata_dir in (git_dir, common_dir):
-        if metadata_dir is None:
-            continue
-        object_roots.extend(_git_alternate_object_roots(metadata_dir / "objects"))
-
-    candidates = [
-        path
-        for path in (common_dir, git_dir, *object_roots)
-        if path is not None and path.exists() and not _path_is_relative_to(path, workspace)
-    ]
-    return _dedupe_bind_roots(candidates)
-
-
-def _git_dir_from_pointer(workspace: Path, git_file: Path) -> Path | None:
-    try:
-        text = git_file.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        return None
-    prefix = "gitdir:"
-    if not text.lower().startswith(prefix):
-        return None
-    git_dir_text = text.split(":", 1)[1].strip()
-    if not git_dir_text:
-        return None
-    git_dir = Path(git_dir_text).expanduser()
-    if not git_dir.is_absolute():
-        git_dir = workspace / git_dir
-    try:
-        git_dir = git_dir.resolve()
-    except OSError:
-        return None
-    if not git_dir.exists():
-        return None
-    return git_dir
-
-
-def _git_alternate_object_roots(objects_dir: Path) -> tuple[Path, ...]:
-    pending = [objects_dir]
-    seen: set[Path] = set()
-    alternates: list[Path] = []
-    while pending:
-        current = pending.pop()
-        try:
-            current = current.resolve()
-        except OSError:
-            continue
-        if current in seen:
-            continue
-        seen.add(current)
-        alternates_file = current / "info" / "alternates"
-        if not alternates_file.is_file():
-            continue
-        try:
-            lines = alternates_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        for raw_line in lines:
-            value = raw_line.strip()
-            if not value or value.startswith("#"):
-                continue
-            alternate = Path(value).expanduser()
-            if not alternate.is_absolute():
-                alternate = current / alternate
-            try:
-                alternate = alternate.resolve()
-            except OSError:
-                continue
-            if not alternate.is_dir() or alternate in seen:
-                continue
-            alternates.append(alternate)
-            pending.append(alternate)
-    return tuple(alternates)
-
-
-def _git_common_dir_from_worktree_admin(git_dir: Path) -> Path | None:
-    common_file = git_dir / "commondir"
-    if not common_file.is_file():
-        return None
-    try:
-        common_text = common_file.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        return None
-    if not common_text:
-        return None
-    common_dir = Path(common_text).expanduser()
-    if not common_dir.is_absolute():
-        common_dir = git_dir / common_dir
-    try:
-        return common_dir.resolve()
-    except OSError:
-        return None
-
-
-def _dedupe_bind_roots(paths: list[Path]) -> tuple[Path, ...]:
-    roots: list[Path] = []
-    for raw_path in paths:
-        try:
-            path = raw_path.resolve()
-        except OSError:
-            continue
-        if any(_path_is_relative_to(path, existing) for existing in roots):
-            continue
-        roots = [existing for existing in roots if not _path_is_relative_to(existing, path)]
-        roots.append(path)
-    return tuple(roots)
-
-
-def _path_is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 def _append_dir_scaffold(args: list[str], path: Path) -> None:
@@ -858,7 +727,32 @@ def _append_dir_scaffold(args: list[str], path: Path) -> None:
 
 
 def _command_targets(command: str) -> tuple[Path, ...]:
-    return tuple(Path(prefix) / command for prefix in ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin"))
+    return tuple(
+        Path(prefix) / command
+        for prefix in ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin")
+    )
+
+
+def _git_entrypoint_targets() -> tuple[Path, ...]:
+    candidates = [*_command_targets("git")]
+    for root in (Path("/usr/lib/git-core"), Path("/usr/libexec/git-core")):
+        candidate = root / "git"
+        if candidate.exists():
+            candidates.append(candidate)
+    return tuple(dict.fromkeys(candidates))
+
+
+def _git_internal_targets() -> tuple[Path, ...]:
+    targets: list[Path] = []
+    for root in (Path("/usr/lib/git-core"), Path("/usr/libexec/git-core")):
+        if not root.is_dir():
+            continue
+        targets.extend(
+            path
+            for path in root.glob("git-*")
+            if path.is_file() and os.access(path, os.X_OK)
+        )
+    return tuple(dict.fromkeys(targets))
 
 
 def _sandbox_cwd(pack: MinionInvocationPack) -> str:
@@ -920,18 +814,34 @@ def _falsey(value: Any) -> bool:
 
 def _deny_wrapper_text(command: str) -> str:
     capability_hint = (
-        "Use Pal resident capabilities when available: search for repository text search; "
+        "Use the dedicated tools available for your task: search for repository text search; "
         "read_file for reading repo text files; edit_file for precise repo text edits; "
         "write_file for creating or overwriting complete repo text files; "
-        "delete_path for deleting repo paths; git for Git inspection."
+        "delete_path for deleting repo paths."
     )
     shell_hint = (
-        "Keep run_shell for tests, builds, scripts, process probes, package commands, and process inspection."
+        "Keep run_shell for tests, builds, scripts, process probes, package commands, process inspection, and read-only Git inspection."
     )
     return (
         "#!/bin/sh\n"
-        f"echo \"pal minion sandbox blocked command '{command}'. This command is outside the sandboxed minion authority.\" >&2\n"
+        f"echo \"blocked command '{command}'. Do not run it through shell; use its dedicated tool instead.\" >&2\n"
         f"echo \"{capability_hint}\" >&2\n"
         f"echo \"{shell_hint}\" >&2\n"
+        "exit 126\n"
+    )
+
+
+def _git_wrapper_text() -> str:
+    shim = shlex.quote(str(Path(__file__).with_name("git_shim.py")))
+    return (
+        "#!/bin/sh\n"
+        f"exec /usr/bin/python3 {shim} \"$@\"\n"
+    )
+
+
+def _git_internal_wrapper_text() -> str:
+    return (
+        "#!/bin/sh\n"
+        "echo \"blocked internal Git entry point. Run a classified read-only git subcommand through run_shell.\" >&2\n"
         "exit 126\n"
     )

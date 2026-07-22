@@ -158,21 +158,19 @@ Concurrency is intentionally global at the minion scheduler layer. Per-endpoint 
 
 ## Runner Sandbox
 
-Minion runners may run inside a task sandbox. Sandbox setup is part of manager spawn preparation and is recorded in `TaskContextPack.metadata.sandbox`.
+Minion runners always run inside a task sandbox. Sandbox setup is part of manager spawn preparation and is recorded in `TaskContextPack.metadata.sandbox`.
 
 Current behavior:
 
-- Linux uses `bubblewrap` (`bwrap`) when available.
-- Unsupported hosts or unwired backends record `backend="unavailable"` with a reason instead of pretending isolation exists.
-- Operators can disable sandboxing with `metadata.sandbox.enabled=false` or `PAL_MINION_SANDBOX=0`.
+- Linux requires `bubblewrap` (`bwrap`). Missing, disabled, or unsupported sandbox configuration fails the invocation closed before a runner process starts.
 - Network remains open so research-capable minions can use web tools and package managers when the task permits.
 - LLM credentials are not passed into the sandbox. Secret-like environment variables are scrubbed, and LLM calls go through the host minion LLM broker (`PAL_MINION_LLM_BROKER=1`).
 - The sandbox gives each run private `HOME`, `TMPDIR`, cache, and pycache paths under `/tmp/pal/minion/sandbox/runs/{run_id}` by default, falling back to `runtime_root/data/minion/sandbox/runs/{run_id}` when the temp scratch root is unavailable or below the free-space threshold.
 - Pal source, Python dependency paths, config, plugin data, skills, and selected runtime data are mounted read-only unless the runner needs task-owned state.
-- The assigned repo/workspace is mounted writable only for coder-style workspaces that own that path.
-- A deny-bin projection replaces high-risk host commands such as `sudo`, `systemctl`, `docker`, `ssh`, and namespace/mount tools with wrappers that tell the runner to use resident Pal tools.
+- The assigned repo/workspace is mounted read-only by default. Coder product scopes and the Module Verifier's Manager-derived repository corpus are rebound writable only for their owning role; verifier overlays, Git metadata, and immutable inputs remain read-only.
+- File and search tools accept the same sandbox-visible paths as shell commands. There is no second `root`/`reference_name` namespace and no command-name deny-wrapper layer.
 
-The sandbox is a runtime boundary, not a replacement for profile policy. The runner still receives a scoped capability surface, minion deny rules still apply, and file/git tools still enforce workspace-relative behavior. The main goal is to reduce host mutation risk and tool-routing friction while keeping minions useful.
+The sandbox is the filesystem/process boundary, while profile capability admission and submit-time changed-path validation remain workflow policy. Artifact identity, candidate ownership, review findings, and state-machine transitions are still checked by their owning handlers; generic file tools do not duplicate those policies.
 
 Non-coder profiles get an isolated folder workspace:
 

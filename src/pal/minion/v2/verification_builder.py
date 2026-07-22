@@ -226,7 +226,11 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_run_lsp_check": {
         "alias": "verification_run_lsp_check",
-        "description": "Run and durably register LSP diagnostics for one source file when a matching server is available.",
+        "description": (
+            "Run and durably register LSP diagnostics for one source file using the Manager-prepared context. "
+            "Use this instead of invoking a language-server executable or creating compile_commands.json/compile_flags.txt through shell. "
+            "If the prepared operation is unavailable, record the LSP obligation UNKNOWN once with verification_check_unavailable; do not repair the LSP environment yourself."
+        ),
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput,
     },
     "op_minion_verification_check_unavailable": {
@@ -436,30 +440,30 @@ def compile_verification_invocation_tool_contract(
         ensure_ascii=False,
         sort_keys=True,
     )
-    overrides: dict[str, str] = {}
+    overrides: dict[str, dict[str, str]] = {}
     for capability in (*_RUN_TO_KIND_TAG, "op_minion_verification_run_lsp_check", "op_minion_verification_check_unavailable"):
-        overrides[capability] = (
+        overrides[capability] = {"use_when": (
             "Record one semantic verification case. Read the immutable task sources directly; do not copy them into structured fields. "
             "Reusing a case name updates that case. The description may cite a source filename in any language. Set probe_path whenever the command "
             "consumes a verifier scratch file so exact evidence reuse is invalidated only by that file. "
             f"Bound verification context: {boundary_text}."
-        )
-    overrides["op_minion_verification_check_unavailable"] = (
+        )}
+    overrides["op_minion_verification_check_unavailable"] = {"use_when": (
         "Record UNKNOWN only for an allowed obligation that is genuinely required but unavailable in this environment. "
         "Do not create an UNKNOWN case for an absent or non-applicable obligation. In particular, an empty historical "
         "RepairBill checklist means there is no historical-regression obligation. Allowed obligations: "
         + json.dumps(policy["allowed_obligations"], ensure_ascii=False, sort_keys=True)
         + f". Bound verification context: {boundary_text}."
-    )
+    )}
     if historical_regressions:
-        overrides["op_minion_verification_run_historical_regression"] = (
+        overrides["op_minion_verification_run_historical_regression"] = {"use_when": (
             "Replay one Manager-bound historical RepairBill case before new adversarial or diff-risk exploration. "
             "Use an exact case name from the checklist and a command that executes its preserved reproducer or promoted project regression. "
             "Every listed case must be recorded before verification_submit; all must PASS before new risk exploration or acceptance. "
             "A repeated FAIL may be submitted immediately with a structured finding. Required historical regressions: "
             + json.dumps(historical_regressions, ensure_ascii=False, sort_keys=True)
-        )
-    overrides[ADD_FINDING_CAPABILITY] = (
+        )}
+    overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
         "Record or replace one independently actionable, evidence-backed finding. Use a stable snake_case finding_key, "
         "p0/p1/p2 priority, a self-contained summary, and exact task_source or workspace locations when available. "
         "Complete the breadth-first audit first and batch independent add_finding calls in one tool round when possible. "
@@ -467,8 +471,8 @@ def compile_verification_invocation_tool_contract(
         "frozen boundary, architecture_defect for ownership/topology, requirements_defect for conflicting task sources, "
         "and integration_defect for cross-module product behavior. Bound semantic modules: "
         f"{json.dumps(all_targets, ensure_ascii=False)}."
-    )
-    contract["description_overrides"] = overrides
+    )}
+    contract["guidance_overrides"] = overrides
     contract["fingerprint"] = hashlib.sha256(
         json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()

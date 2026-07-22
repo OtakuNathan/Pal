@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from pal.minion.profiles import resolve_pinned_minion_pack
 from pal.minion.ipc import python_subprocess_env
 from pal.minion.sandbox import build_sandboxed_runner_invocation, with_minion_sandbox_metadata
+from pal.minion.tool_guidance import merge_tool_guidance_overrides
 from pal.minion.turns import sanitize_runner_session_pack
 from pal.minion.v2.architecture import (
     ArchitectureFindingKind,
@@ -40,6 +41,7 @@ from pal.minion.v2.adapters import (
 from pal.minion.lsp_prewarm import prewarm_workspace_lsp
 from pal.lsp.ipc import LspManagerClient
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.minion.v2.architecture_yaml import prepare_architecture_draft_file
 from pal.minion.v2.contracts import (
     ActionEnvelope,
     AggregateSnapshot,
@@ -84,12 +86,14 @@ from pal.minion.v2.skeleton import (
     ARCHITECTURE_REPAIR_BASELINE_ARTIFACT,
     ARCHITECTURE_SKELETON_ARTIFACT,
     ArchitectureWorkspace,
+    compiled_module_write_scopes,
     SemanticReferenceError,
     SkeletonReviewFinding,
     SkeletonReviewResult,
     architecture_revision_path_states,
     architecture_revision_scope,
     compile_skeleton_markdown,
+    module_verification_corpus_path,
     review_architecture_skeleton,
 )
 from pal.minion.v2.task_sources import TASK_SOURCE_BUNDLE_ARTIFACT, validate_task_source_bundle
@@ -898,6 +902,60 @@ class SemanticOrchestrator:
         if event is not None:
             event.set()
 
+    def _retry_assignment_for_effect(
+        self,
+        effect: Mapping[str, Any],
+        *,
+        snapshot: AggregateSnapshot,
+        role: str,
+        mode: str,
+        submission_kind: str,
+    ) -> dict[str, Any] | None:
+        """Return the durable assignment owned by this logical effect retry.
+
+        A process attempt may fail after many completed model/tool rounds.  The
+        supervisor must claim another attempt on the same assignment, prompt
+        pack, and cognitive session.  Recompiling attempt-local workspace/LSP
+        projections into a new assignment changes its input fingerprint and
+        makes the model see a fresh job.
+        """
+
+        effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
+        assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
+        if not assignment_id:
+            return None
+        assignment = self.repository.read_role_assignment(assignment_id)
+        if assignment is None:
+            return None
+        expected = (
+            snapshot.workflow_id,
+            snapshot.aggregate_type.value,
+            snapshot.aggregate_id,
+            str(role),
+            str(mode),
+            str(submission_kind),
+        )
+        actual = (
+            str(assignment.get("workflow_id") or ""),
+            str(assignment.get("aggregate_type") or ""),
+            str(assignment.get("aggregate_id") or ""),
+            str(assignment.get("role") or ""),
+            str(assignment.get("mode") or ""),
+            str(assignment.get("submission_kind") or ""),
+        )
+        if actual != expected:
+            raise SubmissionInvariantError(
+                "logical role effect retry resolved to a different durable assignment"
+            )
+        if str(assignment.get("state") or "") not in {
+            RoleAssignmentState.QUEUED.value,
+            RoleAssignmentState.RETRY_QUEUED.value,
+            RoleAssignmentState.RESULT_RECORDED.value,
+            RoleAssignmentState.SETTLED.value,
+        }:
+            return None
+        return dict(assignment)
+
     def _role_assignment_disposition(
         self,
         effect: Mapping[str, Any],
@@ -1387,6 +1445,9 @@ class SemanticOrchestrator:
             return {
                 "verifier_test_delta_ref": test_delta_value,
                 "verifier_test_paths": list(node.payload.get("verifier_test_paths") or []),
+                "manager_seeded_corpus_hashes": dict(
+                    node.payload.get("manager_seeded_corpus_hashes") or {}
+                ),
             }
         test_delta_ref = ArtifactRef.from_mapping(test_delta_value)
         test_delta = dict(self.service.artifacts.read_json(test_delta_ref))
@@ -1399,16 +1460,14 @@ class SemanticOrchestrator:
             )
             if str(item).strip()
         ]
-        test_scopes = [
-            dict(item or {})
-            for item in list(
-                dict(node.payload.get("path_policy") or {}).get("test_scopes") or []
-            )
-        ]
+        corpus_scope = dict(
+            dict(node.payload.get("path_policy") or {}).get("verification_corpus")
+            or {}
+        )
         external_paths = [
             path
             for path in declared_paths
-            if not any(_semantic_path_scope_matches(path, scope) for scope in test_scopes)
+            if not _semantic_path_scope_matches(path, corpus_scope)
         ]
         if external_paths:
             return {
@@ -1486,7 +1545,7 @@ class SemanticOrchestrator:
         outside = [
             path
             for path in changed_paths
-            if not any(_semantic_path_scope_matches(path, scope) for scope in test_scopes)
+            if not _semantic_path_scope_matches(path, corpus_scope)
         ]
         if outside:
             subprocess.run(
@@ -1496,16 +1555,27 @@ class SemanticOrchestrator:
                 check=False,
             )
             raise SubmissionInvariantError(
-                "verifier Repair Packet changed paths outside test scopes: "
+                "verifier Repair Packet changed paths outside the module corpus: "
                 + ", ".join(outside)
             )
         if not changed_paths:
             raise SubmissionInvariantError(
                 "semantic Repair Packet installed no verifier regression tests"
             )
+        candidate_baseline = str(node.payload.get("base_sha") or "")
+        corpus_paths = [
+            path
+            for path in git_changed_paths(workspace, candidate_baseline)
+            if _semantic_path_scope_matches(path, corpus_scope)
+        ]
+        manager_seeded_corpus_hashes = {
+            path: _workspace_path_hash_or_deleted(workspace, path)
+            for path in corpus_paths
+        }
         return {
             "verifier_test_delta_ref": test_delta_ref.to_dict(),
             "verifier_test_paths": changed_paths,
+            "manager_seeded_corpus_hashes": manager_seeded_corpus_hashes,
         }
 
     def _promote_verifier_tests(
@@ -1903,7 +1973,7 @@ class SemanticOrchestrator:
                 "current_micro_plan": (
                     ["reproduce RepairBill", "apply minimal repair", "run focused regression"]
                     if repair
-                    else ["inspect UnitWorkView", "write focused tests", "implement contract", "run verification"]
+                    else ["inspect UnitWorkView", "implement contract", "run developer checks"]
                 ),
                 "last_safe_point": "worker_started",
             },
@@ -1939,16 +2009,17 @@ class SemanticOrchestrator:
             references["repair_bill"] = semantic_repair_ref
         instruction = (
             "Repair only the defects in the bound RepairBill. Regress the reviewer reproducer first, add the relevant regression "
-            "test to the project, and make the smallest contract-preserving change. Do not revisit unrelated code."
+            "case from the read-only module corpus, and make the smallest contract-preserving product change. Do not edit tests or revisit unrelated code."
             if repair
-            else "Implement the bound UnitWorkView. Start from its approved evidence and contract, write focused tests first, and stay inside owned_area."
+            else "Implement the bound UnitWorkView from its approved evidence and contract. Treat the repository module corpus as read-only verifier-owned regression coverage, and stay inside owned_area."
         )
         if self._is_skeleton_manifest(node.payload.get("architecture_manifest_ref")):
             instruction = (
-                "Repair only the bound RepairBill against the accepted code skeleton; regress its reproducer first and change only owned implementation/test paths."
+                "Repair only the bound RepairBill against the accepted code skeleton; run its preinstalled read-only corpus reproducer first and change only the module's compiled product write paths. Keep file_frozen contracts unchanged and preserve accepted semantics in review_guarded contracts."
                 if repair
-                else "Implement the bound ModuleWorkView from the accepted code skeleton. Keep frozen contracts unchanged, write focused tests first, and change only owned implementation/test paths."
+                else "Implement the bound ModuleWorkView from the accepted code skeleton. Keep file_frozen contracts unchanged, preserve accepted semantics in review_guarded contracts, treat the repository module corpus as read-only, and change only the module's compiled product write paths."
             )
+        path_policy = dict(node.payload.get("path_policy") or {})
         terminal, prompt_ref, terminal_ref = await self._run_profile(
             effect=effect,
             snapshot=node,
@@ -1966,18 +2037,18 @@ class SemanticOrchestrator:
                 "kind": "existing_repo",
                 "repo_path": str(node.payload.get("workspace_path") or ""),
                 "project_name": str(node.payload.get("unit_id") or "unit"),
-                "write_path_scopes": [
-                    *list(dict(node.payload.get("path_policy") or {}).get("implementation_scopes") or []),
-                    *list(dict(node.payload.get("path_policy") or {}).get("test_scopes") or []),
+                "write_path_scopes": list(compiled_module_write_scopes(path_policy)),
+                "manager_seeded_candidate_paths": sorted(
+                    dict(node.payload.get("manager_seeded_corpus_hashes") or {})
+                ),
+                "read_only_overlay_paths": [
+                    *(
+                        list(path_policy.get("contract_paths") or [])
+                        if str(path_policy.get("contract_mode") or "review_guarded")
+                        == "file_frozen"
+                        else []
+                    ),
                 ],
-                "read_only_overlay_paths": (
-                    list(node.payload.get("verifier_test_paths") or [])
-                    if repair
-                    else []
-                ),
-                "require_os_path_enforcement": self._is_skeleton_manifest(
-                    node.payload.get("architecture_manifest_ref")
-                ),
             },
             prepare_workspace=True,
         )
@@ -2179,6 +2250,9 @@ class SemanticOrchestrator:
                     environment_fingerprint=str(node.payload.get("environment_fingerprint") or "default"),
                     parent_candidate_digest=str(node.payload.get("candidate_digest") or ""),
                     repair_bill_ref=dict(node.payload.get("repair_bill_ref") or {}),
+                    manager_seeded_path_hashes=dict(
+                        node.payload.get("manager_seeded_corpus_hashes") or {}
+                    ),
                 )
             elif adapter == ARTIFACT_BUNDLE_ADAPTER:
                 try:
@@ -2383,9 +2457,9 @@ class SemanticOrchestrator:
                 RoleMode.SCENARIO if scenario_mode else RoleMode.MODULE,
             ),
             instruction=(
-                "Generate and run adversarial verification for the bound real usage scenario. Read every immutable task-source file directly, preserve its exact qualifications and examples, and prove only the obligations exercised by this exact module combination, entrypoint, and environment. Write real tests only in any bound scenario test scope, then submit one semantic outcome."
+                "Generate and run adversarial verification for the bound real usage scenario. Read every immutable task-source file directly, preserve its exact qualifications and examples, and prove only the obligations exercised by this exact module combination, entrypoint, and environment. Write executable probes only in the bound scenario review scratch, then submit one semantic outcome."
                 if scenario_mode
-                else "Generate and run adversarial verification for the bound candidate. Read the Manager-bound Candidate diff and any Contract/Repair diff before judging the code. Read every immutable task-source file directly without widening this module's scope. For review_guarded contracts, compare the Accepted Skeleton shape with the Candidate and reject semantic contract drift. Run historical verifier regressions first, then add or strengthen adversarial tests in the bound test scopes and submit one semantic outcome."
+                else "Generate and run adversarial verification for the bound candidate. Read the Manager-bound Candidate diff and any Contract/Repair diff before judging the code. Treat the module source contracts and comments as primary truth, then use the immutable task sources for intent and scope. For review_guarded contracts, compare the Accepted Skeleton shape with the Candidate and reject semantic contract drift. Inspect and rerun the existing repository corpus first; add or strengthen only missing adversarial coverage under the bound tests/<module_name>/ corpus, then submit one semantic outcome."
             ),
             reference_refs=verifier_references,
             workspace_override={
@@ -2397,11 +2471,17 @@ class SemanticOrchestrator:
                 "verification_scratch_only": (
                     scenario_mode or adapter != SOFTWARE_GIT_ADAPTER
                 ),
-                "write_path_scopes": list(
-                    dict(node.payload.get("path_policy") or {}).get("test_scopes") or []
-                ),
-                "require_os_path_enforcement": bool(
-                    dict(node.payload.get("path_policy") or {}).get("test_scopes")
+                "write_path_scopes": (
+                    []
+                    if scenario_mode
+                    else [
+                        dict(
+                            dict(node.payload.get("path_policy") or {}).get(
+                                "verification_corpus"
+                            )
+                            or {}
+                        )
+                    ]
                 ),
             },
             prepare_workspace=True,
@@ -2497,24 +2577,22 @@ class SemanticOrchestrator:
                 "verifier test paths changed after semantic submission: submitted "
                 f"{submitted_changed_paths}, current {changed_paths}"
             )
-        test_scopes = [
-            dict(item or {})
-            for item in list(
-                dict(node.payload.get("path_policy") or {}).get("test_scopes") or []
-            )
-        ]
+        corpus_scope = dict(
+            dict(node.payload.get("path_policy") or {}).get("verification_corpus")
+            or {}
+        )
         outside = [] if scratch_only else [
             path
             for path in changed_paths
-            if not any(_semantic_path_scope_matches(path, scope) for scope in test_scopes)
+            if not _semantic_path_scope_matches(path, corpus_scope)
         ]
         if outside:
             errors.append(
-                "verifier changed paths outside the bound test scopes: "
+                "verifier changed paths outside the bound module corpus: "
                 + ", ".join(outside)
             )
         if outcome != "unknown" and not changed_paths:
-            errors.append("verification requires a real test delta in the bound test scopes")
+            errors.append("verification requires a real test delta in the bound module corpus")
         receipts = [
             dict(item)
             for item in list(submission.get("tool_receipts") or [])
@@ -2522,13 +2600,6 @@ class SemanticOrchestrator:
         ]
         if not receipts:
             errors.append("verification requires Manager-recorded shell, Git, or LSP evidence")
-        if any(
-            bool(dict(item.get("structured") or {}).get("read_only_workspace_dirty"))
-            for item in receipts
-        ):
-            errors.append(
-                "a verification command modified the audited workspace after its pre-command snapshot"
-            )
         last_write = max(
             (index for index, item in enumerate(receipts) if item.get("kind") == "test_write"),
             default=-1,
@@ -2563,6 +2634,13 @@ class SemanticOrchestrator:
                 "candidate_ref": candidate_ref.to_dict(),
                 "implementation_candidate_ref": candidate_ref.to_dict(),
                 "candidate_digest": candidate_digest,
+                "candidate_git_base": str(
+                    node.payload.get("scenario_commit_sha")
+                    if scenario_mode
+                    else candidate_digest
+                    if execution_adapter == SOFTWARE_GIT_ADAPTER
+                    else ""
+                ),
                 "submitted_workspace_fingerprint": workspace_content_fingerprint(
                     review_workspace
                 ),
@@ -2805,6 +2883,15 @@ class SemanticOrchestrator:
         findings = structured_findings(submission)
         reason = str(submission.get("reason") or "").strip()
         scratch_only = scenario_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
+        candidate_git_base = str(
+            pending.get("candidate_git_base")
+            or (
+                node.payload.get("scenario_commit_sha")
+                if scenario_mode
+                else candidate_digest
+            )
+            or ""
+        )
         changed_paths = (
             _verification_scratch_paths(review_scratch)
             if scratch_only
@@ -2824,22 +2911,18 @@ class SemanticOrchestrator:
             raise SubmissionInvariantError(
                 "verifier test paths changed between submission and snapshot"
             )
-        test_scopes = [
-            dict(item or {})
-            for item in list(
-                dict(node.payload.get("path_policy") or {}).get("test_scopes") or []
-            )
-        ]
+        corpus_scope = dict(
+            dict(node.payload.get("path_policy") or {}).get("verification_corpus")
+            or {}
+        )
         outside = [] if scratch_only else [
             path
             for path in changed_paths
-            if not any(
-                _semantic_path_scope_matches(path, scope) for scope in test_scopes
-            )
+            if not _semantic_path_scope_matches(path, corpus_scope)
         ]
         if outside:
             raise SubmissionInvariantError(
-                "verifier snapshot contains paths outside the bound test scopes: "
+                "verifier snapshot contains paths outside the bound module corpus: "
                 + ", ".join(outside)
             )
         receipts = [
@@ -2850,7 +2933,8 @@ class SemanticOrchestrator:
         test_workspace_ref = self._publish_verification_workspace(
             review_worktree=review_workspace,
             review_scratch=review_scratch,
-            candidate_digest=candidate_digest,
+            candidate_identity=candidate_digest,
+            git_base_sha=candidate_git_base,
             execution_adapter=execution_adapter,
             include_candidate_patch=not scratch_only,
         )
@@ -3689,7 +3773,8 @@ class SemanticOrchestrator:
         test_workspace_ref = self._publish_verification_workspace(
             review_worktree=review_repo,
             review_scratch=review_scratch,
-            candidate_digest=base_sha,
+            candidate_identity=base_sha,
+            git_base_sha=base_sha,
             execution_adapter=SOFTWARE_GIT_ADAPTER,
         )
         status = _standalone_review_status(plan, results)
@@ -4972,6 +5057,11 @@ class SemanticOrchestrator:
                 instruction=(
                     "Review the candidate code skeleton against the exact same immutable Requirements received by the Architect. "
                     "Inspect the module DAG, complete skeleton diff, declarations and comments, ownership, lifecycle, state, invariants, dependencies, and end-to-end contract. "
+                    "For each implementation module, the Manager derives a verifier-owned tests/<module_name>/ corpus after architecture acceptance; the Architect is forbidden to declare test paths or synthetic test modules, and tests are verification evidence rather than product scenarios. Do not report missing test scopes, test sources, test scenarios, or Architect-owned test registration merely because they are absent from contract_paths or implementation_scopes. A coverage obligation remains reachable through the Verifier even when it has no CLI entrypoint. Reject only a missing product semantic seam or a missing task-mandated product build/delivery asset owned by a real product module. "
+                    "Your completion conditions are: contracts compile and compose; key scenarios complete along the contract graph; every failure path has a legal terminal or recovery state; every binding Requirement maps to a contract and scenario; and no dependency is undeclared. "
+                    "Review semantic contract composition rather than implementation: from each concrete scenario entrypoint, trace declared interface inputs, calls, data/state transitions, errors, cleanup, and outputs to the required observable terminal. API presence, compatible signatures, compilation, or a plausible future implementation are not semantic proof; do not assume unspecified behavior, and do not require private algorithms or function bodies when the declared semantics already close the path. "
+                    "Run only focused compile-only declaration or protocol-consumer probes. Compilation confirms contract/protocol consistency, never product behavior; do not require implementation bodies or a linked product executable. "
+                    "Reject new placeholder implementations, stub function bodies, TODO pseudocode control flow, or product source added merely to make the Architecture Skeleton compile. "
                     "The Manager performs no semantic coverage or contract validation; independently review every hard Requirement and module in the bound scope. "
                     "Record only material defects as findings; do not write positive audit rows. "
                     "For a replan, explicitly audit every item in replan_finding_batch and do not PASS while any item remains unresolved. "
@@ -5650,20 +5740,26 @@ class SemanticOrchestrator:
         profile_group, profile_name = profile.rsplit(".", 1)
         if skeleton_mode and activation.role == OrchestrationRole.ARCHITECT:
             invocation_acceptance = [
-                "Write the contract-level code skeleton in the bound architecture worktree.",
-                "Declare semantic module contract dependencies and real end-to-end scenarios incrementally, then call architecture_submit with no arguments.",
+                "Write only the declaration-level code skeleton in the bound architecture worktree; never compile, build, test, link, or execute it.",
+                "Finish only when boundaries and responsibilities, unique state/resource owners, contracts, and closed lifecycle/joins are declared and implementation details are explicitly deferred.",
+                "Keep the complete semantic module graph and real end-to-end scenarios in the Manager-preseeded architecture.yaml, then call architecture_submit with no arguments.",
             ]
         elif skeleton_mode and activation == RoleActivation(
             OrchestrationRole.REVIEWER,
             RoleMode.ARCHITECTURE,
         ):
             invocation_acceptance = [
+                "Before reading a bound reference, investigate what its supplied path currently contains and choose a matching tool; never pass an unclassified path to read_file or assume it is a file. Once an exact file is known, read it directly without repeating discovery.",
                 "Review the exact bound task sources, skeleton diff, code contracts, semantic dependencies, and scenarios.",
+                "Treat the Manager-derived tests/<module_name>/ corpus as verifier-owned verification infrastructure: it is intentionally absent from Architect-declared paths and scenarios, so its absence is not a defect.",
+                "Compile only focused declaration/protocol consumers to confirm contracts compose; compilation is not product behavior proof and must not require implementation bodies.",
+                "For every Requirement and observable scenario claim, trace the declared interface semantics from a concrete entrypoint through data/state/error transitions to a legal terminal; API availability or hypothetical implementation support is insufficient.",
+                "PASS only when key scenarios traverse the contract graph, failure paths terminate legally, every Requirement maps, and no dependency is undeclared.",
                 "Inspect the complete Manager-bound scope, then call architecture_review_pass or submit every material defect once through architecture_review_fail.",
             ]
         elif activation.role == OrchestrationRole.VERIFIER:
             invocation_acceptance = [
-                "Write and run reproducible adversarial tests only in the bound module test scopes or scenario review scratch.",
+                "For module verification, read and extend only tests/<module_name>/; for scenario verification, write probes only in review scratch. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
                 "Call exactly one semantic verification outcome tool; do not construct a VerificationPlan or evidence JSON.",
             ]
         elif activation.role == OrchestrationRole.IMPLEMENTATION:
@@ -5799,16 +5895,11 @@ class SemanticOrchestrator:
             minion_v2["architecture_review_tool_contract"] = tool_contract
             metadata["minion_v2"] = minion_v2
             resolved_profile = dict(pack_value.get("resolved_profile") or {})
-            description_overrides = dict(
-                resolved_profile.get("capability_description_overrides") or {}
+            guidance_overrides = merge_tool_guidance_overrides(
+                resolved_profile.get("capability_guidance_overrides"),
+                tool_contract.get("guidance_overrides"),
             )
-            description_overrides.update(
-                {
-                    str(key): str(value)
-                    for key, value in dict(tool_contract.get("description_overrides") or {}).items()
-                }
-            )
-            resolved_profile["capability_description_overrides"] = description_overrides
+            resolved_profile["capability_guidance_overrides"] = guidance_overrides
             pack = MinionInvocationPack.from_dict(
                 {
                     **pack_value,
@@ -5828,18 +5919,11 @@ class SemanticOrchestrator:
                 minion_v2["swe_verification_tool_contract"] = tool_contract
                 metadata["minion_v2"] = minion_v2
                 resolved_profile = dict(pack_value.get("resolved_profile") or {})
-                description_overrides = dict(
-                    resolved_profile.get("capability_description_overrides") or {}
+                guidance_overrides = merge_tool_guidance_overrides(
+                    resolved_profile.get("capability_guidance_overrides"),
+                    tool_contract.get("guidance_overrides"),
                 )
-                description_overrides.update(
-                    {
-                        str(key): str(value)
-                        for key, value in dict(
-                            tool_contract.get("description_overrides") or {}
-                        ).items()
-                    }
-                )
-                resolved_profile["capability_description_overrides"] = description_overrides
+                resolved_profile["capability_guidance_overrides"] = guidance_overrides
                 pack = MinionInvocationPack.from_dict(
                     {
                         **pack_value,
@@ -5861,18 +5945,11 @@ class SemanticOrchestrator:
                 minion_v2["verification_tool_contract"] = tool_contract
                 metadata["minion_v2"] = minion_v2
                 resolved_profile = dict(pack_value.get("resolved_profile") or {})
-                description_overrides = dict(
-                    resolved_profile.get("capability_description_overrides") or {}
+                guidance_overrides = merge_tool_guidance_overrides(
+                    resolved_profile.get("capability_guidance_overrides"),
+                    tool_contract.get("guidance_overrides"),
                 )
-                description_overrides.update(
-                    {
-                        str(key): str(value)
-                        for key, value in dict(
-                            tool_contract.get("description_overrides") or {}
-                        ).items()
-                    }
-                )
-                resolved_profile["capability_description_overrides"] = description_overrides
+                resolved_profile["capability_guidance_overrides"] = guidance_overrides
                 allowed_verification_capabilities = {
                     str(item) for item in list(tool_contract.get("allowed_capabilities") or [])
                 }
@@ -5919,6 +5996,8 @@ class SemanticOrchestrator:
             for key in ("artifact_dir", "artifact_stage_dir", "log_dir", "review_scratch_dir"):
                 Path(str(bound_workspace[key])).mkdir(parents=True, exist_ok=True)
             pack = MinionInvocationPack.from_dict({**pack.to_dict(), "workspace": bound_workspace})
+        if skeleton_mode and activation.role == OrchestrationRole.ARCHITECT:
+            pack = _bind_architecture_yaml_draft(pack)
         if activation.role == OrchestrationRole.ARCHITECT and base_manifest_ref is not None and not skeleton_mode:
             seed_contract_builder_draft(
                 pack.workspace,
@@ -5931,14 +6010,25 @@ class SemanticOrchestrator:
             for name, ref in bound_reference_refs.items()
             if ref.artifact_type != "LocalPathReference"
         }
-        reusable_assignment = self._reusable_role_assignment(
-            workflow_id=snapshot.workflow_id,
-            aggregate_type=snapshot.aggregate_type.value,
-            aggregate_id=snapshot.aggregate_id,
+        assignment = self._retry_assignment_for_effect(
+            effect,
+            snapshot=snapshot,
             role=role,
             mode=mode,
             submission_kind=submission_kind,
-            input_refs=durable_input_refs,
+        )
+        reusable_assignment = (
+            None
+            if assignment is not None
+            else self._reusable_role_assignment(
+                workflow_id=snapshot.workflow_id,
+                aggregate_type=snapshot.aggregate_type.value,
+                aggregate_id=snapshot.aggregate_id,
+                role=role,
+                mode=mode,
+                submission_kind=submission_kind,
+                input_refs=durable_input_refs,
+            )
         )
         if reusable_assignment is not None:
             self.repository.cancel_role_assignments(
@@ -5998,35 +6088,45 @@ class SemanticOrchestrator:
             scope_kind=session_scope_kind,
             subject_key=session_subject_key,
         )
-        assignment = self.repository.create_role_assignment(
-            RoleAssignmentRequest(
-                assignment_key=(
-                    f"{str(effect.get('effect_key') or effect.get('effect_id') or '')}:"
-                    f"{role}:{mode}:{input_fingerprint}"
-                ),
-                session_id=invocation_id,
-                workflow_id=snapshot.workflow_id,
-                aggregate_type=snapshot.aggregate_type.value,
-                aggregate_id=snapshot.aggregate_id,
-                role=role,
-                mode=mode,
-                executor_profile_id=profile,
-                family_binding_sha=str(binding_ref.get("sha256") or ""),
-                input_fingerprint=input_fingerprint,
-                required_inputs=(),
-                input_refs=durable_input_refs,
-                execution_spec={
-                    "effect_type": str(effect.get("effect_type") or "run_role"),
-                    "effect_id": str(effect.get("effect_id") or ""),
-                    "effect_key": str(effect.get("effect_key") or ""),
-                    "workflow_id": snapshot.workflow_id,
-                    "aggregate_type": snapshot.aggregate_type.value,
-                    "aggregate_id": snapshot.aggregate_id,
-                    "payload": dict(effect.get("payload") or {}),
-                },
-                submission_kind=submission_kind,
+        if assignment is None:
+            assignment = self.repository.create_role_assignment(
+                RoleAssignmentRequest(
+                    assignment_key=(
+                        f"{str(effect.get('effect_key') or effect.get('effect_id') or '')}:"
+                        f"{role}:{mode}:{input_fingerprint}"
+                    ),
+                    session_id=invocation_id,
+                    workflow_id=snapshot.workflow_id,
+                    aggregate_type=snapshot.aggregate_type.value,
+                    aggregate_id=snapshot.aggregate_id,
+                    role=role,
+                    mode=mode,
+                    executor_profile_id=profile,
+                    family_binding_sha=str(binding_ref.get("sha256") or ""),
+                    input_fingerprint=input_fingerprint,
+                    required_inputs=(),
+                    input_refs=durable_input_refs,
+                    execution_spec={
+                        "effect_type": str(effect.get("effect_type") or "run_role"),
+                        "effect_id": str(effect.get("effect_id") or ""),
+                        "effect_key": str(effect.get("effect_key") or ""),
+                        "workflow_id": snapshot.workflow_id,
+                        "aggregate_type": snapshot.aggregate_type.value,
+                        "aggregate_id": snapshot.aggregate_id,
+                        "payload": dict(effect.get("payload") or {}),
+                    },
+                    submission_kind=submission_kind,
+                )
             )
-        )
+        elif assignment["state"] in {
+            RoleAssignmentState.QUEUED.value,
+            RoleAssignmentState.RETRY_QUEUED.value,
+        }:
+            original_prompt_ref = self._durable_assignment_prompt_ref(assignment)
+            if original_prompt_ref is not None:
+                pack = MinionInvocationPack.from_dict(
+                    dict(self.service.artifacts.read_json(original_prompt_ref))
+                )
         self._signal_assignment_ready(effect, str(assignment["assignment_id"]))
         if assignment["state"] in {
             RoleAssignmentState.CLAIMED.value,
@@ -7011,17 +7111,22 @@ class SemanticOrchestrator:
         *,
         review_worktree: Path,
         review_scratch: Path,
-        candidate_digest: str,
+        candidate_identity: str,
+        git_base_sha: str,
         execution_adapter: str,
         include_candidate_patch: bool = True,
     ) -> ArtifactRef:
         patch_bytes = b""
         if execution_adapter == SOFTWARE_GIT_ADAPTER and include_candidate_patch:
+            if not git_base_sha:
+                raise SubmissionInvariantError(
+                    "Git verification workspace publication requires an explicit Git base SHA"
+                )
             patch_bytes = subprocess.run(
-                ["git", "-C", str(review_worktree), "diff", "--binary", candidate_digest, "--"],
+                ["git", "-C", str(review_worktree), "diff", "--binary", git_base_sha, "--"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=False,
+                check=True,
             ).stdout
         files: list[dict[str, Any]] = []
         total_bytes = 0
@@ -7043,9 +7148,9 @@ class SemanticOrchestrator:
                 ["git", "-C", str(review_worktree), "ls-files", "--others", "--exclude-standard", "-z"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=False,
+                check=True,
             ).stdout.split(b"\0")
-            if execution_adapter == SOFTWARE_GIT_ADAPTER
+            if execution_adapter == SOFTWARE_GIT_ADAPTER and include_candidate_patch
             else []
         )
         for raw_path in (item for item in untracked if item):
@@ -7067,16 +7172,48 @@ class SemanticOrchestrator:
         return self.service.artifacts.put_json(
             {
                 "schema_version": "1",
-                "candidate_digest": candidate_digest,
+                # The semantic identity may be a scenario SHA-256. Only the
+                # separately supplied Git base may be passed to Git commands.
+                "candidate_digest": candidate_identity,
+                "candidate_identity": candidate_identity,
+                "git_base_sha": git_base_sha,
                 "workspace_patch_base64": base64.b64encode(patch_bytes).decode("ascii"),
-                "changed_paths": _verification_workspace_changed_paths(
-                    review_worktree,
-                    candidate_digest,
+                "changed_paths": (
+                    _verification_workspace_changed_paths(
+                        review_worktree,
+                        git_base_sha,
+                    )
+                    if execution_adapter == SOFTWARE_GIT_ADAPTER
+                    and include_candidate_patch
+                    else _verification_scratch_paths(review_scratch)
                 ),
                 "files": files,
             },
             artifact_type="VerificationTestWorkspaceArtifact",
         )
+
+
+def _bind_architecture_yaml_draft(pack: MinionInvocationPack) -> MinionInvocationPack:
+    value = pack.to_dict()
+    workspace = dict(value.get("workspace") or {})
+    path = prepare_architecture_draft_file(workspace)
+    guidance = (
+        f" The complete topology Draft is preseeded at `{path}`. Read that file before changing topology. "
+        "It is control-plane metadata, not product source. Its fixed YAML shape is: "
+        "`schema_version: 1`; `modules` is a map from a stable snake_case name to "
+        "`{module_kind, contract_dependencies, paths: {contract_mode, contract_paths, implementation_scopes, reference_only}}`; "
+        "each implementation scope is `{kind: file|directory, path: relative/path}`; and `scenarios` is a map from a stable "
+        "snake_case name to `{modules, entrypoint, observable_behavior, environment}`. The maps may contain any number of entries. "
+        "Edit this preseeded file with read_file plus edit_file/write_file. Do not recreate unchanged revision entries."
+    )
+    return MinionInvocationPack.from_dict(
+        {
+            **value,
+            "goal": str(value.get("goal") or "") + guidance,
+            "instruction": str(value.get("instruction") or "") + guidance,
+            "workspace": workspace,
+        }
+    )
 
 
 def _skeleton_architect_instruction(
@@ -7087,17 +7224,28 @@ def _skeleton_architect_instruction(
 ) -> str:
     instruction = (
         "Design the requested software architecture in the bound writable worktree. The exact task sources are immutable product truth. "
+        "This invocation is declaration-only: design the whole system at module level, never at function or algorithm implementation level. "
+        "Design modules and their interaction contracts; declare boundaries, responsibilities, directional dependencies, public interfaces, "
+        "lifecycle, ownership, invariants, and state machines only when stateful behavior requires them. Build the overall skeleton and express "
+        "the design, but never implement algorithms, business logic, private helpers, concrete adapters or backends, test bodies, or production control flow. "
+        "Do not create product implementation translation units, stub or placeholder function bodies, TODO pseudocode control flow, or complete build implementations, and do not compile, build, link, test, or execute the skeleton. "
+        "Use the user-specified language. Select external libraries or runtimes only where contract feasibility requires them. Do not design a build system or create a build_system module, build contract, target/link plan, package plan, or test-discovery plan. "
+        "A runtime entrypoint or composition root is an ordinary product module that owns assembly behavior; build files and compiler commands are implementation or verification assets. Unless the task or established repository mandates build tooling, leave the minimum sufficient compile/test method to Coder and Verifier. "
+        "When the task or established repository does mandate a formal build, packaging, or delivery file, declare only that path as an implementation scope of the real entrypoint/composition-root owner; do not create it or design its contents. If multiple existing build conventions make that path materially ambiguous, ask the user instead of choosing a migration. "
+        "Completion requires declared boundaries and responsibilities, exactly one owner for every state and resource, defined interaction contracts, closed lifecycle transitions and composition joins, and explicit deferral of every implementation detail to its owning module. "
         "Write contract-level code skeletons, an acyclic semantic Contract Dependency Graph, and one or more meaningful end-to-end scenarios. "
         "All implementation Coders may start from the accepted protocols; contract dependencies describe semantic consumption, not scheduling barriers. "
         "A scenario names the exact implementation modules, real entrypoint, observable behavior, and environment it verifies, but owns no product source. "
-        "A universal all-module scenario is forbidden unless a real product entrypoint requires that exact combination. "
-        "Do not implement behavior, algorithms, mapping tables, SDK call sequences, or complete tests."
+        "A universal all-module scenario is forbidden unless a real product entrypoint requires that exact combination."
+        " Maintain the complete semantic graph in the Manager-preseeded architecture.yaml named in this invocation. "
+        "The file has fixed schema_version, modules, and scenarios fields; modules and scenarios are dynamic snake_case maps. "
+        "Use ordinary file tools to add, edit, or delete map entries, and call architecture_submit with no arguments only after the file and declaration skeleton agree."
     )
     if has_base_manifest:
         instruction += (
             " This is a revision based on the existing skeleton. Modify only locations named by revision_finding or the explicit edit instruction; "
             "preserve every unrelated declaration, contract, path scope, and dependency. The semantic DAG Draft is already seeded from "
-            "the accepted baseline: do not remove, recreate, or restate unchanged modules. A source-only contract "
+            "the accepted baseline in architecture.yaml: do not remove, recreate, or restate unchanged modules. A source-only contract "
             "repair may submit the unchanged semantic DAG after editing the scoped skeleton files."
         )
     if finding:
@@ -7111,7 +7259,7 @@ def _skeleton_architect_instruction(
         )
     elif has_base_manifest:
         instruction += (
-            " Use the same incremental architecture tools to change only scoped semantic units, then call architecture_submit with no arguments."
+            " Edit only the affected architecture.yaml entries and scoped skeleton files, then call architecture_submit with no arguments."
         )
     if has_revision_scope:
         instruction += (
@@ -7130,6 +7278,22 @@ def _skeleton_architecture_review_view(
         raise SubmissionInvariantError("architecture skeleton is missing its semantic submission")
     review_view = dict(submission)
     review_view["changed_paths"] = list(artifact.get("changed_paths") or [])
+    modules = dict(submission.get("modules") or {})
+    review_view["manager_derived_verification_policy"] = {
+        "architect_declares_test_scopes": False,
+        "tests_are_product_scenarios": False,
+        "corpora": {
+            str(name): {
+                "kind": "directory",
+                "path": module_verification_corpus_path(str(name)),
+                "owner": "verifier",
+                "coder_access": "read_only",
+            }
+            for name, raw_module in modules.items()
+            if str(dict(raw_module or {}).get("module_kind") or "")
+            == "implementation"
+        },
+    }
     return review_view
 
 
@@ -7205,6 +7369,22 @@ def _semantic_path_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
     if kind == "directory":
         return normalized == target or normalized.startswith(target + "/")
     return False
+
+
+def _workspace_path_hash_or_deleted(workspace: Path, relative_path: str) -> str:
+    root = workspace.resolve()
+    target = (root / str(relative_path)).resolve()
+    if not target.is_relative_to(root):
+        raise SubmissionInvariantError(
+            f"verification corpus path escapes the repair worktree: {relative_path}"
+        )
+    if not target.exists():
+        return "deleted"
+    if not target.is_file() or target.is_symlink():
+        raise SubmissionInvariantError(
+            f"verification corpus path is not a regular file: {relative_path}"
+        )
+    return hashlib.sha256(target.read_bytes()).hexdigest()
 
 
 def _named_json_output(terminal: Mapping[str, Any], filename: str) -> dict[str, Any]:
@@ -7344,7 +7524,7 @@ def apply_v2_role_capability_policy(
         skeleton_authoring = bool(
             current.intersection(
                 set(ARCHITECTURE_SKELETON_CAPABILITIES)
-                - {"op_minion_architecture_ask_user"}
+                - {"op_minion_ask_question"}
             )
         )
         allowed_authoring = (
@@ -7361,7 +7541,14 @@ def apply_v2_role_capability_policy(
     else:
         allowed_authoring = {
             OrchestrationRole.VERIFIER: (
-                {*SWE_VERIFICATION_CAPABILITIES, "op_minion_verification_scratch_write"}
+                {
+                    *SWE_VERIFICATION_CAPABILITIES,
+                    *(
+                        {"op_minion_verification_scratch_write"}
+                        if activation.mode == RoleMode.SCENARIO
+                        else set()
+                    ),
+                }
                 if current.intersection(SWE_VERIFICATION_CAPABILITIES)
                 else set(VERIFICATION_BUILDER_CAPABILITIES)
             ),
@@ -7379,7 +7566,7 @@ def apply_v2_role_capability_policy(
         forbidden_writes.update({"op_file_write", "op_file_edit", "op_path_delete"})
     if activation.role == OrchestrationRole.ARCHITECT and current.intersection(
         set(ARCHITECTURE_SKELETON_CAPABILITIES)
-        - {"op_minion_architecture_ask_user"}
+        - {"op_minion_ask_question"}
     ):
         forbidden_writes.difference_update({"op_file_write", "op_file_edit", "op_path_delete"})
     if (

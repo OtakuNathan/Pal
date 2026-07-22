@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from pal.minion.families import MinionFamilyManifest, MinionFamilyProvider, MinionFamilyRegistry
 from pal.minion.catalog_store import load_json_objects, profile_override_root
+from pal.minion.tool_guidance import normalize_tool_guidance_overrides
 from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
@@ -71,7 +72,7 @@ class MinionProfile:
     workspace_environment_policy: dict[str, Any] = field(default_factory=dict)
     completion_policy: dict[str, Any] = field(default_factory=dict)
     capability_policy: dict[str, Any] = field(default_factory=dict)
-    capability_description_overrides: dict[str, str] = field(default_factory=dict)
+    capability_guidance_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
     output_policy: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -99,7 +100,10 @@ class MinionProfile:
             "workspace_environment_policy": dict(self.workspace_environment_policy),
             "completion_policy": dict(self.completion_policy),
             "capability_policy": dict(self.capability_policy),
-            "capability_description_overrides": dict(self.capability_description_overrides),
+            "capability_guidance_overrides": {
+                canonical: dict(patch)
+                for canonical, patch in self.capability_guidance_overrides.items()
+            },
             "output_policy": dict(self.output_policy),
             "metadata": dict(self.metadata),
         }
@@ -144,11 +148,9 @@ class MinionProfile:
             workspace_environment_policy=_dict(payload.get("workspace_environment_policy") or payload.get("workspace_environment")),
             completion_policy=_dict(payload.get("completion_policy")),
             capability_policy=_dict(payload.get("capability_policy")),
-            capability_description_overrides={
-                str(key).strip(): str(value).strip()
-                for key, value in _dict(payload.get("capability_description_overrides")).items()
-                if str(key).strip() and str(value).strip()
-            },
+            capability_guidance_overrides=normalize_tool_guidance_overrides(
+                payload.get("capability_guidance_overrides")
+            ),
             output_policy=_dict(payload.get("output_policy")),
             metadata=metadata,
         )
@@ -375,7 +377,6 @@ CORE_MINION_CAPABILITIES = (
 WORKSPACE_READ_CAPABILITIES = (
     "op_search",
     "op_file_read",
-    "op_git",
     "op_exec_shell",
 )
 
@@ -400,6 +401,10 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
+    "architecture_workspace_read": (
+        "op_search",
+        "op_file_read",
+    ),
     "workspace_write": (
         "op_file_edit",
         "op_file_write",
@@ -426,7 +431,6 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
         "op_file_read",
         "op_file_edit",
         "op_file_write",
-        "op_git",
         "op_exec_shell",
         "op_lsp_hover",
         "op_lsp_definition",
@@ -440,7 +444,6 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
         "op_file_edit",
         "op_file_write",
         "op_path_delete",
-        "op_git",
         "op_exec_shell",
     ),
 }
@@ -448,6 +451,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
 
 DEFAULT_MINION_DENIED_CAPABILITIES = frozenset(
     {
+        "op_git",
         "op_behavior_advise",
         "op_behavior_save",
         "op_channel_send_attachment",

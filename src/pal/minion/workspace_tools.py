@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import fnmatch
 import hashlib
 import mimetypes
 from pathlib import Path
@@ -23,9 +22,8 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
             action = "staged" if artifact.get("staged") else "edited"
             text = f"Artifact {action}: {artifact['relative_path']}"
         else:
-            root, root_info = _workspace_root_with_info(workspace, call.args)
             if call.name == "op_search":
-                payload = _workspace_search(root, call.args, root_info=root_info)
+                payload = _workspace_search(workspace, call.args)
                 text = "\n".join(f"{item['path']}:{item['line_number']}: {item['line']}" for item in payload["matches"])
             else:
                 raise ValueError(f"unknown repo tool: {call.name}")
@@ -53,63 +51,14 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
         )
 
 
-def _workspace_root(workspace: dict[str, Any], args: dict[str, Any] | None = None) -> Path:
-    root, _ = _workspace_root_with_info(workspace, args)
-    return root
-
-
-def _workspace_root_with_info(workspace: dict[str, Any], args: dict[str, Any] | None = None) -> tuple[Path, dict[str, Any]]:
-    args = dict(args or {})
-    reference_name = _requested_reference_name(args)
-    if reference_name:
-        return _reference_root(workspace, reference_name)
+def _project_root(workspace: dict[str, Any]) -> Path:
     repo_path = str((workspace or {}).get("repo_path") or "").strip()
     if not repo_path:
         raise ValueError("current project repo is not available")
     root = Path(repo_path).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise ValueError(f"current project repo is not a directory: {root}")
-    return root, {
-        "root_kind": "project",
-        "root_name": "project",
-        "read_only": False,
-        "truth_source": False,
-    }
-
-
-def _requested_reference_name(args: dict[str, Any]) -> str:
-    reference_name = str(args.get("reference_name") or args.get("reference") or "").strip()
-    if reference_name:
-        return reference_name.removeprefix("reference:").strip()
-    root = str(args.get("root") or "").strip()
-    if not root or root in {"project", "repo", "workspace"}:
-        return ""
-    if root.startswith("reference:"):
-        return root.split(":", 1)[1].strip()
     return root
-
-
-def _reference_root(workspace: dict[str, Any], reference_name: str) -> tuple[Path, dict[str, Any]]:
-    normalized = _normalized_reference_paths(workspace)
-    if not normalized:
-        raise ValueError("workspace.reference_paths is not available")
-    requested = str(reference_name or "").strip()
-    for item in normalized:
-        if requested in {str(item.get("name") or ""), str(item.get("id") or "")}:
-            path = Path(str(item.get("path") or "")).expanduser().resolve()
-            if not path.exists() or not path.is_dir():
-                raise ValueError(f"reference path is not a directory: {path}")
-            info = {
-                **item,
-                "root_kind": "reference",
-                "root_name": str(item.get("name") or requested),
-                "reference_name": str(item.get("name") or requested),
-                "read_only": True,
-                "truth_source": bool(item.get("truth_source", True)),
-            }
-            return path, info
-    available = ", ".join(str(item.get("name") or "") for item in normalized if str(item.get("name") or ""))
-    raise ValueError(f"unknown reference root: {requested}; available references: {available or '(none)'}")
 
 
 def _normalized_reference_paths(workspace: dict[str, Any]) -> list[dict[str, Any]]:
@@ -361,49 +310,6 @@ def _append_unique_artifact(items: list[dict[str, Any]], artifact: dict[str, Any
     items.append(dict(artifact))
 
 
-def _workspace_path(root: Path, raw_path: Any = "") -> Path:
-    relative = str(raw_path or ".").strip() or "."
-    candidate = (root / relative).resolve()
-    if candidate != root and root not in candidate.parents:
-        raise ValueError("path must be relative to the current project repo; absolute paths and clone-source paths are not accepted")
-    return candidate
-
-
-def _workspace_path_allowed_by_reference(path: Path, root: Path, root_info: dict[str, Any]) -> bool:
-    if str(root_info.get("root_kind") or "") != "reference":
-        return True
-    includes = _string_list(root_info.get("include"))
-    if not includes:
-        return True
-    try:
-        relative = str(path.relative_to(root)).replace("\\", "/")
-    except ValueError:
-        return False
-    if path.is_dir():
-        return True
-    return any(fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(path.name, pattern) for pattern in includes)
-
-
-def _workspace_root_payload(root: Path, root_info: dict[str, Any]) -> dict[str, Any]:
-    payload = {
-        "root": str(root),
-        "root_kind": str(root_info.get("root_kind") or "project"),
-        "root_name": str(root_info.get("root_name") or root_info.get("reference_name") or "project"),
-    }
-    if str(root_info.get("root_kind") or "") == "reference":
-        payload.update(
-            {
-                "reference_name": str(root_info.get("reference_name") or root_info.get("root_name") or ""),
-                "read_only": True,
-                "truth_source": bool(root_info.get("truth_source", True)),
-            }
-        )
-        includes = _string_list(root_info.get("include"))
-        if includes:
-            payload["include"] = includes
-    return payload
-
-
 _WORKSPACE_SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv"}
 _WORKSPACE_SKIP_SUFFIXES = {
     ".a",
@@ -438,20 +344,25 @@ def _empty_workspace_tool_text(name: str, payload: dict[str, Any]) -> str:
     return "Repo tool completed with no textual output."
 
 
-def _workspace_search(root: Path, args: dict[str, Any], *, root_info: dict[str, Any] | None = None) -> dict[str, Any]:
-    root_info = dict(root_info or {})
+def _workspace_search(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
     query = str(args.get("query") or "").strip()
     if not query:
         raise ValueError("query is required")
-    base = _workspace_path(root, args.get("path") or ".")
+    project_root = _project_root(workspace)
+    raw_path = str(args.get("path") or "").strip()
+    base = Path(raw_path).expanduser() if raw_path else project_root
+    if not base.is_absolute():
+        base = project_root / base
+    base = base.resolve()
+    if not base.exists():
+        raise ValueError(f"search path does not exist inside the sandbox: {base}")
+    root = base if base.is_dir() else base.parent
     limit = max(1, min(_optional_positive_int(args.get("limit")) or 50, 500))
     matches: list[dict[str, Any]] = []
     query_lower = query.lower()
     paths = [base] if base.is_file() else [path for path in base.rglob("*") if path.is_file()]
     for path in paths:
         if _workspace_should_skip_generated(path, root):
-            continue
-        if not _workspace_path_allowed_by_reference(path, root, root_info):
             continue
         try:
             for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
@@ -465,10 +376,10 @@ def _workspace_search(root: Path, args: dict[str, Any], *, root_info: dict[str, 
                     }
                 )
                 if len(matches) >= limit:
-                    return {**_workspace_root_payload(root, root_info), "query": query, "matches": matches, "count": len(matches), "truncated": True}
+                    return {"path": str(base), "query": query, "matches": matches, "count": len(matches), "truncated": True}
         except OSError:
             continue
-    return {**_workspace_root_payload(root, root_info), "query": query, "matches": matches, "count": len(matches)}
+    return {"path": str(base), "query": query, "matches": matches, "count": len(matches)}
 
 
 def _preview_text(value: Any, *, limit: int = 400) -> str:

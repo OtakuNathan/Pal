@@ -29,35 +29,6 @@ from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_ar
 from pal.shared import RuntimeStatus
 
 
-_NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
-_TARGETED_FINDINGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "modules": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-            "minItems": 1,
-            "uniqueItems": True,
-            "description": "Semantic module names from the bound contract dependency or scenario closure.",
-        },
-    },
-    "required": ["modules"],
-    "additionalProperties": False,
-}
-_UNKNOWN_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "reason": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Unavailable environment or platform evidence and the concrete follow-up verification plan.",
-        }
-    },
-    "required": ["reason"],
-    "additionalProperties": False,
-}
-
-
 SWE_VERIFICATION_CAPABILITIES = (
     ADD_FINDING_CAPABILITY,
     "op_minion_verification_pass",
@@ -74,8 +45,8 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_pass": {
         "alias": "verification_pass",
         "description": (
-            "Submit PASS only after historical verifier regressions pass and you have added or materially strengthened "
-            "adversarial tests for this exact candidate. The Manager validates test-scope changes and recorded tool evidence."
+            "Submit PASS only after the existing module corpus passes and you have added or materially strengthened "
+            "adversarial coverage for this exact candidate. The Manager validates tests/<module_name>/ changes and ordinary shell/LSP evidence."
         ),
         "InputModel": MinionV2SweVerificationOpMinionVerificationPassInput,
     },
@@ -159,24 +130,34 @@ def compile_swe_verification_tool_contract(work_view: Mapping[str, Any]) -> dict
         }
     )
     dependency_targets = sorted(set(dependencies + accepted_modules) - {module_name})
-    descriptions: dict[str, str] = {}
-    descriptions[ADD_FINDING_CAPABILITY] = (
+    verification_corpus = str(
+        dict(work_view.get("verification_corpus") or {}).get("path") or ""
+    ).strip()
+    guidance_overrides: dict[str, dict[str, str]] = {}
+    guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
         "Record or replace one evidence-backed verifier finding. Use module_defect for the current implementation, "
         "dependency_defect for an upstream module, contract_defect for a frozen public contract, "
         "architecture_defect for ownership/topology, requirements_defect for contradictory task sources, and "
         "integration_defect for cross-module product behavior. Finish the breadth-first audit first and batch "
         "independent add_finding calls in one tool round when possible."
-    )
+    )}
     if dependency_targets:
-        descriptions["op_minion_verification_request_dependency_repairs"] = (
+        guidance_overrides["op_minion_verification_request_dependency_repairs"] = {"use_when": (
             "Submit all reproduced upstream defects in one call. Allowed semantic module names: "
             + ", ".join(dependency_targets)
             + "."
-        )
+        )}
+    if verification_corpus:
+        guidance_overrides["op_minion_verification_pass"] = {"use_when": (
+            f"Submit PASS only after reading and running the existing {verification_corpus}/ corpus, "
+            "adding or strengthening missing adversarial coverage there, and running a successful "
+            "ordinary shell or LSP check after the final corpus edit. Takes no arguments."
+        )}
     return {
         "module_name": module_name,
         "dependency_targets": dependency_targets,
-        "description_overrides": descriptions,
+        "verification_corpus": verification_corpus,
+        "guidance_overrides": guidance_overrides,
     }
 
 
@@ -307,13 +288,6 @@ def _submission_errors(
     ]
     if not receipts:
         errors.append("run at least one shell, Git, or LSP verification before submitting")
-    if any(
-        bool(dict(item.get("structured") or {}).get("read_only_workspace_dirty"))
-        for item in receipts
-    ):
-        errors.append(
-            "a verification command modified the audited workspace; restore the intended test delta and rerun verification"
-        )
     if outcome == "pass" and not any(bool(item.get("ok")) for item in receipts):
         errors.append("PASS requires at least one successful recorded verification tool result")
     if outcome not in {"pass", "unknown"} and not findings:
@@ -324,7 +298,7 @@ def _submission_errors(
         errors.append("UNKNOWN requires an environmental reason and follow-up verification plan")
     changed_paths = _changed_paths(workspace)
     if outcome != "unknown" and not changed_paths:
-        errors.append("verification requires a verifier-authored test delta in the bound test scopes")
+        errors.append("verification requires a verifier-authored delta in tests/<module_name>/")
     write_scopes = [
         dict(item or {}) for item in list(workspace.get("write_path_scopes") or [])
     ]
@@ -339,7 +313,7 @@ def _submission_errors(
     ]
     if outside:
         errors.append(
-            "verification changed paths outside the bound test scopes: "
+            "verification changed paths outside the bound module corpus: "
             + ", ".join(outside)
         )
     last_write = max(

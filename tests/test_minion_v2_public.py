@@ -44,10 +44,15 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     apply_v2_revision_scope_capability_policy,
     apply_v2_role_capability_policy,
 )
-from pal.minion.v2.role_protocol import RoleAssignmentRequest
+from pal.minion.v2.role_protocol import RoleAssignmentRequest, RoleAssignmentState
 from pal.minion.v2.skeleton import ArchitectureWorkspace
 from pal.minion.v2 import ActionEnvelope, AggregateType
-from pal.minion.v2.contracts import DeferredEffectError, StaleFencingToken, SubmissionInvariantError
+from pal.minion.v2.contracts import (
+    AggregateSnapshot,
+    DeferredEffectError,
+    StaleFencingToken,
+    SubmissionInvariantError,
+)
 from pal.minion.manager import MinionManager, MinionRunState
 from pal.minion.prompt_adapter import render_minion_task_prompt
 from pal.minion.runner import MinionAgentLoopState, MinionRunner
@@ -1329,6 +1334,61 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "reload at safe point"):
             asyncio.run(runner._raise_if_restart_requested())
 
+    def test_runner_does_not_append_original_assignment_after_triage_retry(self) -> None:
+        restored = {
+            "initial_instruction": "implement the bound module",
+            "tool_protocol_messages": [
+                {"role": "assistant", "content": "implementation is ready"},
+            ],
+        }
+
+        self.assertFalse(
+            MinionRunner._is_new_session_response(restored, "implement the bound module")
+        )
+        self.assertTrue(
+            MinionRunner._is_new_session_response(
+                restored,
+                "The user selected the bounded compatibility option.",
+            )
+        )
+
+    def test_effect_retry_reuses_same_durable_role_assignment(self) -> None:
+        processor = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
+        snapshot = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-router",
+            workflow_id="wf-router",
+            state="PRODUCING",
+            version=3,
+            payload={},
+            created_at="2026-07-22T00:00:00+00:00",
+            updated_at="2026-07-22T00:00:00+00:00",
+        )
+        assignment = {
+            "assignment_id": "asg-router",
+            "workflow_id": "wf-router",
+            "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+            "aggregate_id": "node-router",
+            "role": "implementation",
+            "mode": "produce",
+            "submission_kind": "candidate",
+            "state": RoleAssignmentState.RETRY_QUEUED.value,
+        }
+        processor._assignment_ids_by_effect["effect-router"] = "asg-router"
+        processor.repository.read_role_assignment = lambda assignment_id: (
+            dict(assignment) if assignment_id == "asg-router" else None
+        )
+
+        selected = processor._retry_assignment_for_effect(
+            {"effect_key": "effect-router"},
+            snapshot=snapshot,
+            role="implementation",
+            mode="produce",
+            submission_kind="candidate",
+        )
+
+        self.assertEqual(selected["assignment_id"], "asg-router")
+
     @staticmethod
     def _start_workflow(service: MinionV2WorkflowService, request: dict):
         return service.start_workflow(dict(request))
@@ -1477,6 +1537,30 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
 
         self.assertIn("was rejected and is not accepted", instruction)
+        self.assertIn("declaration-only", instruction)
+        self.assertIn("design the whole system at module level", instruction)
+        self.assertIn("never at function or algorithm implementation level", instruction)
+        self.assertIn("lifecycle, ownership, invariants, and state machines", instruction)
+        self.assertIn("never implement algorithms, business logic, private helpers", instruction)
+        self.assertIn("do not compile, build, link, test, or execute the skeleton", instruction)
+        self.assertIn("Use the user-specified language", instruction)
+        self.assertIn("Do not design a build system or create a build_system module", instruction)
+        self.assertIn("runtime entrypoint or composition root", instruction)
+        self.assertIn("leave the minimum sufficient compile/test method to Coder and Verifier", instruction)
+        self.assertIn("declare only that path as an implementation scope", instruction)
+        self.assertIn("multiple existing build conventions", instruction)
+        self.assertIn("exactly one owner for every state and resource", instruction)
+        self.assertIn("closed lifecycle transitions and composition joins", instruction)
+        self.assertIn("explicit deferral of every implementation detail", instruction)
+        rendered_input = render_minion_task_prompt(
+            MinionInvocationPack(
+                invocation_id="inv-architect-boundary",
+                goal="Design the requested software architecture.",
+                instruction=instruction,
+            )
+        )
+        self.assertIn("## Assignment", rendered_input)
+        self.assertIn("This invocation is declaration-only", rendered_input)
         self.assertIn("Read revision_finding before any other work", instruction)
         self.assertIn("package/__init__.py", instruction)
         self.assertIn("Do not report the earlier submit as completion", instruction)
@@ -1999,6 +2083,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         submission = {
             "modules": {
                 "router": {
+                    "module_kind": "implementation",
                     "depends_on": [],
                     "consumes": [],
                     "paths": {"implementation_scopes": [{"kind": "file", "path": "src/router.cpp"}]},
@@ -2018,6 +2103,21 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(view["modules"], submission["modules"])
         self.assertEqual(view["future_semantic_section"], submission["future_semantic_section"])
         self.assertEqual(view["changed_paths"], ["include/router.h", "src/router.cpp"])
+        self.assertEqual(
+            view["manager_derived_verification_policy"],
+            {
+                "architect_declares_test_scopes": False,
+                "tests_are_product_scenarios": False,
+                "corpora": {
+                    "router": {
+                        "kind": "directory",
+                        "path": "tests/router",
+                        "owner": "verifier",
+                        "coder_access": "read_only",
+                    }
+                },
+            },
+        )
         self.assertNotIn("skeleton_commit_sha", view)
         self.assertNotIn("requirements_ref", view)
 
@@ -2273,6 +2373,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         prompt = render_minion_task_prompt(pack)
         self.assertIn("reference:revision_finding", prompt)
         self.assertIn("ordinary file/search tools", prompt)
+        self.assertNotIn("tree -a", prompt)
+        self.assertNotIn("find ", prompt)
         self.assertNotIn("input_read", prompt)
         self.assertNotIn("/host-only/artifacts/secret.json", prompt)
 
@@ -3267,6 +3369,45 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         encoded = json.dumps(result.structured, sort_keys=True)
         for forbidden in ("workflow_id", "decision_token", "actor_id", "active_channel_id", "manifest_sha", "route"):
             self.assertNotIn(forbidden, encoded)
+
+    def test_public_status_uses_manager_live_projection(self) -> None:
+        requested: list[tuple[str, dict[str, object]]] = []
+
+        def manager_request(method: str, params: dict[str, object] | None) -> dict[str, object]:
+            requested.append((method, dict(params or {})))
+            return {
+                "status": "ok",
+                "workflow_id": "wf-live-question",
+                "waiting_for_user": True,
+                "liveness": "human_wait",
+            }
+
+        provider = MinionV2PublicProvider(
+            runtime_root=self.runtime_root,
+            wake_manager=lambda: None,
+            manager_request=manager_request,
+        )
+        provider.service.resolve_workflow_selector = lambda **_kwargs: "wf-live-question"
+
+        result = provider.workflow_status(
+            CapabilityCall(
+                name="intro_minion_workflow_status",
+                meta={"actor_id": "nathan", "channel_id": "socket:new"},
+                args={"task": "Framepipe", "view": "status"},
+            )
+        )
+
+        self.assertEqual(
+            requested,
+            [
+                (
+                    "v2_workflow_status",
+                    {"workflow_id": "wf-live-question", "view": "status"},
+                )
+            ],
+        )
+        self.assertTrue(result.structured["waiting_for_user"])
+        self.assertEqual(result.structured["liveness"], "human_wait")
 
     def test_new_requirement_routes_to_architecture_revision_without_cursor_state(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
@@ -4457,7 +4598,7 @@ framepipe encode 4869
             run_id="run-architect-question",
             pack=MinionInvocationPack(
                 invocation_id="inv-architect-question",
-                workspace={"minion_v2": {"workflow_id": "wf-architect-question"}},
+                metadata={"minion_v2": {"workflow_id": "wf-architect-question"}},
             ),
             pending_clarification={
                 "clarification_id": "clarification-1",
@@ -4511,6 +4652,44 @@ framepipe encode 4869
                     },
                 }
             ],
+        )
+
+    def test_manager_workflow_status_projects_pending_architect_question(self) -> None:
+        manager = MinionManager(self.runtime_root)
+        manager.v2_service.workflow_status = lambda workflow_id, *, view="status": {
+            "status": "ok",
+            "workflow_id": workflow_id,
+            "active_worker": "inv-architect-question",
+            "active_worker_role": "architect",
+            "next_legal_action": ["control_workflow:pause", "control_workflow:cancel"],
+            "waiting_for_user": False,
+            "liveness": "live_lease",
+        }
+        manager.runs["run-architect-question"] = MinionRunState(
+            minion_id="inv-architect-question",
+            run_id="run-architect-question",
+            pack=MinionInvocationPack(
+                invocation_id="inv-architect-question",
+                metadata={"minion_v2": {"workflow_id": "wf-architect-question"}},
+            ),
+            pending_clarification={"clarification_id": "clarification-1"},
+            status="clarification_pending",
+        )
+
+        status = asyncio.run(
+            manager._call_method(
+                "v2_workflow_status",
+                {"workflow_id": "wf-architect-question"},
+            )
+        )
+
+        self.assertTrue(status["waiting_for_user"])
+        self.assertEqual(status["liveness"], "human_wait")
+        self.assertEqual(status["active_worker"], "")
+        self.assertEqual(status["active_worker_role"], "")
+        self.assertEqual(
+            status["next_legal_action"],
+            ["answer_question", "control_workflow:cancel"],
         )
 
     def test_graceful_manager_shutdown_drains_before_stopping(self) -> None:

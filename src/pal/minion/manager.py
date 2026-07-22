@@ -339,7 +339,10 @@ class MinionManager:
             self._v2_wake_event.set()
             return {"ok": True, "status": "woken"}
         if method == "v2_workflow_status":
-            return self.v2_service.workflow_status(str(params.get("workflow_id") or ""))
+            return self._v2_workflow_status(
+                str(params.get("workflow_id") or ""),
+                view=str(params.get("view") or "status"),
+            )
         if method == "list_runs":
             return {"items": [item.summary() for item in sorted(self.runs.values(), key=lambda run: run.started_at)]}
         if method == "read_run":
@@ -469,18 +472,37 @@ class MinionManager:
         state.status = "running"
         return {"ok": True, "run": state.summary(), "clarification": dict(payload)}
 
+    def _pending_clarification_runs(self, workflow_id: str) -> list[MinionRunState]:
+        matches: list[MinionRunState] = []
+        for state in self.runs.values():
+            binding = dict(dict(state.pack.metadata or {}).get("minion_v2") or {})
+            if (
+                state.status not in _TERMINAL_RUN_STATUSES
+                and state.pending_clarification
+                and str(binding.get("workflow_id") or "") == workflow_id
+            ):
+                matches.append(state)
+        return matches
+
+    def _v2_workflow_status(self, workflow_id: str, *, view: str = "status") -> dict[str, Any]:
+        status = self.v2_service.workflow_status(workflow_id, view=view)
+        if status.get("status") != "ok" or not self._pending_clarification_runs(workflow_id):
+            return status
+        return {
+            **status,
+            "active_worker": "",
+            "active_worker_role": "",
+            "next_legal_action": ["answer_question", "control_workflow:cancel"],
+            "waiting_for_user": True,
+            "liveness": "human_wait",
+        }
+
     async def answer_workflow_question(self, payload: dict[str, Any]) -> dict[str, Any]:
         workflow_id = str(payload.get("workflow_id") or "").strip()
         answer = str(payload.get("answer") or "").strip()
         if not workflow_id or not answer:
             raise ValueError("workflow_id and answer are required")
-        matches: list[MinionRunState] = []
-        for state in self.runs.values():
-            if not state.pending_clarification:
-                continue
-            binding = dict(dict(state.pack.workspace or {}).get("minion_v2") or {})
-            if str(binding.get("workflow_id") or "") == workflow_id:
-                matches.append(state)
+        matches = self._pending_clarification_runs(workflow_id)
         if len(matches) != 1:
             raise ValueError(
                 f"workflow has {len(matches)} pending worker questions; expected exactly one"

@@ -424,7 +424,16 @@ def _fallback_compile_flags(
         )
         if str(value).strip() and "\n" not in str(value) and "\r" not in str(value)
     ]
+    # Keep fallback contexts useful without asking the model to manufacture a
+    # compile database.  The workspace root alone does not resolve the common
+    # project form `#include "package/header.hpp"` when public headers live
+    # under include/.  These roots are discovered, never created, and the
+    # generated flags stay in the manager-owned LSP context directory.
     include_roots = [workspace_root]
+    for relative in ("include", "inc"):
+        candidate = (workspace_root / relative).resolve()
+        if candidate.is_dir() and candidate not in include_roots:
+            include_roots.append(candidate)
     for value in [
         *list(workspace.get("include_paths") or []),
         *list(workspace.get("stub_include_paths") or []),

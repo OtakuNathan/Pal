@@ -23,6 +23,7 @@ from pal.minion.v2.semantic_evidence import (
     run_lsp_evidence,
     run_shell_evidence,
 )
+from pal.minion.v2.skeleton import compiled_module_write_scopes
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
     SubmissionDraftStore,
@@ -390,7 +391,12 @@ def _live_worktree_delta(workspace: Mapping[str, Any], *, work_view: Mapping[str
         return []
     tracked = _git_paths(repo_path, "diff", "--name-only", "--no-renames", "-z", "HEAD", "--")
     untracked = _git_paths(repo_path, "ls-files", "--others", "--exclude-standard", "-z")
-    actual = sorted(set(tracked + untracked))
+    manager_seeded = {
+        str(item).replace("\\", "/").strip().lstrip("./")
+        for item in list(workspace.get("manager_seeded_candidate_paths") or [])
+        if str(item).strip()
+    }
+    actual = sorted(set(tracked + untracked) - manager_seeded)
     _validate_reported_changed_paths(actual, work_view=work_view)
     return actual
 
@@ -398,22 +404,30 @@ def _live_worktree_delta(workspace: Mapping[str, Any], *, work_view: Mapping[str
 def _validate_reported_changed_paths(value: Any, *, work_view: Mapping[str, Any]) -> None:
     if _is_artifact_unit_view(work_view):
         return
-    scopes = [
-        dict(item or {})
-        for item in [
-            *list(work_view.get("implementation_scopes") or []),
-            *list(work_view.get("test_scopes") or []),
-        ]
-    ]
+    scopes = list(compiled_module_write_scopes(work_view))
     outside: list[str] = []
+    frozen_contracts = (
+        {
+            str(item).replace("\\", "/")
+            for item in list(work_view.get("contract_paths") or [])
+        }
+        if str(work_view.get("contract_mode") or "review_guarded") == "file_frozen"
+        else set()
+    )
     for raw in list(value or []):
         path = str(raw).replace("\\", "/").strip()
         parsed = PurePosixPath(path)
         normalized = str(parsed)
-        if not path or path.startswith("/") or ".." in parsed.parts or not any(_scope_matches(normalized, scope) for scope in scopes):
+        if (
+            not path
+            or path.startswith("/")
+            or ".." in parsed.parts
+            or normalized in frozen_contracts
+            or not any(_scope_matches(normalized, scope) for scope in scopes)
+        ):
             outside.append(path or "<empty>")
     if outside:
-        raise ValueError("Candidate Git delta is outside bound implementation/test scopes: " + ", ".join(sorted(set(outside))))
+        raise ValueError("Candidate Git delta is outside bound module write scopes: " + ", ".join(sorted(set(outside))))
 
 
 def _git_paths(repo_path: Path, *args: str) -> list[str]:

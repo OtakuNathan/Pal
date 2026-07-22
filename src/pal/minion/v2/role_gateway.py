@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from pal.execution.git_tool import GitTool, classify_git_command
 from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.artifacts import ArtifactRef
@@ -65,6 +66,8 @@ class RoleAssignmentGateway:
             return self._draft_submit(authenticated, payload)
         if method == "artifact_put":
             return self._artifact_put(authenticated, payload)
+        if method == "git_read":
+            return self._git_read(authenticated, payload)
         raise ValueError(f"role gateway method is not allowed: {method}")
 
     def _submission_status(
@@ -255,6 +258,50 @@ class RoleAssignmentGateway:
             },
         )
         return {"artifact_ref": ref.to_dict()}
+
+    def _git_read(
+        self,
+        authenticated: Mapping[str, Any],
+        params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        command = str(params.get("cmd") or "").strip()
+        policy = classify_git_command(command)
+        if policy.operation_kind != "read":
+            reason = policy.reason or "the command is not classified as read-only"
+            raise ValueError(f"only classified read-only Git commands are allowed: {reason}")
+
+        attempt = self.repository.read_role_attempt(str(authenticated["attempt_id"]))
+        prompt_ref = dict((attempt or {}).get("prompt_pack_ref") or {})
+        if not prompt_ref.get("sha256"):
+            raise ValueError("role prompt pack is unavailable for Git scope validation")
+        prompt_pack = self.service.artifacts.read_json(prompt_ref)
+        if not isinstance(prompt_pack, Mapping):
+            raise ValueError("role prompt pack is malformed")
+        workspace = dict(prompt_pack.get("workspace") or {})
+        root_text = next(
+            (
+                str(workspace.get(key) or "").strip()
+                for key in ("repo_path", "task_repo_path", "target_repo_path")
+                if str(workspace.get(key) or "").strip()
+            ),
+            "",
+        )
+        if not root_text:
+            raise ValueError("role prompt pack has no repository workspace")
+        workspace_root = Path(root_text).expanduser().resolve()
+        cwd_text = str(params.get("cwd") or "").strip()
+        cwd = Path(cwd_text).expanduser().resolve() if cwd_text else workspace_root
+        if not cwd.is_relative_to(workspace_root):
+            raise ValueError("Git cwd is outside the assigned repository workspace")
+
+        result = GitTool().invoke({"cmd": command, "cwd": str(cwd)})
+        structured = dict(result.structured or {})
+        return {
+            "returncode": int(structured.get("returncode", 1)),
+            "stdout": str(structured.get("stdout") or ""),
+            "stderr": str(structured.get("stderr") or ""),
+            "classification": dict(structured.get("classification") or policy.to_dict()),
+        }
 
     @staticmethod
     def _context(

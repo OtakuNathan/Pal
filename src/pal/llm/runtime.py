@@ -9,7 +9,7 @@ import queue
 import random
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
@@ -64,6 +64,19 @@ _DEFAULT_MAX_RETRY_DELAY_MS = 32_000
 _DEFAULT_STALE_CONNECTION_SETTLE_MS = 300
 _DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS = 180.0
 _DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS = 180.0
+_DEFAULT_MAX_OUTPUT_RECOVERY_ATTEMPTS = 3
+_OUTPUT_LIMIT_FINISH_REASONS = {
+    "length",
+    "max_tokens",
+    "max_output_tokens",
+    "model_context_window_exceeded",
+}
+_OUTPUT_LIMIT_CONTINUATION_PROMPT = (
+    "Output token limit hit. Resume directly—no apology and no recap. "
+    "Pick up mid-thought if needed and break the remaining work into smaller pieces. "
+    "No tool call from the truncated response was executed; if one is still needed, "
+    "emit it again exactly once as a complete valid tool call."
+)
 _ENDPOINT_FALLBACK_DISABLED_POLICIES = {
     "disabled",
     "none",
@@ -226,6 +239,12 @@ class _EndpointInvocationResult:
     reserved_output_tokens: int | None = None
     error_kind: str = ""
     error_type: str = ""
+
+
+@dataclass(frozen=True)
+class _OutputRecoveryResult:
+    value: Any
+    request: CanonicalLLMRequest
 
 
 @dataclass
@@ -678,9 +697,195 @@ def _ensure_llm_invocation_result_has_payload(result: Any) -> None:
             raise LLMEndpointInvocationError("llm stream ended without assistant content or tool calls")
 
 
+def _endpoint_max_output_tokens_upper_limit(endpoint: LLMEndpointModel) -> int | None:
+    capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
+    recovery = capabilities.get("max_output_recovery")
+    nested = dict(recovery) if isinstance(recovery, dict) else {}
+    raw = nested.get("upper_limit", capabilities.get("max_output_tokens_upper_limit"))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _max_output_recovery_settings(
+    endpoint: LLMEndpointModel,
+    request: CanonicalLLMRequest,
+    *,
+    default_attempts: int,
+) -> dict[str, int | bool]:
+    capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
+    recovery = capabilities.get("max_output_recovery")
+    nested = dict(recovery) if isinstance(recovery, dict) else {}
+    enabled = bool(nested.get("enabled", recovery if isinstance(recovery, bool) else False))
+    explicit_enabled = request.metadata.get("max_output_recovery_enabled")
+    if explicit_enabled is not None:
+        enabled = bool(explicit_enabled)
+    endpoint_default = _positive_int_or_none(getattr(endpoint, "max_output_tokens", None))
+    explicitly_requested = explicit_enabled is True
+    if endpoint_default is not None and request.max_output_tokens < endpoint_default and not explicitly_requested:
+        enabled = False
+    upper_limit = _endpoint_max_output_tokens_upper_limit(endpoint) or request.max_output_tokens
+    upper_limit = max(int(request.max_output_tokens), int(upper_limit))
+    raw_attempts = nested.get(
+        "max_continuations",
+        capabilities.get("max_output_recovery_attempts", default_attempts),
+    )
+    try:
+        max_continuations = max(0, int(raw_attempts))
+    except (TypeError, ValueError):
+        max_continuations = max(0, int(default_attempts))
+    return {
+        "enabled": enabled and (upper_limit > request.max_output_tokens or max_continuations > 0),
+        "upper_limit": upper_limit,
+        "max_continuations": max_continuations,
+    }
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _invocation_finish_reason(result: Any) -> str:
+    if isinstance(result, CanonicalLLMOutcome):
+        return str(result.finish_reason or "").strip().lower()
+    if isinstance(result, list):
+        for event in reversed(result):
+            reason = str(getattr(event, "finish_reason", "") or "").strip().lower()
+            if reason:
+                return reason
+    return ""
+
+
+def _is_output_limited_result(result: Any) -> bool:
+    return _invocation_finish_reason(result) in _OUTPUT_LIMIT_FINISH_REASONS
+
+
+def _invocation_text(result: Any) -> str:
+    if isinstance(result, CanonicalLLMOutcome):
+        return str(result.text or "")
+    if isinstance(result, list):
+        return "".join(
+            str(event.text or "")
+            for event in result
+            if event.event_kind == LLMStreamEventKind.TEXT_DELTA
+        )
+    return ""
+
+
+def _invocation_reasoning_text(result: Any) -> str:
+    if isinstance(result, CanonicalLLMOutcome):
+        return str(result.reasoning_text or "")
+    if isinstance(result, list):
+        return "".join(
+            str(event.reasoning_text or "")
+            for event in result
+            if event.event_kind == LLMStreamEventKind.REASONING_DELTA
+        )
+    return ""
+
+
+def _with_output_recovery_metadata(
+    request: CanonicalLLMRequest,
+    *,
+    stage: str,
+    attempt: int,
+) -> CanonicalLLMRequest:
+    return replace(
+        request,
+        metadata={
+            **dict(request.metadata),
+            "max_output_recovery_stage": stage,
+            "max_output_recovery_attempt": int(attempt),
+        },
+    )
+
+
+def _build_output_continuation_request(
+    request: CanonicalLLMRequest,
+    truncated_result: Any,
+    *,
+    max_output_tokens: int,
+    attempt: int,
+) -> CanonicalLLMRequest:
+    messages = [dict(message) for message in request.messages]
+    metadata = dict(request.metadata)
+    metadata.pop("prompt_budget_snapshot", None)
+    partial_text = _invocation_text(truncated_result)
+    if partial_text:
+        messages.append({"role": "assistant", "content": partial_text})
+    messages.append({"role": "user", "content": _OUTPUT_LIMIT_CONTINUATION_PROMPT})
+    return _with_output_recovery_metadata(
+        replace(
+            request,
+            messages=messages,
+            max_output_tokens=int(max_output_tokens),
+            metadata=metadata,
+        ),
+        stage="continue",
+        attempt=attempt,
+    )
+
+
+def _strip_truncated_tool_calls(result: Any) -> Any:
+    if isinstance(result, CanonicalLLMOutcome):
+        return replace(result, tool_calls=[])
+    if isinstance(result, list):
+        return [event for event in result if event.event_kind != LLMStreamEventKind.TOOL_CALL]
+    return result
+
+
+def _merge_output_recovery_results(partials: list[Any], final_result: Any) -> Any:
+    if isinstance(final_result, CanonicalLLMOutcome):
+        return replace(
+            final_result,
+            text="".join(_invocation_text(item) for item in partials) + str(final_result.text or ""),
+            reasoning_text="\n".join(
+                part
+                for part in [*(_invocation_reasoning_text(item) for item in partials), str(final_result.reasoning_text or "")]
+                if part
+            ),
+        )
+    if isinstance(final_result, list):
+        prefix: list[NormalizedLLMStreamEvent] = []
+        for partial in partials:
+            if not isinstance(partial, list):
+                text = _invocation_text(partial)
+                reasoning = _invocation_reasoning_text(partial)
+                if reasoning:
+                    prefix.append(
+                        NormalizedLLMStreamEvent(
+                            event_kind=LLMStreamEventKind.REASONING_DELTA,
+                            reasoning_text=reasoning,
+                        )
+                    )
+                if text:
+                    prefix.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=text))
+                continue
+            prefix.extend(
+                event
+                for event in partial
+                if event.event_kind in {LLMStreamEventKind.TEXT_DELTA, LLMStreamEventKind.REASONING_DELTA}
+            )
+        return [*prefix, *final_result]
+    return final_result
+
+
+def _merge_exhausted_output_recovery_results(partials: list[Any]) -> Any:
+    if not partials:
+        return CanonicalLLMOutcome(text="", finish_reason="length")
+    final_result = _strip_truncated_tool_calls(partials[-1])
+    return _merge_output_recovery_results(partials[:-1], final_result)
+
+
 def _is_empty_successful_llm_outcome(outcome: CanonicalLLMOutcome) -> bool:
     finish_reason = str(outcome.finish_reason or "").strip()
-    if finish_reason in {LLMFinishReason.ERROR, LLMFinishReason.COMPACT_REQUIRED}:
+    if finish_reason in {LLMFinishReason.ERROR, LLMFinishReason.COMPACT_REQUIRED} or finish_reason.lower() in _OUTPUT_LIMIT_FINISH_REASONS:
         return False
     return not str(outcome.text or "").strip() and not list(outcome.tool_calls or [])
 
@@ -689,6 +894,8 @@ def _is_empty_successful_stream_result(events: list[NormalizedLLMStreamEvent]) -
     saw_terminal_error = False
     saw_payload = False
     for event in events:
+        if str(event.finish_reason or "").strip().lower() in _OUTPUT_LIMIT_FINISH_REASONS:
+            saw_terminal_error = True
         if event.event_kind in {LLMStreamEventKind.ERROR, LLMStreamEventKind.COMPACT_REQUIRED}:
             saw_terminal_error = True
         elif event.event_kind == LLMStreamEventKind.TEXT_DELTA and str(event.text or "").strip():
@@ -846,6 +1053,7 @@ class AnthropicMessagesEndpointInvoker:
         thinking = think_level_to_anthropic_thinking(
             request.metadata.get("think_level"),
             request.max_output_tokens,
+            thinking_budget_tokens=request.thinking_budget_tokens,
         )
         if thinking is not None:
             request_kwargs["thinking"] = thinking
@@ -1359,6 +1567,18 @@ class LLMRuntime(LLMRuntimePort):
         )
         return _coerce_timeout_seconds(value, default=_DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS)
 
+    @property
+    def _max_output_recovery_attempts(self) -> int:
+        value = (
+            getattr(self.config, "llm_max_output_recovery_attempts", _DEFAULT_MAX_OUTPUT_RECOVERY_ATTEMPTS)
+            if self.config
+            else _DEFAULT_MAX_OUTPUT_RECOVERY_ATTEMPTS
+        )
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return _DEFAULT_MAX_OUTPUT_RECOVERY_ATTEMPTS
+
     def _timeout_seconds_for_metadata(self, metadata: dict[str, Any]) -> float:
         explicit = metadata.get("timeout_seconds")
         if explicit is not None:
@@ -1504,6 +1724,7 @@ class LLMRuntime(LLMRuntimePort):
                 "model_id": None,
                 "context_window": None,
                 "max_output_tokens": None,
+                "max_output_tokens_upper_limit": None,
                 "supports_vision": False,
                 "supports_streaming": False,
                 "input_modalities": [],
@@ -1514,6 +1735,7 @@ class LLMRuntime(LLMRuntimePort):
             "model_id": endpoint.model_id,
             "context_window": endpoint.context_window,
             "max_output_tokens": endpoint.max_output_tokens,
+            "max_output_tokens_upper_limit": _endpoint_max_output_tokens_upper_limit(endpoint),
             "supports_vision": bool(endpoint.supports_vision),
             "supports_streaming": bool(endpoint.supports_streaming),
             "input_modalities": list(endpoint.input_modalities_blob or []),
@@ -1608,11 +1830,17 @@ class LLMRuntime(LLMRuntimePort):
             for attempt in range(attempt_count):
                 try:
                     timeout_seconds = self._timeout_seconds_for_metadata(dict(effective_request.metadata))
-                    result = _run_with_wall_timeout(
-                        lambda: invoke_fn(endpoint, effective_request),
-                        timeout_seconds=timeout_seconds,
-                        description=f"llm endpoint invocation for {endpoint.endpoint_id}",
+                    recovered = self._invoke_with_output_recovery(
+                        endpoint,
+                        effective_request,
+                        lambda recovery_request: _run_with_wall_timeout(
+                            lambda: invoke_fn(endpoint, recovery_request),
+                            timeout_seconds=timeout_seconds,
+                            description=f"llm endpoint invocation for {endpoint.endpoint_id}",
+                        ),
                     )
+                    result = recovered.value
+                    effective_request = recovered.request
                     _ensure_llm_invocation_result_has_payload(result)
                     self.last_request = effective_request
                     self.last_endpoint_id = endpoint.endpoint_id
@@ -1745,6 +1973,113 @@ class LLMRuntime(LLMRuntimePort):
             error_kind=last_error_kind,
             error_type=last_error_type or "UnknownEndpointError",
         )
+
+    def _invoke_with_output_recovery(
+        self,
+        endpoint: LLMEndpointModel,
+        request: CanonicalLLMRequest,
+        invoke_once: Callable[[CanonicalLLMRequest], Any],
+    ) -> _OutputRecoveryResult:
+        current_request = request
+        result = invoke_once(current_request)
+        if not _is_output_limited_result(result):
+            return _OutputRecoveryResult(value=result, request=current_request)
+
+        settings = _max_output_recovery_settings(
+            endpoint,
+            request,
+            default_attempts=self._max_output_recovery_attempts,
+        )
+        if not settings["enabled"]:
+            return _OutputRecoveryResult(value=_strip_truncated_tool_calls(result), request=current_request)
+
+        upper_limit = int(settings["upper_limit"])
+        if current_request.max_output_tokens < upper_limit:
+            escalated_request = _with_output_recovery_metadata(
+                replace(current_request, max_output_tokens=upper_limit),
+                stage="escalate",
+                attempt=0,
+            )
+            if self._recovery_request_fits(endpoint, escalated_request):
+                self._emit_llm_progress(
+                    "llm_output_limit_recovery_started",
+                    endpoint=endpoint,
+                    stage="escalate",
+                    attempt=0,
+                    max_attempts=int(settings["max_continuations"]),
+                    previous_max_output_tokens=current_request.max_output_tokens,
+                    max_output_tokens=upper_limit,
+                )
+                current_request = escalated_request
+                result = invoke_once(current_request)
+                if not _is_output_limited_result(result):
+                    self._emit_llm_progress(
+                        "llm_output_limit_recovery_succeeded",
+                        endpoint=endpoint,
+                        stage="escalate",
+                        attempt=0,
+                        max_output_tokens=upper_limit,
+                    )
+                    return _OutputRecoveryResult(value=result, request=current_request)
+
+        partial_results: list[Any] = [result]
+        max_continuations = int(settings["max_continuations"])
+        for continuation_attempt in range(1, max_continuations + 1):
+            continuation_request = _build_output_continuation_request(
+                current_request,
+                result,
+                max_output_tokens=upper_limit,
+                attempt=continuation_attempt,
+            )
+            if not self._recovery_request_fits(endpoint, continuation_request):
+                break
+            self._emit_llm_progress(
+                "llm_output_limit_recovery_started",
+                endpoint=endpoint,
+                stage="continue",
+                attempt=continuation_attempt,
+                max_attempts=max_continuations,
+                previous_max_output_tokens=current_request.max_output_tokens,
+                max_output_tokens=upper_limit,
+            )
+            current_request = continuation_request
+            result = invoke_once(current_request)
+            if not _is_output_limited_result(result):
+                merged = _merge_output_recovery_results(partial_results, result)
+                self._emit_llm_progress(
+                    "llm_output_limit_recovery_succeeded",
+                    endpoint=endpoint,
+                    stage="continue",
+                    attempt=continuation_attempt,
+                    max_output_tokens=upper_limit,
+                )
+                return _OutputRecoveryResult(value=merged, request=current_request)
+            partial_results.append(result)
+
+        exhausted = _merge_exhausted_output_recovery_results(partial_results)
+        self._emit_llm_progress(
+            "llm_output_limit_recovery_exhausted",
+            endpoint=endpoint,
+            stage="continue",
+            attempt=max(0, len(partial_results) - 1),
+            max_attempts=max_continuations,
+            max_output_tokens=upper_limit,
+        )
+        return _OutputRecoveryResult(value=exhausted, request=current_request)
+
+    def _recovery_request_fits(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> bool:
+        advice = self._build_preflight_advice(
+            endpoint=endpoint,
+            request=LLMPreflightRequest(
+                messages=list(request.messages),
+                max_output_tokens=request.max_output_tokens,
+                model_hint=request.model_hint,
+                tools=list(request.tools),
+                metadata=dict(request.metadata),
+            ),
+            fallback_chain=[],
+        )
+        return advice.status != LLMPreflightStatus.COMPACT_REQUIRED
 
     def _emit_llm_progress(self, phase: str, *, endpoint: LLMEndpointModel, **payload: Any) -> None:
         sink = _SCOPED_LLM_EVENT_SINK.get() or self.event_sink
@@ -1991,8 +2326,10 @@ class LLMRuntime(LLMRuntimePort):
     ) -> LLMPreflightAdvice:
         breakdown = self._build_preflight_breakdown(request)
         reserved_output_tokens = request.max_output_tokens
-        if endpoint is not None and endpoint.max_output_tokens is not None:
-            reserved_output_tokens = min(request.max_output_tokens, endpoint.max_output_tokens)
+        if endpoint is not None:
+            endpoint_ceiling = _endpoint_max_output_tokens_upper_limit(endpoint) or endpoint.max_output_tokens
+            if endpoint_ceiling is not None:
+                reserved_output_tokens = min(request.max_output_tokens, endpoint_ceiling)
         if endpoint is None or endpoint.context_window is None:
             available_input_budget_chars = max(
                 int(breakdown.get("estimated_input_chars", 0)),
@@ -2137,6 +2474,8 @@ class LLMRuntime(LLMRuntimePort):
         endpoint: LLMEndpointModel | None,
     ) -> CanonicalLLMRequest:
         requested_think_level = str(request.metadata.get("think_level") or "").strip() or self.think_level
+        max_output_tokens = int(request.max_output_tokens)
+        thinking_budget_tokens = request.thinking_budget_tokens
         metadata: dict[str, Any] = {
             **dict(request.metadata),
             "think_level": requested_think_level,
@@ -2144,6 +2483,13 @@ class LLMRuntime(LLMRuntimePort):
         if metadata.get("timeout_seconds") is None:
             metadata["timeout_seconds"] = self._timeout_seconds_for_metadata(metadata)
         if endpoint is not None:
+            upper_limit = _endpoint_max_output_tokens_upper_limit(endpoint)
+            if upper_limit is not None:
+                max_output_tokens = min(max_output_tokens, upper_limit)
+            if thinking_budget_tokens is None:
+                thinking_budget_tokens = _positive_int_or_none(
+                    dict(endpoint.capabilities_blob or {}).get("thinking_budget_tokens")
+                )
             metadata.update(
                 {
                     "endpoint_id": endpoint.endpoint_id,
@@ -2154,7 +2500,8 @@ class LLMRuntime(LLMRuntimePort):
             )
         return CanonicalLLMRequest(
             messages=list(request.messages),
-            max_output_tokens=request.max_output_tokens,
+            max_output_tokens=max_output_tokens,
+            thinking_budget_tokens=thinking_budget_tokens,
             model_hint=request.model_hint or (endpoint.model_id if endpoint is not None else None),
             temperature=request.temperature,
             tools=list(request.tools),

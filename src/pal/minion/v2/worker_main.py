@@ -11,6 +11,24 @@ from pal.minion.runner import MinionRunner
 from pal.shared import MinionInvocationPack
 
 
+async def _read_control_message(
+    messages: asyncio.Queue[dict[str, Any]],
+    timeout: float | None,
+) -> dict[str, Any] | None:
+    if timeout is None:
+        return await messages.get()
+    timeout_seconds = float(timeout)
+    if timeout_seconds <= 0:
+        try:
+            return messages.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+    try:
+        return await asyncio.wait_for(messages.get(), timeout=timeout_seconds)
+    except TimeoutError:
+        return None
+
+
 async def _run(runtime_root: Path, pack_path: Path, minion_id: str, run_id: str) -> int:
     payload = json.loads(pack_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -41,10 +59,7 @@ async def _run(runtime_root: Path, pack_path: Path, minion_id: str, run_id: str)
     stdin_task = asyncio.create_task(read_stdin(), name=f"minion-v2-stdin-{run_id}")
 
     async def read_decision(timeout: float | None = None) -> dict[str, Any] | None:
-        try:
-            return await asyncio.wait_for(decisions.get(), timeout=max(0.001, float(timeout or 0.001)))
-        except TimeoutError:
-            return None
+        return await _read_control_message(decisions, timeout)
 
     runner = MinionRunner(
         runtime_root=runtime_root,

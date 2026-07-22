@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from pal.lsp.config import LspServerConfig, LspServerFileConfig, load_builtin_lsp_templates, load_lsp_server_file, lsp_config_root
 from pal.lsp.connector import AsyncLspConnector, LspProtocolError
+from pal.lsp.environment import prepare_workspace_lsp_environment
 from pal.lsp.ipc import LspManagerClient
 from pal.lsp.manager import LspManager, LspServerState
 from pal.minion.ipc import MinionManagerClient
@@ -607,6 +608,35 @@ language_ids = ["foo"]
         restored = restarted_manager._workspace_environment(workspace)
         self.assertEqual(restored["fingerprint"], changed["environment_fingerprint"])
         self.assertEqual(restored["primary_language"], "cpp")
+
+    async def test_cpp_fallback_context_includes_existing_public_include_root(self) -> None:
+        workspace = self.root / "prepared_cpp_include"
+        include = workspace / "include"
+        include.mkdir(parents=True)
+        (workspace / "module.cpp").write_text(
+            '#include "package/value.hpp"\nint value() { return package_value(); }\n',
+            encoding="utf-8",
+        )
+        package = include / "package"
+        package.mkdir()
+        (package / "value.hpp").write_text(
+            "inline int package_value() { return 1; }\n",
+            encoding="utf-8",
+        )
+
+        setup, unavailable = prepare_workspace_lsp_environment(
+            workspace_root=workspace,
+            primary_language="cpp",
+            context_root=self.root / "contexts",
+            workspace={"cpp_standard": "c++17"},
+        )
+
+        self.assertEqual(unavailable, [])
+        context = setup["project_contexts"]["clangd"]
+        self.assertEqual(context["kind"], "generated_compile_flags")
+        flags = Path(context["source_path"]).read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"-I{workspace.resolve()}", flags)
+        self.assertIn(f"-I{include.resolve()}", flags)
 
     async def test_required_project_context_rejects_unprepared_lsp_session(self) -> None:
         workspace = self.root / "unprepared_cpp"

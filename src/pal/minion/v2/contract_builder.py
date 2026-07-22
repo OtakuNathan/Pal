@@ -74,7 +74,7 @@ CONTRACT_BUILDER_CAPABILITIES = (
 )
 ARCHITECT_BUILDER_CAPABILITIES = (
     *CONTRACT_SKETCH_BUILDER_CAPABILITIES,
-    "op_minion_architecture_ask_user",
+    "op_minion_ask_question",
 )
 
 

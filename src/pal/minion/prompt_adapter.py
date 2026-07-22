@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import shlex
 from dataclasses import dataclass
+import json
 from typing import Any, Callable
 
 from pal.foundation import EventEnvelope
@@ -103,21 +103,42 @@ def render_minion_task_prompt(pack: MinionInvocationPack) -> str:
         lines.extend(["", "## Immutable Inputs"])
         for item in references:
             name = str(item.get("name") or "")
-            if bool(item.get("bound_input")):
-                lines.append(
-                    f"- reference:{name}: read-only semantic input; inspect it with ordinary file/search tools "
-                    f"(truth_source={bool(item.get('truth_source'))})"
-                )
-                continue
+            includes = [str(value).strip() for value in list(item.get("include") or []) if str(value).strip()]
             path = str(item.get("path") or "").strip()
-            shell_path = shlex.quote(path) if path else f"/pal/references/{name}"
-            lines.append(
-                f"- reference:{name}: read-only semantic input. For read_file/search, pass "
-                f"reference_name='{name}' plus a root-relative path; never pass the sandbox path to those tools. "
-                f"For run_shell only, sandbox_path={path or shell_path}; list it with "
-                f"`tree -a -L 3 --filelimit 200 --noreport {shell_path}` through run_shell "
-                f"(`find {shell_path} -maxdepth 3 -print | head -n 500` fallback; truth_source={bool(item.get('truth_source'))})"
-            )
+            details = [
+                "read-only semantic input",
+                "access=ordinary file/search tools",
+                f"truth_source={bool(item.get('truth_source'))}",
+            ]
+            if not bool(item.get("bound_input")):
+                visible_path = path or f"/pal/references/{name}"
+                details.append(f"path={visible_path}")
+                if len(includes) == 1 and not any(character in includes[0] for character in "*?["):
+                    details.append(
+                        "read_file_args="
+                        + json.dumps(
+                            {"file_path": visible_path},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
+                    )
+            if includes:
+                details.append(
+                    "projected_paths="
+                    + json.dumps(includes, ensure_ascii=False, separators=(",", ":"))
+                )
+            lines.append(f"- reference:{name}: " + "; ".join(details))
+        lines.extend(
+            [
+                "",
+                "## Tool Efficiency",
+                "- Before reading a reference, briefly investigate what the supplied path currently contains and choose the appropriate visible tool. Do not assume the path is a file or call read_file on it before establishing that it is the relevant file.",
+                "- When exact read_file_args are already supplied, use that exact file path directly when the reference is needed; do not investigate it again.",
+                "- Keep reference investigation bounded, read only what the current question requires, and reuse what you already learned instead of repeating discovery.",
+                *_role_efficiency_lines(pack),
+            ]
+        )
     lines.extend(
         [
             "",
@@ -125,9 +146,24 @@ def render_minion_task_prompt(pack: MinionInvocationPack) -> str:
             "- This is one durable role invocation, not an autonomous workflow.",
             "- Do not create architecture, acceptance authority, hidden follow-up work, milestones, or checkpoints.",
             "- Use only visible capabilities and the bound workspace/reference roots.",
+            "- Immutable inputs are lookup sources, not a mandatory reading checklist. Read one only when the current prompt, source, contract, diff, or evidence is insufficient to decide a role obligation or named question; stop once the evidence is decisive.",
         ]
     )
     return "\n".join(lines)
+
+
+def _role_efficiency_lines(pack: MinionInvocationPack) -> list[str]:
+    role = str(dict(dict(pack.metadata or {}).get("minion_v2") or {}).get("role") or "")
+    if role == "implementation":
+        return [
+            "- Once the owned contract, edit path, and one sufficient validation path are clear, implement directly. Do not over-abstract, keep investigating, or repeat unchanged passing checks before candidate_submit.",
+        ]
+    if role == "verifier":
+        return [
+            "- Treat VerificationPolicy as the bounded checklist. Once decisive evidence covers it, submit immediately; do not accumulate optional evidence or repeat unchanged passing checks.",
+            "- Use the Manager-prepared verification LSP tool. Do not invoke language-server executables or create compile configuration through shell.",
+        ]
+    return []
 
 
 def prompt_view_from_pack(pack: MinionInvocationPack) -> dict[str, Any]:
@@ -150,7 +186,6 @@ def _render_execution_rules(scaffold: dict[str, Any]) -> str:
     return "\n".join(
         (
             "- Work only on the bound role invocation.",
-            "- Inspect immutable inputs before making claims or edits.",
             "- Architecture roles must use their bound architecture tools and output contract; they cannot invent alternate plan artifacts.",
             "- Producers cannot accept their own output; verifiers cannot repair candidates.",
             f"- Visible capabilities: {', '.join(allowed) if allowed else '(none)' }.",

@@ -10,28 +10,42 @@ from pathlib import Path
 
 from pal.llm.contracts import CanonicalToolCall
 from pal.minion.v2.architecture import ArchitectureArtifactService
+from pal.minion.v2.architecture_yaml import (
+    ArchitectureDraft,
+    load_architecture_draft,
+    prepare_architecture_draft_file,
+    write_architecture_draft,
+)
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType
-from pal.minion.v2.execution import DagScheduler, ExecutionCompiler, UnitWorkViewBuilder
+from pal.minion.v2.execution import (
+    DagScheduler,
+    ExecutionCompiler,
+    UnitWorkViewBuilder,
+    _validate_skeleton_candidate_paths,
+)
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_SKELETON_ARTIFACT,
+    ArchitectureValidationError,
     GitBackedSkeletonService,
     architecture_revision_changed_paths_since,
     architecture_revision_path_states,
     architecture_revision_scope,
     compile_skeleton_markdown,
+    compiled_module_write_scopes,
     review_architecture_skeleton,
+    validate_architecture_changed_paths,
     validate_architecture_revision_scope,
     validate_architecture_submission,
 )
 from pal.minion.v2.task_sources import TaskSourceBundleService
 from pal.minion.v2.skeleton_builder import (
     SKELETON_BUILDER_TOOL_SPECS,
-    architecture_question_tool_result,
+    ask_question_tool_result,
     compile_architecture_review_invocation_tool_contract,
     skeleton_builder_tool_result,
 )
@@ -147,12 +161,13 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "file_frozen",
         )
 
-    def test_review_guarded_contract_may_share_its_module_writable_file(self) -> None:
+    def test_review_guarded_contract_compiles_as_its_module_writable_file(self) -> None:
         submission = self._submission()
         submission["modules"]["router"]["paths"] = {
             **submission["modules"]["router"]["paths"],
             "contract_mode": "review_guarded",
             "contract_paths": ["src/router.cpp"],
+            "implementation_scopes": [],
         }
 
         normalized = validate_architecture_submission(
@@ -165,8 +180,44 @@ class MinionV2SkeletonTests(unittest.TestCase):
             normalized["modules"]["router"]["paths"]["contract_mode"],
             "review_guarded",
         )
+        self.assertIn(
+            {"kind": "file", "path": "src/router.cpp"},
+            compiled_module_write_scopes(normalized["modules"]["router"]["paths"]),
+        )
 
-    def test_file_frozen_contract_rejects_its_module_writable_overlap(self) -> None:
+    def test_review_guarded_contract_deduplicates_explicit_implementation_scope(self) -> None:
+        submission = self._submission()
+        submission["modules"]["router"]["paths"] = {
+            **submission["modules"]["router"]["paths"],
+            "contract_mode": "review_guarded",
+            "contract_paths": ["src/router.cpp"],
+        }
+
+        normalized = validate_architecture_submission(
+            submission,
+            requirements_payload=self.requirements,
+            workspace_root=self.repo,
+        )
+        scopes = compiled_module_write_scopes(normalized["modules"]["router"]["paths"])
+        self.assertEqual(
+            scopes.count({"kind": "file", "path": "src/router.cpp"}),
+            1,
+        )
+
+    def test_review_guarded_contract_is_a_candidate_write_path_without_duplicate_scope(self) -> None:
+        policy = {
+            "contract_mode": "review_guarded",
+            "contract_paths": ["src/main.cpp"],
+            "implementation_scopes": [{"kind": "file", "path": "CMakeLists.txt"}],
+            "verification_corpus": {"kind": "directory", "path": "tests/cli"},
+            "reference_only": [],
+        }
+
+        _validate_skeleton_candidate_paths(["src/main.cpp"], policy)
+        with self.assertRaisesRegex(ValueError, "outside its compiled module write scopes"):
+            _validate_skeleton_candidate_paths(["src/other.cpp"], policy)
+
+    def test_file_frozen_contract_overrides_its_module_writable_overlap(self) -> None:
         submission = self._submission()
         submission["modules"]["router"]["paths"] = {
             **submission["modules"]["router"]["paths"],
@@ -174,47 +225,98 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "contract_paths": ["src/router.cpp"],
         }
 
-        with self.assertRaisesRegex(ValueError, "file_frozen contract"):
-            validate_architecture_submission(
-                submission,
-                requirements_payload=self.requirements,
-                workspace_root=self.repo,
+        normalized = validate_architecture_submission(
+            submission,
+            requirements_payload=self.requirements,
+            workspace_root=self.repo,
+        )
+        with self.assertRaisesRegex(ValueError, "frozen architecture contracts"):
+            _validate_skeleton_candidate_paths(
+                ["src/router.cpp"],
+                normalized["modules"]["router"]["paths"],
             )
 
-    def test_review_guarded_contract_cannot_be_owned_by_test_scope(self) -> None:
+    def test_review_guarded_contract_cannot_be_owned_by_verification_corpus(self) -> None:
+        corpus_contract = self.repo / "tests" / "router" / "contract.h"
+        corpus_contract.parent.mkdir()
+        corpus_contract.write_text(_contract("router"), encoding="utf-8")
         submission = self._submission()
         submission["modules"]["router"]["paths"] = {
             **submission["modules"]["router"]["paths"],
             "contract_mode": "review_guarded",
-            "contract_paths": ["tests/test_router.cpp"],
+            "contract_paths": ["tests/router/contract.h"],
         }
 
-        with self.assertRaisesRegex(ValueError, "review_guarded contract"):
+        with self.assertRaisesRegex(ValueError, "verification_corpus.*review_guarded contract"):
             validate_architecture_submission(
                 submission,
                 requirements_payload=self.requirements,
                 workspace_root=self.repo,
             )
 
-    def test_architecture_validation_reports_all_current_path_errors_together(self) -> None:
+    def test_architecture_validation_allows_future_implementation_paths(self) -> None:
         (self.repo / "include").mkdir()
         (self.repo / "include" / "router.h").write_text(
             _contract("router"), encoding="utf-8"
         )
         (self.repo / "src" / "router.cpp").unlink()
-        (self.repo / "tests" / "test_router.cpp").unlink()
+        submission = self._submission()
+        submission["modules"]["router"]["paths"]["implementation_scopes"] = [
+            {"kind": "file", "path": "future/router.cpp"},
+            {"kind": "directory", "path": "generated/router"},
+        ]
 
-        with self.assertRaises(ValueError) as raised:
-            validate_architecture_submission(
-                self._submission(),
-                requirements_payload=self.requirements,
-                workspace_root=self.repo,
-            )
+        normalized = validate_architecture_submission(
+            submission,
+            requirements_payload=self.requirements,
+            workspace_root=self.repo,
+        )
 
-        message = str(raised.exception)
-        self.assertIn("src/router.cpp", message)
-        self.assertIn("tests/test_router.cpp", message)
-        self.assertIn("consistent errors", message)
+        self.assertEqual(
+            normalized["modules"]["router"]["paths"]["implementation_scopes"],
+            [
+                {"kind": "file", "path": "future/router.cpp"},
+                {"kind": "directory", "path": "generated/router"},
+            ],
+        )
+        self.assertFalse((self.repo / "future" / "router.cpp").exists())
+        self.assertFalse((self.repo / "generated" / "router").exists())
+
+    def test_architect_changed_paths_exclude_future_implementation_scopes(self) -> None:
+        (self.repo / "include").mkdir()
+        (self.repo / "include" / "router.h").write_text(
+            _contract("router"), encoding="utf-8"
+        )
+        submission = self._submission()
+
+        with self.assertRaisesRegex(ValueError, "outside declared contract skeleton paths"):
+            validate_architecture_changed_paths(submission, ["src/router.cpp"])
+
+        self.assertEqual(
+            validate_architecture_changed_paths(submission, ["include/router.h"]),
+            ("include/router.h",),
+        )
+
+    def test_top_level_implementation_directory_is_valid(self) -> None:
+        (self.repo / "include").mkdir()
+        (self.repo / "include" / "router.h").write_text(
+            _contract("router"), encoding="utf-8"
+        )
+        submission = self._submission()
+        submission["modules"]["router"]["paths"]["implementation_scopes"] = [
+            {"kind": "directory", "path": "src"}
+        ]
+
+        normalized = validate_architecture_submission(
+            submission,
+            requirements_payload=self.requirements,
+            workspace_root=self.repo,
+        )
+
+        self.assertEqual(
+            normalized["modules"]["router"]["paths"]["implementation_scopes"],
+            [{"kind": "directory", "path": "src"}],
+        )
 
     def test_submission_rejects_overlapping_owned_scopes(self) -> None:
         contract = self.repo / "include" / "router.h"
@@ -249,7 +351,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "paths": {
                 "contract_paths": ["include/consumer.h"],
                 "implementation_scopes": [{"kind": "file", "path": "src/consumer.cpp"}],
-                "test_scopes": [{"kind": "file", "path": "tests/test_consumer.cpp"}],
                 "reference_only": [],
             },
         }
@@ -266,12 +367,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
         (workspace.worktree / "include" / "consumer.h").write_text(
             _contract("consumer"), encoding="utf-8"
         )
-        (workspace.worktree / "src" / "consumer.cpp").write_text(
-            "// consumer implementation skeleton\n", encoding="utf-8"
-        )
-        (workspace.worktree / "tests" / "test_consumer.cpp").write_text(
-            "// consumer test skeleton\n", encoding="utf-8"
-        )
         submission = self._submission()
         submission["modules"]["consumer"] = {
             "module_kind": "implementation",
@@ -280,7 +375,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "contract_mode": "file_frozen",
                 "contract_paths": ["include/consumer.h"],
                 "implementation_scopes": [{"kind": "file", "path": "src/consumer.cpp"}],
-                "test_scopes": [{"kind": "file", "path": "tests/test_consumer.cpp"}],
                 "reference_only": [],
             },
         }
@@ -292,6 +386,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             submission=submission,
             requirements_ref=self.requirements_ref,
         )
+        self.assertFalse((workspace.worktree / "src" / "consumer.cpp").exists())
         compilation = ExecutionCompiler(
             self.repository,
             ArchitectureArtifactService(self.artifacts, self.repository),
@@ -322,6 +417,10 @@ class MinionV2SkeletonTests(unittest.TestCase):
             consumer.payload["contract_dependency_node_ids"],
             [compilation.unit_node_ids["router"]],
         )
+        self.assertEqual(
+            consumer.payload["path_policy"]["verification_corpus"],
+            {"kind": "directory", "path": "tests/consumer"},
+        )
         self.assertEqual(scenario.state, "BLOCKED_BY_DEPS")
         self.assertEqual(
             set(scenario.payload["dependency_node_ids"]),
@@ -349,9 +448,9 @@ class MinionV2SkeletonTests(unittest.TestCase):
             }
 
         result = asyncio.run(
-            architecture_question_tool_result(
+            ask_question_tool_result(
                 CanonicalToolCall(
-                    name="op_minion_architecture_ask_user",
+                    name="op_minion_ask_question",
                     args={
                         "title": "Compatibility",
                         "question": "Which compatibility boundary is binding?",
@@ -419,7 +518,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "paths": {
                 "contract_paths": ["include/route_types.h"],
                 "implementation_scopes": [],
-                "test_scopes": [],
                 "reference_only": [],
             },
         }
@@ -505,7 +603,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "paths": {
                 "contract_paths": ["include/route_types.h"],
                 "implementation_scopes": [],
-                "test_scopes": [],
                 "reference_only": [],
             },
         }
@@ -942,7 +1039,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "int route_rule() { return 17; }\n",
         )
 
-    def test_skeleton_builder_schema_contains_semantics_not_manager_identity(self) -> None:
+    def test_skeleton_builder_surface_contains_only_question_submit_and_review_tools(self) -> None:
         projected_specs = {
             canonical_path: {
                 **{key: value for key, value in spec.items() if key != "InputModel"},
@@ -951,13 +1048,19 @@ class MinionV2SkeletonTests(unittest.TestCase):
             for canonical_path, spec in SKELETON_BUILDER_TOOL_SPECS.items()
         }
         encoded = json.dumps(projected_specs, sort_keys=True)
-        self.assertIn("contract_paths", encoded)
-        self.assertIn("op_minion_architecture_module_upsert", encoded)
         self.assertIn("op_minion_architecture_submit", encoded)
+        self.assertIn("op_minion_ask_question", encoded)
+        self.assertNotIn("architecture_module_upsert", encoded)
+        self.assertNotIn("architecture_module_remove", encoded)
+        self.assertNotIn("architecture_scenario_upsert", encoded)
+        self.assertNotIn("architecture_scenario_remove", encoded)
+        self.assertIn("architecture.yaml", encoded)
         self.assertNotIn("architecture_verification", encoded)
         self.assertNotIn("consume_contract", encoded)
         self.assertNotIn("cover_requirement", encoded)
         self.assertNotIn('"items": {"type": "object"}', encoded)
+        self.assertNotIn("test_files", encoded)
+        self.assertNotIn("test_directories", encoded)
         self.assertNotIn('"prefix"', encoded)
         for forbidden in (
             "workflow_id",
@@ -969,6 +1072,55 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "sha256",
         ):
             self.assertNotIn(f'"{forbidden}"', encoded)
+
+    def test_architecture_yaml_schema_accepts_dynamic_semantic_name_maps(self) -> None:
+        schema = ArchitectureDraft.model_json_schema(mode="validation")
+        module_map = schema["properties"]["modules"]
+        scenario_map = schema["properties"]["scenarios"]
+        self.assertIn(r"^[a-z][a-z0-9_]{1,79}$", module_map["patternProperties"])
+        self.assertIn(r"^[a-z][a-z0-9_]{1,79}$", scenario_map["patternProperties"])
+
+        payload = {"schema_version": 1, **self._submission()}
+        ArchitectureDraft.model_validate(payload, strict=True)
+        for invalid_name in ("CLI Decode Streaming", "a", "2fast", "bad-name", "a" * 81):
+            with self.subTest(invalid_name=invalid_name), self.assertRaises(ValueError):
+                invalid = json.loads(json.dumps(payload))
+                invalid["modules"][invalid_name] = invalid["modules"].pop("router")
+                ArchitectureDraft.model_validate(invalid, strict=True)
+
+    def test_architect_question_description_exposes_semantic_triggers(self) -> None:
+        description = str(
+            SKELETON_BUILDER_TOOL_SPECS["op_minion_ask_question"]["description"]
+        )
+
+        for trigger in (
+            "contradiction",
+            "material ambiguity",
+            "incorrect or infeasible requirement",
+            "user preference",
+            "modification scope",
+            "implementation scope",
+        ):
+            with self.subTest(trigger=trigger):
+                self.assertIn(trigger, description)
+        self.assertIn("Use this tool proactively before architecture design", description)
+        self.assertIn("Do not silently choose precedence", description)
+        self.assertIn("identify the exact issue and the decision needed", description)
+        self.assertIn("suspends the current tool call", description)
+        self.assertEqual(
+            SKELETON_BUILDER_TOOL_SPECS["op_minion_ask_question"]["alias"],
+            "ask_question",
+        )
+
+    def test_architecture_review_pass_requires_semantic_contract_composition(self) -> None:
+        description = str(
+            SKELETON_BUILDER_TOOL_SPECS["op_minion_architecture_review_pass"]["description"]
+        )
+
+        self.assertIn("manually trace the declared interface semantics", description)
+        self.assertIn("from a concrete entrypoint", description)
+        self.assertIn("hypothetical future implementation support are not semantic proof", description)
+        self.assertIn("do not require private algorithms or function bodies", description)
 
     def test_architecture_submit_needs_no_semantic_coverage_index(self) -> None:
         (self.repo / "include").mkdir()
@@ -1154,7 +1306,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertNotIn("hard_requirements", contract)
         self.assertEqual(contract["module_names"], ["router"])
         self.assertNotIn("verification_node_names", contract)
-        descriptions = json.dumps(contract["description_overrides"], ensure_ascii=False)
+        descriptions = json.dumps(contract["guidance_overrides"], ensure_ascii=False)
         self.assertIn("router", descriptions)
         self.assertIn("where private state/resources live", descriptions)
         self.assertIn("syntax and compilation are not semantic proof", descriptions)
@@ -1433,7 +1585,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertEqual(scope["allowed_paths"], ["include/router.h"])
         self.assertFalse(scope["allow_topology_changes"])
 
-    def test_module_upsert_fully_replaces_one_dag_node(self) -> None:
+    def test_yaml_revision_edit_replaces_one_dag_node(self) -> None:
         (self.repo / "include").mkdir()
         (self.repo / "include" / "router.h").write_text(
             _contract("router"), encoding="utf-8"
@@ -1459,21 +1611,9 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         produced: list[dict[str, object]] = []
 
-        result = self._builder_call(
-            workspace,
-            "op_minion_architecture_module_upsert",
-            {
-                "name": "router",
-                "module_kind": "implementation",
-                "contract_mode": "file_frozen",
-                "contract_dependencies": [],
-                "contract_paths": ["include/router.h"],
-                "implementation_files": ["src/router.cpp"],
-                "test_files": ["tests/test_router.cpp"],
-                "reference_only": ["README.md"],
-            },
-        )
-        self.assertTrue(result.ok, result.text)
+        revised = load_architecture_draft(workspace)
+        revised["modules"]["router"]["paths"]["reference_only"] = ["README.md"]
+        write_architecture_draft(workspace, revised)
         submitted = self._builder_call(
             workspace,
             "op_minion_architecture_submit",
@@ -1490,6 +1630,54 @@ class MinionV2SkeletonTests(unittest.TestCase):
             set(payload["modules"]["router"]),
             {"module_kind", "contract_dependencies", "paths"},
         )
+
+    def test_invalid_yaml_schema_is_rejected_without_advancing_submission(self) -> None:
+        base = self._submission()
+        workspace = self._bind_builder_workspace(
+            {
+                "repo_path": str(self.repo),
+                "artifact_dir": str(self.runtime_root / "invalid-upsert-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "invalid-upsert-stage"),
+                "architecture_revision_base_submission": base,
+            },
+            role="architect",
+            mode="revision",
+        )
+
+        draft_path = Path(str(workspace["architecture_draft_path"]))
+        draft_path.write_text(
+            draft_path.read_text(encoding="utf-8").replace(
+                "      reference_only: []",
+                "      reference_only: []\n      surprise: true",
+            ),
+            encoding="utf-8",
+        )
+        result = self._builder_call(workspace, "op_minion_architecture_submit")
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.structured["error_type"], "ArchitectureDraftFileError")
+        self.assertEqual(result.structured["code"], "schema_validation_failed")
+        self.assertIn("modules.router.paths.surprise", str(result.structured["errors"]))
+
+    def test_invalid_module_is_excluded_from_graph_analysis_without_key_error(self) -> None:
+        submission = self._submission()
+        submission["modules"]["router"] = {
+            "module_kind": "implementation",
+            "contract_dependencies": [],
+            "paths": {"contract_paths": []},
+        }
+
+        with self.assertRaises(ArchitectureValidationError) as raised:
+            validate_architecture_submission(
+                submission,
+                requirements_payload=self.requirements,
+                workspace_root=self.repo,
+            )
+
+        report = raised.exception.to_dict()
+        self.assertEqual(report["error_type"], "ArchitectureValidationError")
+        self.assertGreaterEqual(len(report["errors"]), 2)
+        self.assertNotIn("KeyError", str(report))
 
     def test_rejected_candidate_path_baseline_ignores_preexisting_revision_changes(self) -> None:
         (self.repo / "include").mkdir()
@@ -1648,18 +1836,18 @@ class MinionV2SkeletonTests(unittest.TestCase):
         }, role="architect", mode="revision")
         produced: list[dict[str, object]] = []
 
-        updated = self._builder_call(
-            workspace,
-            "op_minion_architecture_module_upsert",
-            {
-                "name": "route_status",
-                "module_kind": "contract_only",
+        revised = load_architecture_draft(workspace)
+        revised["modules"]["route_status"] = {
+            "module_kind": "contract_only",
+            "contract_dependencies": [],
+            "paths": {
                 "contract_mode": "file_frozen",
-                "contract_dependencies": [],
                 "contract_paths": ["include/route_status.h"],
+                "implementation_scopes": [],
+                "reference_only": [],
             },
-        )
-        self.assertTrue(updated.ok, updated.text)
+        }
+        write_architecture_draft(workspace, revised)
         result = self._builder_call(
             workspace, "op_minion_architecture_submit", produced=produced
         )
@@ -2162,7 +2350,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
                         "contract_mode": "file_frozen",
                         "contract_paths": ["include/router.h"],
                         "implementation_scopes": [{"kind": "file", "path": "src/router.cpp"}],
-                        "test_scopes": [{"kind": "file", "path": "tests/test_router.cpp"}],
                         "reference_only": [],
                     },
                 }
@@ -2222,6 +2409,8 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 },
             }
         )
+        if role == "architect":
+            prepare_architecture_draft_file(workspace)
         return workspace
 
     def _builder_call(
@@ -2250,47 +2439,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         workspace: dict[str, object],
         submission: dict[str, object],
     ) -> None:
-        for module_name, raw_module in dict(submission["modules"]).items():
-            module = dict(raw_module)
-            paths = dict(module["paths"])
-            args: dict[str, object] = {
-                "name": module_name,
-                "module_kind": module["module_kind"],
-                "contract_mode": str(paths.get("contract_mode") or "file_frozen"),
-                "contract_dependencies": list(module.get("contract_dependencies") or []),
-                "contract_paths": list(paths.get("contract_paths") or []),
-                "implementation_files": [
-                    str(item["path"])
-                    for item in list(paths.get("implementation_scopes") or [])
-                    if str(dict(item).get("kind")) == "file"
-                ],
-                "implementation_directories": [
-                    str(item["path"])
-                    for item in list(paths.get("implementation_scopes") or [])
-                    if str(dict(item).get("kind")) == "directory"
-                ],
-                "test_files": [
-                    str(item["path"])
-                    for item in list(paths.get("test_scopes") or [])
-                    if str(dict(item).get("kind")) == "file"
-                ],
-                "test_directories": [
-                    str(item["path"])
-                    for item in list(paths.get("test_scopes") or [])
-                    if str(dict(item).get("kind")) == "directory"
-                ],
-                "reference_only": list(paths.get("reference_only") or []),
-            }
-            result = self._builder_call(workspace, "op_minion_architecture_module_upsert", args)
-            self.assertTrue(result.ok, result.text)
-        for scenario_name, raw_scenario in dict(submission.get("scenarios") or {}).items():
-            scenario = dict(raw_scenario)
-            result = self._builder_call(
-                workspace,
-                "op_minion_architecture_scenario_upsert",
-                {"name": scenario_name, **scenario},
-            )
-            self.assertTrue(result.ok, result.text)
+        write_architecture_draft(workspace, submission)
 
 
 if __name__ == "__main__":

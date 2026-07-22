@@ -91,6 +91,12 @@ Important fields:
 - `capabilities_blob`
 - `notes`
 
+`max_output_tokens` is the endpoint's ordinary per-request default. An endpoint
+may opt into output-limit recovery with
+`capabilities_blob.max_output_recovery = {enabled, upper_limit,
+max_continuations}`. The upper limit is exceptional recovery capacity, not the
+default reservation used by every turn.
+
 `provider` is the primary semantic routing key. `capabilities_blob.adapter` or
 `capabilities_blob.llm_adapter` may force a specific adapter when provider alone
 is insufficient.
@@ -201,6 +207,30 @@ Rendering rules:
 - Tool results become Anthropic `tool_result` blocks.
 - Think level maps to Anthropic `thinking` budget when compatible with the
   requested max output token budget.
+- `CanonicalLLMRequest.thinking_budget_tokens` may explicitly override that
+  budget and is clamped below `max_output_tokens`. Providers without a numeric
+  thinking-budget parameter must not receive it.
+
+## Output-Limit Recovery
+
+Output-limit recovery belongs to the shared endpoint runtime, before a result
+is visible to Pal Core or Minion. For an opted-in endpoint:
+
+1. A `length`, `max_tokens`, `max_output_tokens`, or
+   `model_context_window_exceeded` result is buffered and no tool call from it
+   is executable.
+2. If the request used the endpoint default below `upper_limit`, the same
+   request is retried once at the upper limit and the first partial result is
+   discarded.
+3. If the upper-limit response is still truncated, the runtime may append a
+   bounded continuation turn asking the model to resume directly and split the
+   remaining work into smaller pieces.
+4. Only tool calls from a non-truncated final response are returned. If the
+   continuation budget is exhausted, partial text may be returned with the
+   truncation finish reason, but all partial tool calls are removed.
+
+Requests intentionally below the endpoint default, such as compact summaries,
+do not opt into escalation unless their metadata explicitly enables it.
 
 ## Provider Overrides
 

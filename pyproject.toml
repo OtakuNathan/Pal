@@ -16,6 +16,7 @@ dependencies = [
     "peewee>=3.17,<4",
     "playwright>=1.48,<2",
     "pydantic>=2.10,<3",
+    "PyYAML>=6.0,<7",
     "jsonschema>=4.23,<5",
     "prompt-toolkit>=3.0,<4",
     "python-telegram-bot>=20.7,<22",

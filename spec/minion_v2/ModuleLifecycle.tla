@@ -25,7 +25,7 @@ ResultKinds == {"None", "Candidate", "Pass", "Fail"} \cup FailureKinds
 ControlStates == {"Run", "Pause", "Freeze", "Cancel"}
 ResumeStates == {
     "Ready", "Quiescing", "Snapshotting", "VerifyReady", "Verifying",
-    "VerifyQuiescing", "VerifySnapshotting", "RevisionReady"
+    "VerifyQuiescing", "VerifySnapshotting", "RevisionReady", "Triage"
 }
 ExecutionModes == {"Initial", "Revision"}
 
@@ -37,6 +37,9 @@ VARIABLES
     writerLease,
     candidateVersion,
     verifiedVersion,
+    corpusVersion,
+    candidateCorpusVersion,
+    coderCorpusVersion,
     receiptState,
     resultKind,
     desiredControl,
@@ -47,7 +50,8 @@ VARIABLES
 
 vars == <<
     nodeState, coderState, verifierState, activeRole, writerLease,
-    candidateVersion, verifiedVersion, receiptState, resultKind,
+    candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion,
+    coderCorpusVersion, receiptState, resultKind,
     desiredControl, pauseResume, triageResume, executionMode, managerUp
 >>
 
@@ -62,6 +66,7 @@ RetryTarget(state, mode) ==
       [] state = "Snapshotting" -> "Ready"
       [] state = "VerifyReady" -> "VerifyReady"
       [] state = "RevisionReady" -> "RevisionReady"
+      [] state = "Triage" -> "Triage"
       [] OTHER -> "Ready"
 
 Init ==
@@ -72,6 +77,9 @@ Init ==
     /\ writerLease = FALSE
     /\ candidateVersion = 0
     /\ verifiedVersion = 0
+    /\ corpusVersion = 0
+    /\ candidateCorpusVersion = 0
+    /\ coderCorpusVersion = 0
     /\ receiptState = "None"
     /\ resultKind = "None"
     /\ desiredControl = "Run"
@@ -86,6 +94,7 @@ StartCoder ==
     /\ nodeState \in {"Ready", "RevisionReady"}
     /\ activeRole = "None"
     /\ receiptState \in {"None", "Settled"}
+    /\ (nodeState = "RevisionReady" => coderCorpusVersion = corpusVersion)
     /\ nodeState' = "Executing"
     /\ coderState' = "Running"
     /\ verifierState' = verifierState
@@ -94,7 +103,7 @@ StartCoder ==
     /\ executionMode' = IF nodeState = "RevisionReady" THEN "Revision" ELSE "Initial"
     /\ receiptState' = "None"
     /\ resultKind' = "None"
-    /\ UNCHANGED <<candidateVersion, verifiedVersion, desiredControl, pauseResume, triageResume, managerUp>>
+    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, managerUp>>
 
 RecordCandidateReceipt ==
     /\ managerUp
@@ -110,7 +119,7 @@ RecordCandidateReceipt ==
     /\ writerLease' = FALSE
     /\ receiptState' = "Recorded"
     /\ resultKind' = "Candidate"
-    /\ UNCHANGED <<nodeState, verifierState, candidateVersion, verifiedVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<nodeState, verifierState, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 SettleCandidateReceipt ==
     /\ managerUp
@@ -121,7 +130,7 @@ SettleCandidateReceipt ==
     /\ resultKind = "Candidate"
     /\ nodeState' = "Quiescing"
     /\ receiptState' = "Settled"
-    /\ UNCHANGED <<coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 QuiesceCandidate ==
     /\ managerUp
@@ -130,7 +139,7 @@ QuiesceCandidate ==
     /\ receiptState = "Settled"
     /\ ~writerLease
     /\ nodeState' = "Snapshotting"
-    /\ UNCHANGED <<coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 SnapshotCandidate ==
     /\ managerUp
@@ -142,9 +151,10 @@ SnapshotCandidate ==
     /\ coderState' = "Suspended"
     /\ verifierState' = "Ready"
     /\ candidateVersion' = candidateVersion + 1
+    /\ candidateCorpusVersion' = coderCorpusVersion
     /\ receiptState' = "None"
     /\ resultKind' = "None"
-    /\ UNCHANGED <<activeRole, writerLease, verifiedVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<activeRole, writerLease, verifiedVersion, corpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 StartVerifier ==
     /\ managerUp
@@ -156,7 +166,7 @@ StartVerifier ==
     /\ nodeState' = "Verifying"
     /\ verifierState' = "Running"
     /\ activeRole' = "Verifier"
-    /\ UNCHANGED <<coderState, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<coderState, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 RecordVerifierResult(kind) ==
     /\ kind \in {"Pass", "Fail"}
@@ -166,12 +176,14 @@ RecordVerifierResult(kind) ==
     /\ verifierState = "Running"
     /\ activeRole = "Verifier"
     /\ receiptState = "None"
+    /\ corpusVersion < MaxCandidate
     /\ nodeState' = "VerifyQuiescing"
     /\ verifierState' = "AwaitingSettlement"
     /\ activeRole' = "None"
     /\ receiptState' = "Settled"
     /\ resultKind' = kind
-    /\ UNCHANGED <<coderState, writerLease, candidateVersion, verifiedVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ corpusVersion' = corpusVersion + 1
+    /\ UNCHANGED <<coderState, writerLease, candidateVersion, verifiedVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 QuiesceVerifier ==
     /\ managerUp
@@ -181,7 +193,7 @@ QuiesceVerifier ==
     /\ receiptState = "Settled"
     /\ resultKind \in {"Pass", "Fail"}
     /\ nodeState' = "VerifySnapshotting"
-    /\ UNCHANGED <<coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 SettleVerifierPass ==
     /\ managerUp
@@ -195,7 +207,8 @@ SettleVerifierPass ==
     /\ coderState' = "Done"
     /\ verifierState' = "Done"
     /\ verifiedVersion' = candidateVersion
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ candidateCorpusVersion' = corpusVersion
+    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, corpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 SettleVerifierFail ==
     /\ managerUp
@@ -207,7 +220,8 @@ SettleVerifierFail ==
     /\ nodeState' = "RevisionReady"
     /\ coderState' = "Ready"
     /\ verifierState' = "Done"
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ coderCorpusVersion' = corpusVersion
+    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 RecordFailure(kind) ==
     /\ kind \in FailureKinds
@@ -229,7 +243,7 @@ RecordFailure(kind) ==
     /\ verifierState' = IF activeRole = "Verifier" THEN "AwaitingSettlement" ELSE verifierState
     /\ activeRole' = "None"
     /\ writerLease' = FALSE
-    /\ UNCHANGED <<nodeState, candidateVersion, verifiedVersion, desiredControl, pauseResume, executionMode, managerUp>>
+    /\ UNCHANGED <<nodeState, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, executionMode, managerUp>>
 
 SettleFailure ==
     /\ managerUp
@@ -241,7 +255,7 @@ SettleFailure ==
     /\ receiptState' = "Settled"
     /\ coderState' = IF coderState = "AwaitingSettlement" THEN "Suspended" ELSE coderState
     /\ verifierState' = IF verifierState = "AwaitingSettlement" THEN "Suspended" ELSE verifierState
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 ResolveTriage ==
     /\ managerUp
@@ -254,14 +268,14 @@ ResolveTriage ==
     /\ verifierState' = IF triageResume = "VerifyReady" THEN "Ready" ELSE verifierState
     /\ receiptState' = "None"
     /\ resultKind' = "None"
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 RequestPause ==
     /\ desiredControl = "Run"
     /\ nodeState \notin TerminalStates \cup {"Paused", "Frozen"}
     /\ desiredControl' = "Pause"
     /\ pauseResume' = RetryTarget(nodeState, executionMode)
-    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, triageResume, executionMode, managerUp>>
 
 PauseNode ==
     /\ managerUp
@@ -273,7 +287,7 @@ PauseNode ==
     /\ verifierState' = IF verifierState \in {"Done", "Dormant"} THEN verifierState ELSE "Suspended"
     /\ activeRole' = "None"
     /\ writerLease' = FALSE
-    /\ UNCHANGED <<candidateVersion, verifiedVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 ResumeNode ==
     /\ managerUp
@@ -283,13 +297,13 @@ ResumeNode ==
     /\ desiredControl' = "Run"
     /\ coderState' = IF pauseResume \in {"Ready", "RevisionReady"} THEN "Ready" ELSE coderState
     /\ verifierState' = IF pauseResume = "VerifyReady" THEN "Ready" ELSE verifierState
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, pauseResume, triageResume, executionMode, managerUp>>
 
 RequestFreeze ==
     /\ desiredControl \in {"Run", "Pause"}
     /\ nodeState \notin TerminalStates \cup {"Frozen"}
     /\ desiredControl' = "Freeze"
-    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, pauseResume, triageResume, executionMode, managerUp>>
 
 FreezeNode ==
     /\ managerUp
@@ -301,7 +315,7 @@ FreezeNode ==
     /\ activeRole' = "None"
     /\ writerLease' = FALSE
     /\ receiptState' = IF receiptState = "Recorded" THEN "Settled" ELSE receiptState
-    /\ UNCHANGED <<candidateVersion, verifiedVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 ApplyReplan ==
     /\ managerUp
@@ -312,6 +326,9 @@ ApplyReplan ==
     /\ verifierState' = "Dormant"
     /\ candidateVersion' = 0
     /\ verifiedVersion' = 0
+    /\ corpusVersion' = 0
+    /\ candidateCorpusVersion' = 0
+    /\ coderCorpusVersion' = 0
     /\ receiptState' = "None"
     /\ resultKind' = "None"
     /\ desiredControl' = "Run"
@@ -322,7 +339,7 @@ RequestCancel ==
     /\ desiredControl # "Cancel"
     /\ nodeState \notin TerminalStates
     /\ desiredControl' = "Cancel"
-    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, pauseResume, triageResume, executionMode, managerUp>>
 
 CancelNode ==
     /\ managerUp
@@ -334,17 +351,17 @@ CancelNode ==
     /\ activeRole' = "None"
     /\ writerLease' = FALSE
     /\ receiptState' = IF receiptState = "Recorded" THEN "Settled" ELSE receiptState
-    /\ UNCHANGED <<candidateVersion, verifiedVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
 CrashManager ==
     /\ managerUp
     /\ managerUp' = FALSE
-    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode>>
+    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode>>
 
 RestartManager ==
     /\ ~managerUp
     /\ managerUp' = TRUE
-    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode>>
+    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode>>
 
 SettleRecordedResult ==
     \/ SettleCandidateReceipt
@@ -398,6 +415,9 @@ TypeOK ==
     /\ writerLease \in BOOLEAN
     /\ candidateVersion \in 0..MaxCandidate
     /\ verifiedVersion \in 0..MaxCandidate
+    /\ corpusVersion \in 0..MaxCandidate
+    /\ candidateCorpusVersion \in 0..MaxCandidate
+    /\ coderCorpusVersion \in 0..MaxCandidate
     /\ receiptState \in ReceiptStates
     /\ resultKind \in ResultKinds
     /\ desiredControl \in ControlStates
@@ -428,8 +448,31 @@ AcceptedWasVerified ==
     nodeState = "Accepted" =>
         /\ candidateVersion > 0
         /\ verifiedVersion = candidateVersion
+        /\ candidateCorpusVersion = corpusVersion
         /\ receiptState = "Settled"
         /\ resultKind = "Pass"
+
+CorpusVersionsOrdered ==
+    /\ candidateCorpusVersion <= corpusVersion
+    /\ coderCorpusVersion <= corpusVersion
+
+VerifierStartsFromCandidateCorpus ==
+    nodeState \in {"VerifyReady", "Verifying"} =>
+        candidateCorpusVersion = corpusVersion
+
+VerifierResultProducesCorpusDelta ==
+    nodeState \in {"VerifyQuiescing", "VerifySnapshotting"} /\
+        resultKind \in {"Pass", "Fail"} =>
+            corpusVersion = candidateCorpusVersion + 1
+
+FailedCorpusReachesRevisionCoder ==
+    nodeState = "RevisionReady" /\ resultKind = "Fail" =>
+        /\ coderCorpusVersion = corpusVersion
+        /\ candidateCorpusVersion < corpusVersion
+
+RevisionCoderReadsLatestCorpus ==
+    nodeState = "Executing" /\ executionMode = "Revision" =>
+        coderCorpusVersion = corpusVersion
 
 CandidateOwnsFreshVerifier ==
     nodeState = "VerifyReady" =>

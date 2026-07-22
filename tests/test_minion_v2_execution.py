@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ from pal.minion.v2.execution import (
     format_workspace_process_holders,
     terminate_process_group,
     workspace_process_holders,
+    _validate_manager_seeded_paths,
     _validate_skeleton_candidate_paths,
 )
 from pal.minion.v2.task_sources import TaskSourceBundleService
@@ -85,12 +87,31 @@ def _contract(unit_id: str, owned_area: str) -> dict:
 
 
 class MinionV2ExecutionTests(unittest.TestCase):
+    def test_manager_seeded_corpus_hash_is_checked_before_snapshot(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="pal_seeded_corpus_"))
+        self.addCleanup(shutil.rmtree, root, True)
+        test_file = root / "tests" / "router" / "test_router.py"
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("def test_route():\n    assert True\n", encoding="utf-8")
+        expected = hashlib.sha256(test_file.read_bytes()).hexdigest()
+
+        _validate_manager_seeded_paths(
+            root,
+            {"tests/router/test_router.py": expected},
+        )
+        test_file.write_text("def test_route():\n    assert False\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Coder modified"):
+            _validate_manager_seeded_paths(
+                root,
+                {"tests/router/test_router.py": expected},
+            )
+
     def test_contract_enforcement_modes_distinguish_frozen_and_guarded_files(self) -> None:
         policy = {
             "contract_paths": ["src/router.py"],
             "reference_only": [],
             "implementation_scopes": [{"kind": "file", "path": "src/router.py"}],
-            "test_scopes": [],
+            "verification_corpus": {"kind": "directory", "path": "tests/router"},
         }
         with self.assertRaisesRegex(ValueError, "frozen architecture contracts"):
             _validate_skeleton_candidate_paths(
@@ -102,10 +123,20 @@ class MinionV2ExecutionTests(unittest.TestCase):
             ["src/router.py"],
             {**policy, "contract_mode": "review_guarded"},
         )
+        with self.assertRaisesRegex(ValueError, "outside"):
+            _validate_skeleton_candidate_paths(
+                ["tests/router/test_router.py"],
+                {**policy, "contract_mode": "review_guarded"},
+            )
+        _validate_skeleton_candidate_paths(
+            ["tests/router/test_router.py"],
+            {**policy, "contract_mode": "review_guarded"},
+            manager_seeded_paths={"tests/router/test_router.py"},
+        )
 
         with self.assertRaisesRegex(ValueError, "outside"):
             _validate_skeleton_candidate_paths(
-                ["src/router.py"],
+                ["src/other.py"],
                 {
                     **policy,
                     "contract_mode": "review_guarded",
@@ -763,7 +794,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
                     "contract_paths": [],
                     "reference_only": [],
                     "implementation_scopes": [{"kind": "directory", "path": "src"}],
-                    "test_scopes": [],
+                    "verification_corpus": {"kind": "directory", "path": "tests/module"},
                 },
                 base_sha=current_head,
                 candidate_baseline_sha=baseline_sha,
@@ -891,7 +922,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             ),
             "outside write": (
                 lambda root: (root / "docs.txt").write_text("outside\n", encoding="utf-8"),
-                "outside its owned",
+                "outside its compiled module write scopes",
             ),
         }
         for index, (name, (mutate, error)) in enumerate(cases.items()):
@@ -957,7 +988,10 @@ class MinionV2ExecutionTests(unittest.TestCase):
                             "contract_paths": ["include/contract.h"],
                             "reference_only": ["reference/api.h"],
                             "implementation_scopes": [{"kind": "directory", "path": "src"}],
-                            "test_scopes": [{"kind": "directory", "path": "tests"}],
+                            "verification_corpus": {
+                                "kind": "directory",
+                                "path": "tests/module",
+                            },
                         },
                         base_sha=base_sha,
                         candidate_baseline_sha=base_sha,

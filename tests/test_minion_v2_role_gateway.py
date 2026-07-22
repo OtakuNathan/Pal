@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+import subprocess
 
 from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.service import MinionV2WorkflowService
@@ -16,12 +17,25 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal-v2-worker-gateway-"))
         self.service = MinionV2WorkflowService(self.runtime_root)
         self.gateway = RoleAssignmentGateway(self.service)
+        self.workspace = self.runtime_root / "workspace"
+        self.workspace.mkdir()
+        subprocess.run(
+            ["git", "init"],
+            cwd=self.workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        (self.workspace / "README.md").write_text("gateway\n", encoding="utf-8")
         self.input_ref = self.service.artifacts.put_json(
             {"module": "router", "contract": "route deterministically"},
             artifact_type="ModuleWorkViewArtifact",
         )
         self.prompt_ref = self.service.artifacts.put_json(
-            {"instruction": "implement router"},
+            {
+                "instruction": "implement router",
+                "workspace": {"repo_path": str(self.workspace)},
+            },
             artifact_type="RolePromptPackArtifact",
         )
         self.service.repository.ensure_role_session(
@@ -149,6 +163,30 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
     def test_gateway_has_a_closed_method_allowlist(self) -> None:
         with self.assertRaisesRegex(ValueError, "not allowed"):
             self.call("v2_workflow_status")
+
+    def test_git_read_delegates_to_real_git_within_the_assigned_workspace(self) -> None:
+        result = self.call(
+            "git_read",
+            cmd="status --short",
+            cwd=str(self.workspace),
+        )
+
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["stdout"].strip(), "?? README.md")
+        self.assertEqual(result["classification"]["operation_kind"], "read")
+
+    def test_git_read_rejects_mutations_unknown_commands_and_out_of_scope_cwd(self) -> None:
+        for command in ("restore -- README.md", "commit -am nope", "frobnicate"):
+            with self.subTest(command=command), self.assertRaisesRegex(
+                ValueError,
+                "only classified read-only Git commands",
+            ):
+                self.call("git_read", cmd=command, cwd=str(self.workspace))
+
+        outside = self.runtime_root / "outside"
+        outside.mkdir()
+        with self.assertRaisesRegex(ValueError, "outside the assigned repository"):
+            self.call("git_read", cmd="status --short", cwd=str(outside))
 
 if __name__ == "__main__":
     unittest.main()

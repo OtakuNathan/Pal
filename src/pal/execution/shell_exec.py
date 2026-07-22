@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pal.execution.contracts import CapabilityResult
+from pal.execution.tool_facade import ToolGuidance
 from pal.execution.tool_semantics import DIRECT_CONTROL
 from pal.shared import (
     OPERATION_NAMESPACE,
@@ -25,28 +26,29 @@ from pal.shared import (
 )
 
 
-SHELL_EXEC_DESCRIPTION = (
-    "Run shell; returns stdout, stderr, and exit status. "
-    "Use for tests, builds, scripts, process probes, and package commands. "
-    "Pal runtime, module, capability, minion state: use search_tools/read_tool/call_tool or the visible Pal tool before shell. "
-    "For bounded directory listings use `tree -a -L 3 --filelimit 200 --noreport <path>`; if tree is unavailable use `find <path> -maxdepth 3 -print | head -n 500`. "
-    "search for repository text search; read_file for reading text files; edit_file for precise in-place edits after reading; "
-    "write_file for creating or overwriting complete UTF-8 text files; delete_path for deleting files or directories; "
-    "git for git status, diff, log, show, and audited git restore/revert. "
-    "Do not use shell commands such as cat/head/tail for file inspection, grep/rg for repository search, sed/awk for edits, "
-    "tee/echo/printf redirection for writes, or rm/unlink/rmdir/git rm/find -delete for deletion when the matching capability is visible. "
-    "Piping command output through head/tail to shorten stdout or stderr is fine. "
-    "In minion workspaces, do not use shell for git add/commit or other checkpoint mutations; use the dedicated checkpoint commit capability instead."
+SHELL_EXEC_DESCRIPTION = "Run one shell command and return stdout, stderr, and exit status."
+
+SHELL_EXEC_GUIDANCE = ToolGuidance(
+    purpose=SHELL_EXEC_DESCRIPTION,
+    use_when=(
+        "Use for tests, builds, scripts, package commands, process probes, and bounded directory listings. "
+        "Piping command output through head or tail to shorten stdout or stderr is allowed."
+    ),
+    do_not_use_when=(
+        "Do not use for Pal runtime, module, capability, or Minion state when a Pal tool is available. "
+        "When the matching dedicated capability is visible, use search for repository text search, read_file for "
+        "file reads, edit_file for edits, write_file for writes, delete_path for deletion, and git for Git operations."
+    ),
+    failure_next_steps=(
+        "Inspect stdout, stderr, and exit status, correct the command or environment, and retry only when the "
+        "operation is safe to repeat. Follow any returned recovery affordance."
+    ),
 )
 
 SHELL_EXEC_CMD_DESCRIPTION = (
-    "Shell command to execute. Use only for command execution, tests, builds, scripts, process probes, and package commands. "
+    "Shell command to execute as one string. "
     "Use bounded `tree -a -L 3 --filelimit 200 --noreport` listings (or `find -maxdepth 3 -print | head -n 500` when tree is unavailable). "
-    "If visible, prefer search for text search, read_file for file reads, edit_file for edits, "
-    "write_file for writes, delete_path for deletion, and git for git status/diff/log/show. "
-    "Avoid cat/head/tail/grep/rg/sed/awk/tee/echo/printf redirection/rm/unlink/rmdir/git rm/find -delete for repo file operations when the matching capability is visible. "
-    "For Pal runtime/module/minion/capability state or actions, use built-in Pal tools before shell. "
-    "In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing; use the dedicated checkpoint commit capability instead."
+    "Pipelines and shell operators are accepted; use them only when they are part of the command being executed."
 )
 
 @dataclass(unsafe_hash=True)
@@ -293,6 +295,7 @@ class ShellExecCapabilityMixin:
         aliases=("run_shell",),
         InputModel=ExecutionShellExecShellExecCapabilityMixinShellInput,
         OutputModel=ExecutionShellExecShellExecCapabilityMixinShellOutput,
+        guidance=SHELL_EXEC_GUIDANCE,
         execution=DIRECT_CONTROL,
     )
     def shell(self, call: IntrospectionCall) -> IntrospectionResult:

@@ -34,6 +34,8 @@ from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_SKELETON_ARTIFACT,
     SKELETON_MODULE_CONTRACT_ARTIFACT,
+    compiled_module_write_scopes,
+    module_verification_corpus_path,
 )
 from pal.minion.v2.verification import candidate_reuse_fingerprint, repair_bill_semantic_view
 
@@ -557,7 +559,10 @@ class ExecutionCompiler:
                             "contract_mode": str(paths.get("contract_mode") or "review_guarded"),
                             "contract_paths": list(paths.get("contract_paths") or []),
                             "implementation_scopes": list(paths.get("implementation_scopes") or []),
-                            "test_scopes": list(paths.get("test_scopes") or []),
+                            "verification_corpus": {
+                                "kind": "directory",
+                                "path": module_verification_corpus_path(name),
+                            },
                             "reference_only": list(paths.get("reference_only") or []),
                         },
                         **(
@@ -596,7 +601,7 @@ class ExecutionCompiler:
                             "contract_mode": "review_guarded",
                             "contract_paths": [],
                             "implementation_scopes": [],
-                            "test_scopes": [],
+                            "verification_corpus": None,
                             "reference_only": [],
                         },
                         **dict(workspaces[name]),
@@ -1440,7 +1445,7 @@ class UnitWorkViewBuilder:
             "contract_mode": str(path_policy.get("contract_mode") or "review_guarded"),
             "contract_paths": list(path_policy.get("contract_paths") or []),
             "implementation_scopes": list(path_policy.get("implementation_scopes") or []),
-            "test_scopes": list(path_policy.get("test_scopes") or []),
+            "verification_corpus": dict(path_policy.get("verification_corpus") or {}),
             "reference_only": list(path_policy.get("reference_only") or []),
             "contract_dependencies": list(contract.get("contract_dependencies") or []),
             "dependency_outputs": semantic_dependency_outputs,
@@ -1525,6 +1530,7 @@ class CandidateSnapshotService:
         environment_fingerprint: str,
         parent_candidate_digest: str = "",
         repair_bill_ref: Mapping[str, Any] | None = None,
+        manager_seeded_path_hashes: Mapping[str, str] | None = None,
     ) -> tuple[ArtifactRef, str]:
         self.repository.assert_fencing_token(lease_resource_key, worker_id, fencing_token)
         if not self.worktree_locks.is_held(node_run_id):
@@ -1551,9 +1557,17 @@ class CandidateSnapshotService:
                 raise ValueError("candidate requires the fixed assembled Node baseline")
             changed_paths = git_changed_paths(worktree, candidate_baseline_sha)
             if path_policy:
-                _validate_skeleton_candidate_paths(changed_paths, path_policy)
+                _validate_skeleton_candidate_paths(
+                    changed_paths,
+                    path_policy,
+                    manager_seeded_paths=set(manager_seeded_path_hashes or {}),
+                )
             else:
                 _validate_reference_only_paths(changed_paths, reference_only_paths)
+            _validate_manager_seeded_paths(
+                worktree,
+                manager_seeded_path_hashes or {},
+            )
             if not changed_paths:
                 raise ValueError("candidate has no changes")
             candidate_key = hashlib.sha256(
@@ -1565,6 +1579,9 @@ class CandidateSnapshotService:
                         "parent_candidate_digest": parent_candidate_digest,
                         "workspace_fingerprint": before,
                         "unit_contract_hash": unit_contract_hash,
+                        "manager_seeded_path_hashes": dict(
+                            sorted((manager_seeded_path_hashes or {}).items())
+                        ),
                     },
                     sort_keys=True,
                 ).encode("utf-8")
@@ -1613,6 +1630,7 @@ class CandidateSnapshotService:
                 "environment_fingerprint": environment_fingerprint,
                 "workspace_fingerprint": before,
                 "changed_paths": changed_paths,
+                "manager_seeded_paths": sorted(manager_seeded_path_hashes or {}),
                 "candidate_key": candidate_key,
             }
             child_refs = ()
@@ -2163,19 +2181,33 @@ def _validate_reference_only_paths(changed_paths: list[str], reference_only_path
         raise ValueError(f"candidate modified reference-only paths: {reference_violations}")
 
 
-def _validate_skeleton_candidate_paths(changed_paths: list[str], policy: Mapping[str, Any]) -> None:
+def _validate_skeleton_candidate_paths(
+    changed_paths: list[str],
+    policy: Mapping[str, Any],
+    *,
+    manager_seeded_paths: set[str] | None = None,
+) -> None:
     contract_mode = str(policy.get("contract_mode") or "file_frozen")
     if contract_mode not in {"file_frozen", "review_guarded"}:
         raise ValueError(f"unknown contract enforcement mode: {contract_mode}")
     frozen = {str(item).replace(os.sep, "/") for item in list(policy.get("contract_paths") or [])}
     references = {str(item).replace(os.sep, "/") for item in list(policy.get("reference_only") or [])}
-    writable = [
-        dict(item or {})
-        for item in [
-            *list(policy.get("implementation_scopes") or []),
-            *list(policy.get("test_scopes") or []),
-        ]
-    ]
+    writable = list(compiled_module_write_scopes(policy))
+    manager_seeded = {
+        str(item).replace(os.sep, "/").strip("/")
+        for item in set(manager_seeded_paths or set())
+    }
+    corpus_scope = dict(policy.get("verification_corpus") or {})
+    invalid_seeded = sorted(
+        path
+        for path in manager_seeded
+        if not _path_scope_matches(path, corpus_scope)
+    )
+    if invalid_seeded:
+        raise ValueError(
+            "Manager-seeded paths are outside the module verification corpus: "
+            + ", ".join(invalid_seeded)
+        )
     frozen_violations = sorted(
         path
         for path in changed_paths
@@ -2183,27 +2215,46 @@ def _validate_skeleton_candidate_paths(changed_paths: list[str], policy: Mapping
     )
     if frozen_violations:
         raise ValueError("candidate modified frozen architecture contracts: " + ", ".join(frozen_violations))
-    implementation_scopes = [
-        dict(item or {}) for item in list(policy.get("implementation_scopes") or [])
-    ]
-    guarded_scope_violations = sorted(
-        path
-        for path in changed_paths
-        if contract_mode == "review_guarded"
-        and path.replace(os.sep, "/") in frozen
-        and not any(_path_scope_matches(path, scope) for scope in implementation_scopes)
-    )
-    if guarded_scope_violations:
-        raise ValueError(
-            "candidate modified review-guarded contracts outside implementation scope: "
-            + ", ".join(guarded_scope_violations)
-        )
     reference_violations = sorted(path for path in changed_paths if path.replace(os.sep, "/") in references)
     if reference_violations:
         raise ValueError("candidate modified reference-only paths: " + ", ".join(reference_violations))
-    outside = sorted(path for path in changed_paths if not any(_path_scope_matches(path, scope) for scope in writable))
+    outside = sorted(
+        path
+        for path in changed_paths
+        if path.replace(os.sep, "/").strip("/") not in manager_seeded
+        and not any(_path_scope_matches(path, scope) for scope in writable)
+    )
     if outside:
-        raise ValueError("candidate changed paths outside its owned implementation/test scopes: " + ", ".join(outside))
+        raise ValueError("candidate changed paths outside its compiled module write scopes: " + ", ".join(outside))
+
+
+def _validate_manager_seeded_paths(
+    worktree: Path,
+    expected_hashes: Mapping[str, str],
+) -> None:
+    root = worktree.resolve()
+    errors: list[str] = []
+    for raw_path, expected_hash in sorted(expected_hashes.items()):
+        path = str(raw_path).replace(os.sep, "/").strip("/")
+        target = (root / path).resolve()
+        if not target.is_relative_to(root):
+            errors.append(f"{path}: escapes the worktree")
+            continue
+        if str(expected_hash) == "deleted":
+            if target.exists() or target.is_symlink():
+                errors.append(f"{path}: restored after Manager deletion")
+            continue
+        if not target.is_file() or target.is_symlink():
+            errors.append(f"{path}: missing or non-file")
+            continue
+        actual_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        if actual_hash != str(expected_hash):
+            errors.append(f"{path}: content changed after Manager installation")
+    if errors:
+        raise ValueError(
+            "Coder modified Manager-seeded verification corpus files: "
+            + ", ".join(errors)
+        )
 
 
 def _path_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:

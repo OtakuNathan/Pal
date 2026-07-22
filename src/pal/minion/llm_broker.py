@@ -25,6 +25,7 @@ def llm_request_to_payload(request: CanonicalLLMRequest) -> dict[str, Any]:
     return {
         "messages": list(request.messages or []),
         "max_output_tokens": int(request.max_output_tokens or 0),
+        "thinking_budget_tokens": request.thinking_budget_tokens,
         "model_hint": request.model_hint,
         "temperature": request.temperature,
         "tools": list(request.tools or []),
@@ -36,6 +37,11 @@ def llm_request_from_payload(payload: dict[str, Any]) -> CanonicalLLMRequest:
     return CanonicalLLMRequest(
         messages=[dict(item) for item in list(payload.get("messages") or []) if isinstance(item, dict)],
         max_output_tokens=int(payload.get("max_output_tokens") or 0),
+        thinking_budget_tokens=(
+            int(payload["thinking_budget_tokens"])
+            if payload.get("thinking_budget_tokens") is not None
+            else None
+        ),
         model_hint=str(payload.get("model_hint") or "") or None,
         temperature=payload.get("temperature"),
         tools=[dict(item) for item in list(payload.get("tools") or []) if isinstance(item, dict)],

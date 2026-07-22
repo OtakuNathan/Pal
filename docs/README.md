@@ -53,7 +53,7 @@ Older design notes are historical references. These docs are the active baseline
 - `pal_introspection_contract.md`: self-observation, diagnostics, self-maintenance, and extensibility.
 - `pal_tasking_contract.md`: tasking, minions, checkpoints, ledgers, and workspace governance.
 - `pal_minion_v1.md`: implemented minion sidecar boundary, approval flow, tasking store, checkpoint cursor, and capability surface.
-- `pal_engineering_quality_gates.md`: design baseline for reviewer/verifier gates, LSP evidence, shell mutation auditing, and minion engineering-quality hardening.
+- `pal_engineering_quality_gates.md`: design baseline for reviewer/verifier gates, LSP evidence, sandbox enforcement, and minion engineering-quality hardening.
 - `pal_reviewer_gate_plan.md`: historical hardening plan for strict plan and checkpoint reviewer gates; use `pal_minion_v1.md#gate-loop` as the current implementation sync point.
 - `minion_repair_bill_replay.md`: planned repair-bill replay model for propagating downstream integration failures back through the module DAG.
 - `minion_layered_architect_planning.md`: planned layered architect flow that separates global architecture sketches, per-module detail fill, and implementation milestone planning.

@@ -36,6 +36,7 @@ class CanonicalLLMRequest:
     temperature: float | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    thinking_budget_tokens: int | None = None
 
 
 @dataclass(frozen=True)

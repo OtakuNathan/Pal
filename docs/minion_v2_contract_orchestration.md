@@ -89,18 +89,25 @@ architecture is a content-addressed manifest of semantic unit and cross-unit
 contracts. Internal IDs and hashes are Manager concerns and are absent from the
 LLM authoring surface.
 
-Architect tools accept complete module definitions, real end-to-end scenario
-definitions, an in-place user-question IO, and terminal submit. Each module
-contains its semantic name, kind, contract dependencies, contract enforcement
-mode and paths, writable implementation/test scopes, and reference-only paths.
+Manager pre-seeds one fixed-schema `architecture.yaml` control-plane Draft for
+each Architect invocation. Its `modules` and `scenarios` fields are dynamic maps
+keyed by stable semantic names, so initial design and revision use ordinary file
+editing rather than per-node mutation tools. A revision starts from the complete
+accepted YAML and preserves it across process retries. Architect receives only
+the in-place user-question IO and no-argument terminal submit in addition to
+ordinary workspace tools. Each module contains its kind, contract dependencies,
+contract enforcement mode and paths, writable implementation scopes, and
+reference-only paths.
+Manager derives one repository verification corpus at `tests/<module_name>/`
+for every implementation module; Architect does not declare or name it.
 Each scenario names the exact implementation-module combination, real product or
 build entrypoint, observable behavior, and environment it verifies.
 `file_frozen` is reserved for a physically separate protocol/interface/schema
 file that remains Coder-read-only. `review_guarded` is the default when public
 shape and implementation share a module-owned file; Manager then binds an
 Accepted-Skeleton-to-Candidate contract diff that Verifier must read before
-submitting. Cross-module overlap remains invalid in both modes, and test scopes
-can never own contract files. Software Architect writes contract-level declarations,
+submitting. Cross-module overlap remains invalid in both modes, and the derived
+verification corpus can never own contract or reference-only files. Software Architect writes contract-level declarations,
 concise adjacent semantic comments where useful, and minimal compile wiring in
 an isolated worktree. It may not write algorithms, functional implementations,
 milestones, test matrices, implementation checklists, or function-level
@@ -127,15 +134,22 @@ not a Manager schema rule.
 
 ## Schema-Bounded Authoring
 
-LLMs do not author canonical submission JSON. Architecture,
-candidate, verification, and standalone-review roles receive narrow semantic
-mutation or execution tools. The SWE Verifier writes executable tests and ends
+LLMs do not author canonical submission JSON. Software Architecture authors one
+Manager-preseeded YAML projection whose fixed schema is validated and compiled
+into the canonical immutable manifest only by `architecture_submit`. Candidate,
+verification, and standalone-review roles receive narrow semantic mutation or
+execution tools. The SWE Verifier writes executable tests and ends
 with one outcome tool carrying at most prose findings and semantic module
 names; it never maintains case/finding/evidence records. The Manager validates
 the live workspace, derives hidden identities and Git deltas, and materializes
 the canonical artifact before allowing the worker to exit.
 
 Authoring Drafts are durable, lease-fenced, versioned, and operation-idempotent.
+The Architecture YAML is an author-visible file projection, not an aggregate or
+workflow truth source; submit rechecks the active lease, fencing token, complete
+schema, semantic graph, revision scope, Git state, and snapshot stability before
+advancing the state machine. Duplicate YAML keys, aliases, custom tags, merges,
+unknown fields, and stale invocations are rejected.
 A replacement role invocation with the same immutable input fingerprint inherits only
 semantic definitions by default. Every family Verifier uses one semantic
 outcome and restarts from immutable task sources, candidate or artifact diff,
@@ -261,7 +275,8 @@ reference-only paths, verifies Git HEAD did not move, compares pre/post content
 fingerprints, creates the candidate commit, and publishes a candidate artifact.
 
 Module Verifier runs with product code read-only and write authority only over
-the module's declared test scopes. Scenario Verifier receives a read-only
+the Manager-derived `tests/<module_name>/` corpus. Coder sees that corpus
+read-only. Scenario Verifier receives a read-only
 Manager-assembled Candidate union and writes executable probes/tests only to a
 durable review-scratch Artifact. Both derive adversarial cases from contracts,
 lifecycle, state, ownership, invariants, and the diff, write real regression
@@ -276,9 +291,9 @@ REVIEWING -> REVIEW_QUIESCING -> REVIEW_SNAPSHOTTING -> verdict
 VERIFYING -> VERIFY_QUIESCING -> VERIFY_SNAPSHOTTING -> verdict
 ```
 
-On PASS, Manager promotes the verifier test delta into the accepted Candidate.
-On FAIL, Manager creates a semantic Repair Packet, installs the failing tests
-read-only in the module worktree, and gives Coder the original findings and
+On PASS, Manager promotes the verifier corpus delta into the accepted Candidate.
+On FAIL, Manager creates a semantic Repair Packet, installs the verifier corpus
+delta read-only in the next Coder worktree, and gives Coder the original findings and
 recorded regression commands. Coder repairs product code rather than translating
 or rewriting verifier-owned test schemas. Coder has no acceptance authority;
 verifier has no product implementation authority.

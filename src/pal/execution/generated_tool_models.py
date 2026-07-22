@@ -850,7 +850,7 @@ MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInputChanges = _stri
         'workspace_environment_policy': (dict[str, Any] | None, Field(None)),
         'completion_policy': (dict[str, Any] | None, Field(None)),
         'capability_policy': (dict[str, Any] | None, Field(None)),
-        'capability_description_overrides': (dict[str, str] | None, Field(None)),
+        'capability_guidance_overrides': (dict[str, dict[str, str]] | None, Field(None)),
         'output_policy': (dict[str, Any] | None, Field(None)),
         'metadata': (dict[str, Any] | None, Field(None)),
     },
@@ -1481,11 +1481,9 @@ WebSearchCapabilitiesWebSearchIntrospectionProviderSetConfigInput = _strict_mode
 MinionScopedExecutionOpSearchInput = _strict_model(
     'MinionScopedExecutionOpSearchInput',
     {
-        'query': (str, Field(...)),
-        'path': (str, Field('.')),
-        'root': (str, Field(None)),
-        'reference_name': (str, Field(None)),
-        'limit': (int, Field(50)),
+        'query': (str, Field(..., description='Exact text to search for.')),
+        'path': (str, Field(None, description='Optional sandbox-visible file or directory path. Defaults to the project workspace.')),
+        'limit': (int, Field(50, description='Maximum matches to return.', ge=1, le=500)),
     },
 )
 
@@ -1748,49 +1746,8 @@ MinionV2ContractBuilderOpMinionArchitectureReviewSubmitInput = _strict_model(
     },
 )
 
-MinionV2SkeletonBuilderOpMinionArchitectureModuleUpsertInput = _strict_model(
-    'MinionV2SkeletonBuilderOpMinionArchitectureModuleUpsertInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'module_kind': (Literal['implementation', 'contract_only'], Field(...)),
-        'contract_mode': (Literal['file_frozen', 'review_guarded'], Field(None)),
-        'contract_dependencies': (list[str], Field(...)),
-        'contract_paths': (list[str], Field(...)),
-        'implementation_files': (list[str], Field(None)),
-        'implementation_directories': (list[str], Field(None)),
-        'test_files': (list[str], Field(None)),
-        'test_directories': (list[str], Field(None)),
-        'reference_only': (list[str], Field(None)),
-    },
-)
-
-MinionV2SkeletonBuilderOpMinionArchitectureModuleRemoveInput = _strict_model(
-    'MinionV2SkeletonBuilderOpMinionArchitectureModuleRemoveInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-    },
-)
-
-MinionV2SkeletonBuilderOpMinionArchitectureScenarioUpsertInput = _strict_model(
-    'MinionV2SkeletonBuilderOpMinionArchitectureScenarioUpsertInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'modules': (list[str], Field(..., min_length=1)),
-        'entrypoint': (str, Field(..., min_length=1)),
-        'observable_behavior': (str, Field(..., min_length=1)),
-        'environment': (str, Field(..., min_length=1)),
-    },
-)
-
-MinionV2SkeletonBuilderOpMinionArchitectureScenarioRemoveInput = _strict_model(
-    'MinionV2SkeletonBuilderOpMinionArchitectureScenarioRemoveInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-    },
-)
-
-MinionV2SkeletonBuilderOpMinionArchitectureAskUserInput = _strict_model(
-    'MinionV2SkeletonBuilderOpMinionArchitectureAskUserInput',
+MinionV2SkeletonBuilderOpMinionAskQuestionInput = _strict_model(
+    'MinionV2SkeletonBuilderOpMinionAskQuestionInput',
     {
         'title': (str, Field(..., min_length=1)),
         'question': (str, Field(..., min_length=1)),
@@ -1961,50 +1918,5 @@ MinionV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput = _strict_model(
         'contract_section': (str, Field(None)),
         'invariants': (list[str], Field(None)),
         'probe_path': (str, Field(None)),
-    },
-)
-
-MinionWorkspaceFileToolsOpFileReadInput = _strict_model(
-    'MinionWorkspaceFileToolsOpFileReadInput',
-    {
-        'path': (str, Field(..., description='Root-relative file path, for example src/app.py.')),
-        'offset': (int, Field(None, description='1-based line number to start reading from. Defaults to 1.', ge=1)),
-        'limit': (int, Field(None, description='Maximum number of lines to return. Defaults to 2000.', ge=1)),
-        'root': (str, Field(None, description='Optional root selector. Omit or use project for the current project repo; use reference:<name> for a declared read-only truth-source reference.')),
-        'reference_name': (str, Field(None, description='Optional declared reference root name; equivalent to root=reference:<name>.')),
-    },
-)
-
-MinionWorkspaceFileToolsOpFileEditInput = _strict_model(
-    'MinionWorkspaceFileToolsOpFileEditInput',
-    {
-        'path': (str, Field(..., description='Repo-relative file path, for example src/app.py.')),
-        'old_string': (str, Field(..., description='Exact text to find and replace.')),
-        'new_string': (str, Field(..., description='Replacement text.')),
-        'replace_all': (bool, Field(False, description='Replace every exact occurrence. Leave false to require one unique match.')),
-    },
-)
-
-MinionWorkspaceFileToolsOpFileWriteInput = _strict_model(
-    'MinionWorkspaceFileToolsOpFileWriteInput',
-    {
-        'path': (str, Field(..., description='Repo-relative file path, for example tests/test_app.py.')),
-        'content': (str, Field(..., description='Complete UTF-8 text content for the file.')),
-    },
-)
-
-MinionWorkspaceFileToolsOpPathDeleteInput = _strict_model(
-    'MinionWorkspaceFileToolsOpPathDeleteInput',
-    {
-        'path': (str, Field(..., description='Repo-relative path to delete.')),
-        'expected_sha256': (str, Field(None, description='Optional current SHA-256 digest for regular files. If supplied, a prior read_file snapshot is not required.')),
-        'recursive': (bool, Field(False, description='Required for directory deletion. Regular file deletion does not require this.')),
-    },
-)
-
-MinionWorkspaceFileToolsOpFileStateInput = _strict_model(
-    'MinionWorkspaceFileToolsOpFileStateInput',
-    {
-        'path': (str, Field(..., description='Repo-relative file path, for example src/app.py.')),
     },
 )

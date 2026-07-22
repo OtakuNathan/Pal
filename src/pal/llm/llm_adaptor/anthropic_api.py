@@ -28,6 +28,7 @@ class AnthropicMessagesProvider(LLMProviderAdapter):
         draft.thinking = _think_level_to_anthropic_thinking(
             request.metadata.get("think_level"),
             request.max_output_tokens,
+            thinking_budget_tokens=request.thinking_budget_tokens,
         )
 
 
@@ -129,8 +130,17 @@ def chat_tools_to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str,
     return rendered
 
 
-def think_level_to_anthropic_thinking(value: Any, max_output_tokens: int | None) -> dict[str, Any] | None:
-    return _think_level_to_anthropic_thinking(value, max_output_tokens)
+def think_level_to_anthropic_thinking(
+    value: Any,
+    max_output_tokens: int | None,
+    *,
+    thinking_budget_tokens: int | None = None,
+) -> dict[str, Any] | None:
+    return _think_level_to_anthropic_thinking(
+        value,
+        max_output_tokens,
+        thinking_budget_tokens=thinking_budget_tokens,
+    )
 
 
 def _think_level_to_anthropic_effort(value: Any) -> str | None:
@@ -148,10 +158,28 @@ def _think_level_to_anthropic_effort(value: Any) -> str | None:
     return mapping.get(text, "medium" if text else None)
 
 
-def _think_level_to_anthropic_thinking(value: Any, max_output_tokens: int | None) -> dict[str, Any] | None:
+def _think_level_to_anthropic_thinking(
+    value: Any,
+    max_output_tokens: int | None,
+    *,
+    thinking_budget_tokens: int | None = None,
+) -> dict[str, Any] | None:
     effort = _think_level_to_anthropic_effort(value)
     if effort is None:
         return None
+    if thinking_budget_tokens is not None:
+        try:
+            explicit_budget = int(thinking_budget_tokens)
+        except (TypeError, ValueError):
+            explicit_budget = 0
+        if explicit_budget <= 0:
+            return None
+        explicit_budget = max(1024, explicit_budget)
+        if max_output_tokens is not None:
+            if max_output_tokens <= 1024:
+                return None
+            explicit_budget = min(explicit_budget, max_output_tokens - 1)
+        return {"type": "enabled", "budget_tokens": explicit_budget}
     budget_map = {"low": 1024, "medium": 8192, "high": 32768}
     budget = budget_map.get(effort, 8192)
     if max_output_tokens is not None and max_output_tokens <= 1024:

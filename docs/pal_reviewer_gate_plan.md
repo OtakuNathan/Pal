@@ -271,7 +271,7 @@ Checkpoint reviewer checks:
 - changed files match owned area and expected contracts
 - tests were run and are relevant
 - claimed API usage exists in source/docs/LSP/build evidence
-- no unexplained shell mutation exists
+- final changed paths stay within the role's bound scopes
 - checkpoint commit includes the right files and excludes generated noise/secrets
 - code quality risks are reported with file/line evidence
 
@@ -279,16 +279,15 @@ Reviewer pass should not mean "perfect"; it means "sufficient evidence for this 
 
 ## Shell Mutation Audit
 
-Do not implement a full shell parser.
+Historical note: this proposed audit was superseded by fail-closed bwrap path projection plus submit-time changed-path validation. Do not implement a full shell parser or revive `shell_mutation_violation`.
 
-Instead:
+Current enforcement is:
 
-- before shell execution, record workspace snapshot or git status
-- after shell execution, inspect mutation
-- if workspace changed without structured file edit/write/checkpoint evidence, record `shell_mutation_violation`
-- a checkpoint with unresolved violation cannot pass review
+- mount the workspace read-only except for the active role's explicit product implementation scopes or Manager-derived module verification corpus
+- keep immutable inputs, verifier overlays, and Git metadata read-only
+- validate the final diff and role-owned scopes before accepting a submission
 
-Start with Git-backed coder workspaces because they have clear diff/status semantics.
+Git-backed workspaces still provide the final diff/status evidence, but not a per-command security boundary.
 
 ## LSP Integration
 

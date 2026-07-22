@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -630,30 +629,6 @@ def repair_bill_semantic_view(
             )
             if key in raw
         }
-    test_files: list[dict[str, Any]] = []
-    test_ref = bill.get("test_artifact_ref")
-    if isinstance(test_ref, Mapping) and test_ref.get("sha256"):
-        try:
-            test_workspace = dict(artifacts.read_json(test_ref))
-        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-            test_workspace = {}
-        for item in list(test_workspace.get("files") or []):
-            entry = dict(item or {})
-            encoded = str(entry.get("content_base64") or "")
-            content = ""
-            binary = False
-            if encoded:
-                try:
-                    raw = base64.b64decode(encoded, validate=True)
-                    content = raw.decode("utf-8")
-                except (ValueError, UnicodeDecodeError):
-                    binary = True
-            test_files.append(
-                {
-                    "path": str(entry.get("path") or ""),
-                    **({"content": content} if not binary else {"binary": True}),
-                }
-            )
     return {
         "module_name": str(bill.get("module_name") or ""),
         "defect_kind": str(bill.get("defect_kind") or ""),
@@ -676,7 +651,6 @@ def repair_bill_semantic_view(
         "suggested_repair_boundary": [
             str(item) for item in list(bill.get("suggested_repair_boundary") or [])
         ],
-        "test_files": test_files,
         "regression_test_obligation": str(
             dict(bill.get("regression_test_obligation") or {}).get("instruction") or ""
         ),

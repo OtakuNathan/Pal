@@ -47,7 +47,7 @@ _PROFILE_PATCH_FIELDS = frozenset(
         "workspace_environment_policy",
         "completion_policy",
         "capability_policy",
-        "capability_description_overrides",
+        "capability_guidance_overrides",
         "output_policy",
         "metadata",
     }

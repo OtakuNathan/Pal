@@ -52,12 +52,107 @@ class GitToolTests(unittest.TestCase):
             "restore --pathspec-from-file paths.txt -- src/app.py",
             "git -C /tmp status",
             "status --short && rm -rf .",
+            "branch new-feature",
+            "branch -f new-feature HEAD",
+            "diff --output=/tmp/pal-git-output HEAD",
+            "diff --no-index /etc/passwd /etc/hosts",
+            "blame --contents /etc/passwd HEAD -- README.md",
+            "grep --open-files-in-pager=cat needle",
         ]
         for command in blocked:
             with self.subTest(command=command):
                 policy = classify_git_command(command)
                 self.assertFalse(policy.allowed)
                 self.assertFalse(policy.is_mutation)
+                self.assertTrue(policy.reason)
+
+        for command in (
+            "branch",
+            "branch --show-current",
+            "branch --list feature/*",
+            "branch --contains HEAD",
+            "branch --merged main",
+            "branch --points-at HEAD",
+        ):
+            with self.subTest(command=command):
+                policy = classify_git_command(command)
+                self.assertEqual(policy.operation_kind, "read")
+
+    def test_classifies_comprehensive_local_read_only_git_surface(self) -> None:
+        commands = (
+            "annotate HEAD -- README.md",
+            "archive --format=tar HEAD",
+            "cat-file -t HEAD",
+            "check-attr diff -- README.md",
+            "check-ignore -q ignored.txt",
+            "check-mailmap user@example.com",
+            "check-ref-format refs/heads/main",
+            "cherry HEAD upstream/main",
+            "count-objects -v",
+            "describe --always HEAD",
+            "diff-files --name-only",
+            "diff-index --name-only HEAD",
+            "diff-tree --name-only HEAD",
+            "for-each-ref --format=%(refname) refs/heads",
+            "fsck --no-progress",
+            "ls-tree -r HEAD",
+            "merge-base HEAD main",
+            "name-rev HEAD",
+            "patch-id --stable",
+            "range-diff main...HEAD",
+            "rev-list --count HEAD",
+            "shortlog -s HEAD",
+            "show-ref --heads",
+            "show-branch --all",
+            "verify-pack objects/pack/example.idx",
+            "verify-commit HEAD",
+            "verify-tag release-1",
+            "var GIT_DEFAULT_BRANCH",
+            "version",
+            "whatchanged -1 HEAD",
+            "tag --list release-*",
+            "stash list",
+            "stash show --stat stash@{0}",
+            "reflog show HEAD",
+            "worktree list --porcelain",
+            "notes list",
+            "sparse-checkout list",
+            "submodule status",
+            "remote -v",
+            "remote get-url --all origin",
+            "remote show -n origin",
+            "symbolic-ref --short HEAD",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                policy = classify_git_command(command)
+                self.assertEqual(policy.operation_kind, "read", policy.reason)
+
+    def test_blocks_mutating_modes_on_mixed_git_subcommands(self) -> None:
+        commands = (
+            "archive --output=/tmp/archive.tar HEAD",
+            "archive -o /tmp/archive.tar HEAD",
+            "archive --add-file=/etc/passwd HEAD",
+            "archive --remote=/tmp/other.git HEAD",
+            "cat-file --filters HEAD:README.md",
+            "fsck --lost-found",
+            "tag release-1",
+            "tag --delete release-1",
+            "stash push -m checkpoint",
+            "stash drop stash@{0}",
+            "reflog expire --all",
+            "worktree add ../other",
+            "notes add -m note HEAD",
+            "sparse-checkout set src",
+            "submodule update --init",
+            "remote add origin https://example.invalid/repo.git",
+            "remote show origin",
+            "symbolic-ref HEAD refs/heads/other",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                policy = classify_git_command(command)
+                self.assertEqual(policy.operation_kind, "blocked")
                 self.assertTrue(policy.reason)
 
     def test_read_only_status_returns_llm_friendly_output(self) -> None:

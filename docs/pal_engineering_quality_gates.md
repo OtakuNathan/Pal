@@ -181,27 +181,27 @@ V1 can use a simple freshness strategy: before every request, compare file hash 
 
 Do not attempt to perfectly parse shell. Shell is too expressive for reliable static safety analysis.
 
-The target rule is:
+The runtime rule is:
 
 ```text
 Shell can run commands, tests, builds, and diagnostics.
-Shell must not become an untracked file editor.
+The bwrap projection, not command parsing, limits readable and writable paths.
 ```
 
-Pal should prefer runtime auditing over complex shell parsing:
+Pal separates OS authority from workflow correctness:
 
-- Before shell execution, record the relevant workspace state.
-- After shell execution, inspect workspace mutation.
-- If files changed without corresponding file-edit/file-write/checkpoint evidence, record a violation.
-- Do not allow an unauthorized shell mutation to close a milestone.
+- The workspace is read-only by default. Coder receives only declared product implementation scopes writable; Module Verifier receives only its Manager-derived `tests/<module_name>/` corpus writable.
+- Immutable inputs, verifier overlays, and Git metadata remain read-only.
+- Shell and structured file tools see the same sandbox paths; there is no command-name trap or second path namespace.
+- Submit handlers validate the final changed-path set, candidate ownership, and required evidence before a state transition.
 
 This is closer to the Codex-style boundary:
 
 ```text
-Read through structured tools.
-Write through structured edit tools.
-Run through shell.
-Verify through tests, diff, reviewer, and ledger.
+Use structured tools when their semantics reduce mistakes.
+Use shell when it is the natural execution interface.
+Constrain both through bwrap.
+Verify final state through tests, diff, reviewer, and ledger.
 ```
 
 It is different from trying to prove every shell command is read-only before running it.

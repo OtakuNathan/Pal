@@ -58,7 +58,20 @@ _PROFILE_OVERRIDE_CHANGES_SCHEMA = {
         "workspace_environment_policy": {"type": ["object", "null"]},
         "completion_policy": {"type": ["object", "null"]},
         "capability_policy": {"type": ["object", "null"]},
-        "capability_description_overrides": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
+        "capability_guidance_overrides": {
+            "type": ["object", "null"],
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "purpose": {"type": "string"},
+                    "use_when": {"type": "string"},
+                    "do_not_use_when": {"type": "string"},
+                    "failure_next_steps": {"type": "string"},
+                },
+                "additionalProperties": False,
+                "minProperties": 1,
+            },
+        },
         "output_policy": {"type": ["object", "null"]},
         "metadata": {"type": ["object", "null"]},
     },
@@ -426,9 +439,14 @@ class MinionV2PublicProvider:
             workflow_id = self.service.resolve_workflow_selector(
                 selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
             )
-            payload = self.service.workflow_status(
-                workflow_id,
-                view=str(call.args.get("view") or "status"),
+            view = str(call.args.get("view") or "status")
+            payload = (
+                self.manager_request(
+                    "v2_workflow_status",
+                    {"workflow_id": workflow_id, "view": view},
+                )
+                if self.manager_request is not None
+                else self.service.workflow_status(workflow_id, view=view)
             )
             return _public_result("minion workflow status", payload)
         except ValueError as exc:

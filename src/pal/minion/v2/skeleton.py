@@ -101,6 +101,35 @@ class ValidationIssue:
         }
 
 
+class ArchitectureValidationError(ValueError):
+    """Machine-readable rejection raised for an invalid architecture draft."""
+
+    def __init__(self, issues: Sequence[ValidationIssue]) -> None:
+        self.issues = tuple(issues)
+        messages = list(
+            dict.fromkeys(
+                str(item.message).strip()
+                for item in self.issues
+                if str(item.message).strip()
+            )
+        )
+        if len(messages) == 1:
+            message = messages[0]
+        else:
+            message = (
+                f"Architecture submission has {len(messages)} consistent errors:\n"
+                + "\n".join(f"- {item}" for item in messages)
+            )
+        super().__init__(message)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "error": str(self),
+            "error_type": self.__class__.__name__,
+            "errors": [item.to_dict() for item in self.issues],
+        }
+
+
 @dataclass(frozen=True)
 class ArchitectureValidationResult:
     normalized_submission: Mapping[str, Any]
@@ -115,7 +144,8 @@ class ArchitectureValidationResult:
         return tuple(item for item in self.issues if item.severity == "warning")
 
     def raise_for_errors(self) -> None:
-        _raise_architecture_errors(item.message for item in self.errors)
+        if self.errors:
+            raise ArchitectureValidationError(self.errors)
 
     def report_dict(self) -> dict[str, Any]:
         return {
@@ -139,6 +169,41 @@ class PathScope:
         if self.kind == "file":
             return normalized == self.path
         return normalized == self.path or normalized.startswith(self.path + "/")
+
+
+def compiled_module_write_scopes(path_policy: Mapping[str, Any]) -> tuple[dict[str, str], ...]:
+    """Compile the single path policy into the module Coder's OS write scopes."""
+
+    policy = dict(path_policy or {})
+    scopes: list[dict[str, str]] = []
+    if str(policy.get("contract_mode") or "review_guarded") == "review_guarded":
+        scopes.extend(
+            {"kind": "file", "path": _normalized_repo_path(str(path))}
+            for path in list(policy.get("contract_paths") or [])
+        )
+    scopes.extend(
+        {
+            "kind": str(dict(raw or {}).get("kind") or ""),
+            "path": _normalized_repo_path(str(dict(raw or {}).get("path") or "")),
+        }
+        for raw in list(policy.get("implementation_scopes") or [])
+    )
+    return tuple(
+        {"kind": kind, "path": path}
+        for kind, path in dict.fromkeys((item["kind"], item["path"]) for item in scopes)
+        if kind and path
+    )
+
+
+def module_verification_corpus_path(module_name: str) -> str:
+    """Return the Manager-owned repository path for one module's test corpus."""
+
+    normalized_name = str(module_name or "").strip()
+    if MODULE_NAME_PATTERN.fullmatch(normalized_name) is None:
+        raise ValueError(
+            f"invalid semantic module name: {normalized_name or '<empty>'}"
+        )
+    return f"tests/{normalized_name}"
 
 
 @dataclass(frozen=True)
@@ -332,6 +397,7 @@ def analyze_architecture_submission(
             ),
         )
     modules: dict[str, dict[str, Any]] = {}
+    invalid_module_names: set[str] = set()
     for raw_name, raw_module in raw_modules.items():
         name = str(raw_name or "").strip()
         if MODULE_NAME_PATTERN.fullmatch(name) is None:
@@ -339,14 +405,16 @@ def analyze_architecture_submission(
             continue
         if not isinstance(raw_module, Mapping):
             errors.append(f"module {name} must be an object")
+            invalid_module_names.add(name)
             continue
         try:
-            modules[name] = _normalize_architecture_module(
+            modules[name] = validate_architecture_module_definition(
                 name,
                 dict(raw_module),
             )
         except ValueError as exc:
             errors.append(exc)
+            invalid_module_names.add(name)
     declared_module_names = {
         str(name or "").strip()
         for name in raw_modules
@@ -362,12 +430,24 @@ def analyze_architecture_submission(
     )
     if unknown:
         errors.append("Architecture DAG references unknown modules: " + ", ".join(unknown))
-    else:
-        cycle = _cycle_nodes(
-            {name: module["contract_dependencies"] for name, module in modules.items()}
+    invalid_dependencies = sorted(
+        {
+            dependency
+            for module in modules.values()
+            for dependency in module["contract_dependencies"]
+            if dependency in invalid_module_names
+        }
+    )
+    if invalid_dependencies:
+        errors.append(
+            "Architecture DAG references modules whose definitions are invalid: "
+            + ", ".join(invalid_dependencies)
         )
-        if cycle:
-            errors.append("Architecture DAG contains a cycle: " + ", ".join(cycle))
+    if not unknown and not invalid_dependencies:
+        try:
+            _validate_construction_graph(modules)
+        except ValueError as exc:
+            errors.append(exc)
     raw_scenarios = submission.get("scenarios")
     if not isinstance(raw_scenarios, Mapping) or not raw_scenarios:
         errors.append("Architecture submission requires at least one end-to-end scenario")
@@ -421,7 +501,6 @@ def analyze_architecture_submission(
                 )
         scenarios[name] = scenario
     validators = (
-        lambda: _validate_construction_graph(modules),
         lambda: _validate_path_policy(modules),
         lambda: _validate_declared_paths(modules, Path(workspace_root)),
     )
@@ -459,17 +538,28 @@ def validate_architecture_submission(
     return dict(result.normalized_submission)
 
 
-def _normalize_architecture_module(
+def validate_architecture_module_definition(
     name: str,
     module: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """Validate and normalize one complete semantic module definition."""
+
+    normalized_name = str(name or "").strip()
+    if MODULE_NAME_PATTERN.fullmatch(normalized_name) is None:
+        raise ValueError(
+            f"invalid semantic module name: {normalized_name or '<empty>'}"
+        )
     contract_dependencies = _unique_text(module.get("contract_dependencies"))
     module_kind = str(module.get("module_kind") or "").strip()
     if module_kind not in MODULE_KINDS:
         raise ValueError(
-            f"module {name} module_kind must be implementation or contract_only"
+            f"module {normalized_name} module_kind must be implementation or contract_only"
         )
-    paths = _normalize_module_paths(name, module.get("paths"), module_kind=module_kind)
+    paths = _normalize_module_paths(
+        normalized_name,
+        module.get("paths"),
+        module_kind=module_kind,
+    )
     return {
         "module_kind": module_kind,
         "contract_dependencies": contract_dependencies,
@@ -575,10 +665,11 @@ def compile_skeleton_markdown(
             f"`{dict(item).get('path', '')}`"
             for item in list(paths.get("implementation_scopes") or [])
         ) or "none"
-        test_scope = ", ".join(
-            f"`{dict(item).get('path', '')}`"
-            for item in list(paths.get("test_scopes") or [])
-        ) or "none"
+        verification_corpus = (
+            f"`{module_verification_corpus_path(str(name))}/`"
+            if str(module.get("module_kind") or "") == "implementation"
+            else "none"
+        )
         lines.extend(
             [
                 f"### {name}",
@@ -588,7 +679,7 @@ def compile_skeleton_markdown(
                 f"- Contract enforcement: {paths.get('contract_mode', 'review_guarded')}",
                 f"- Contracts: {', '.join(f'`{item}`' for item in list(paths.get('contract_paths') or []))}",
                 f"- Implementation scope: {implementation_scope}",
-                f"- Test scope: {test_scope}",
+                f"- Verification corpus: {verification_corpus}",
                 f"- Reference only: {', '.join(f'`{item}`' for item in list(paths.get('reference_only') or [])) or 'none'}",
             ]
         )
@@ -690,7 +781,6 @@ def _module_declared_paths(module: Mapping[str, Any]) -> set[str]:
         str(dict(item or {}).get("path") or "")
         for item in [
             *list(paths.get("implementation_scopes") or []),
-            *list(paths.get("test_scopes") or []),
         ]
         if str(dict(item or {}).get("path") or "")
     )
@@ -797,7 +887,6 @@ def _module_declares_writable_skeleton_path(module: Mapping[str, Any], path: str
         PathScope(str(item.get("kind") or ""), str(item.get("path") or "")).matches(path)
         for item in [
             *list(paths.get("implementation_scopes") or []),
-            *list(paths.get("test_scopes") or []),
         ]
     )
 
@@ -812,7 +901,6 @@ def _module_declares_path(module: Mapping[str, Any], path: str) -> bool:
         PathScope(str(item.get("kind") or ""), str(item.get("path") or "")).matches(path)
         for item in [
             *list(paths.get("implementation_scopes") or []),
-            *list(paths.get("test_scopes") or []),
         ]
     )
 
@@ -945,6 +1033,7 @@ class GitBackedSkeletonService:
         validation.raise_for_errors()
         normalized = dict(validation.normalized_submission)
         changed_paths = _git_changed_paths(architecture_workspace.worktree, architecture_workspace.base_sha)
+        architect_authored_paths = changed_paths
         if revision_base_artifact is not None:
             if revision_scope is None:
                 raise ValueError("architecture revision snapshot requires an explicit semantic scope")
@@ -963,7 +1052,8 @@ class GitBackedSkeletonService:
                 changed_paths=scope_changed_paths,
                 scope=revision_scope,
             )
-        validate_architecture_changed_paths(normalized, changed_paths)
+            architect_authored_paths = scope_changed_paths
+        validate_architecture_changed_paths(normalized, architect_authored_paths)
         _git(architecture_workspace.worktree, "add", "-A")
         submission_hash = _stable_hash(normalized)
         commit_key = hashlib.sha256(
@@ -1299,23 +1389,25 @@ def _normalize_module_paths(
     implementation = _normalize_path_scopes(
         paths.get("implementation_scopes"),
         field=f"{module_name}.implementation_scopes",
-        allow_empty=module_kind == "contract_only",
+        allow_empty=(
+            module_kind == "contract_only"
+            or (contract_mode == "review_guarded" and bool(contracts))
+        ),
     )
-    tests = _normalize_path_scopes(
-        paths.get("test_scopes"),
-        field=f"{module_name}.test_scopes",
-        allow_empty=module_kind == "contract_only",
-    )
-    if module_kind == "contract_only" and (implementation or tests):
+    if "test_scopes" in paths:
         raise ValueError(
-            f"contract_only module {module_name} cannot declare implementation_scopes or test_scopes"
+            f"module {module_name} cannot declare paths.test_scopes; "
+            "the Manager owns tests/<module_name>/"
+        )
+    if module_kind == "contract_only" and implementation:
+        raise ValueError(
+            f"contract_only module {module_name} cannot declare implementation_scopes"
         )
     references = [_normalized_repo_path(str(item)) for item in list(paths.get("reference_only") or [])]
     return {
         "contract_mode": contract_mode,
         "contract_paths": list(dict.fromkeys(contracts)),
         "implementation_scopes": [item.to_dict() for item in implementation],
-        "test_scopes": [item.to_dict() for item in tests],
         "reference_only": list(dict.fromkeys(references)),
     }
 
@@ -1336,8 +1428,10 @@ def _normalize_path_scopes(
         path = _normalized_repo_path(str(raw.get("path") or ""))
         if kind not in PATH_SCOPE_KINDS:
             raise ValueError(f"{field} path scope kind must be file or directory")
-        if not path or (kind != "file" and "/" not in path):
-            raise ValueError(f"{field} must use a file or narrow subdirectory/prefix, never the repository root")
+        if not path:
+            raise ValueError(
+                f"{field} must use a file or directory below the repository root"
+            )
         result.append(PathScope(kind, path.rstrip("/")))
     if not result and not allow_empty:
         raise ValueError(f"{field} requires at least one narrow writable path scope")
@@ -1360,27 +1454,38 @@ def _validate_path_policy(modules: Mapping[str, Mapping[str, Any]]) -> None:
                 errors.append(f"contract path {path} is owned by both {previous[0]} and {name}")
         for value in paths["implementation_scopes"]:
             owners.append((name, "implementation", PathScope(str(value["kind"]), str(value["path"]))))
-        for value in paths["test_scopes"]:
-            owners.append((name, "test", PathScope(str(value["kind"]), str(value["path"]))))
+        if str(module.get("module_kind") or "") == "implementation":
+            owners.append(
+                (
+                    name,
+                    "verification_corpus",
+                    PathScope("directory", module_verification_corpus_path(name)),
+                )
+            )
         references.extend((name, path) for path in paths["reference_only"])
     for index, (owner, scope_kind, scope) in enumerate(owners):
-        for other_owner, _other_scope_kind, other_scope in owners[index + 1 :]:
-            if owner != other_owner and _path_scopes_overlap(scope, other_scope):
+        for other_owner, other_scope_kind, other_scope in owners[index + 1 :]:
+            if _path_scopes_overlap(scope, other_scope) and (
+                owner != other_owner
+                or "verification_corpus" in {scope_kind, other_scope_kind}
+            ):
                 errors.append(
-                    f"writable path scopes overlap between {owner} and {other_owner}: {scope.path}, {other_scope.path}"
+                    "writable path scopes overlap between "
+                    f"{owner} ({scope_kind}) and {other_owner} ({other_scope_kind}): "
+                    f"{scope.path}, {other_scope.path}"
                 )
         for contract_path, (contract_owner, contract_mode) in contracts.items():
             if scope.matches(contract_path):
-                if (
-                    owner != contract_owner
-                    or contract_mode == "file_frozen"
-                    or scope_kind != "implementation"
-                ):
+                if owner != contract_owner or scope_kind != "implementation":
                     errors.append(
-                        f"writable scope {scope.path} for {owner} overlaps {contract_mode} contract {contract_path} owned by {contract_owner}"
+                        f"writable {scope_kind} scope {scope.path} for {owner} overlaps "
+                        f"{contract_mode} contract {contract_path} owned by {contract_owner}"
                     )
         for reference_owner, reference_path in references:
-            if scope.matches(reference_path):
+            if scope.matches(reference_path) or _repo_paths_overlap(
+                scope.path,
+                reference_path,
+            ):
                 errors.append(
                     f"writable scope {scope.path} for {owner} overlaps reference-only path {reference_path} from {reference_owner}"
                 )
@@ -1394,6 +1499,19 @@ def _validate_construction_graph(
         name: set(str(item) for item in list(module.get("contract_dependencies") or []))
         for name, module in modules.items()
     }
+    unknown = sorted(
+        {
+            dependency
+            for dependencies in contract_dependencies.values()
+            for dependency in dependencies
+            if dependency not in contract_dependencies
+        }
+    )
+    if unknown:
+        raise ValueError(
+            "Architecture contract dependency graph references unavailable modules: "
+            + ", ".join(unknown)
+        )
     cycle = _cycle_nodes(
         {name: sorted(dependencies) for name, dependencies in contract_dependencies.items()}
     )
@@ -1415,13 +1533,6 @@ def _validate_declared_paths(
         for contract_path in list(paths["contract_paths"]):
             if not (workspace_root / contract_path).is_file():
                 errors.append(f"module {name} contract path does not exist: {contract_path}")
-        for raw_scope in [*list(paths["implementation_scopes"]), *list(paths["test_scopes"])]:
-            scope = PathScope(str(raw_scope["kind"]), str(raw_scope["path"]))
-            declared = workspace_root / scope.path
-            if scope.kind == "file" and not declared.is_file():
-                errors.append(f"module {name} writable file does not exist in the skeleton: {scope.path}")
-            if scope.kind == "directory" and not declared.is_dir():
-                errors.append(f"module {name} writable directory does not exist in the skeleton: {scope.path}")
         for reference in list(paths["reference_only"]):
             if not (workspace_root / reference).exists():
                 errors.append(f"module {name} reference-only path does not exist: {reference}")
@@ -1437,7 +1548,14 @@ def _compiled_path_policy(submission: Mapping[str, Any]) -> dict[str, Any]:
             "contract_mode": str(paths.get("contract_mode") or "review_guarded"),
             "contract_paths": list(paths.get("contract_paths") or []),
             "implementation_scopes": list(paths.get("implementation_scopes") or []),
-            "test_scopes": list(paths.get("test_scopes") or []),
+            "verification_corpus": (
+                {
+                    "kind": "directory",
+                    "path": module_verification_corpus_path(str(name)),
+                }
+                if str(dict(raw_module).get("module_kind") or "") == "implementation"
+                else None
+            ),
             "reference_only": list(paths.get("reference_only") or []),
         }
     return {"modules": modules}
@@ -1455,7 +1573,7 @@ def validate_architecture_changed_paths(
     ]
     if undeclared:
         raise ValueError(
-            "Architect changed paths outside declared contract/implementation/test skeleton scopes: "
+            "Architect changed paths outside declared contract skeleton paths: "
             + ", ".join(undeclared)
         )
     return normalized_paths
@@ -1466,12 +1584,6 @@ def _architect_path_is_declared(path: str, submission: Mapping[str, Any]) -> boo
         paths = dict(dict(module).get("paths") or {})
         if path in set(str(item) for item in list(paths.get("contract_paths") or [])):
             return True
-        for raw_scope in [
-            *list(paths.get("implementation_scopes") or []),
-            *list(paths.get("test_scopes") or []),
-        ]:
-            if PathScope(str(raw_scope["kind"]), str(raw_scope["path"])).matches(path):
-                return True
     return False
 
 
@@ -1482,6 +1594,16 @@ def _path_scopes_overlap(left: PathScope, right: PathScope) -> bool:
     if right.kind == "directory":
         probes.add(right.path + "/__pal_probe__")
     return any(left.matches(path) and right.matches(path) for path in probes)
+
+
+def _repo_paths_overlap(left: str, right: str) -> bool:
+    left_path = _normalized_repo_path(left).rstrip("/")
+    right_path = _normalized_repo_path(right).rstrip("/")
+    return (
+        left_path == right_path
+        or left_path.startswith(right_path + "/")
+        or right_path.startswith(left_path + "/")
+    )
 
 
 def _cycle_nodes(depends_on: Mapping[str, Sequence[str]]) -> tuple[str, ...]:
