@@ -12,6 +12,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import PropertyMock, patch
 
+from pal.execution import ToolCallBudget
+from pal.execution.tool_facade import PagedResult
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2 import (
     ActionEnvelope,
@@ -47,7 +49,10 @@ from pal.minion.v2.verification_builder import (
     effective_verification_policy,
     verification_builder_tool_result,
 )
-from pal.minion.v2.candidate_builder import candidate_builder_tool_result
+from pal.minion.v2.candidate_builder import (
+    CANDIDATE_BUILDER_TOOL_SPECS,
+    candidate_builder_tool_result,
+)
 from pal.minion.v2.swe_verification import (
     _changed_paths,
     compile_swe_verification_tool_contract,
@@ -1369,6 +1374,8 @@ class MinionV2VerificationTests(unittest.TestCase):
             result.structured["case"]["environment"]["environment_fingerprint"],
             "prepared-lsp-environment",
         )
+        self.assertEqual(result.structured["execution"], self.adapter.lsp_structured)
+        self.assertIn("header file not found", result.llm_text)
         delegated = self.adapter.calls[-1]
         self.assertEqual(delegated.args["workspace_root"], str(self.runtime_root))
         self.assertNotIn("primary_language", delegated.args)
@@ -1650,6 +1657,116 @@ class MinionV2VerificationTests(unittest.TestCase):
         report = json.loads((stage_dir / "coder_report.json").read_text(encoding="utf-8"))
         self.assertEqual(report["affected_module"], "font_backend")
         self.assertEqual(report["files_changed"], [])
+
+    def test_developer_compile_check_projects_complete_failure_output(self) -> None:
+        repo = self.runtime_root / "compile-output-repo"
+        repo.mkdir()
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "compile-output-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "compile-output-stage"),
+            },
+            role="implementation",
+        )
+
+        result = self._candidate_call(
+            workspace,
+            "op_minion_developer_compile_check",
+            {
+                "name": "compile failure",
+                "command": (
+                    "printf 'compiler stdout\\n'; "
+                    "printf 'error: missing frame header\\nnote: required here\\n' >&2; "
+                    "exit 7"
+                ),
+            },
+        )
+
+        self.assertTrue(result.ok, result.llm_text)
+        execution = dict(result.structured["execution"])
+        self.assertEqual(execution["status"], "FAIL")
+        self.assertEqual(execution["exit_code"], 7)
+        self.assertEqual(execution["stdout"], "compiler stdout\n")
+        self.assertEqual(
+            execution["stderr"],
+            "error: missing frame header\nnote: required here\n",
+        )
+        self.assertIn("compiler stdout", result.llm_text)
+        self.assertIn("error: missing frame header", result.llm_text)
+        self.assertIn("note: required here", result.llm_text)
+
+    def test_developer_compile_output_uses_tagged_result_paging(self) -> None:
+        from pal.execution.runtime import ExecutionRuntime
+        from pal.minion.scoped_execution import _immutable_workflow_tool
+
+        repo = self.runtime_root / "paged-compile-output-repo"
+        repo.mkdir()
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "paged-compile-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "paged-compile-stage"),
+            },
+            role="implementation",
+        )
+        runtime = ExecutionRuntime(runtime_root=self.runtime_root)
+
+        async def handler(call, _context):
+            return await candidate_builder_tool_result(
+                call,
+                workspace,
+                [],
+                original_adapter=self.adapter,
+            )
+
+        runtime.register_tool(
+            _immutable_workflow_tool(
+                name="op_minion_developer_compile_check",
+                spec=CANDIDATE_BUILDER_TOOL_SPECS[
+                    "op_minion_developer_compile_check"
+                ],
+                handler=handler,
+            )
+        )
+        try:
+            result = asyncio.run(
+                runtime.execute_tool_async(
+                    CanonicalToolCall(
+                        name="developer_compile_check",
+                        args={
+                            "name": "large compiler failure",
+                            "command": (
+                                "python -c 'import sys; "
+                                'sys.stderr.write("compile-error-" + "x" * 4000); '
+                                "raise SystemExit(1)'"
+                            ),
+                        },
+                        call_id="call-paged-compile",
+                    ),
+                    budget=ToolCallBudget(
+                        max_output_chars=500,
+                        preview_chars=256,
+                        artifact_bucket_id="turn-paged-compile",
+                    ),
+                )
+            )
+            self.assertIsInstance(result.invocation_result, PagedResult)
+            handle = dict(result.invocation_result.result_handle)
+            pages = [
+                runtime.read_tool_result_page(
+                    result_ref=str(handle["result_ref"]),
+                    page=page,
+                )
+                for page in range(1, int(handle["page_count"]) + 1)
+            ]
+            rendered = "".join(
+                item.content for item in pages if item is not None
+            )
+            self.assertIn("compile-error-", rendered)
+            self.assertIn('"status": "FAIL"', rendered)
+        finally:
+            runtime.shutdown()
 
     def test_candidate_submit_accepts_review_guarded_contract_as_live_git_delta(self) -> None:
         repo = self.runtime_root / "candidate-repo"

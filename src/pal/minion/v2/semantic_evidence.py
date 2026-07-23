@@ -34,6 +34,7 @@ async def run_shell_evidence(
         store = SubmissionDraftStore(_runtime_root(workspace))
         snapshot = store.read(context, seed=_empty_payload())
         existing = dict(dict(snapshot.payload.get("evidence") or {}).get("cases") or {}).get(name)
+        artifacts = _artifact_store(workspace)
         request_fingerprint = _fingerprint_payload(
             context,
             {
@@ -51,10 +52,22 @@ async def run_shell_evidence(
             and str(existing.get("request_fingerprint") or "") == request_fingerprint
             and str(existing.get("status") or "") != "UNKNOWN"
         ):
+            stdout = _artifact_text(artifacts, existing.get("stdout_ref"))
+            stderr = _artifact_text(artifacts, existing.get("stderr_ref"))
+            execution = _shell_execution_projection(
+                existing,
+                stdout=stdout,
+                stderr=stderr,
+            )
             return _success_result(
                 call,
                 f"reused recorded {name}: {existing.get('status')}",
-                {"reused": True, "case": dict(existing)},
+                {
+                    "reused": True,
+                    "case": dict(existing),
+                    "execution": execution,
+                },
+                llm_text=_shell_execution_text(name, execution, reused=True),
             )
         cwd = str(workspace.get("repo_path") or "").strip() or None
         result = await original_adapter.execute_tool_async(
@@ -78,7 +91,6 @@ async def run_shell_evidence(
             status = "UNKNOWN"
         else:
             status = "PASS" if int(exit_code) in expected_exit_codes else "FAIL"
-        artifacts = _artifact_store(workspace)
         stdout_ref = artifacts.put_bytes(
             stdout.encode("utf-8"),
             artifact_type="VerificationStdoutArtifact",
@@ -122,7 +134,17 @@ async def run_shell_evidence(
             reducer=reducer,
             seed=_empty_payload(),
         )
-        return _success_result(call, f"recorded {name}: {status}", mutation)
+        execution = _shell_execution_projection(
+            case,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return _success_result(
+            call,
+            f"recorded {name}: {status}",
+            {**mutation, "execution": execution},
+            llm_text=_shell_execution_text(name, execution),
+        )
     except Exception as exc:
         return _error_result(call, exc)
 
@@ -147,6 +169,7 @@ async def run_lsp_evidence(
         store = SubmissionDraftStore(_runtime_root(workspace))
         snapshot = store.read(context, seed=_empty_payload())
         existing = dict(dict(snapshot.payload.get("evidence") or {}).get("cases") or {}).get(name)
+        artifacts = _artifact_store(workspace)
         request_fingerprint = _fingerprint_payload(
             context,
             {
@@ -162,10 +185,21 @@ async def run_lsp_evidence(
             and str(existing.get("request_fingerprint") or "") == request_fingerprint
             and str(existing.get("status") or "") != "UNKNOWN"
         ):
+            recorded_result = _artifact_json(artifacts, existing.get("stdout_ref"))
             return _success_result(
                 call,
                 f"reused recorded {name}: {existing.get('status')}",
-                {"reused": True, "case": dict(existing)},
+                {
+                    "reused": True,
+                    "case": dict(existing),
+                    "execution": recorded_result,
+                },
+                llm_text=_lsp_execution_text(
+                    name,
+                    str(existing.get("status") or ""),
+                    recorded_result,
+                    reused=True,
+                ),
             )
         result = await original_adapter.execute_tool_async(
             CanonicalToolCall(
@@ -180,7 +214,6 @@ async def run_lsp_evidence(
             turn_id=turn_id,
         )
         serialized = json.dumps(dict(result.structured or {}), ensure_ascii=False, sort_keys=True)
-        artifacts = _artifact_store(workspace)
         stdout_ref = artifacts.put_bytes(
             serialized.encode("utf-8"),
             artifact_type="LspDiagnosticsArtifact",
@@ -253,7 +286,12 @@ async def run_lsp_evidence(
             reducer=reducer,
             seed=_empty_payload(),
         )
-        return _success_result(call, f"recorded {name}: {status}", mutation)
+        return _success_result(
+            call,
+            f"recorded {name}: {status}",
+            {**mutation, "execution": structured},
+            llm_text=_lsp_execution_text(name, status, structured),
+        )
     except Exception as exc:
         return _error_result(call, exc)
 
@@ -555,12 +593,94 @@ def _operation_key(call: CanonicalToolCall, fallback: str) -> str:
     return str(call.call_id or "").strip() or f"semantic:{call.name}:{fallback}"
 
 
-def _success_result(call: CanonicalToolCall, text: str, structured: Mapping[str, Any]) -> CanonicalToolResult:
+def _artifact_text(
+    artifacts: ContentAddressedArtifactStore,
+    ref: Any,
+) -> str:
+    if not isinstance(ref, (Mapping, str)) or not ref:
+        return ""
+    return artifacts.read_bytes(ref).decode("utf-8", errors="replace")
+
+
+def _artifact_json(
+    artifacts: ContentAddressedArtifactStore,
+    ref: Any,
+) -> dict[str, Any]:
+    raw = _artifact_text(artifacts, ref)
+    if not raw:
+        return {}
+    value = json.loads(raw)
+    if not isinstance(value, Mapping):
+        raise ValueError("recorded LSP evidence is not a JSON object")
+    return dict(value)
+
+
+def _shell_execution_projection(
+    case: Mapping[str, Any],
+    *,
+    stdout: str,
+    stderr: str,
+) -> dict[str, Any]:
+    return {
+        "status": str(case.get("status") or "UNKNOWN"),
+        "exit_code": case.get("exit_code"),
+        "expected_exit_codes": [
+            int(item) for item in list(case.get("expected_exit_codes") or [])
+        ],
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def _shell_execution_text(
+    name: str,
+    execution: Mapping[str, Any],
+    *,
+    reused: bool = False,
+) -> str:
+    prefix = "Reused" if reused else "Recorded"
+    lines = [
+        (
+            f"{prefix} {name}: {execution.get('status')}; "
+            f"exit_code={execution.get('exit_code')}; "
+            f"expected_exit_codes={list(execution.get('expected_exit_codes') or [])}"
+        ),
+        "",
+        "stdout:",
+        str(execution.get("stdout") or "(empty)"),
+        "",
+        "stderr:",
+        str(execution.get("stderr") or "(empty)"),
+    ]
+    return "\n".join(lines)
+
+
+def _lsp_execution_text(
+    name: str,
+    status: str,
+    execution: Mapping[str, Any],
+    *,
+    reused: bool = False,
+) -> str:
+    prefix = "Reused" if reused else "Recorded"
+    return (
+        f"{prefix} {name}: {status}\n\n"
+        + json.dumps(dict(execution), ensure_ascii=False, indent=2, sort_keys=True)
+    )
+
+
+def _success_result(
+    call: CanonicalToolCall,
+    text: str,
+    structured: Mapping[str, Any],
+    *,
+    llm_text: str | None = None,
+) -> CanonicalToolResult:
     return CanonicalToolResult(
         name=call.name,
         ok=True,
         text=text,
-        llm_text=text,
+        llm_text=str(llm_text or text),
         structured=dict(structured),
         call_id=call.call_id,
         status=RuntimeStatus.OK,
