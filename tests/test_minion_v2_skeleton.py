@@ -1992,8 +1992,14 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
 
         draft_path = Path(str(workspace["architecture_draft_path"]))
+        header, separator, live_document = draft_path.read_text(
+            encoding="utf-8"
+        ).rpartition("\nschema_version: 4\n")
+        self.assertTrue(separator)
         draft_path.write_text(
-            draft_path.read_text(encoding="utf-8").replace(
+            header
+            + separator
+            + live_document.replace(
                 "      reference_only: []",
                 "      reference_only: []\n      surprise: true",
             ),

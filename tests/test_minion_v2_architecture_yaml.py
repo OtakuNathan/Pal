@@ -4,7 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from pal.minion.v2.architecture_yaml import (
+    ArchitectureDraft,
     ArchitectureDraftFileError,
     load_architecture_draft,
     prepare_architecture_draft_file,
@@ -170,7 +173,7 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def test_initial_template_has_dynamic_empty_maps_and_examples(self) -> None:
+    def test_initial_template_has_complete_strict_schema_and_valid_example(self) -> None:
         path = prepare_architecture_draft_file(self.workspace)
 
         self.assertEqual(
@@ -181,7 +184,45 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
         self.assertIn("schema_version: 4", text)
         self.assertIn("requirements: {}", text)
         self.assertIn("modules: {}", text)
-        self.assertIn("Module example:", text)
+        self.assertIn("BEGIN COMPLETE VALID EXAMPLE", text)
+        self.assertIn("module_kind enum: implementation | contract_only", text)
+        self.assertIn(
+            "behavior_kind enum: stateless | resource_owner | service | workflow | adapter",
+            text,
+        )
+        self.assertIn("contract_mode enum: file_frozen | review_guarded", text)
+        self.assertIn("kind enum: file | directory", text)
+        self.assertIn("consumes:", text)
+        self.assertIn("meaning:", text)
+        self.assertIn("effect:", text)
+        self.assertIn("Do not declare test_scopes", text)
+
+        example_lines: list[str] = []
+        inside_example = False
+        for line in text.splitlines():
+            if line == "# BEGIN COMPLETE VALID EXAMPLE":
+                inside_example = True
+                continue
+            if line == "# END COMPLETE VALID EXAMPLE":
+                break
+            if inside_example:
+                self.assertTrue(line.startswith("#"))
+                example_lines.append(line[2:] if line.startswith("# ") else "")
+        example = yaml.safe_load("\n".join(example_lines))
+        validated = ArchitectureDraft.model_validate(example, strict=True)
+        self.assertEqual(validated.schema_version, 4)
+        self.assertEqual(
+            validated.modules["frame_protocol"].state_machine.states[
+                "reading_header"
+            ].transitions["header_ready"].effect,
+            "retain the decoded payload length",
+        )
+        self.assertEqual(
+            validated.modules["framepipe_cli"].dependencies[
+                "frame_protocol"
+            ].consumes,
+            ["frames", "status"],
+        )
 
     def test_revision_is_preseeded_from_complete_validated_submission(self) -> None:
         self.workspace["architecture_revision_base_submission"] = _submission()
