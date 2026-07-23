@@ -10,11 +10,14 @@ from pal.execution.generated_tool_models import (
     MinionV2CandidateBuilderOpMinionDeveloperTestInput,
 )
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Annotated, Any, Mapping
 
+from pydantic import Field
+from pal.execution.tool_facade import StrictToolModel
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.semantic_evidence import (
     record_unavailable_evidence,
@@ -34,6 +37,7 @@ from pal.shared import RuntimeStatus
 
 
 CANDIDATE_BUILDER_CAPABILITIES = (
+    "op_minion_candidate_update_checklist",
     "op_minion_developer_test",
     "op_minion_developer_compile_check",
     "op_minion_developer_lsp_check",
@@ -42,6 +46,24 @@ CANDIDATE_BUILDER_CAPABILITIES = (
     "op_minion_candidate_report_architecture_defect",
     "op_minion_candidate_request_module_split",
 )
+
+
+_ChecklistStep = Annotated[str, Field(min_length=1, max_length=240)]
+
+
+class MinionV2CandidateUpdateChecklistInput(StrictToolModel):
+    """Complete replacement for the Coder's durable, evidence-free micro-plan."""
+
+    pending: list[_ChecklistStep] = Field(max_length=32)
+    in_progress: _ChecklistStep | None
+    completed: list[_ChecklistStep] = Field(max_length=64)
+
+
+_CHECKLIST_EXAMPLE = {
+    "pending": ["handle incomplete EOF at the CLI boundary"],
+    "in_progress": "finish failed-state reset behavior",
+    "completed": ["implement split-header buffering"],
+}
 
 _RUN_SCHEMA = {
     "type": "object",
@@ -90,6 +112,19 @@ _DEFECT_SCHEMA = {
 _NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 
 CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
+    "op_minion_candidate_update_checklist": {
+        "alias": "update_checklist",
+        "description": (
+            "Replace your complete durable Coder checklist. Put work not started in pending, "
+            "at most one current step in in_progress, and finished work in completed. Keep steps "
+            "short and update only when the plan materially changes. This checklist is a private "
+            "micro-plan and completion declaration, never test evidence or proof of correctness."
+        ),
+        "InputModel": MinionV2CandidateUpdateChecklistInput,
+        "examples": (_CHECKLIST_EXAMPLE,),
+        "idempotency": "idempotent",
+        "retry_policy": "automatic",
+    },
     "op_minion_developer_test": {
         "alias": "developer_test",
         "description": "Run and durably record one focused developer test. Provide a shell command, not a nested test report.",
@@ -132,6 +167,8 @@ for _tool_name, _tool_spec in CANDIDATE_BUILDER_TOOL_SPECS.items():
         _tool_spec["InputModel"].model_json_schema(mode="validation", union_format="primitive_type_array"),
         owner=_tool_name,
     )
+    for _example in tuple(_tool_spec.get("examples") or ()):
+        _tool_spec["InputModel"].model_validate(_example, strict=True)
 
 
 def is_candidate_builder_capability(name: str) -> bool:
@@ -147,6 +184,11 @@ async def candidate_builder_tool_result(
     turn_id: str | None = None,
 ) -> CanonicalToolResult:
     name = str(call.name or "")
+    if name == "op_minion_candidate_update_checklist":
+        try:
+            return _replace_checklist(call, workspace)
+        except Exception as exc:
+            return _error(call, exc)
     if name == "op_minion_developer_test":
         return await run_shell_evidence(
             call,
@@ -189,6 +231,45 @@ async def candidate_builder_tool_result(
         return _error(call, exc)
 
 
+def _replace_checklist(
+    call: CanonicalToolCall,
+    workspace: Mapping[str, Any],
+) -> CanonicalToolResult:
+    args = dict(call.args or {})
+    checklist = _normalize_checklist(args, require_nonempty=True)
+    context = SubmissionDraftContext.from_workspace(workspace, draft_kind="candidate")
+    store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
+
+    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
+        payload["checklist"] = checklist
+        return payload, {
+            "updated": True,
+            "checklist": checklist,
+            "unfinished_count": len(checklist["pending"])
+            + (1 if checklist["in_progress"] else 0),
+        }
+
+    result = store.mutate(
+        context,
+        operation_key=str(
+            call.call_id
+            or "replace-candidate-checklist:"
+            + hashlib.sha256(
+                json.dumps(
+                    args,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        ),
+        request=args,
+        reducer=reducer,
+        seed=_empty_candidate_payload(),
+    )
+    return _ok(call, _render_checklist(checklist), result)
+
+
 def _submit_candidate(
     call: CanonicalToolCall,
     workspace: Mapping[str, Any],
@@ -202,9 +283,22 @@ def _submit_candidate(
     snapshot = store.read(context, seed=_empty_candidate_payload())
     work_view = bound_reference_payload(workspace, "unit_work_view")
     cases = recorded_cases(snapshot.payload)
+    raw_checklist = snapshot.payload.get("checklist")
+    checklist = _normalize_checklist(
+        raw_checklist if isinstance(raw_checklist, Mapping) else {},
+        require_nonempty=False,
+    )
     if status == "candidate_ready":
         if args:
             raise ValueError("candidate_submit takes no arguments")
+        unfinished = [
+            *checklist["pending"],
+            *([checklist["in_progress"]] if checklist["in_progress"] else []),
+        ]
+        if unfinished:
+            raise ValueError(
+                "candidate checklist still has unfinished work: " + ", ".join(unfinished)
+            )
         failures = [item for item in cases if str(item.get("status")) == "FAIL"]
         if failures:
             raise ValueError("developer checks still fail: " + ", ".join(str(item.get("name")) for item in failures))
@@ -229,6 +323,7 @@ def _submit_candidate(
             "candidate_submit requires at least one contracted product file in the artifact workspace"
         )
     report = {
+        "checklist": checklist,
         "files_changed": files_changed,
         "tests_run": [f"{item.get('name')}: {item.get('status')}" for item in cases],
         "status": status,
@@ -291,6 +386,7 @@ def validate_candidate_submission(
     value: Mapping[str, Any], *, work_view: Mapping[str, Any]
 ) -> tuple[str, ...]:
     required = {
+        "checklist",
         "files_changed",
         "tests_run",
         "status",
@@ -298,9 +394,10 @@ def validate_candidate_submission(
     missing = required - set(value)
     if missing:
         raise ValueError("candidate report is missing Manager fields: " + ", ".join(sorted(missing)))
-    for field in required - {"status"}:
+    for field in required - {"status", "checklist"}:
         if not isinstance(value.get(field), list) or any(not isinstance(item, str) for item in value[field]):
             raise ValueError(f"candidate report {field} must be a string array")
+    checklist = _normalize_checklist(value.get("checklist"), require_nonempty=False)
     status = str(value.get("status") or "")
     if status not in {"candidate_ready", "architecture_defect", "module_split_request"}:
         raise ValueError("candidate report has invalid status")
@@ -311,6 +408,10 @@ def validate_candidate_submission(
         if str(value.get("affected_module") or "") != _bound_unit_name(work_view):
             raise ValueError("candidate defect must target the bound module")
         return ()
+    if checklist["pending"] or checklist["in_progress"]:
+        raise ValueError(
+            "candidate_ready requires no pending or in-progress checklist work"
+        )
     return ()
 
 
@@ -413,6 +514,83 @@ def _defect_locations(args: Mapping[str, Any]) -> list[dict[str, str]]:
 
 def _empty_candidate_payload() -> dict[str, Any]:
     return {"definitions": {}, "evidence": {"cases": {}}, "findings": [], "summary": {}}
+
+
+def candidate_checklist_context(workspace: Mapping[str, Any]) -> str:
+    """Render the latest fenced Coder checklist for prompt assembly."""
+
+    metadata = dict(workspace.get("minion_v2") or {})
+    if str(metadata.get("role") or "") != "implementation":
+        return ""
+    try:
+        context = SubmissionDraftContext.from_workspace(workspace, draft_kind="candidate")
+        snapshot = SubmissionDraftStore(Path(str(workspace["runtime_root"]))).read(
+            context,
+            seed=_empty_candidate_payload(),
+        )
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    raw = snapshot.payload.get("checklist")
+    if not isinstance(raw, Mapping):
+        return (
+            "Coder checklist: not initialized. Use update_checklist to record a short "
+            "pending / in_progress / completed micro-plan before submission."
+        )
+    return _render_checklist(_normalize_checklist(raw, require_nonempty=False))
+
+
+def _normalize_checklist(
+    value: Any,
+    *,
+    require_nonempty: bool,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("Coder checklist must be an object")
+    pending = _checklist_steps(value.get("pending"), field="pending")
+    completed = _checklist_steps(value.get("completed"), field="completed")
+    raw_in_progress = value.get("in_progress")
+    in_progress = str(raw_in_progress).strip() if raw_in_progress is not None else None
+    if in_progress == "":
+        raise ValueError("Coder checklist in_progress must be null or non-empty")
+    all_steps = [*pending, *([in_progress] if in_progress else []), *completed]
+    if require_nonempty and not all_steps:
+        raise ValueError("Coder checklist must contain at least one step")
+    duplicates = sorted({step for step in all_steps if all_steps.count(step) > 1})
+    if duplicates:
+        raise ValueError(
+            "Coder checklist steps must occur in exactly one state: "
+            + ", ".join(duplicates)
+        )
+    return {
+        "pending": pending,
+        "in_progress": in_progress,
+        "completed": completed,
+    }
+
+
+def _checklist_steps(value: Any, *, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"Coder checklist {field} must be a string array")
+    steps = [item.strip() for item in value]
+    if any(not item for item in steps):
+        raise ValueError(f"Coder checklist {field} entries must be non-empty")
+    return steps
+
+
+def _render_checklist(checklist: Mapping[str, Any]) -> str:
+    pending = [str(item) for item in list(checklist.get("pending") or [])]
+    completed = [str(item) for item in list(checklist.get("completed") or [])]
+    in_progress = str(checklist.get("in_progress") or "").strip()
+    lines = ["Coder checklist (self-reported micro-plan; not verification evidence):"]
+    lines.extend(f"- pending: {item}" for item in pending)
+    if in_progress:
+        lines.append(f"- in_progress: {in_progress}")
+    lines.extend(f"- completed: {item}" for item in completed)
+    if len(lines) == 1:
+        lines.append("- (empty)")
+    return "\n".join(lines)
 
 
 def _has_bound_reference(workspace: Mapping[str, Any], name: str) -> bool:

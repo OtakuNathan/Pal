@@ -266,6 +266,9 @@ def _verifier_reference_refs(
         "module_work_view": module_work_view_ref,
         "candidate_diff": candidate_diff_ref,
     }
+    producer_report_value = node_payload.get("producer_report_ref")
+    if isinstance(producer_report_value, Mapping) and producer_report_value.get("sha256"):
+        references["coder_report"] = _ref_from_mapping(producer_report_value)
     architecture_ref_value = node_payload.get("architecture_manifest_ref")
     if not isinstance(architecture_ref_value, Mapping) or not architecture_ref_value.get("sha256"):
         return references
@@ -2144,9 +2147,16 @@ class SemanticOrchestrator:
             lease_resource=lease_resource,
             fencing_token=fencing_token,
             updates={
-                "current_micro_plan": [],
-                "completed_checklist": (
-                    ["candidate submitted"] if status == "candidate_ready" else []
+                "current_micro_plan": [
+                    *list(dict(report.get("checklist") or {}).get("pending") or []),
+                    *(
+                        [str(dict(report.get("checklist") or {}).get("in_progress"))]
+                        if dict(report.get("checklist") or {}).get("in_progress")
+                        else []
+                    ),
+                ],
+                "completed_checklist": list(
+                    dict(report.get("checklist") or {}).get("completed") or []
                 ),
                 "files_changed": list(report.get("files_changed") or []),
                 "tests_run": list(report.get("tests_run") or []),
@@ -2531,7 +2541,7 @@ class SemanticOrchestrator:
             instruction=(
                 "Generate and run adversarial verification for the bound real usage scenario. Consult the immutable task.yaml ledger when the accepted scenario contracts are insufficient, preserve its exact qualifications and examples, and prove only the requirements exercised by this exact module combination, contract flow, entrypoint, and environment. Write executable probes only in the bound scenario review scratch, then submit one semantic outcome."
                 if scenario_mode
-                else "Generate and run adversarial verification for the bound candidate. Read the Manager-bound Candidate diff and any Contract/Repair diff before judging the code. Treat the module source contracts and comments as primary truth, then consult the immutable task.yaml ledger only as upstream provenance for intent and scope. For review_guarded contracts, compare the Accepted Skeleton shape with the Candidate and reject semantic contract drift. Read and run both durable corpora first; tests/<module_name>/developer is read-only Coder evidence, while you add or strengthen only missing adversarial coverage under tests/<module_name>/verification. Reuse existing cases for regression and do not regenerate equivalent probes, then submit one semantic outcome."
+                else "Generate and run adversarial verification for the bound candidate. Read the Manager-bound Candidate diff and any Contract/Repair diff before judging the code. Treat the module source contracts and comments as primary truth, then consult the immutable task.yaml ledger only as upstream provenance for intent and scope. Use the bound Coder checklist only to identify claimed or potentially omitted work while reconciling the task, contract, and actual diff; it is never acceptance evidence. For review_guarded contracts, compare the Accepted Skeleton shape with the Candidate and reject semantic contract drift. Read and run both durable corpora first; tests/<module_name>/developer is read-only Coder evidence, while you add or strengthen only missing adversarial coverage under tests/<module_name>/verification. Reuse existing cases for regression and do not regenerate equivalent probes, then submit one semantic outcome."
             ),
             reference_refs=verifier_references,
             workspace_override={
@@ -5913,7 +5923,7 @@ class SemanticOrchestrator:
             if self._is_skeleton_manifest(snapshot.payload.get("architecture_manifest_ref")):
                 invocation_acceptance = [
                     "Implement or repair only the bound module, write focused tests only in tests/<module_name>/developer, and keep tests/<module_name>/verification read-only.",
-                    "Run the minimum sufficient check with a dedicated developer tool, then call candidate_submit with no arguments.",
+                    "Maintain the compact durable checklist with update_checklist; it is a micro-plan, not evidence. Complete it, run the minimum sufficient check with a dedicated developer tool, then call candidate_submit with no arguments.",
                 ]
             else:
                 invocation_acceptance = [

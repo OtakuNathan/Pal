@@ -1317,6 +1317,9 @@ class MinionRunner:
     def _render_minion_memory_context(self, state: MinionAgentLoopState) -> str:
         pack = state.memory_service.build_pack(MemoryPackRequest(turn_kind="minion", work_order_id=self.pack.invocation_id))
         parts: list[str] = []
+        role_context = self._render_durable_role_context()
+        if role_context:
+            parts.append(role_context)
         summary_text = self._render_minion_current_summary(pack.current_summary)
         if summary_text:
             parts.append(f"Current summary:\n{summary_text}")
@@ -1329,6 +1332,20 @@ class MinionRunner:
             lines = [f"- {record.get('document_kind')}:{record.get('title')}: {record.get('summary')}" for record in records[:8]]
             parts.append("Candidate experience records:\n" + "\n".join(lines))
         return "\n\n".join(parts).strip()
+
+    def _render_durable_role_context(self) -> str:
+        binding = dict((self.pack.metadata or {}).get("minion_v2") or {})
+        if str(binding.get("role") or "") != "implementation":
+            return ""
+        from pal.minion.v2.candidate_builder import candidate_checklist_context
+
+        workspace = {
+            **dict(self.pack.workspace or {}),
+            "runtime_root": str(self.runtime_root),
+            "invocation_id": self.pack.invocation_id,
+            "minion_v2": binding,
+        }
+        return candidate_checklist_context(workspace)
 
     @staticmethod
     def _render_minion_current_summary(entry: Any) -> str:

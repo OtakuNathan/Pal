@@ -1388,6 +1388,33 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(restored["subject_key"], "node-router")
         self.assertTrue(first_output.is_file())
 
+    def test_runner_reloads_latest_coder_checklist_for_each_prompt_assembly(self) -> None:
+        pack = MinionInvocationPack(
+            invocation_id="inv-checklist-context",
+            workspace={"repo_path": str(self.runtime_root)},
+            metadata={
+                "minion_v2": {
+                    "role": "implementation",
+                    "invocation_id": "inv-checklist-context",
+                }
+            },
+        )
+        runner = MinionRunner(
+            runtime_root=self.runtime_root,
+            pack=pack,
+            minion_id=pack.invocation_id,
+            run_id="run-checklist-context",
+            write_event=_noop_write_event,
+            read_decision=lambda: None,
+        )
+        with patch(
+            "pal.minion.v2.candidate_builder.candidate_checklist_context",
+            side_effect=["pending: implement", "completed: implement"],
+        ) as render:
+            self.assertEqual(runner._render_durable_role_context(), "pending: implement")
+            self.assertEqual(runner._render_durable_role_context(), "completed: implement")
+        self.assertEqual(render.call_count, 2)
+
     def test_runner_restart_control_is_distinct_from_workflow_cancel(self) -> None:
         messages = [
             {

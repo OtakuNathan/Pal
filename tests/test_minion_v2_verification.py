@@ -51,6 +51,8 @@ from pal.minion.v2.verification_builder import (
 )
 from pal.minion.v2.candidate_builder import (
     CANDIDATE_BUILDER_TOOL_SPECS,
+    MinionV2CandidateUpdateChecklistInput,
+    candidate_checklist_context,
     candidate_builder_tool_result,
 )
 from pal.minion.v2.swe_verification import (
@@ -1104,7 +1106,19 @@ class MinionV2VerificationTests(unittest.TestCase):
 
         references = _verifier_reference_refs(
             artifacts=self.store,
-            node_payload={"architecture_manifest_ref": manifest_ref.to_dict()},
+            node_payload={
+                "architecture_manifest_ref": manifest_ref.to_dict(),
+                "producer_report_ref": self.store.put_json(
+                    {
+                        "checklist": {
+                            "pending": [],
+                            "in_progress": None,
+                            "completed": ["implement exact routing semantics"],
+                        }
+                    },
+                    artifact_type="ProducerReportArtifact",
+                ).to_dict(),
+            },
             module_work_view_ref=work_view_ref,
             candidate_diff_ref=candidate_view_ref,
         )
@@ -1112,6 +1126,10 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(references["module_work_view"], work_view_ref)
         self.assertEqual(references["candidate_diff"], candidate_view_ref)
         self.assertEqual(references["task"], requirements_ref)
+        self.assertEqual(
+            self.store.read_json(references["coder_report"])["checklist"]["completed"],
+            ["implement exact routing semantics"],
+        )
         task_ledger = self.store.read_json(references["task"])
         self.assertEqual(
             task_ledger["original"]["objective"],
@@ -1970,17 +1988,69 @@ class MinionV2VerificationTests(unittest.TestCase):
             "artifact_stage_dir": str(stage_dir),
             "reference_paths": [{"name": "unit_work_view", "path": str(work_view)}],
         }, role="implementation")
+        planned = self._candidate_call(
+            workspace,
+            "op_minion_candidate_update_checklist",
+            {
+                "pending": ["run focused render check"],
+                "in_progress": "implement review-guarded render contract",
+                "completed": [],
+            },
+        )
+        self.assertTrue(planned.ok, planned.text)
+        self.assertIn(
+            "in_progress: implement review-guarded render contract",
+            candidate_checklist_context(workspace),
+        )
         checked = self._candidate_call(
             workspace,
             "op_minion_developer_test",
             {"name": "focused render check", "command": "test -f src/font/backend.cpp"},
         )
         self.assertTrue(checked.ok, checked.text)
+        unfinished = self._candidate_call(workspace, "op_minion_candidate_submit")
+        self.assertFalse(unfinished.ok)
+        self.assertIn("unfinished work", unfinished.llm_text)
+        completed = self._candidate_call(
+            workspace,
+            "op_minion_candidate_update_checklist",
+            {
+                "pending": [],
+                "in_progress": None,
+                "completed": [
+                    "implement review-guarded render contract",
+                    "run focused render check",
+                ],
+            },
+        )
+        self.assertTrue(completed.ok, completed.text)
         accepted = self._candidate_call(workspace, "op_minion_candidate_submit")
         self.assertTrue(accepted.ok)
         report = json.loads((stage_dir / "coder_report.json").read_text(encoding="utf-8"))
         self.assertEqual(report["files_changed"], ["src/font/backend.cpp"])
         self.assertEqual(report["tests_run"], ["focused render check: PASS"])
+        self.assertEqual(
+            report["checklist"]["completed"],
+            [
+                "implement review-guarded render contract",
+                "run focused render check",
+            ],
+        )
+
+    def test_candidate_checklist_contract_is_reloadable_and_evidence_free(self) -> None:
+        self.assertEqual(
+            MinionV2CandidateUpdateChecklistInput.__module__,
+            "pal.minion.v2.candidate_builder",
+        )
+        schema = MinionV2CandidateUpdateChecklistInput.model_json_schema(
+            mode="validation"
+        )
+        encoded = json.dumps(schema, sort_keys=True)
+        self.assertIn('"pending"', encoded)
+        self.assertIn('"in_progress"', encoded)
+        self.assertIn('"completed"', encoded)
+        self.assertNotIn("evidence", schema["properties"])
+        self.assertNotIn("tests", schema["properties"])
 
     def test_rejected_candidate_submit_does_not_publish_primary_report(self) -> None:
         repo = self.runtime_root / "rejected-candidate-repo"
@@ -3118,6 +3188,11 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_coder_defect_report_is_bound_to_module_and_requirement_text(self) -> None:
         report = {
+            "checklist": {
+                "pending": [],
+                "in_progress": None,
+                "completed": [],
+            },
             "files_changed": [],
             "tests_run": [],
             "status": "architecture_defect",
