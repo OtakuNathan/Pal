@@ -1578,16 +1578,6 @@ MinionV2ContractBuilderOpMinionContractAddConstraintInput = _strict_model(
     },
 )
 
-MinionV2ContractBuilderOpMinionContractAddDesignDecisionInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractAddDesignDecisionInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'decision': (str, Field(..., min_length=1)),
-        'rationale': (str, Field(..., min_length=1)),
-        'downstream_impact': (str, Field(None)),
-    },
-)
-
 MinionV2ContractBuilderOpMinionContractAddGateCheckInput = _strict_model(
     'MinionV2ContractBuilderOpMinionContractAddGateCheckInput',
     {

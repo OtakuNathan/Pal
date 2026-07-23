@@ -275,6 +275,26 @@ class ContractBuilderTests(unittest.TestCase):
         self.assertIsNone(scoped.get_capability_spec("op_minion_contract_read"))
         self.assertIsNone(scoped.get_capability_spec("op_minion_contract_add_unit_outlines_batch"))
 
+    def test_design_decision_tool_and_projection_are_removed(self) -> None:
+        self.assertNotIn(
+            "op_minion_contract_add_design_decision",
+            CONTRACT_BUILDER_TOOL_SPECS,
+        )
+        legacy = self._complete_base_contract()
+        legacy["design_decisions"] = [
+            {
+                "id": "obsolete",
+                "decision": "Duplicate a module protocol rule.",
+                "rationale": "legacy",
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "unknown top-level fields: design_decisions",
+        ):
+            seed_contract_builder_draft(self.workspace, legacy)
+
     def test_add_finding_is_role_bound_and_includes_a_valid_example(self) -> None:
         self.workspace["minion_v2"].update(
             {"role": "reviewer", "mode": "architecture"}

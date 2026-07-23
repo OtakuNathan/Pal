@@ -203,7 +203,6 @@ class MinionV2ExecutionTests(unittest.TestCase):
         module_a = self.architecture.publish_unit_contract(_contract("a", "src/a/**"))
         module_b = self.architecture.publish_unit_contract(_contract("b", "src/b/**"))
         constraints = self.architecture.publish_fragment([], artifact_type="GlobalConstraintsArtifact")
-        decisions = self.architecture.publish_fragment([], artifact_type="DesignDecisionsArtifact")
         gates = self.architecture.publish_fragment([], artifact_type="ArchitectureGateChecksArtifact")
         cross = self.architecture.publish_fragment(
             {"contract_id": "X", "provider": "a", "consumer": "b"},
@@ -223,7 +222,6 @@ class MinionV2ExecutionTests(unittest.TestCase):
             {
                 "requirements_ref": requirements.to_dict(),
                 "global_constraints_ref": constraints.to_dict(),
-                "design_decisions_ref": decisions.to_dict(),
                 "gate_checks_ref": gates.to_dict(),
                 "unit_contract_refs": [module_a.to_dict(), module_b.to_dict()],
                 "cross_unit_contract_refs": [cross.to_dict()],

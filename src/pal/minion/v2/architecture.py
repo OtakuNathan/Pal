@@ -36,7 +36,6 @@ REVISION_TARGET_SECTIONS = frozenset(
     {
         "task_ledger",
         "constraint",
-        "design_decision",
         "gate_check",
         "unit",
         "cross_unit_contract",
@@ -129,7 +128,6 @@ def contract_revision_changes(
                 changes.append(ArchitectureRevisionTarget(section, item_id, fields, "update"))
 
     stable_collection("constraint", "global_constraints")
-    stable_collection("design_decision", "design_decisions")
     stable_collection("gate_check", "gate_checks")
     stable_collection("unit", "units", "unit_id")
     stable_collection("cross_unit_contract", "cross_unit_contracts")
@@ -546,13 +544,23 @@ def validate_architecture_manifest(payload: Mapping[str, Any]) -> dict[str, Any]
     required_single = (
         "requirements_ref",
         "global_constraints_ref",
-        "design_decisions_ref",
         "gate_checks_ref",
         "topology_ref",
         "integration_contract_ref",
         "assumption_ledger_ref",
         "risk_ledger_ref",
     )
+    allowed = {
+        "schema_version",
+        *required_single,
+        "unit_contract_refs",
+        "cross_unit_contract_refs",
+    }
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise ValueError(
+            "architecture manifest contains unknown fields: " + ", ".join(unknown)
+        )
     missing = [field for field in required_single if not _is_artifact_ref(payload.get(field))]
     module_refs = list(payload.get("unit_contract_refs") or [])
     cross_refs = list(payload.get("cross_unit_contract_refs") or [])

@@ -1134,7 +1134,6 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             {
                 "requirements_ref": dict(prepared["requirements_ref"]),
                 "global_constraints_ref": fragment([], "GlobalConstraintsArtifact").to_dict(),
-                "design_decisions_ref": fragment([], "DesignDecisionsArtifact").to_dict(),
                 "gate_checks_ref": fragment([], "ArchitectureGateChecksArtifact").to_dict(),
                 "unit_contract_refs": [unit.to_dict()],
                 "cross_unit_contract_refs": [],

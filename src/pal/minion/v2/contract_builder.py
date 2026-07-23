@@ -5,7 +5,6 @@ from pal.execution.generated_tool_models import (
     MinionV2ContractBuilderOpMinionContractAddAssumptionInput,
     MinionV2ContractBuilderOpMinionContractAddConstraintInput,
     MinionV2ContractBuilderOpMinionContractAddCrossUnitContractInput,
-    MinionV2ContractBuilderOpMinionContractAddDesignDecisionInput,
     MinionV2ContractBuilderOpMinionContractAddGateCheckInput,
     MinionV2ContractBuilderOpMinionContractAddRiskInput,
     MinionV2ContractBuilderOpMinionContractSetIntegrationInput,
@@ -54,7 +53,6 @@ CONTRACT_SKETCH_BUILDER_CAPABILITIES = (
     "op_minion_contract_unit_add_rule",
     "op_minion_contract_unit_remove",
     "op_minion_contract_add_constraint",
-    "op_minion_contract_add_design_decision",
     "op_minion_contract_add_gate_check",
     "op_minion_contract_add_cross_unit_contract",
     "op_minion_contract_set_integration",
@@ -154,15 +152,6 @@ _CONSTRAINT = _schema(
     },
     required=("name", "constraint"),
 )
-_DECISION = _schema(
-    {
-        "name": {"type": "string", "minLength": 1},
-        "decision": {"type": "string", "minLength": 1},
-        "rationale": {"type": "string", "minLength": 1},
-        "downstream_impact": {"type": "string"},
-    },
-    required=("name", "decision", "rationale"),
-)
 _GATE = _schema(
     {
         "name": {"type": "string", "minLength": 1},
@@ -223,7 +212,6 @@ CONTRACT_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_contract_unit_add_rule": {"alias": "contract_unit_add_rule", "description": "Add one rule. kind is invariant, error_behavior, compatibility, dependency_constraint, verification_obligation, or split_condition; statement is required and condition/expected are optional.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitAddRuleInput},
     "op_minion_contract_unit_remove": {"alias": "contract_unit_remove", "description": "Remove one semantic unit during a scoped revision.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitRemoveInput},
     "op_minion_contract_add_constraint": {"alias": "contract_add_constraint", "description": "Add or replace one named global constraint.", "InputModel": MinionV2ContractBuilderOpMinionContractAddConstraintInput},
-    "op_minion_contract_add_design_decision": {"alias": "contract_add_design_decision", "description": "Add or replace one named architecture decision.", "InputModel": MinionV2ContractBuilderOpMinionContractAddDesignDecisionInput},
     "op_minion_contract_add_gate_check": {"alias": "contract_add_gate_check", "description": "Add or replace one module-boundary or end-to-end gate, not an implementation checklist.", "InputModel": MinionV2ContractBuilderOpMinionContractAddGateCheckInput},
     "op_minion_contract_add_cross_unit_contract": {"alias": "contract_add_cross_unit_contract", "description": "Add or replace one directional cross-unit data/lifecycle contract.", "InputModel": MinionV2ContractBuilderOpMinionContractAddCrossUnitContractInput},
     "op_minion_contract_set_integration": {"alias": "contract_set_integration", "description": "Set the real end-to-end delivery entrypoint, dataflow, completion, and failure behavior.", "InputModel": MinionV2ContractBuilderOpMinionContractSetIntegrationInput},
@@ -373,10 +361,9 @@ def _apply_contract_operation(contract: dict[str, Any], name: str, args: Mapping
                     semantic_key="statement",
                 )
         _replace_named(units, unit, id_field="unit_id")
-    elif name in {"op_minion_contract_add_constraint", "op_minion_contract_add_design_decision", "op_minion_contract_add_gate_check"}:
+    elif name in {"op_minion_contract_add_constraint", "op_minion_contract_add_gate_check"}:
         field, prefix, text_fields = {
             "op_minion_contract_add_constraint": ("global_constraints", "C", ("constraint", "rationale")),
-            "op_minion_contract_add_design_decision": ("design_decisions", "D", ("decision", "rationale", "downstream_impact")),
             "op_minion_contract_add_gate_check": ("gate_checks", "G", ("check", "scope")),
         }[name]
         semantic_name = _semantic_name(args.get("name"))
@@ -501,6 +488,13 @@ def seed_contract_builder_draft(
 
 
 def _validate_contract(payload: Mapping[str, Any]) -> None:
+    allowed = set(_empty_contract())
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise ValueError(
+            "Architecture Contract contains unknown top-level fields: "
+            + ", ".join(unknown)
+        )
     units = [dict(item) for item in list(payload.get("units") or []) if isinstance(item, Mapping)]
     if not units:
         raise ValueError("Architecture Contract requires at least one unit")
@@ -553,7 +547,6 @@ def _assert_revision_scope(workspace: Mapping[str, Any], payload: Mapping[str, A
 def _empty_contract() -> dict[str, Any]:
     return {
         "global_constraints": [],
-        "design_decisions": [],
         "gate_checks": [],
         "units": [],
         "cross_unit_contracts": [],
@@ -657,7 +650,15 @@ def _require_no_args(call: CanonicalToolCall) -> None:
 
 
 def _contract_counts(payload: Mapping[str, Any]) -> dict[str, int]:
-    return {field: len(list(payload.get(field) or [])) for field in ("global_constraints", "design_decisions", "gate_checks", "units", "cross_unit_contracts")}
+    return {
+        field: len(list(payload.get(field) or []))
+        for field in (
+            "global_constraints",
+            "gate_checks",
+            "units",
+            "cross_unit_contracts",
+        )
+    }
 
 
 def _validate_architecture_review(payload: Mapping[str, Any]) -> None:

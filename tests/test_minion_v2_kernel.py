@@ -2145,10 +2145,10 @@ class MinionV2PersistenceTests(unittest.TestCase):
 
     def test_identical_bytes_have_distinct_typed_artifact_addresses(self) -> None:
         constraints = self.artifacts.put_json([], artifact_type="GlobalConstraintsArtifact")
-        decisions = self.artifacts.put_json([], artifact_type="DesignDecisionsArtifact")
-        self.assertNotEqual(constraints.sha256, decisions.sha256)
+        gates = self.artifacts.put_json([], artifact_type="ArchitectureGateChecksArtifact")
+        self.assertNotEqual(constraints.sha256, gates.sha256)
         self.assertEqual(self.artifacts.read_json(constraints), [])
-        self.assertEqual(self.artifacts.read_json(decisions), [])
+        self.assertEqual(self.artifacts.read_json(gates), [])
 
     def test_startup_recovery_reaps_expired_lease_before_new_fencing_token(self) -> None:
         first = self.repository.claim_lease(

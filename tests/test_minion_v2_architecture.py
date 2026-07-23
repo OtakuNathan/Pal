@@ -84,7 +84,6 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         )
         module = self.service.publish_unit_contract(_unit_contract())
         constraints = self.service.publish_fragment([], artifact_type="GlobalConstraintsArtifact")
-        decisions = self.service.publish_fragment([], artifact_type="DesignDecisionsArtifact")
         gates = self.service.publish_fragment([], artifact_type="ArchitectureGateChecksArtifact")
         cross = self.service.publish_fragment(
             {"contract_id": "X-1", "provider": "foundation", "consumer": "integration"},
@@ -107,7 +106,6 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             {
                 "requirements_ref": requirements.to_dict(),
                 "global_constraints_ref": constraints.to_dict(),
-                "design_decisions_ref": decisions.to_dict(),
                 "gate_checks_ref": gates.to_dict(),
                 "unit_contract_refs": [module.to_dict()],
                 "cross_unit_contract_refs": [cross.to_dict()],
@@ -118,6 +116,14 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             }
         )
         return requirements, requirements, manifest
+
+    def test_manifest_rejects_removed_design_decision_projection(self) -> None:
+        _requirements, _normalized, manifest = self._publish_contract()
+        payload = self.store.read_json(manifest)
+        payload["design_decisions_ref"] = payload["global_constraints_ref"]
+
+        with self.assertRaisesRegex(ValueError, "unknown fields: design_decisions_ref"):
+            self.service.publish_manifest(payload)
 
     def test_manager_does_not_grade_lifecycle_semantics(self) -> None:
         validated = validate_unit_contract(_unit_contract(), complexity_policy=ComplexityBudgetPolicy())

@@ -4098,7 +4098,6 @@ class SemanticOrchestrator:
             list(workflow_request.get("constraints") or []),
             artifact_type="GlobalConstraintsArtifact",
         )
-        decisions = self.service.architecture.publish_fragment([], artifact_type="DesignDecisionsArtifact")
         gates = self.service.architecture.publish_fragment([], artifact_type="ArchitectureGateChecksArtifact")
         topology = self.service.architecture.publish_fragment(
             {"depends_on": {unit_contract["unit_id"]: []}},
@@ -4114,7 +4113,6 @@ class SemanticOrchestrator:
             {
                 "requirements_ref": requirements_ref.to_dict(),
                 "global_constraints_ref": constraints.to_dict(),
-                "design_decisions_ref": decisions.to_dict(),
                 "gate_checks_ref": gates.to_dict(),
                 "unit_contract_refs": [module_ref.to_dict()],
                 "cross_unit_contract_refs": [],
@@ -5689,7 +5687,6 @@ class SemanticOrchestrator:
             }
         if target.section in {
             "constraint",
-            "design_decision",
             "gate_check",
             "cross_unit_contract",
         }:
@@ -5708,7 +5705,6 @@ class SemanticOrchestrator:
         del requirements
         collection_sections = {
             "constraint": ("global_constraints", "id"),
-            "design_decision": ("design_decisions", "id"),
             "gate_check": ("gate_checks", "id"),
             "unit": ("units", "unit_id"),
             "cross_unit_contract": ("cross_unit_contracts", "id"),
@@ -7076,7 +7072,6 @@ class SemanticOrchestrator:
     ) -> ArtifactRef:
         required_keys = {
             "global_constraints",
-            "design_decisions",
             "gate_checks",
             "units",
             "cross_unit_contracts",
@@ -7106,7 +7101,6 @@ class SemanticOrchestrator:
             return self.service.architecture.publish_fragment(output[output_key], artifact_type=artifact_type, provenance=provenance)
 
         constraints = reuse_single("global_constraints_ref", "global_constraints", "GlobalConstraintsArtifact")
-        decisions = reuse_single("design_decisions_ref", "design_decisions", "DesignDecisionsArtifact")
         gates = reuse_single("gate_checks_ref", "gate_checks", "ArchitectureGateChecksArtifact")
 
         base_units: dict[str, tuple[dict[str, Any], ArtifactRef]] = {}
@@ -7139,7 +7133,6 @@ class SemanticOrchestrator:
             {
                 "requirements_ref": (requirements_ref.to_dict() if requirements_ref else dict(revision.payload["requirements_ref"])),
                 "global_constraints_ref": constraints.to_dict(),
-                "design_decisions_ref": decisions.to_dict(),
                 "gate_checks_ref": gates.to_dict(),
                 "unit_contract_refs": [item.to_dict() for item in units],
                 "cross_unit_contract_refs": [item.to_dict() for item in cross],
@@ -7209,7 +7202,6 @@ class SemanticOrchestrator:
 
         return {
             "global_constraints": read_ref("global_constraints_ref"),
-            "design_decisions": read_ref("design_decisions_ref"),
             "gate_checks": read_ref("gate_checks_ref"),
             "units": [
                 self.service.artifacts.read_json(dict(item))
@@ -7241,7 +7233,6 @@ class SemanticOrchestrator:
 
         return {
             "global_constraints": read("base_global_constraints"),
-            "design_decisions": read("base_design_decisions"),
             "gate_checks": read("base_gate_checks"),
             "units": numbered("base_unit_contract_"),
             "cross_unit_contracts": numbered("base_cross_unit_contract_"),

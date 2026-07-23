@@ -2395,7 +2395,6 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             source_channel="test",
         )
         constraints_ref = service.artifacts.put_json([], artifact_type="GlobalConstraintsArtifact")
-        decisions_ref = service.artifacts.put_json([], artifact_type="DesignDecisionsArtifact")
         gates_ref = service.artifacts.put_json([], artifact_type="ArchitectureGateChecksArtifact")
         unit_ref = service.artifacts.put_json({"unit_id": "foundation"}, artifact_type="UnitContractArtifact")
         topology_ref = service.artifacts.put_json({"depends_on": {"foundation": []}}, artifact_type="TopologyArtifact")
@@ -2406,7 +2405,6 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             {
                 "requirements_ref": requirements_ref.to_dict(),
                 "global_constraints_ref": constraints_ref.to_dict(),
-                "design_decisions_ref": decisions_ref.to_dict(),
                 "gate_checks_ref": gates_ref.to_dict(),
                 "unit_contract_refs": [unit_ref.to_dict()],
                 "cross_unit_contract_refs": [],
@@ -2620,7 +2618,6 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         base = {
             "global_constraints": [{"id": "C-1", "constraint": "Keep stable."}],
-            "design_decisions": [],
             "gate_checks": [],
             "units": [unit("foundation"), unit("window")],
             "cross_unit_contracts": [],
