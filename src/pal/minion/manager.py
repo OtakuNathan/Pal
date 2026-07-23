@@ -45,6 +45,40 @@ _TERMINAL_RUN_STATUSES = frozenset(
 )
 
 
+def _pending_clarification_status(payload: Mapping[str, Any]) -> dict[str, Any]:
+    questions = [
+        dict(item)
+        for item in list(payload.get("questions") or [])
+        if isinstance(item, Mapping)
+    ]
+    question = questions[0] if questions else {}
+    options = [
+        {
+            "label": str(option.get("label") or option.get("answer") or "").strip(),
+            "description": str(
+                option.get("description")
+                or option.get("label")
+                or option.get("answer")
+                or ""
+            ).strip(),
+        }
+        for option in list(question.get("options") or [])
+        if isinstance(option, Mapping)
+    ]
+    return {
+        "title": str(
+            question.get("title") or payload.get("title") or "Architecture question"
+        ).strip(),
+        "question": str(
+            question.get("question")
+            or payload.get("question")
+            or payload.get("summary")
+            or "Minion needs clarification."
+        ).strip(),
+        "options": options[:3],
+    }
+
+
 @dataclass
 class MinionRunState:
     minion_id: str
@@ -395,12 +429,31 @@ class MinionManager:
 
     async def _publish_v2_worker_event(self, event: Mapping[str, Any]) -> None:
         item = dict(event)
-        self.v2_service.repository.record_worker_event(item)
         run_id = str(item.get("run_id") or "")
         state = self.runs.get(run_id)
         if state is not None:
             payload = dict(item.get("payload") or {})
             kind = str(item.get("event_kind") or "")
+            binding = dict(dict(state.pack.metadata or {}).get("minion_v2") or {})
+            workflow_id = str(binding.get("workflow_id") or "")
+            if workflow_id and not item.get("workflow_id"):
+                item["workflow_id"] = workflow_id
+            if kind in {"approval_requested", "clarification_requested"}:
+                control_route = dict(binding.get("control_route") or {})
+                if workflow_id:
+                    workflow = self.v2_service.repository.read_snapshot(
+                        AggregateType.WORKFLOW,
+                        workflow_id,
+                    )
+                    if workflow is not None:
+                        current_route = dict(
+                            workflow.payload.get("control_route") or {}
+                        )
+                        if current_route:
+                            control_route = current_route
+                if control_route:
+                    payload["control_route"] = control_route
+            item["payload"] = payload
             if kind == "approval_requested":
                 state.pending_approval = payload
                 state.status = "approval_pending"
@@ -412,6 +465,7 @@ class MinionManager:
                 state.ended_at = utc_now()
             state.last_event = item
             state.last_event_at = str(item.get("created_at") or utc_now())
+        self.v2_service.repository.record_worker_event(item)
         self.events.queue_event(item)
 
     def _register_v2_broker_run(
@@ -486,7 +540,8 @@ class MinionManager:
 
     def _v2_workflow_status(self, workflow_id: str, *, view: str = "status") -> dict[str, Any]:
         status = self.v2_service.workflow_status(workflow_id, view=view)
-        if status.get("status") != "ok" or not self._pending_clarification_runs(workflow_id):
+        matches = self._pending_clarification_runs(workflow_id)
+        if status.get("status") != "ok" or not matches:
             return status
         return {
             **status,
@@ -495,6 +550,10 @@ class MinionManager:
             "next_legal_action": ["answer_question", "control_workflow:cancel"],
             "waiting_for_user": True,
             "liveness": "human_wait",
+            "pending_question_count": len(matches),
+            "pending_question": _pending_clarification_status(
+                matches[0].pending_clarification
+            ),
         }
 
     async def answer_workflow_question(self, payload: dict[str, Any]) -> dict[str, Any]:

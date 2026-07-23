@@ -1611,12 +1611,15 @@ class MinionRunner:
 
     def _user_interaction_port(self) -> MinionUserInteractionPort:
         if self.user_interaction is None:
+            binding = dict(dict(self.pack.metadata or {}).get("minion_v2") or {})
             self.user_interaction = MinionUserInteractionPort(
                 emit_event=self._emit,
                 read_response=self._read_manager_control,
                 run_id=self.run_id,
                 minion_id=self.minion_id,
                 invocation_id=self.pack.invocation_id,
+                workflow_id=str(binding.get("workflow_id") or ""),
+                control_route=dict(binding.get("control_route") or {}),
                 auto_accept_approvals=self.auto_accept_approvals,
             )
         return self.user_interaction
@@ -1801,14 +1804,21 @@ class MinionRunner:
         return normalized.strip("_")[:80] or "minion"
 
     async def _emit(self, event_kind: str, payload: dict[str, Any]) -> None:
+        binding = dict(dict(self.pack.metadata or {}).get("minion_v2") or {})
+        event_payload = dict(payload)
+        if event_kind in {"approval_requested", "clarification_requested"}:
+            control_route = dict(binding.get("control_route") or {})
+            if control_route and not event_payload.get("control_route"):
+                event_payload["control_route"] = control_route
         event = {
             "type": "event",
             "event_kind": event_kind,
             "minion_id": self.minion_id,
             "run_id": self.run_id,
             "invocation_id": self.pack.invocation_id,
+            "workflow_id": str(binding.get("workflow_id") or ""),
             "minion_profile": self.pack.minion_profile,
-            "payload": dict(payload),
+            "payload": event_payload,
             "created_at": utc_now(),
         }
         self._append_debug_log("runner_event", event)

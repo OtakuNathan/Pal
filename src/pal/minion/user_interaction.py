@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
@@ -17,6 +17,8 @@ class MinionUserInteractionPort:
     run_id: str
     minion_id: str
     invocation_id: str
+    workflow_id: str = ""
+    control_route: dict[str, Any] = field(default_factory=dict)
     auto_accept_approvals: bool = False
 
     def should_request_approval(self, capability_name: str, approval_policy: dict[str, Any]) -> bool:
@@ -44,6 +46,8 @@ class MinionUserInteractionPort:
             "approval_requested",
             {
                 "approval_id": approval_id,
+                "workflow_id": self.workflow_id,
+                "control_route": dict(self.control_route),
                 "title": title or "Minion high-risk operation",
                 "requested_action": capability_name,
                 "risk": risk,
@@ -75,6 +79,8 @@ class MinionUserInteractionPort:
             "run_id": self.run_id,
             "minion_id": self.minion_id,
             "invocation_id": self.invocation_id,
+            "workflow_id": self.workflow_id,
+            "control_route": dict(self.control_route),
             "status": "pending",
         }
         if not clarification_questions_are_interactive(payload.get("questions")):

@@ -86,6 +86,13 @@ class MinionSandboxTests(unittest.TestCase):
                 run_id="run-question",
                 minion_id="minion-question",
                 invocation_id="inv-question",
+                workflow_id="wf-question",
+                control_route={
+                    "endpoint_id": "socket",
+                    "channel_kind": "socket",
+                    "reply_target": {"connection_id": "client-1"},
+                    "control_scope_key": "socket:client-1",
+                },
             )
             pending = asyncio.create_task(
                 port.request_clarification(
@@ -109,6 +116,16 @@ class MinionSandboxTests(unittest.TestCase):
             await asyncio.sleep(0)
             self.assertFalse(pending.done())
             clarification = dict(events[0]["payload"])
+            self.assertEqual(clarification["workflow_id"], "wf-question")
+            self.assertEqual(
+                clarification["control_route"],
+                {
+                    "endpoint_id": "socket",
+                    "channel_kind": "socket",
+                    "reply_target": {"connection_id": "client-1"},
+                    "control_scope_key": "socket:client-1",
+                },
+            )
             await responses.put(
                 {
                     "type": "clarification",

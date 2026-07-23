@@ -2658,14 +2658,22 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_profile_worker_preserves_scheduler_lease_owner_id(self) -> None:
         worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         leased_invocation_id = "inv_scheduler_owned"
-        captured: dict[str, str] = {}
+        captured: dict[str, object] = {}
 
         def capture_invocation(**kwargs) -> None:
             captured["invocation_id"] = str(kwargs["invocation_id"])
             raise RuntimeError("stop-after-invocation-record")
 
         worker.repository.read_snapshot = lambda *_args: SimpleNamespace(
-            payload={"family_binding_ref": {"sha256": "binding"}}
+            payload={
+                "family_binding_ref": {"sha256": "binding"},
+                "control_route": {
+                    "endpoint_id": "socket",
+                    "channel_kind": "socket",
+                    "reply_target": {"connection_id": "client-1"},
+                    "control_scope_key": "socket:client-1",
+                },
+            }
         )
         worker.repository.record_role_invocation = capture_invocation
         snapshot = SimpleNamespace(
@@ -2675,6 +2683,13 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             payload={"research_mode": "local_only"},
         )
         identity = lambda pack, **_kwargs: pack
+
+        def capture_prompt_pack(pack, **_kwargs):
+            captured["control_route"] = dict(
+                dict(pack.metadata.get("minion_v2") or {}).get("control_route") or {}
+            )
+            return pack
+
         with (
             patch("pal.minion.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot", return_value={"workspace": {"kind": "new_project"}}),
             patch.object(
@@ -2698,7 +2713,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             patch("pal.minion.v2.semantic_orchestration.orchestrator.resolve_pinned_minion_pack", lambda pack, **_kwargs: pack),
             patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_role_capability_policy", identity),
             patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_research_capability_policy", identity),
-            patch("pal.minion.v2.semantic_orchestration.orchestrator.sanitize_runner_session_pack", identity),
+            patch(
+                "pal.minion.v2.semantic_orchestration.orchestrator.sanitize_runner_session_pack",
+                capture_prompt_pack,
+            ),
             patch("pal.minion.v2.semantic_orchestration.orchestrator.with_minion_sandbox_metadata", lambda _root, pack, **_kwargs: pack),
         ):
             with self.assertRaisesRegex(RuntimeError, "stop-after-invocation-record"):
@@ -2721,6 +2739,15 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 )
 
         self.assertEqual(captured["invocation_id"], leased_invocation_id)
+        self.assertEqual(
+            captured["control_route"],
+            {
+                "endpoint_id": "socket",
+                "channel_kind": "socket",
+                "reply_target": {"connection_id": "client-1"},
+                "control_scope_key": "socket:client-1",
+            },
+        )
 
     def _create_task(self, service: MinionV2WorkflowService, suffix: str) -> str:
         task_id = f"task_{suffix}"
@@ -4794,7 +4821,26 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 invocation_id="inv-architect-question",
                 metadata={"minion_v2": {"workflow_id": "wf-architect-question"}},
             ),
-            pending_clarification={"clarification_id": "clarification-1"},
+            pending_clarification={
+                "clarification_id": "clarification-1",
+                "title": "Compatibility boundary",
+                "questions": [
+                    {
+                        "id": "compatibility",
+                        "question": "Which public API is binding?",
+                        "options": [
+                            {
+                                "label": "Preserve",
+                                "description": "Keep the checked-in API.",
+                            },
+                            {
+                                "label": "Replace",
+                                "description": "Use the new API only.",
+                            },
+                        ],
+                    }
+                ],
+            },
             status="clarification_pending",
         )
 
@@ -4812,6 +4858,90 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(
             status["next_legal_action"],
             ["answer_question", "control_workflow:cancel"],
+        )
+        self.assertEqual(status["pending_question_count"], 1)
+        self.assertEqual(
+            status["pending_question"],
+            {
+                "title": "Compatibility boundary",
+                "question": "Which public API is binding?",
+                "options": [
+                    {
+                        "label": "Preserve",
+                        "description": "Keep the checked-in API.",
+                    },
+                    {
+                        "label": "Replace",
+                        "description": "Use the new API only.",
+                    },
+                ],
+            },
+        )
+        self.assertNotIn("clarification_id", json.dumps(status["pending_question"]))
+
+    def test_manager_binds_worker_question_to_workflow_control_route(self) -> None:
+        manager = MinionManager(self.runtime_root)
+        route = {
+            "endpoint_id": "socket",
+            "channel_kind": "socket",
+            "reply_target": {"connection_id": "client-1"},
+            "control_scope_key": "socket:client-1",
+        }
+        state = MinionRunState(
+            minion_id="inv-routed-question",
+            run_id="run-routed-question",
+            pack=MinionInvocationPack(
+                invocation_id="inv-routed-question",
+                metadata={
+                    "minion_v2": {
+                        "workflow_id": "wf-routed-question",
+                        "control_route": route,
+                    }
+                },
+            ),
+        )
+        manager.runs[state.run_id] = state
+        recorded: list[dict[str, object]] = []
+        queued: list[dict[str, object]] = []
+        manager.v2_service.repository.read_snapshot = lambda *_args: None
+        manager.v2_service.repository.record_worker_event = (
+            lambda event: recorded.append(dict(event))
+        )
+        manager.events.queue_event = lambda event: queued.append(dict(event))
+
+        asyncio.run(
+            manager._publish_v2_worker_event(
+                {
+                    "event_kind": "clarification_requested",
+                    "run_id": state.run_id,
+                    "invocation_id": state.pack.invocation_id,
+                    "payload": {
+                        "clarification_id": "clarification-routed",
+                        "control_route": {
+                            "endpoint_id": "stale",
+                            "channel_kind": "socket",
+                            "reply_target": {"connection_id": "old-client"},
+                            "control_scope_key": "socket:old-client",
+                        },
+                        "questions": [
+                            {
+                                "id": "compatibility",
+                                "question": "Which boundary is binding?",
+                            }
+                        ],
+                    },
+                }
+            )
+        )
+
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded, queued)
+        self.assertEqual(queued[0]["workflow_id"], "wf-routed-question")
+        self.assertEqual(dict(queued[0]["payload"])["control_route"], route)
+        self.assertEqual(state.status, "clarification_pending")
+        self.assertEqual(
+            state.pending_clarification["clarification_id"],
+            "clarification-routed",
         )
 
     def test_graceful_manager_shutdown_drains_before_stopping(self) -> None:

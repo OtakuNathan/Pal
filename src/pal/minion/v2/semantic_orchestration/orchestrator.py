@@ -5939,6 +5939,7 @@ class SemanticOrchestrator:
             metadata={
                 "minion_v2": {
                     "workflow_id": snapshot.workflow_id,
+                    "control_route": dict(workflow.payload.get("control_route") or {}),
                     "aggregate_type": snapshot.aggregate_type.value,
                     "aggregate_id": snapshot.aggregate_id,
                     "effect_id": effect["effect_id"],
