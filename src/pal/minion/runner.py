@@ -1435,6 +1435,11 @@ class MinionRunner:
                 "Do not delete paths through shell. Use delete_path so the resolved path stays within your "
                 "assigned workspace."
             )
+        if _shell_invokes_command(cmd, {"touch"}):
+            return (
+                "Do not create files or placeholders through shell. Use write_file with the intended complete "
+                "UTF-8 content; it creates missing files and parent directories."
+            )
         return ""
 
     def _tool_call_with_minion_defaults(self, tool_call: CanonicalToolCall) -> CanonicalToolCall:

@@ -428,6 +428,7 @@ class MinionSandboxTests(unittest.TestCase):
         cases = {
             "rm src/router.py": "Use delete_path",
             "find src -type f -delete": "Use delete_path",
+            "touch src/router.py": "Use write_file",
         }
         for command, expected in cases.items():
             with self.subTest(command=command):

@@ -29,8 +29,9 @@ MINION_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
                     "when search, read_file, edit_file, write_file, or delete_path is available. Git is available here "
                     "only for classified read-only inspection such as status, diff, log, show, blame, grep, ls-files, "
                     "rev-parse, show-ref, and non-mutating branch queries. Git mutations and unknown Git subcommands are "
-                    "trapped; do not run rm, unlink, rmdir, git rm, or find -delete through shell. Call delete_path for "
-                    "path deletion and leave repository checkpoint mutations to the Manager."
+                    "trapped; do not run touch, rm, unlink, rmdir, git rm, or find -delete through shell. Call write_file "
+                    "to create a file with its intended content, call delete_path for path deletion, and leave repository "
+                    "checkpoint mutations to the Manager."
                 ),
                 "failure_next_steps": (
                     "If a command is trapped, do not retry it through another shell spelling or wrapper. For a trapped "
