@@ -3077,6 +3077,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_public_human_decision_resolves_pending_card_without_token_argument(self) -> None:
         wakes: list[str] = []
         submitted: list[dict[str, object]] = []
+        validated = MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput.model_validate(
+            {"task": "OHOS platform layer", "decision": "accept"}
+        )
+        self.assertIsNone(validated.edit_scope)
         provider = MinionV2PublicProvider(
             runtime_root=self.runtime_root,
             wake_manager=lambda: wakes.append("wake"),

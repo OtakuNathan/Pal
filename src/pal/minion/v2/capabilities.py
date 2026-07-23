@@ -116,11 +116,11 @@ class MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput(StrictT
 
     task: str | None = None
     decision: Literal["accept", "edit", "reject"]
-    edit_scope: Literal["architecture", "requirements"] = Field(
-        default="architecture",
+    edit_scope: Literal["architecture", "requirements"] | None = Field(
+        default=None,
         description=(
             "For decision=edit, choose whether the task ledger changes or only the "
-            "architecture changes."
+            "architecture changes. Omit it for accept or reject."
         ),
     )
     edit_instruction: str | None = Field(
