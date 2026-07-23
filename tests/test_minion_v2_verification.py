@@ -331,6 +331,101 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(submission["outcome"], "module_repair")
         self.assertEqual(submission["target_modules"], ["streaming_decoder"])
 
+    def test_swe_verifier_reuses_an_unchanged_durable_corpus(self) -> None:
+        repo, _digest = self._git_repo("unchanged-verifier-corpus")
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "unchanged-corpus-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "unchanged-corpus-stage"),
+                "write_path_scopes": [
+                    {"kind": "directory", "path": "tests/router/verification"}
+                ],
+                "review_tool_evidence_refs": [
+                    {
+                        "kind": "command",
+                        "tool_name": "op_exec_shell",
+                        "ok": True,
+                        "args": {
+                            "cmd": (
+                                "python -m pytest "
+                                "tests/router/verification/test_router.py"
+                            )
+                        },
+                        "output_sha256": "ok",
+                    }
+                ],
+            },
+            role="verifier",
+        )
+
+        result = swe_verification_tool_result(
+            CanonicalToolCall(
+                name="op_minion_verification_pass",
+                args={},
+                call_id="unchanged-corpus-pass",
+            ),
+            workspace,
+            [],
+        )
+
+        self.assertTrue(result.ok, result.llm_text)
+        submission = json.loads(
+            (
+                self.runtime_root
+                / "unchanged-corpus-stage"
+                / "verification_submission.json"
+            ).read_text()
+        )
+        self.assertEqual(submission["changed_test_paths"], [])
+
+    def test_swe_verifier_requires_a_case_when_corpus_is_empty(self) -> None:
+        repo, _digest = self._git_repo("empty-verifier-corpus")
+        corpus = repo / "tests" / "router" / "verification"
+        for path in corpus.iterdir():
+            path.unlink()
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "-A"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-qm", "empty corpus"],
+            check=True,
+        )
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "empty-corpus-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "empty-corpus-stage"),
+                "write_path_scopes": [
+                    {"kind": "directory", "path": "tests/router/verification"}
+                ],
+                "review_tool_evidence_refs": [
+                    {
+                        "kind": "command",
+                        "tool_name": "op_exec_shell",
+                        "ok": True,
+                        "args": {"cmd": "true"},
+                        "output_sha256": "ok",
+                    }
+                ],
+            },
+            role="verifier",
+        )
+
+        result = swe_verification_tool_result(
+            CanonicalToolCall(
+                name="op_minion_verification_pass",
+                args={},
+                call_id="empty-corpus-pass",
+            ),
+            workspace,
+            [],
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("bound verification corpus is empty", result.llm_text)
+
     def test_scenario_repair_requires_a_module_owned_location(self) -> None:
         with self.assertRaisesRegex(ValueError, "cannot derive a repair owner"):
             infer_repair_target_modules(
@@ -502,6 +597,82 @@ class MinionV2VerificationTests(unittest.TestCase):
             installed["manager_seeded_corpus_hashes"],
         )
 
+    def test_semantic_repair_reuses_existing_verifier_corpus_without_new_delta(self) -> None:
+        repo, candidate_digest = self._git_repo("repair-existing-corpus")
+        test_delta_ref = self.store.put_json(
+            {
+                "schema_version": "1",
+                "candidate_digest": candidate_digest,
+                "changed_paths": [],
+                "workspace_patch_base64": "",
+                "files": [],
+            },
+            artifact_type="VerificationTestWorkspaceArtifact",
+        )
+        repair_ref = self.store.put_json(
+            {
+                "artifact_kind": "semantic_repair_packet",
+                "module_name": "router",
+                "findings": [
+                    {
+                        "finding_key": "existing_case_failed",
+                        "finding_kind": "module_defect",
+                        "priority": "p1",
+                        "summary": "The existing durable regression failed.",
+                        "locations": [
+                            {
+                                "scope": "workspace",
+                                "file": "src/router.py",
+                                "line": 1,
+                            }
+                        ],
+                    }
+                ],
+                "test_delta_ref": test_delta_ref.to_dict(),
+                "changed_test_paths": [],
+            },
+            artifact_type="RepairPacketArtifact",
+        )
+        node = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-router-existing-corpus",
+            workflow_id="wf-router",
+            state="REPAIR_QUEUED",
+            version=1,
+            created_at="2026-07-19T00:00:00+00:00",
+            updated_at="2026-07-19T00:00:00+00:00",
+            payload={
+                "workspace_path": str(repo),
+                "candidate_digest": candidate_digest,
+                "repair_bill_ref": repair_ref.to_dict(),
+                "path_policy": {
+                    "implementation_scopes": [
+                        {"kind": "directory", "path": "src"}
+                    ],
+                    "verification_corpus": {
+                        "kind": "directory",
+                        "path": "tests/router/verification",
+                    },
+                },
+            },
+        )
+
+        installed = SemanticOrchestrator(
+            MinionV2WorkflowService(self.runtime_root)
+        )._install_verifier_tests_for_repair(node)
+
+        self.assertEqual(installed["verifier_test_paths"], [])
+        self.assertEqual(installed["manager_seeded_corpus_hashes"], {})
+        self.assertTrue(
+            (
+                repo
+                / "tests"
+                / "router"
+                / "verification"
+                / "test_router.py"
+            ).is_file()
+        )
+
     def test_semantic_verifier_changed_paths_preserve_both_sides_of_rename(self) -> None:
         repo, _candidate_digest = self._git_repo("renamed-verifier-test")
         source = repo / "tests" / "router" / "verification" / "test_router.py"
@@ -515,9 +686,6 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_semantic_verifier_submission_persists_original_candidate_for_snapshot(self) -> None:
         repo, candidate_digest = self._git_repo("semantic-pending")
-        (repo / "tests" / "router" / "verification" / "test_router.py").write_text(
-            "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n"
-        )
         candidate_ref = self.store.put_json(
             {"candidate_digest": candidate_digest},
             artifact_type="CandidateSnapshotArtifact",
@@ -558,9 +726,8 @@ class MinionV2VerificationTests(unittest.TestCase):
         }
         submission = {
             "outcome": "pass",
-            "changed_test_paths": ["tests/router/verification/test_router.py"],
+            "changed_test_paths": [],
             "tool_receipts": [
-                {"kind": "test_write", "ok": True, "structured": {}},
                 {"kind": "command", "ok": True, "structured": {}},
             ],
         }

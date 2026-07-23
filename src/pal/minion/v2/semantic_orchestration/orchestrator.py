@@ -1539,18 +1539,31 @@ class SemanticOrchestrator:
             raise SubmissionInvariantError(
                 "repair worktree is not based on the rejected candidate"
             )
-        subprocess.run(
-            ["git", "-C", str(workspace), "reset", "--hard", candidate_digest],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
+        encoded_patch = str(test_delta.get("workspace_patch_base64") or "")
+        patch_bytes = base64.b64decode(encoded_patch, validate=True) if encoded_patch else b""
         file_entries = [
             dict(item)
             for item in list(test_delta.get("files") or [])
             if isinstance(item, Mapping)
             and str(dict(item).get("path") or "").startswith("worktree/")
         ]
+        if not declared_paths and not patch_bytes and not file_entries:
+            if not _verification_corpus_files(workspace, corpus_scope):
+                raise SubmissionInvariantError(
+                    "semantic Repair Packet has no verifier delta and the candidate "
+                    "contains no durable verifier corpus"
+                )
+            return {
+                "verifier_test_delta_ref": test_delta_ref.to_dict(),
+                "verifier_test_paths": [],
+                "manager_seeded_corpus_hashes": {},
+            }
+        subprocess.run(
+            ["git", "-C", str(workspace), "reset", "--hard", candidate_digest],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
         for item in file_entries:
             relative = str(item.get("path") or "").removeprefix("worktree/")
             target = (workspace / relative).resolve()
@@ -1560,8 +1573,6 @@ class SemanticOrchestrator:
                 )
             if target.exists() and target.is_file():
                 target.unlink()
-        encoded_patch = str(test_delta.get("workspace_patch_base64") or "")
-        patch_bytes = base64.b64decode(encoded_patch, validate=True) if encoded_patch else b""
         if patch_bytes:
             applied = subprocess.run(
                 ["git", "-C", str(workspace), "apply", "--binary", "-"],
@@ -2046,6 +2057,15 @@ class SemanticOrchestrator:
             )
             semantic_repair_view["verifier_tests_are_preinstalled"] = bool(
                 node.payload.get("verifier_test_paths")
+                or _verification_corpus_files(
+                    Path(str(node.payload.get("workspace_path") or "")),
+                    dict(
+                        dict(node.payload.get("path_policy") or {}).get(
+                            "verification_corpus"
+                        )
+                        or {}
+                    ),
+                )
             )
             semantic_repair_ref = self.service.artifacts.put_json(
                 semantic_repair_view,
@@ -2645,8 +2665,16 @@ class SemanticOrchestrator:
                 "verifier changed paths outside the bound module corpus: "
                 + ", ".join(outside)
             )
-        if outcome != "unknown" and not changed_paths:
-            errors.append("verification requires a real test delta in the bound module corpus")
+        current_case_paths = (
+            _verification_scratch_paths(review_scratch)
+            if scratch_only
+            else _verification_corpus_files(review_workspace, corpus_scope)
+        )
+        if outcome != "unknown" and not current_case_paths:
+            errors.append(
+                "verification requires at least one durable verifier-authored case; "
+                "the bound verification corpus is empty"
+            )
         receipts = [
             dict(item)
             for item in list(submission.get("tool_receipts") or [])
@@ -3007,7 +3035,7 @@ class SemanticOrchestrator:
         accepted_candidate_ref = candidate_ref
         accepted_candidate_digest = candidate_digest
         accepted_candidate = dict(candidate)
-        if outcome == "pass" and not scratch_only:
+        if outcome == "pass" and not scratch_only and changed_paths:
             (
                 accepted_candidate_ref,
                 accepted_candidate_digest,
@@ -5882,7 +5910,7 @@ class SemanticOrchestrator:
             ]
         elif activation.role == OrchestrationRole.VERIFIER:
             invocation_acceptance = [
-                "For module verification, read both durable corpora and extend only tests/<module_name>/verification; tests/<module_name>/developer is read-only. For scenario verification, write probes only in review scratch. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
+                "For module verification, read and run both durable corpora; extend only tests/<module_name>/verification and only for a demonstrated coverage gap, while tests/<module_name>/developer remains read-only. For scenario verification, reuse or extend probes only in durable review scratch. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
                 "Call exactly one semantic verification outcome tool; do not construct a VerificationPlan or evidence JSON.",
             ]
         elif activation.role == OrchestrationRole.IMPLEMENTATION:
@@ -7589,6 +7617,28 @@ def _verification_scratch_paths(review_scratch: Path) -> list[str]:
         for path in sorted(
             item for item in review_scratch.rglob("*") if item.is_file() and not item.is_symlink()
         )
+    ]
+
+
+def _verification_corpus_files(
+    review_workspace: Path,
+    corpus_scope: Mapping[str, Any],
+) -> list[str]:
+    root = review_workspace.resolve()
+    target = str(corpus_scope.get("path") or "").replace("\\", "/").strip("/")
+    if not target or not root.is_dir():
+        return []
+    path = (root / target).resolve()
+    if not path.is_relative_to(root):
+        return []
+    if str(corpus_scope.get("kind") or "") == "file":
+        return [target] if path.is_file() and not path.is_symlink() else []
+    if not path.is_dir():
+        return []
+    return [
+        item.relative_to(root).as_posix()
+        for item in sorted(path.rglob("*"))
+        if item.is_file() and not item.is_symlink()
     ]
 
 

@@ -45,9 +45,9 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_pass": {
         "alias": "verification_pass",
         "description": (
-            "Submit PASS only after the existing module corpus passes and you have added or materially strengthened "
-            "adversarial coverage for this exact candidate. Takes no arguments. The Manager validates that the Verifier-owned "
-            "tests/<module_name>/verification corpus changed and that a successful ordinary shell or LSP check ran after the final edit."
+            "Submit PASS after the durable module corpus covers the candidate and passes. Add or materially strengthen "
+            "adversarial coverage only when the existing corpus leaves a real gap. Takes no arguments. The Manager requires "
+            "a non-empty tests/<module_name>/verification corpus and a successful ordinary shell or LSP check after any final edit."
         ),
         "InputModel": EmptyToolInput,
     },
@@ -173,8 +173,8 @@ def compile_swe_verification_tool_contract(
     if verification_corpus:
         guidance_overrides["op_minion_verification_pass"] = {"use_when": (
             f"Submit PASS only after reading and running the existing {verification_corpus}/ corpus, "
-            "adding or strengthening missing adversarial coverage there, and running a successful "
-            "ordinary shell or LSP check after the final corpus edit. PASS takes no arguments."
+            "adding or strengthening coverage only for a demonstrated gap, and running a successful "
+            "ordinary shell or LSP check against the final corpus state. PASS takes no arguments."
         )}
     elif requirements:
         guidance_overrides["op_minion_verification_pass"] = {"use_when": (
@@ -352,9 +352,10 @@ def _submission_errors(
     if outcome == "unknown" and not reason:
         errors.append("UNKNOWN requires an environmental reason and follow-up verification plan")
     changed_paths = _changed_paths(workspace)
-    if outcome != "unknown" and not changed_paths:
+    if outcome != "unknown" and not _verification_case_files(workspace):
         errors.append(
-            "verification requires a verifier-authored delta in tests/<module_name>/verification"
+            "verification requires at least one durable verifier-authored case; "
+            "add coverage because the bound verification corpus is empty"
         )
     write_scopes = [
         dict(item or {}) for item in list(workspace.get("write_path_scopes") or [])
@@ -580,3 +581,47 @@ def _changed_paths(workspace: Mapping[str, Any]) -> list[str]:
                 paths.append(source.replace("\\", "/"))
             index += 1
     return sorted(dict.fromkeys(paths))
+
+
+def _verification_case_files(workspace: Mapping[str, Any]) -> list[str]:
+    if bool(
+        workspace.get("verification_scenario")
+        or workspace.get("verification_scratch_only")
+    ):
+        root = Path(str(workspace.get("review_scratch_dir") or ""))
+        return (
+            [
+                f"review_scratch/{path.relative_to(root).as_posix()}"
+                for path in sorted(
+                    item
+                    for item in root.rglob("*")
+                    if item.is_file() and not item.is_symlink()
+                )
+            ]
+            if root.is_dir()
+            else []
+        )
+    root = Path(str(workspace.get("repo_path") or ""))
+    if not root.is_dir():
+        return []
+    files: list[str] = []
+    for raw_scope in list(workspace.get("write_path_scopes") or []):
+        scope = dict(raw_scope or {})
+        target = str(scope.get("path") or "").replace("\\", "/").strip("/")
+        if not target:
+            continue
+        path = (root / target).resolve()
+        if not path.is_relative_to(root.resolve()):
+            continue
+        if str(scope.get("kind") or "") == "file":
+            if path.is_file() and not path.is_symlink():
+                files.append(target)
+            continue
+        if not path.is_dir():
+            continue
+        files.extend(
+            item.relative_to(root).as_posix()
+            for item in sorted(path.rglob("*"))
+            if item.is_file() and not item.is_symlink()
+        )
+    return sorted(set(files))
