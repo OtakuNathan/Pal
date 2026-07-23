@@ -304,14 +304,14 @@ class MinionV2OutboxProcessor:
                 dict.fromkeys(
                     str(item)
                     for item in (
-                        *list(node.payload.get("dependency_node_ids") or []),
-                        *list(node.payload.get("module_node_ids") or []),
-                        node.payload.get("dependency_node_id") or "",
-                        node.payload.get("module_node_id") or "",
+                        *list(node.payload.get("repair_target_node_ids") or []),
+                        node.payload.get("repair_target_node_id") or "",
                     )
                     if str(item)
                 )
             )
+            if not targets:
+                raise RuntimeError("repair propagation effect has no explicit target nodes")
             for target in targets:
                 DefectPropagationService(self.repository).propagate_dependency_defect(
                     workflow_id=node.workflow_id,

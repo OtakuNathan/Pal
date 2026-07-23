@@ -1150,7 +1150,10 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 DagNodeRunState.REVIEW_SNAPSHOTTING,
                 "DEPENDENCY_DEFECT",
                 DagNodeRunState.STALE,
-                {"repair_bill_ref": "artifact:repair", "dependency_node_id": "dependency"},
+                {
+                    "repair_bill_ref": "artifact:repair",
+                    "repair_target_node_id": "dependency",
+                },
             ),
             (
                 DagNodeRunState.VERIFY_SNAPSHOTTING,
@@ -1165,7 +1168,10 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 DagNodeRunState.VERIFY_SNAPSHOTTING,
                 "MODULE_DEFECT",
                 DagNodeRunState.STALE,
-                {"repair_bill_ref": "artifact:repair", "module_node_id": "module"},
+                {
+                    "repair_bill_ref": "artifact:repair",
+                    "repair_target_node_id": "module",
+                },
             ),
             (
                 DagNodeRunState.PRODUCING,

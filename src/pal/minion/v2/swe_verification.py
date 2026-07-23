@@ -107,10 +107,18 @@ def is_swe_verification_capability(name: str) -> bool:
     return str(name) in SWE_VERIFICATION_TOOL_SPECS
 
 
-def compile_swe_verification_tool_contract(work_view: Mapping[str, Any]) -> dict[str, Any]:
+def compile_swe_verification_tool_contract(
+    work_view: Mapping[str, Any],
+    *,
+    repair_path_owners: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     module_name = str(
         work_view.get("module_name") or work_view.get("verification_name") or ""
     ).strip()
+    scenario_mode = bool(
+        str(work_view.get("verification_name") or "").strip()
+        or work_view.get("scenario")
+    )
     dependencies = sorted(str(item) for item in dict(work_view.get("dependencies") or {}))
     accepted_modules = sorted(
         {
@@ -130,6 +138,11 @@ def compile_swe_verification_tool_contract(work_view: Mapping[str, Any]) -> dict
         str(name): dict(value or {})
         for name, value in dict(work_view.get("requirements") or {}).items()
     }
+    compiled_repair_path_owners = _normalize_repair_path_owners(
+        repair_path_owners
+        if repair_path_owners is not None
+        else _work_view_repair_path_owners(work_view)
+    )
     guidance_overrides: dict[str, dict[str, str]] = {}
     guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
         "Record or replace one evidence-backed verifier finding. Use module_defect for the current implementation, "
@@ -138,11 +151,24 @@ def compile_swe_verification_tool_contract(work_view: Mapping[str, Any]) -> dict
         "integration_defect for cross-module product behavior. Finish the breadth-first audit first and batch "
         "independent add_finding calls in one tool round when possible."
     )}
+    if scenario_mode:
+        guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
+            "Record or replace one evidence-backed scenario finding. For every implementation repair, cite at least "
+            "one exact workspace file owned by the affected module so Manager can derive the graph route mechanically. "
+            "Use contract_defect, architecture_defect, or requirements_defect when no implementation-owned path can "
+            "legally resolve the issue. Finish the breadth-first audit first and batch independent findings in one tool round."
+        )}
     if dependency_targets:
         guidance_overrides["op_minion_verification_request_dependency_repairs"] = {"use_when": (
             "Submit all reproduced upstream defects in one call. Allowed semantic module names: "
             + ", ".join(dependency_targets)
             + "."
+        )}
+    if scenario_mode:
+        guidance_overrides["op_minion_verification_request_module_repair"] = {"use_when": (
+            "Submit reproduced implementation defects after recording each with add_finding. "
+            "Manager derives every affected module mechanically from the finding locations and "
+            "the bound path ownership map; do not choose repair targets yourself."
         )}
     if verification_corpus:
         guidance_overrides["op_minion_verification_pass"] = {"use_when": (
@@ -156,7 +182,9 @@ def compile_swe_verification_tool_contract(work_view: Mapping[str, Any]) -> dict
         )}
     return {
         "module_name": module_name,
+        "scenario_mode": scenario_mode,
         "dependency_targets": dependency_targets,
+        "repair_path_owners": compiled_repair_path_owners,
         "verification_corpus": verification_corpus,
         "requirements": requirements,
         "guidance_overrides": guidance_overrides,
@@ -172,7 +200,6 @@ def swe_verification_tool_result(
         outcome = _OUTCOME_BY_CAPABILITY[call.name]
         args = dict(call.args or {})
         reason = str(args.get("reason") or "").strip()
-        target_modules = _validate_target_modules(workspace, args.get("modules") or [])
         if outcome == "pass" and args:
             raise ValueError("verification_pass takes no arguments")
         context = SubmissionDraftContext.from_workspace(
@@ -182,6 +209,30 @@ def swe_verification_tool_result(
         store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
         snapshot = store.read(context, seed=empty_review_draft())
         findings = structured_findings(snapshot.payload)
+        contract = dict(
+            dict(workspace.get("minion_v2") or {}).get(
+                "swe_verification_tool_contract"
+            )
+            or {}
+        )
+        scenario_mode = bool(
+            workspace.get("verification_scenario")
+            or contract.get("scenario_mode")
+        )
+        if scenario_mode and outcome in {"module_repair", "dependency_repairs"}:
+            target_modules = infer_repair_target_modules(
+                findings,
+                contract.get("repair_path_owners") or {},
+            )
+            # Scenario modules are all accepted Candidate dependencies.  The
+            # terminal capability selects repair semantics; Manager owns the
+            # graph route and canonicalizes both historical repair spellings.
+            outcome = "module_repair"
+        else:
+            target_modules = _validate_target_modules(
+                workspace,
+                args.get("modules") or [],
+            )
         errors = _submission_errors(
             outcome=outcome,
             findings=findings,
@@ -370,6 +421,122 @@ def _validate_target_modules(workspace: Mapping[str, Any], values: Any) -> list[
             + (", ".join(sorted(allowed)) or "<none>")
         )
     return requested
+
+
+def infer_repair_target_modules(
+    findings: list[Mapping[str, Any]],
+    repair_path_owners: Mapping[str, Any],
+) -> list[str]:
+    """Resolve semantic repair owners from verifier-authored source locations."""
+
+    owners = _normalize_repair_path_owners(repair_path_owners)
+    resolved: set[str] = set()
+    unresolved: list[str] = []
+    for finding in findings:
+        finding_key = str(finding.get("finding_key") or "<unnamed>")
+        finding_owners: set[str] = set()
+        for raw_location in list(finding.get("locations") or []):
+            location = dict(raw_location or {})
+            if str(location.get("scope") or "") != "workspace":
+                continue
+            path = str(location.get("file") or location.get("path") or "").strip()
+            if not path:
+                continue
+            for module_name, scopes in owners.items():
+                if any(_path_scope_matches(path, scope) for scope in scopes):
+                    finding_owners.add(module_name)
+        if not finding_owners:
+            unresolved.append(finding_key)
+            continue
+        resolved.update(finding_owners)
+    if unresolved:
+        raise ValueError(
+            "Manager cannot derive a repair owner for finding(s): "
+            + ", ".join(sorted(unresolved))
+            + ". Cite at least one workspace file owned by the affected module, "
+            "or use the contract/architecture/requirements revision outcome."
+        )
+    if not resolved:
+        raise ValueError(
+            "Manager cannot derive repair targets without workspace-owned finding locations"
+        )
+    return sorted(resolved)
+
+
+def _work_view_repair_path_owners(
+    work_view: Mapping[str, Any],
+) -> dict[str, list[dict[str, str]]]:
+    owners: dict[str, list[dict[str, str]]] = {}
+    modules = {
+        str(name): dict(value or {})
+        for name, value in dict(work_view.get("modules") or {}).items()
+    }
+    if modules:
+        for module_name, module in modules.items():
+            paths = dict(module.get("paths") or {})
+            scopes = [
+                {"kind": "file", "path": str(path)}
+                for path in list(paths.get("contract_paths") or [])
+            ]
+            scopes.extend(
+                dict(scope or {})
+                for scope in list(paths.get("implementation_scopes") or [])
+            )
+            scopes.extend(
+                (
+                    {
+                        "kind": "directory",
+                        "path": f"tests/{module_name}/developer",
+                    },
+                    {
+                        "kind": "directory",
+                        "path": f"tests/{module_name}/verification",
+                    },
+                )
+            )
+            owners[module_name] = scopes
+        return owners
+
+    module_name = str(work_view.get("module_name") or "").strip()
+    if not module_name:
+        return owners
+    scopes = [
+        {"kind": "file", "path": str(path)}
+        for path in list(work_view.get("contract_paths") or [])
+    ]
+    scopes.extend(
+        dict(scope or {})
+        for scope in list(work_view.get("implementation_scopes") or [])
+    )
+    for field in ("developer_tests", "verification_corpus"):
+        scope = dict(work_view.get(field) or {})
+        if scope:
+            scopes.append(scope)
+    owners[module_name] = scopes
+    return owners
+
+
+def _normalize_repair_path_owners(
+    value: Mapping[str, Any],
+) -> dict[str, list[dict[str, str]]]:
+    normalized: dict[str, list[dict[str, str]]] = {}
+    for raw_module_name, raw_scopes in dict(value or {}).items():
+        module_name = str(raw_module_name or "").strip()
+        if not module_name:
+            continue
+        scopes: list[dict[str, str]] = []
+        for raw_scope in list(raw_scopes or []):
+            scope = dict(raw_scope or {})
+            kind = str(scope.get("kind") or "").strip().lower()
+            path = str(scope.get("path") or "").replace("\\", "/").strip("/")
+            if kind not in {"file", "directory"} or not path:
+                continue
+            item = {"kind": kind, "path": path}
+            if item not in scopes:
+                scopes.append(item)
+        if scopes:
+            normalized[module_name] = scopes
+    return dict(sorted(normalized.items()))
 
 
 def _changed_paths(workspace: Mapping[str, Any]) -> list[str]:

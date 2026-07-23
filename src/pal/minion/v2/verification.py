@@ -436,8 +436,8 @@ class VerificationService:
                 payload = {
                     **common,
                     "repair_bill_ref": repair_bill_ref.to_dict(),
-                    "dependency_node_id": dependency_targets[0],
-                    "dependency_node_ids": list(dependency_targets),
+                    "repair_target_node_id": dependency_targets[0],
+                    "repair_target_node_ids": list(dependency_targets),
                     "finding_fingerprint": finding_fingerprint_value,
                     "failure_history": history,
                 }
@@ -462,8 +462,8 @@ class VerificationService:
                 payload = {
                     **common,
                     "repair_bill_ref": repair_bill_ref.to_dict(),
-                    "module_node_id": module_targets[0],
-                    "module_node_ids": list(module_targets),
+                    "repair_target_node_id": module_targets[0],
+                    "repair_target_node_ids": list(module_targets),
                     "finding_fingerprint": finding_fingerprint_value,
                     "failure_history": history,
                 }

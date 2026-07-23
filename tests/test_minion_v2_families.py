@@ -211,6 +211,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             "op_minion_verification_scratch_write",
             scenario.allowed_capabilities,
         )
+        self.assertNotIn(
+            "op_minion_verification_request_dependency_repairs",
+            scenario.allowed_capabilities,
+        )
 
         for profile in ("general.verifier", "lifestyle.verifier"):
             with self.subTest(profile=profile):

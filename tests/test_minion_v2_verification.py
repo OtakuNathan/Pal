@@ -51,6 +51,7 @@ from pal.minion.v2.candidate_builder import candidate_builder_tool_result
 from pal.minion.v2.swe_verification import (
     _changed_paths,
     compile_swe_verification_tool_contract,
+    infer_repair_target_modules,
     swe_verification_tool_result,
 )
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
@@ -64,6 +65,7 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     _recorded_verification_case_results,
     _reject_manager_identity_fields,
     _routable_verification_findings,
+    _resolve_dependency_node_id,
     _resolve_verification_defect_targets,
     _seed_durable_verification_scratch,
     _module_verifier_git_diff_refs,
@@ -72,6 +74,7 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     _verifier_reference_refs,
     _verification_case_specs,
     _verification_findings,
+    _verification_repair_path_owners,
     _verification_workspace_changed_paths,
     _verification_workspace_from_prompt_pack,
 )
@@ -230,6 +233,120 @@ class MinionV2VerificationTests(unittest.TestCase):
             contract["dependency_targets"],
             ["drawing_backend", "event_input"],
         )
+
+    def test_scenario_module_repair_derives_target_from_finding_location(self) -> None:
+        workspace = self._bind_workspace(
+            {
+                "artifact_dir": str(self.runtime_root / "scenario-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "scenario-stage"),
+                "verification_scenario": True,
+                "verification_scratch_only": True,
+                "review_tool_evidence_refs": [
+                    {
+                        "kind": "command",
+                        "tool_name": "op_exec_shell",
+                        "ok": False,
+                        "args": {"cmd": "python tests/streaming_decoder/repro.py"},
+                        "output_sha256": "failed-reproducer",
+                    }
+                ],
+            },
+            role="verifier",
+            mode="scenario",
+        )
+        scratch = Path(str(workspace["review_scratch_dir"]))
+        (scratch / "streaming_decoder_repro.py").write_text(
+            "raise AssertionError('broken corpus')\n",
+            encoding="utf-8",
+        )
+        contract = compile_swe_verification_tool_contract(
+            {
+                "verification_name": "streaming_round_trip",
+                "scenario": {"modules": ["encoder", "streaming_decoder"]},
+                "modules": {
+                    "encoder": {
+                        "paths": {
+                            "contract_paths": ["include/framepipe/encoder.hpp"],
+                            "implementation_scopes": [
+                                {"kind": "file", "path": "src/encoder.cpp"}
+                            ],
+                        }
+                    },
+                    "streaming_decoder": {
+                        "paths": {
+                            "contract_paths": ["include/framepipe/decoder.hpp"],
+                            "implementation_scopes": [
+                                {"kind": "file", "path": "src/decoder.cpp"}
+                            ],
+                        }
+                    },
+                },
+            }
+        )
+        binding = dict(workspace["minion_v2"])
+        binding["swe_verification_tool_contract"] = contract
+        workspace["minion_v2"] = binding
+
+        finding = add_finding_tool_result(
+            CanonicalToolCall(
+                name=ADD_FINDING_CAPABILITY,
+                args={
+                    "finding_key": "decoder_developer_corpus_is_broken",
+                    "finding_kind": "module_defect",
+                    "priority": "p1",
+                    "summary": "The decoder developer corpus does not compile.",
+                    "locations": [
+                        {
+                            "scope": "workspace",
+                            "file": "tests/streaming_decoder/developer/test_decoder.cpp",
+                            "line": 17,
+                        }
+                    ],
+                },
+                call_id="scenario-finding",
+            ),
+            workspace,
+        )
+        self.assertTrue(finding.ok, finding.text)
+
+        result = swe_verification_tool_result(
+            CanonicalToolCall(
+                name="op_minion_verification_request_module_repair",
+                args={},
+                call_id="scenario-repair",
+            ),
+            workspace,
+            [],
+        )
+
+        self.assertTrue(result.ok, result.text)
+        submission = json.loads(
+            (self.runtime_root / "scenario-stage" / "verification_submission.json").read_text()
+        )
+        self.assertEqual(submission["outcome"], "module_repair")
+        self.assertEqual(submission["target_modules"], ["streaming_decoder"])
+
+    def test_scenario_repair_requires_a_module_owned_location(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot derive a repair owner"):
+            infer_repair_target_modules(
+                [
+                    {
+                        "finding_key": "unowned_failure",
+                        "locations": [
+                            {
+                                "scope": "workspace",
+                                "file": "tests/scenario/repro.cpp",
+                                "line": 1,
+                            }
+                        ],
+                    }
+                ],
+                {
+                    "decoder": [
+                        {"kind": "file", "path": "src/decoder.cpp"},
+                    ]
+                },
+            )
 
     def test_artifact_verifier_uses_durable_scratch_as_its_test_delta(self) -> None:
         scratch = self.runtime_root / "artifact-verifier-scratch"
@@ -3103,6 +3220,265 @@ class MinionV2VerificationTests(unittest.TestCase):
 
         self.assertEqual(dependency_node_id, "")
         self.assertEqual(module_node_id, "")
+
+    def test_scenario_repair_targets_do_not_replace_dependency_graph(self) -> None:
+        node_id = "node_scenario_repair_route"
+        dependency_ids = ("node_encoder", "node_streaming_decoder")
+        scenario_fingerprint = "scenario-repair-fingerprint"
+        contract = self.store.put_json(
+            {"verification_name": "streaming_round_trip"},
+            artifact_type="VerificationScenarioContractArtifact",
+        )
+        union = self.store.put_json(
+            {"scenario": "streaming_round_trip"},
+            artifact_type="CandidateUnionArtifact",
+        )
+        actions = [
+            (
+                "CREATE_NODE_RUN",
+                {
+                    "unit_contract_ref": contract.to_dict(),
+                    "epoch_id": "epoch",
+                    "node_kind": "verification",
+                    "dependency_node_ids": list(dependency_ids),
+                },
+            ),
+            (
+                "VERIFICATION_DEPENDENCIES_ACCEPTED",
+                {
+                    "accepted_dependency_node_ids": list(dependency_ids),
+                    "epoch_frozen": False,
+                },
+            ),
+            (
+                "VERIFICATION_PREPARED",
+                {
+                    "scenario_fingerprint": scenario_fingerprint,
+                    "scenario_candidate_union_ref": union.to_dict(),
+                    "scenario_commit_sha": "scenario-commit",
+                    "verification_workspace_fingerprint": "scenario-tree",
+                },
+            ),
+            ("START_SCENARIO_VERIFICATION", {"fencing_token": 1}),
+            (
+                "SUBMIT_SEMANTIC_VERIFICATION",
+                {"pending_verification_ref": {"sha256": "pending-scenario"}},
+            ),
+            (
+                "VERIFIER_QUIESCED",
+                {
+                    "fencing_token": 1,
+                    "process_group_reaped": True,
+                    "exclusive_workspace_lock": True,
+                    "workspace_fingerprint": "verification-tree",
+                },
+            ),
+        ]
+        for action_type, payload in actions:
+            snapshot = self.repository.read_snapshot(
+                AggregateType.DAG_NODE_RUN,
+                node_id,
+            )
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id="wf_verify",
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node_id,
+                    actor="test",
+                    expected_version=snapshot.version if snapshot else 0,
+                    idempotency_key=f"{node_id}:{action_type}",
+                    payload=payload,
+                )
+            )
+        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+        assert node is not None
+        verification_ref = self.store.put_json(
+            {"status": "FAIL", "scenario_fingerprint": scenario_fingerprint},
+            artifact_type="VerificationArtifact",
+        )
+        repair_ref = self.store.put_json(
+            {"finding": "decoder corpus is broken"},
+            artifact_type="RepairPacketArtifact",
+        )
+
+        failed = self.verification.submit_verdict(
+            node=node,
+            verification_ref=verification_ref,
+            status=VerificationStatus.FAIL,
+            actor="verifier",
+            repair_bill_ref=repair_ref,
+            finding_fingerprint_value="decoder-corpus-finding",
+            defect_kind=DefectKind.MODULE,
+            module_node_ids=("node_streaming_decoder",),
+            scenario_fingerprint=scenario_fingerprint,
+        ).snapshot
+
+        self.assertEqual(failed.state, "STALE")
+        self.assertEqual(
+            failed.payload["dependency_node_ids"],
+            list(dependency_ids),
+        )
+        self.assertEqual(
+            failed.payload["repair_target_node_ids"],
+            ["node_streaming_decoder"],
+        )
+        self.assertEqual(
+            failed.payload["repair_target_node_id"],
+            "node_streaming_decoder",
+        )
+
+    def test_manager_resolves_scenario_repair_owner_from_immutable_path_policy(self) -> None:
+        contract = self.store.put_json(
+            {"contract": "framepipe"},
+            artifact_type="UnitContractArtifact",
+        )
+        for node_id, module_name, source_path in (
+            ("node_encoder", "encoder", "src/encoder.cpp"),
+            ("node_streaming_decoder", "streaming_decoder", "src/decoder.cpp"),
+        ):
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="CREATE_NODE_RUN",
+                    workflow_id="wf_verify",
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node_id,
+                    actor="test",
+                    expected_version=0,
+                    idempotency_key=f"create:{node_id}",
+                    payload={
+                        "epoch_id": "epoch",
+                        "node_kind": "unit",
+                        "module_name": module_name,
+                        "unit_id": module_name,
+                        "unit_contract_ref": contract.to_dict(),
+                        "dependency_node_ids": [],
+                        "contract_dependency_node_ids": [],
+                        "path_policy": {
+                            "contract_paths": [
+                                f"include/framepipe/{module_name}.hpp"
+                            ],
+                            "implementation_scopes": [
+                                {"kind": "file", "path": source_path}
+                            ],
+                            "developer_tests": {
+                                "kind": "directory",
+                                "path": f"tests/{module_name}/developer",
+                            },
+                            "verification_corpus": {
+                                "kind": "directory",
+                                "path": f"tests/{module_name}/verification",
+                            },
+                        },
+                    },
+                )
+            )
+        scenario_id = "node_streaming_scenario"
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="wf_verify",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=scenario_id,
+                actor="test",
+                expected_version=0,
+                idempotency_key=f"create:{scenario_id}",
+                payload={
+                    "epoch_id": "epoch",
+                    "node_kind": "verification",
+                    "module_name": "streaming_round_trip",
+                    "unit_contract_ref": contract.to_dict(),
+                    "dependency_node_ids": [
+                        "node_encoder",
+                        "node_streaming_decoder",
+                    ],
+                },
+            )
+        )
+        scenario = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            scenario_id,
+        )
+        assert scenario is not None
+
+        owners = _verification_repair_path_owners(self.repository, scenario)
+        targets = infer_repair_target_modules(
+            [
+                {
+                    "finding_key": "decoder_developer_corpus_is_broken",
+                    "locations": [
+                        {
+                            "scope": "workspace",
+                            "file": "tests/streaming_decoder/developer/test_decoder.cpp",
+                            "line": 17,
+                        }
+                    ],
+                }
+            ],
+            owners,
+        )
+
+        self.assertEqual(targets, ["streaming_decoder"])
+        self.assertEqual(
+            _resolve_dependency_node_id(
+                self.repository,
+                scenario,
+                dependency_module=targets[0],
+            ),
+            "node_streaming_decoder",
+        )
+
+    def test_repair_effect_reopens_only_explicit_manager_targets(self) -> None:
+        repair_ref = self.store.put_json(
+            {"finding": "decoder corpus is broken"},
+            artifact_type="RepairPacketArtifact",
+        )
+        node = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node_streaming_scenario",
+            workflow_id="wf_verify",
+            state="STALE",
+            version=7,
+            created_at="2026-07-23T00:00:00+00:00",
+            updated_at="2026-07-23T00:00:00+00:00",
+            payload={
+                "epoch_id": "epoch",
+                "dependency_node_ids": [
+                    "node_encoder",
+                    "node_streaming_decoder",
+                    "node_cli",
+                ],
+                "repair_target_node_id": "node_streaming_decoder",
+                "repair_target_node_ids": ["node_streaming_decoder"],
+                "repair_bill_ref": repair_ref.to_dict(),
+            },
+        )
+        processor = MinionV2OutboxProcessor(
+            MinionV2WorkflowService(self.runtime_root)
+        )
+
+        with (
+            patch.object(processor, "_effect_snapshot", return_value=node),
+            patch.object(
+                DefectPropagationService,
+                "propagate_dependency_defect",
+                return_value=(),
+            ) as propagate,
+        ):
+            asyncio.run(
+                processor._execute_mechanical(
+                    {
+                        "effect_type": "reopen_dependency_and_stale_descendants",
+                        "effect_key": "repair-route",
+                    }
+                )
+            )
+
+        self.assertEqual(propagate.call_count, 1)
+        self.assertEqual(
+            propagate.call_args.kwargs["dependency_node_id"],
+            "node_streaming_decoder",
+        )
 
     def test_unknown_hard_semantics_requires_human_waiver(self) -> None:
         assumption = self.store.put_json({"owner": "platform", "verification_plan": "device CI"}, artifact_type="AssumptionLedgerArtifact")

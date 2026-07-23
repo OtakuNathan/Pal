@@ -111,6 +111,7 @@ from pal.minion.v2.skeleton_builder import (
 from pal.minion.v2.swe_verification import (
     SWE_VERIFICATION_CAPABILITIES,
     compile_swe_verification_tool_contract,
+    infer_repair_target_modules,
 )
 from pal.minion.v2.integration import (
     CandidateUnionConflict,
@@ -2661,6 +2662,18 @@ class SemanticOrchestrator:
             errors.append("run verification again after the final test edit")
         if outcome == "pass" and not any(bool(item.get("ok")) for item in final_checks):
             errors.append("PASS requires a successful final command or LSP receipt")
+        normalized_submission = dict(submission)
+        if scenario_mode and outcome in {"module_repair", "dependency_repairs"}:
+            try:
+                target_modules = infer_repair_target_modules(
+                    findings,
+                    _verification_repair_path_owners(self.repository, node),
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+            else:
+                normalized_submission["outcome"] = "module_repair"
+                normalized_submission["target_modules"] = target_modules
         if errors:
             raise SubmissionInvariantError(
                 "semantic verifier submission failed manager validation:\n- "
@@ -2678,7 +2691,7 @@ class SemanticOrchestrator:
             {
                 "schema_version": "1",
                 "scenario_mode": scenario_mode,
-                "submission": dict(submission),
+                "submission": normalized_submission,
                 "candidate_ref": candidate_ref.to_dict(),
                 "implementation_candidate_ref": candidate_ref.to_dict(),
                 "candidate_digest": candidate_digest,
@@ -3065,7 +3078,7 @@ class SemanticOrchestrator:
             for item in list(submission.get("target_modules") or [])
             if str(item).strip()
         ]
-        dependency_node_ids = [
+        repair_node_ids = [
             _resolve_dependency_node_id(
                 self.repository,
                 node,
@@ -3074,12 +3087,12 @@ class SemanticOrchestrator:
             for module_name in target_modules
         ]
         module_node_id = ""
-        if scenario_mode and outcome == "module_repair":
-            raise SubmissionInvariantError(
-                "scenario verifier must use dependency repairs with semantic module names"
-            )
-        if scenario_mode and outcome == "dependency_repairs" and dependency_node_ids:
-            module_node_id = dependency_node_ids[0]
+        if scenario_mode and outcome in {"module_repair", "dependency_repairs"}:
+            if not repair_node_ids:
+                raise SubmissionInvariantError(
+                    "scenario repair requires Manager-resolved module targets"
+                )
+            module_node_id = repair_node_ids[0]
             defect_kind = DefectKind.MODULE
         fingerprint = hashlib.sha256(
             json.dumps(
@@ -3151,10 +3164,18 @@ class SemanticOrchestrator:
                 fallback=accepted_candidate_digest,
             ),
             defect_kind=defect_kind,
-            dependency_node_id=dependency_node_ids[0] if dependency_node_ids else "",
-            dependency_node_ids=dependency_node_ids,
+            dependency_node_id=(
+                repair_node_ids[0]
+                if repair_node_ids and defect_kind == DefectKind.DEPENDENCY
+                else ""
+            ),
+            dependency_node_ids=(
+                repair_node_ids
+                if defect_kind == DefectKind.DEPENDENCY
+                else ()
+            ),
             module_node_id=module_node_id,
-            module_node_ids=(dependency_node_ids if module_node_id else ()),
+            module_node_ids=(repair_node_ids if module_node_id else ()),
             scenario_fingerprint=str(node.payload.get("scenario_fingerprint") or ""),
             accepted_candidate_ref=(
                 accepted_candidate_ref if outcome == "pass" and not scratch_only else None
@@ -6018,7 +6039,11 @@ class SemanticOrchestrator:
             view_ref = bound_reference_refs.get("module_work_view")
             if view_ref is not None:
                 tool_contract = compile_swe_verification_tool_contract(
-                    self.service.artifacts.read_json(view_ref)
+                    self.service.artifacts.read_json(view_ref),
+                    repair_path_owners=_verification_repair_path_owners(
+                        self.repository,
+                        snapshot,
+                    ),
                 )
                 pack_value = pack.to_dict()
                 metadata = dict(pack_value.get("metadata") or {})
@@ -7753,6 +7778,16 @@ def apply_v2_role_capability_policy(
             OrchestrationRole.REVIEWER: set(STANDALONE_REVIEW_BUILDER_CAPABILITIES),
             OrchestrationRole.IMPLEMENTATION: set(CANDIDATE_BUILDER_CAPABILITIES),
         }.get(activation.role)
+        if (
+            activation == RoleActivation(
+                OrchestrationRole.VERIFIER,
+                RoleMode.SCENARIO,
+            )
+            and allowed_authoring is not None
+        ):
+            allowed_authoring.discard(
+                "op_minion_verification_request_dependency_repairs"
+            )
     if allowed_authoring is None:
         return pack
     current.update(allowed_authoring)
@@ -8334,16 +8369,121 @@ def _resolve_dependency_node_id(
     if not name:
         raise ValueError("verification defect route requires a target module")
     matches: list[str] = []
-    for dependency_id in list(node.payload.get("dependency_node_ids") or []):
-        dependency = repository.read_snapshot(AggregateType.DAG_NODE_RUN, str(dependency_id))
-        if dependency is None:
-            continue
+    for dependency in _verification_related_module_nodes(repository, node):
         module_name = str(dependency.payload.get("module_name") or dependency.payload.get("unit_id") or "")
         if module_name == name:
             matches.append(dependency.aggregate_id)
     if len(matches) != 1:
         raise ValueError(f"dependency_module {name!r} does not name exactly one direct dependency")
     return matches[0]
+
+
+def _verification_repair_path_owners(
+    repository: MinionV2Repository,
+    node: AggregateSnapshot,
+) -> dict[str, list[dict[str, str]]]:
+    """Compile immutable module path ownership for Manager-routed repairs."""
+
+    owners: dict[str, list[dict[str, str]]] = {}
+    for dependency in _verification_related_module_nodes(
+        repository,
+        node,
+        include_current=str(node.payload.get("node_kind") or "") != "verification",
+    ):
+        module_name = str(
+            dependency.payload.get("module_name")
+            or dependency.payload.get("unit_id")
+            or ""
+        ).strip()
+        if not module_name:
+            continue
+        policy = dict(dependency.payload.get("path_policy") or {})
+        scopes: list[dict[str, str]] = [
+            {
+                "kind": "file",
+                "path": str(path).replace("\\", "/").strip("/"),
+            }
+            for path in list(policy.get("contract_paths") or [])
+            if str(path).strip()
+        ]
+        scopes.extend(
+            {
+                "kind": str(dict(raw or {}).get("kind") or ""),
+                "path": str(dict(raw or {}).get("path") or "")
+                .replace("\\", "/")
+                .strip("/"),
+            }
+            for raw in list(policy.get("implementation_scopes") or [])
+        )
+        for field in ("developer_tests", "verification_corpus"):
+            raw_scope = dict(policy.get(field) or {})
+            if raw_scope:
+                scopes.append(
+                    {
+                        "kind": str(raw_scope.get("kind") or ""),
+                        "path": str(raw_scope.get("path") or "")
+                        .replace("\\", "/")
+                        .strip("/"),
+                    }
+                )
+        normalized = [
+            scope
+            for scope in scopes
+            if scope["kind"] in {"file", "directory"} and scope["path"]
+        ]
+        if normalized:
+            owners[module_name] = list(
+                {
+                    (scope["kind"], scope["path"]): scope
+                    for scope in normalized
+                }.values()
+            )
+    return dict(sorted(owners.items()))
+
+
+def _verification_related_module_nodes(
+    repository: MinionV2Repository,
+    node: AggregateSnapshot,
+    *,
+    include_current: bool = False,
+) -> tuple[AggregateSnapshot, ...]:
+    """Return the semantic module closure without exposing or rewriting DAG edges."""
+
+    pending = [
+        str(item)
+        for item in (
+            *list(node.payload.get("dependency_node_ids") or []),
+            *list(node.payload.get("contract_dependency_node_ids") or []),
+        )
+        if str(item)
+    ]
+    if include_current:
+        pending.insert(0, node.aggregate_id)
+    visited: set[str] = set()
+    modules: list[AggregateSnapshot] = []
+    while pending:
+        node_id = pending.pop(0)
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        dependency = (
+            node
+            if node_id == node.aggregate_id
+            else repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+        )
+        if dependency is None:
+            continue
+        if str(dependency.payload.get("node_kind") or "unit") == "unit":
+            modules.append(dependency)
+        pending.extend(
+            str(item)
+            for item in (
+                *list(dependency.payload.get("dependency_node_ids") or []),
+                *list(dependency.payload.get("contract_dependency_node_ids") or []),
+            )
+            if str(item) and str(item) not in visited
+        )
+    return tuple(modules)
 
 
 def _semantic_contract_review_view(
