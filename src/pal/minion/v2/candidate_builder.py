@@ -7,7 +7,6 @@ from pal.execution.generated_tool_models import (
     MinionV2CandidateBuilderOpMinionDeveloperCheckUnavailableInput,
     MinionV2CandidateBuilderOpMinionDeveloperCompileCheckInput,
     MinionV2CandidateBuilderOpMinionDeveloperLspCheckInput,
-    MinionV2CandidateBuilderOpMinionDeveloperNoteInput,
     MinionV2CandidateBuilderOpMinionDeveloperTestInput,
 )
 
@@ -35,7 +34,6 @@ from pal.shared import RuntimeStatus
 
 
 CANDIDATE_BUILDER_CAPABILITIES = (
-    "op_minion_developer_note",
     "op_minion_developer_test",
     "op_minion_developer_compile_check",
     "op_minion_developer_lsp_check",
@@ -45,18 +43,6 @@ CANDIDATE_BUILDER_CAPABILITIES = (
     "op_minion_candidate_request_module_split",
 )
 
-_NOTE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "kind": {
-            "type": "string",
-            "enum": ["micro_plan", "completed", "file_inspected", "open_question", "known_failure"],
-        },
-        "text": {"type": "string", "minLength": 1},
-    },
-    "required": ["kind", "text"],
-    "additionalProperties": False,
-}
 _RUN_SCHEMA = {
     "type": "object",
     "properties": {
@@ -104,11 +90,6 @@ _DEFECT_SCHEMA = {
 _NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 
 CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
-    "op_minion_developer_note": {
-        "alias": "developer_note",
-        "description": "Record one durable local progress item. kind is micro_plan, completed, file_inspected, open_question, or known_failure.",
-        "InputModel": MinionV2CandidateBuilderOpMinionDeveloperNoteInput,
-    },
     "op_minion_developer_test": {
         "alias": "developer_test",
         "description": "Run and durably record one focused developer test. Provide a shell command, not a nested test report.",
@@ -197,8 +178,6 @@ async def candidate_builder_tool_result(
     if name == "op_minion_developer_check_unavailable":
         return record_unavailable_evidence(call, workspace=workspace, draft_kind="candidate")
     try:
-        if name == "op_minion_developer_note":
-            return _record_note(call, workspace)
         if name == "op_minion_candidate_submit":
             return _submit_candidate(call, workspace, produced_artifacts, status="candidate_ready")
         if name == "op_minion_candidate_report_architecture_defect":
@@ -208,34 +187,6 @@ async def candidate_builder_tool_result(
         raise ValueError(f"unknown candidate authoring capability: {name}")
     except Exception as exc:
         return _error(call, exc)
-
-
-def _record_note(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> CanonicalToolResult:
-    args = dict(call.args or {})
-    kind = str(args.get("kind") or "").strip()
-    text = str(args.get("text") or "").strip()
-    if kind not in {"micro_plan", "completed", "file_inspected", "open_question", "known_failure"} or not text:
-        raise ValueError("developer note requires a valid kind and non-empty text")
-    context = SubmissionDraftContext.from_workspace(workspace, draft_kind="candidate")
-    store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
-
-    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-        summary = dict(payload.get("summary") or {})
-        values = list(summary.get(kind) or [])
-        if text not in values:
-            values.append(text)
-        summary[kind] = values
-        payload["summary"] = summary
-        return payload, {"recorded": True, "kind": kind, "text": text}
-
-    result = store.mutate(
-        context,
-        operation_key=str(call.call_id or f"note:{kind}:{text}"),
-        request=args,
-        reducer=reducer,
-        seed=_empty_candidate_payload(),
-    )
-    return _ok(call, "developer note recorded", result)
 
 
 def _submit_candidate(
@@ -250,7 +201,6 @@ def _submit_candidate(
     store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
     snapshot = store.read(context, seed=_empty_candidate_payload())
     work_view = bound_reference_payload(workspace, "unit_work_view")
-    summary = dict(snapshot.payload.get("summary") or {})
     cases = recorded_cases(snapshot.payload)
     if status == "candidate_ready":
         if args:
@@ -279,13 +229,8 @@ def _submit_candidate(
             "candidate_submit requires at least one contracted product file in the artifact workspace"
         )
     report = {
-        "current_micro_plan": list(summary.get("micro_plan") or []),
-        "completed_checklist": list(summary.get("completed") or []),
-        "files_inspected": list(summary.get("file_inspected") or []),
         "files_changed": files_changed,
         "tests_run": [f"{item.get('name')}: {item.get('status')}" for item in cases],
-        "open_questions": list(summary.get("open_question") or []),
-        "known_failures": list(summary.get("known_failure") or []),
         "status": status,
     }
     if status != "candidate_ready":
@@ -346,13 +291,8 @@ def validate_candidate_submission(
     value: Mapping[str, Any], *, work_view: Mapping[str, Any]
 ) -> tuple[str, ...]:
     required = {
-        "current_micro_plan",
-        "completed_checklist",
-        "files_inspected",
         "files_changed",
         "tests_run",
-        "open_questions",
-        "known_failures",
         "status",
     }
     missing = required - set(value)

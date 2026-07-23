@@ -2124,13 +2124,18 @@ class SemanticOrchestrator:
             lease_resource=lease_resource,
             fencing_token=fencing_token,
             updates={
-                "current_micro_plan": list(report.get("current_micro_plan") or []),
-                "completed_checklist": list(report.get("completed_checklist") or []),
-                "files_inspected": list(report.get("files_inspected") or []),
+                "current_micro_plan": [],
+                "completed_checklist": (
+                    ["candidate submitted"] if status == "candidate_ready" else []
+                ),
                 "files_changed": list(report.get("files_changed") or []),
                 "tests_run": list(report.get("tests_run") or []),
-                "open_questions": list(report.get("open_questions") or []),
-                "known_failures": list(report.get("known_failures") or []),
+                "open_questions": [],
+                "known_failures": (
+                    [str(report.get("summary") or "")]
+                    if status != "candidate_ready"
+                    else []
+                ),
                 "last_safe_point": "producer_report_persisted",
             },
         )
@@ -5884,12 +5889,12 @@ class SemanticOrchestrator:
             if self._is_skeleton_manifest(snapshot.payload.get("architecture_manifest_ref")):
                 invocation_acceptance = [
                     "Implement or repair only the bound module, write focused tests only in tests/<module_name>/developer, and keep tests/<module_name>/verification read-only.",
-                    "Record checks with dedicated developer tools, then call candidate_submit with no arguments.",
+                    "Run the minimum sufficient check with a dedicated developer tool, then call candidate_submit with no arguments.",
                 ]
             else:
                 invocation_acceptance = [
                     "Write the contracted product artifact in the bound workspace and run a focused validation.",
-                    "Record progress and checks with dedicated developer tools, then call candidate_submit with no arguments; do not write producer_report.json.",
+                    "Run one focused validation with a dedicated developer tool, then call candidate_submit with no arguments; do not write producer_report.json.",
                 ]
         elif activation.mode == RoleMode.STANDALONE:
             invocation_acceptance = [

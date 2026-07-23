@@ -1424,14 +1424,6 @@ MinionScopedExecutionOpMinionArtifactWriteInput = _strict_model(
     },
 )
 
-MinionV2CandidateBuilderOpMinionDeveloperNoteInput = _strict_model(
-    'MinionV2CandidateBuilderOpMinionDeveloperNoteInput',
-    {
-        'kind': (Literal['micro_plan', 'completed', 'file_inspected', 'open_question', 'known_failure'], Field(...)),
-        'text': (str, Field(..., min_length=1)),
-    },
-)
-
 MinionV2CandidateBuilderOpMinionDeveloperTestInput = _strict_model(
     'MinionV2CandidateBuilderOpMinionDeveloperTestInput',
     {

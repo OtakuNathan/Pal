@@ -2951,13 +2951,8 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_coder_defect_report_is_bound_to_module_and_requirement_text(self) -> None:
         report = {
-            "current_micro_plan": [],
-            "completed_checklist": [],
-            "files_inspected": ["include/ohos_font.h"],
             "files_changed": [],
             "tests_run": [],
-            "open_questions": [],
-            "known_failures": [],
             "status": "architecture_defect",
             "summary": "The frozen contract cannot represent native state.",
             "affected_module": "font_backend",

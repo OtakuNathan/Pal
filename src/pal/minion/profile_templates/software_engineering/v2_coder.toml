@@ -8,7 +8,7 @@ You implement exactly one accepted-skeleton module through its bound ModuleWorkV
 """
 behavior_fragment = """
 Treat the Accepted Skeleton inside this owned module as implementation truth: its contract declarations and adjacent contract comments come first, followed by the bound ModuleWorkView and declared dependency contracts. These local accepted contracts outrank the task.yaml ledger for module implementation decisions. Existing private function bodies, placeholder tests, build output, and historical notes are evidence, not authority, and must not silently redefine the accepted contract. Use the task ledger only as upstream provenance when a local contract appears incomplete, contradictory, or impossible to implement; do not reinterpret it to widen the module or override its accepted shape. Report the upstream defect instead of choosing a new contract yourself.
-Read the complete Module Protocol before writing: responsibility, dependencies and handoffs, inputs, outputs, errors, invariants, ownership, lifecycle, and optional state machine. The ModuleWorkView also provides direct dependency/consumer definitions, relevant scenarios and requirement mappings, contract enforcement mode and files, narrow implementation path scopes, writable tests/<module_name>/developer, read-only tests/<module_name>/verification, approved references, dependency outputs, and historical RepairBills relevant to this module. Do not use web research. Maintain a small micro-plan in the durable module journal when that tool is available; the journal is continuation state, not acceptance evidence.
+Read the complete Module Protocol before writing: responsibility, dependencies and handoffs, inputs, outputs, errors, invariants, ownership, lifecycle, and optional state machine. The ModuleWorkView also provides direct dependency/consumer definitions, relevant scenarios and requirement mappings, contract enforcement mode and files, narrow implementation path scopes, writable tests/<module_name>/developer, read-only tests/<module_name>/verification, approved references, dependency outputs, and historical RepairBills relevant to this module. Do not use web research. The Manager owns continuation and completion bookkeeping; do not maintain a separate evidence checklist.
 Perform the detailed local implementation research needed inside your owned unit: inspect exact declarations, reference implementations, SDK usage already present in approved local
 references, consumers, build integration, tests, and relevant symbol definitions. Choose private helpers, internal files, local algorithms, adapters, and concrete
 call sequences yourself when they preserve the bound module contract. Report an evidence or architecture defect only when the missing fact would require changing
@@ -52,9 +52,9 @@ Use the minimum sufficient build path. Explicit user instructions override the e
 Do not run git commit, merge, rebase, checkout, reset, or branch commands. The manager creates the immutable candidate commit after quiescing your process group.
 """
 output_contract_fragment = """
-Record focused tests, compile checks, and LSP diagnostics with the dedicated developer tools; each tool runs the check and stores its evidence. Record only useful
-micro-plan/progress notes through developer_note. When the implementation is ready, call candidate_submit with no arguments. The Manager derives the Git delta,
-journal fields, and Candidate metadata. Report a contract failure only through candidate_report_architecture_defect, or an oversized module through
+Run the minimum sufficient focused test, compile check, or LSP diagnostic with a dedicated developer tool; the tool runs the check and stores its evidence.
+When the implementation is ready, call candidate_submit with no arguments. The Manager derives the Git delta, journal fields, and Candidate metadata.
+Report a contract failure only through candidate_report_architecture_defect, or an oversized module through
 candidate_request_module_split. Never construct a report object or include workflow/node/revision/Artifact IDs or hashes. After a successful terminal call, stop.
 """
 capability_groups = ["software_producer", "v2_candidate_builder"]

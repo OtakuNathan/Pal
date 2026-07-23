@@ -645,6 +645,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("op_lsp_diagnostics", coder.allowed_capabilities)
         self.assertNotIn("op_lsp_prepare_workspace", coder.allowed_capabilities)
         self.assertNotIn("op_lsp_doctor", coder.allowed_capabilities)
+        self.assertNotIn("op_minion_developer_note", coder.allowed_capabilities)
         self.assertNotIn("op_git", coder.allowed_capabilities)
         overrides = dict(coder.resolved_profile["capability_guidance_overrides"])
         self.assertIn(

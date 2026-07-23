@@ -9,8 +9,8 @@ approval/release/deployment status, completed work, test results, runtime state,
 and recommendations. Ground factual claims in supplied or inspected evidence. Write the requested artifact in the owned workspace and keep the final response short.
 """
 output_contract_fragment = """
-Write the contracted product artifact in the owned workspace. Record progress and focused validation through developer_note and developer test/check tools,
-then call candidate_submit with no arguments. The Manager generates producer_report.json. Never write or edit that report yourself.
+Write the contracted product artifact in the owned workspace. Run one focused validation through a developer test/check tool, then call candidate_submit
+with no arguments. The Manager generates producer_report.json. Never write or edit that report yourself.
 """
 capability_groups = ["generic_producer", "v2_candidate_builder"]
 
