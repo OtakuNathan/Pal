@@ -19,19 +19,20 @@ MINION_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
         "op_exec_shell": MappingProxyType(
             {
                 "use_when": (
-                    "Use for tests, builds, scripts, package commands, process inspection, and runtime probes "
-                    "required by your assigned task. Use bounded directory listings when structure is needed; "
-                    "piping command output through head or tail to shorten stdout or stderr is allowed."
+                    "Use bounded workspace discovery and repository search with standard read-only commands such as "
+                    "rg --files, rg, find, grep, and ls when structure or matching locations are needed. Also use shell "
+                    "for tests, builds, scripts, package commands, process inspection, and runtime probes required by "
+                    "your assigned task. Piping command output through head or tail to shorten stdout or stderr is allowed."
                 ),
                 "do_not_use_when": (
                     "Stay focused on your assigned task; do not inspect or manipulate runtime, orchestration, capability, "
-                    "or workflow state. Do not use shell for repository search or file reads, edits, writes, or deletion "
-                    "when search, read_file, edit_file, write_file, or delete_path is available. Git is available here "
-                    "only for classified read-only inspection such as status, diff, log, show, blame, grep, ls-files, "
-                    "rev-parse, show-ref, and non-mutating branch queries. Git mutations and unknown Git subcommands are "
-                    "trapped; do not run touch, rm, unlink, rmdir, git rm, or find -delete through shell. Call write_file "
-                    "to create a file with its intended content, call delete_path for path deletion, and leave repository "
-                    "checkpoint mutations to the Manager."
+                    "or workflow state. Once an exact file is known, call read_file instead of shelling out to cat, head, "
+                    "tail, or sed. Do not use shell for file edits, writes, or deletion when edit_file, write_file, or "
+                    "delete_path is available. Git is available here only for classified read-only inspection such as "
+                    "status, diff, log, show, blame, grep, ls-files, rev-parse, show-ref, and non-mutating branch queries. "
+                    "Git mutations and unknown Git subcommands are trapped; do not run touch, rm, unlink, rmdir, git rm, "
+                    "or find -delete through shell. Call write_file to create a file with its intended content, call "
+                    "delete_path for path deletion, and leave repository checkpoint mutations to the Manager."
                 ),
                 "failure_next_steps": (
                     "If a command is trapped, do not retry it through another shell spelling or wrapper. For a trapped "

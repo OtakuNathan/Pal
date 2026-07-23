@@ -375,7 +375,6 @@ CORE_MINION_CAPABILITIES = (
 
 
 WORKSPACE_READ_CAPABILITIES = (
-    "op_search",
     "op_file_read",
     "op_exec_shell",
 )
@@ -401,10 +400,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
-    "architecture_workspace_read": (
-        "op_search",
-        "op_file_read",
-    ),
+    "architecture_workspace_read": WORKSPACE_READ_CAPABILITIES,
     "workspace_write": (
         "op_file_edit",
         "op_file_write",

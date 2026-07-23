@@ -561,8 +561,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             for item in scoped.build_llm_tool_contracts()
         }["run_shell"]
         description = str(provider["description"])
-        self.assertIn("Use when: Use for tests, builds", description)
+        self.assertIn("Use when: Use bounded workspace discovery", description)
+        self.assertIn("rg --files, rg, find, grep, and ls", description)
         self.assertIn("Stay focused on your assigned task", description)
+        self.assertIn("Once an exact file is known, call read_file", description)
         self.assertIn("Git is available here only for classified read-only inspection", description)
         self.assertIn("Git mutations and unknown Git subcommands are trapped", description)
         self.assertNotIn("Minion", description)
@@ -635,8 +637,8 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("not a completion or acceptance claim", behavior)
         self.assertIn("test_debugging", coder.allowed_skills)
         architect = self._pack("software_engineering.v2_architect")
-        self.assertNotIn("op_exec_shell", architect.allowed_capabilities)
-        self.assertIn("op_search", architect.allowed_capabilities)
+        self.assertIn("op_exec_shell", architect.allowed_capabilities)
+        self.assertNotIn("op_search", architect.allowed_capabilities)
         self.assertIn("op_file_read", architect.allowed_capabilities)
         self.assertNotIn("op_git", architect.allowed_capabilities)
         self.assertNotIn("op_tree", architect.allowed_capabilities)
@@ -656,6 +658,17 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("do not prove runtime behavior", overrides["op_lsp_diagnostics"]["use_when"])
         self.assertNotIn("op_git", overrides)
         self.assertNotIn("op_exec_shell", overrides)
+
+        for profile in (
+            "software_engineering.v2_coder",
+            "software_engineering.v2_reviewer",
+            "software_engineering.v2_verifier",
+        ):
+            with self.subTest(profile=profile):
+                self.assertNotIn(
+                    "op_search",
+                    self._pack(profile).allowed_capabilities,
+                )
 
         reviewer_overrides = dict(
             self._pack("software_engineering.v2_reviewer").resolved_profile[
