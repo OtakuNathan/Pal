@@ -74,7 +74,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             {"lifestyle.nutrition_checkin_producer"},
         )
         self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
-        self.assertEqual(binding["policies"]["llm"]["llm_round_timeout_seconds"], 900)
+        self.assertEqual(binding["policies"]["llm"]["llm_round_timeout_seconds"], 3000)
 
     def test_general_family_is_a_complete_data_driven_contract_dag(self) -> None:
         ref = MinionV2Catalog(self.root, self.store).publish_family_binding("generic")

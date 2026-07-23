@@ -23,7 +23,7 @@ publisher = "artifact_bundle.v2"
 
 [policies.llm]
 temperature = 0.05
-llm_round_timeout_seconds = 900
+llm_round_timeout_seconds = 3000
 
 [policies.verification]
 require_focused_tests = true
