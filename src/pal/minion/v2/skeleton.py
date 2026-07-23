@@ -19,7 +19,7 @@ from pal.minion.v2.paths import (
     project_git_layout_lock,
     resolve_project_git_layout,
 )
-from pal.minion.v2.task_sources import TaskSourceBundleService, validate_task_source_bundle
+from pal.minion.v2.task_ledger import validate_task_ledger
 
 
 ARCHITECTURE_SKELETON_ARTIFACT = "ArchitectureSkeletonArtifact"
@@ -384,18 +384,27 @@ def analyze_architecture_submission(
 ) -> ArchitectureValidationResult:
     del requirements_payload, reference_roots, evidence_catalog
     errors: list[Any] = []
+    raw_obligations = submission.get("obligations")
+    if not isinstance(raw_obligations, Mapping) or not raw_obligations:
+        errors.append("Architecture submission requires a non-empty obligations map")
+        raw_obligations = {}
+    obligations: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_obligation in raw_obligations.items():
+        name = str(raw_name or "").strip()
+        if MODULE_NAME_PATTERN.fullmatch(name) is None:
+            errors.append(f"invalid semantic obligation name: {name or '<empty>'}")
+            continue
+        if not isinstance(raw_obligation, Mapping):
+            errors.append(f"obligation {name} must be an object")
+            continue
+        try:
+            obligations[name] = _normalize_architecture_obligation(name, raw_obligation)
+        except ValueError as exc:
+            errors.append(exc)
     raw_modules = submission.get("modules")
     if not isinstance(raw_modules, Mapping) or not raw_modules:
-        return ArchitectureValidationResult(
-            {},
-            (
-                ValidationIssue(
-                    "error",
-                    "modules_required",
-                    "Architecture submission requires a non-empty modules map",
-                ),
-            ),
-        )
+        errors.append("Architecture submission requires a non-empty modules map")
+        raw_modules = {}
     modules: dict[str, dict[str, Any]] = {}
     invalid_module_names: set[str] = set()
     for raw_name, raw_module in raw_modules.items():
@@ -500,6 +509,36 @@ def analyze_architecture_submission(
                     + ", ".join(missing)
                 )
         scenarios[name] = scenario
+    declared_obligations = set(obligations)
+    referenced_obligations: set[str] = set()
+    for scenario_name, scenario in scenarios.items():
+        scenario_obligations = set(scenario["obligations"])
+        referenced_obligations.update(scenario_obligations)
+        unknown_obligations = sorted(scenario_obligations - declared_obligations)
+        if unknown_obligations:
+            errors.append(
+                f"scenario {scenario_name} references unknown obligations: "
+                + ", ".join(unknown_obligations)
+            )
+    unreferenced_obligations = sorted(declared_obligations - referenced_obligations)
+    if unreferenced_obligations:
+        errors.append(
+            "Architecture obligations must be consumed by at least one scenario: "
+            + ", ".join(unreferenced_obligations)
+        )
+    declared_owners = set(modules) | set(scenarios)
+    obligation_name_conflicts = sorted(set(obligations) & declared_owners)
+    if obligation_name_conflicts:
+        errors.append(
+            "obligation names must not conflict with module or scenario names: "
+            + ", ".join(obligation_name_conflicts)
+        )
+    for obligation_name, obligation in obligations.items():
+        owner = str(obligation.get("owner") or "")
+        if owner not in declared_owners:
+            errors.append(
+                f"obligation {obligation_name} owner references an unknown module or scenario: {owner}"
+            )
     validators = (
         lambda: _validate_path_policy(modules),
         lambda: _validate_declared_paths(modules, Path(workspace_root)),
@@ -514,7 +553,7 @@ def analyze_architecture_submission(
         for item in _unique_architecture_errors(errors)
     )
     return ArchitectureValidationResult(
-        {"modules": modules, "scenarios": scenarios},
+        {"obligations": obligations, "modules": modules, "scenarios": scenarios},
         issues,
     )
 
@@ -576,6 +615,7 @@ def _normalize_architecture_scenario(
         raise ValueError(f"scenario {name} requires at least one implementation module")
     result = {
         "modules": modules,
+        "obligations": _unique_text(scenario.get("obligations")),
         "entrypoint": str(scenario.get("entrypoint") or "").strip(),
         "observable_behavior": str(scenario.get("observable_behavior") or "").strip(),
         "environment": str(scenario.get("environment") or "").strip(),
@@ -583,7 +623,99 @@ def _normalize_architecture_scenario(
     for field in ("entrypoint", "observable_behavior", "environment"):
         if not result[field]:
             raise ValueError(f"scenario {name} requires {field}")
+    if not result["obligations"]:
+        raise ValueError(f"scenario {name} requires at least one obligation")
     return result
+
+
+def _normalize_architecture_obligation(
+    name: str,
+    obligation: Mapping[str, Any],
+) -> dict[str, Any]:
+    claim = str(obligation.get("claim") or "").strip()
+    owner = str(obligation.get("owner") or "").strip()
+    raw_states = obligation.get("states")
+    states: dict[str, dict[str, str]] = {}
+    if isinstance(raw_states, Mapping):
+        for raw_state_name, raw_state in raw_states.items():
+            state_name = str(raw_state_name or "").strip()
+            if MODULE_NAME_PATTERN.fullmatch(state_name) is None:
+                raise ValueError(
+                    f"obligation {name} has invalid state name: {state_name or '<empty>'}"
+                )
+            if not isinstance(raw_state, Mapping):
+                raise ValueError(
+                    f"obligation {name} state {state_name} must be a semantic mapping"
+                )
+            state = {
+                "entry_condition": str(raw_state.get("entry_condition") or "").strip(),
+                "decision_point": str(raw_state.get("decision_point") or "").strip(),
+                "outcome": str(raw_state.get("outcome") or "").strip(),
+                "required_outcome": str(raw_state.get("required_outcome") or "").strip(),
+            }
+            for field, value in state.items():
+                if not value:
+                    raise ValueError(
+                        f"obligation {name} state {state_name} requires {field}"
+                    )
+            for field in ("decision_point", "outcome"):
+                if MODULE_NAME_PATTERN.fullmatch(state[field]) is None:
+                    raise ValueError(
+                        f"obligation {name} state {state_name} {field} must be a stable snake_case semantic name"
+                    )
+            states[state_name] = state
+    observable_outcome = str(obligation.get("observable_outcome") or "").strip()
+    contract_path = _unique_text(obligation.get("contract_path"))
+    raw_boundaries = obligation.get("boundaries")
+    boundaries: dict[str, list[str]] = {}
+    if isinstance(raw_boundaries, Mapping):
+        for raw_boundary_name, raw_partitions in raw_boundaries.items():
+            boundary_name = str(raw_boundary_name or "").strip()
+            if MODULE_NAME_PATTERN.fullmatch(boundary_name) is None:
+                raise ValueError(
+                    f"obligation {name} has invalid boundary name: {boundary_name or '<empty>'}"
+                )
+            partitions = _unique_text(raw_partitions)
+            if not partitions:
+                raise ValueError(
+                    f"obligation {name} boundary {boundary_name} requires at least one partition"
+                )
+            boundaries[boundary_name] = partitions
+    required_text = {
+        "claim": claim,
+        "owner": owner,
+        "observable_outcome": observable_outcome,
+    }
+    for field, value in required_text.items():
+        if not value:
+            raise ValueError(f"obligation {name} requires {field}")
+    if MODULE_NAME_PATTERN.fullmatch(owner) is None:
+        raise ValueError(f"obligation {name} owner must be a stable snake_case semantic name")
+    if not states:
+        raise ValueError(f"obligation {name} requires at least one semantic state")
+    if not boundaries:
+        raise ValueError(f"obligation {name} requires at least one boundary partition axis")
+    if not contract_path:
+        raise ValueError(f"obligation {name} requires a non-empty contract_path")
+    bare_files = [
+        value
+        for value in contract_path
+        if ("/" in value or value.endswith((".h", ".hpp", ".py")))
+        and not any(marker in value for marker in ("#", "::", "->"))
+    ]
+    if bare_files:
+        raise ValueError(
+            f"obligation {name} contract_path must name public interfaces/signals, not bare files: "
+            + ", ".join(bare_files)
+        )
+    return {
+        "claim": claim,
+        "owner": owner,
+        "states": states,
+        "boundaries": boundaries,
+        "observable_outcome": observable_outcome,
+        "contract_path": contract_path,
+    }
 
 
 def _unique_architecture_errors(errors: Iterable[Any]) -> tuple[Any, ...]:
@@ -645,16 +777,36 @@ def compile_skeleton_markdown(
     requirements_payload: Mapping[str, Any],
 ) -> str:
     submission = dict(artifact.get("submission") or {})
-    task_sources = validate_task_source_bundle(requirements_payload)
-    lines = ["# Architecture Skeleton", "", "## Task Sources", ""]
-    for raw in [
-        *list(task_sources.get("documents") or []),
-        *list(task_sources.get("amendments") or []),
-    ]:
+    task_ledger = validate_task_ledger(requirements_payload)
+    lines = ["# Architecture Skeleton", "", "## Task Ledger", ""]
+    lines.append("- `task.yaml`: original plus ordered append-only revisions")
+    lines.append(f"- Revisions: {len(list(task_ledger.get('revisions') or []))}")
+    for raw in list(task_ledger.get("revisions") or []):
         item = dict(raw or {})
-        observed = f" ({item['observed_at']})" if item.get("observed_at") else ""
+        authority = dict(item.get("authority") or {})
         lines.append(
-            f"- `{item.get('name', '')}`: {item.get('origin', 'source')}{observed}"
+            f"  - {item.get('sequence')}: {item.get('summary', '')} "
+            f"({authority.get('origin', 'user')}, {authority.get('observed_at', '')})"
+        )
+    lines.extend(["", "## Requirement Obligations", ""])
+    for name, raw_obligation in dict(submission.get("obligations") or {}).items():
+        obligation = dict(raw_obligation or {})
+        boundaries = "; ".join(
+            f"{axis}=[{', '.join(str(item) for item in list(partitions or []))}]"
+            for axis, partitions in dict(obligation.get("boundaries") or {}).items()
+        )
+        lines.extend(
+            [
+                f"### {name}",
+                "",
+                f"- Claim: {obligation.get('claim', '')}",
+                f"- Owner: {obligation.get('owner', '')}",
+                f"- Semantic states: {', '.join(str(item) for item in list(obligation.get('states') or []))}",
+                f"- Boundary partitions: {boundaries}",
+                f"- Observable outcome: {obligation.get('observable_outcome', '')}",
+                f"- Contract path: {' -> '.join(str(item) for item in list(obligation.get('contract_path') or []))}",
+                "",
+            ]
         )
     lines.extend(["", "## Contract Dependency Graph", ""])
     for name, raw_module in dict(submission.get("modules") or {}).items():
@@ -692,6 +844,7 @@ def compile_skeleton_markdown(
                 f"### {name}",
                 "",
                 f"- Modules: {', '.join(str(item) for item in list(scenario.get('modules') or []))}",
+                f"- Obligations: {', '.join(str(item) for item in list(scenario.get('obligations') or []))}",
                 f"- Entrypoint: {scenario.get('entrypoint', '')}",
                 f"- Observable behavior: {scenario.get('observable_behavior', '')}",
                 f"- Environment: {scenario.get('environment', '')}",
@@ -713,6 +866,7 @@ def architecture_revision_scope(
     modules = {str(name): dict(value or {}) for name, value in dict(base_submission.get("modules") or {}).items()}
     affected_modules: set[str] = set()
     allowed_paths: set[str] = set()
+    immutable_requirement_paths: set[str] = set()
     finding_kinds: set[str] = set()
     for raw_finding in findings:
         finding = dict(raw_finding or {})
@@ -732,14 +886,18 @@ def architecture_revision_scope(
             if str(path).strip()
         )
         for raw_location in locations:
+            location = dict(raw_location or {})
             path = _normalized_repo_path(
                 str(
-                    dict(raw_location or {}).get("file")
-                    or dict(raw_location or {}).get("path")
+                    location.get("file")
+                    or location.get("path")
                     or ""
                 )
             )
             if not path:
+                continue
+            if str(location.get("scope") or "workspace") == "task_ledger":
+                immutable_requirement_paths.add(path)
                 continue
             allowed_paths.add(path)
             for module_name, module in modules.items():
@@ -764,6 +922,7 @@ def architecture_revision_scope(
     return {
         "affected_modules": sorted(affected_modules),
         "allowed_paths": sorted(allowed_paths),
+        "immutable_requirement_paths": sorted(immutable_requirement_paths),
         "allow_topology_changes": allow_topology_changes,
     }
 
@@ -1006,22 +1165,7 @@ class GitBackedSkeletonService:
         revision_base_path_states: Mapping[str, str] | None = None,
     ) -> ArtifactRef:
         submitted = dict(submission)
-        clarification_refs = [
-            ArtifactRef.from_mapping(item)
-            for item in list(submitted.pop("clarification_refs", []) or [])
-            if isinstance(item, Mapping) and item.get("sha256")
-        ]
-        if clarification_refs:
-            requirements_ref = TaskSourceBundleService(
-                self.runtime_root,
-                self.artifacts,
-            ).append_existing_amendments(
-                base_ref=requirements_ref,
-                amendment_refs=clarification_refs,
-                actor="architect_user_io",
-                source_channel="bound_active_channel",
-            )
-        requirements = self.artifacts.read_json(requirements_ref)
+        requirements = validate_task_ledger(self.artifacts.read_json(requirements_ref))
         evidence_catalog = self.artifacts.read_json(evidence_catalog_ref) if evidence_catalog_ref else None
         validation = analyze_architecture_submission(
             submitted,

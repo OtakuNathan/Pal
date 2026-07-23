@@ -6,7 +6,7 @@ CONSTANT MaxRevision
 States == {
     "ArchitectQueued", "ArchitectRunning", "ArchitectQuiescing",
     "ArchitectSnapshotting", "ReviewQueued", "Reviewing", "HumanReview",
-    "ClarificationPending", "PauseRequested", "Paused", "CancelRequested",
+    "PauseRequested", "Paused", "CancelRequested",
     "Accepted", "Rejected", "Superseded", "Cancelled", "Triage"
 }
 
@@ -15,14 +15,14 @@ WorkerStates == {
     "ArchitectQueued", "ArchitectRunning", "ArchitectQuiescing",
     "ArchitectSnapshotting", "ReviewQueued", "Reviewing"
 }
-WaitStates == {"HumanReview", "ClarificationPending", "Paused", "Triage"}
+WaitStates == {"HumanReview", "Paused", "Triage"}
 DecisionStates == {"None", "Issued", "Consumed"}
 FailureKinds == {
     "None", "WorkerFailure", "EffectFailure", "OrphanedWorker",
     "QuiesceFailure", "SnapshotFailure"
 }
 ResumeStates == WorkerStates \cup {
-    "HumanReview", "ClarificationPending", "PauseRequested", "CancelRequested"
+    "HumanReview", "PauseRequested", "CancelRequested"
 }
 
 VARIABLES
@@ -42,13 +42,15 @@ VARIABLES
     triageResume,
     failureKind,
     managerUp,
-    staleDecisionRejects
+    staleDecisionRejects,
+    taskRevisionPending
 
 vars == <<
     state, revision, manifestVersion, architectLease, reviewerLease,
     workspaceStable, decisionState, tokenRevision, tokenManifest,
     acceptedRevision, supersededCount, revisionCreatePending, pauseResume,
-    triageResume, failureKind, managerUp, staleDecisionRejects
+    triageResume, failureKind, managerUp, staleDecisionRejects,
+    taskRevisionPending
 >>
 
 SafeResume(s) ==
@@ -77,6 +79,7 @@ Init ==
     /\ failureKind = "None"
     /\ managerUp = TRUE
     /\ staleDecisionRejects = 0
+    /\ taskRevisionPending = FALSE
 
 StartArchitect ==
     /\ managerUp
@@ -93,6 +96,7 @@ SubmitSkeleton ==
     /\ managerUp
     /\ state = "ArchitectRunning"
     /\ architectLease
+    /\ ~taskRevisionPending
     /\ state' = "ArchitectQuiescing"
     /\ architectLease' = FALSE
     /\ UNCHANGED <<revision, manifestVersion, reviewerLease, workspaceStable,
@@ -169,23 +173,27 @@ ReviewPassed ==
         acceptedRevision, supersededCount, revisionCreatePending, pauseResume,
         triageResume, failureKind, managerUp, staleDecisionRejects>>
 
-RequestClarification ==
+RecordTaskRevisionAuthority ==
     /\ managerUp
     /\ state = "ArchitectRunning"
-    /\ state' = "ClarificationPending"
-    /\ architectLease' = FALSE
-    /\ UNCHANGED <<revision, manifestVersion, reviewerLease, workspaceStable,
-        decisionState, tokenRevision, tokenManifest, acceptedRevision,
-        supersededCount, revisionCreatePending, pauseResume, triageResume,
-        failureKind, managerUp, staleDecisionRejects>>
+    /\ ~taskRevisionPending
+    /\ taskRevisionPending' = TRUE
+    /\ UNCHANGED <<state, revision, manifestVersion, architectLease,
+        reviewerLease, workspaceStable, decisionState, tokenRevision,
+        tokenManifest, acceptedRevision, supersededCount,
+        revisionCreatePending, pauseResume, triageResume, failureKind,
+        managerUp, staleDecisionRejects>>
 
-ProvideClarification ==
-    /\ state = "ClarificationPending"
-    /\ state' = "ArchitectQueued"
-    /\ UNCHANGED <<revision, manifestVersion, architectLease, reviewerLease,
-        workspaceStable, decisionState, tokenRevision, tokenManifest,
-        acceptedRevision, supersededCount, revisionCreatePending, pauseResume,
-        triageResume, failureKind, managerUp, staleDecisionRejects>>
+AppendTaskRevision ==
+    /\ managerUp
+    /\ state = "ArchitectRunning"
+    /\ taskRevisionPending
+    /\ taskRevisionPending' = FALSE
+    /\ UNCHANGED <<state, revision, manifestVersion, architectLease,
+        reviewerLease, workspaceStable, decisionState, tokenRevision,
+        tokenManifest, acceptedRevision, supersededCount,
+        revisionCreatePending, pauseResume, triageResume, failureKind,
+        managerUp, staleDecisionRejects>>
 
 ValidDecision ==
     /\ state = "HumanReview"
@@ -212,13 +220,25 @@ HumanReject ==
         supersededCount, revisionCreatePending, pauseResume, triageResume,
         failureKind, managerUp, staleDecisionRejects>>
 
-HumanEdit ==
+HumanArchitectureEdit ==
     /\ ValidDecision
     /\ revision < MaxRevision
     /\ state' = "Superseded"
     /\ decisionState' = "Consumed"
     /\ supersededCount' = supersededCount + 1
     /\ revisionCreatePending' = TRUE
+    /\ UNCHANGED <<revision, manifestVersion, architectLease, reviewerLease,
+        workspaceStable, tokenRevision, tokenManifest, acceptedRevision,
+        pauseResume, triageResume, failureKind, managerUp, staleDecisionRejects>>
+
+HumanRequirementsEdit ==
+    /\ ValidDecision
+    /\ revision < MaxRevision
+    /\ state' = "Superseded"
+    /\ decisionState' = "Consumed"
+    /\ supersededCount' = supersededCount + 1
+    /\ revisionCreatePending' = TRUE
+    /\ taskRevisionPending' = TRUE
     /\ UNCHANGED <<revision, manifestVersion, architectLease, reviewerLease,
         workspaceStable, tokenRevision, tokenManifest, acceptedRevision,
         pauseResume, triageResume, failureKind, managerUp, staleDecisionRejects>>
@@ -356,7 +376,7 @@ RestartManager ==
         revisionCreatePending, pauseResume, triageResume, failureKind,
         staleDecisionRejects>>
 
-InternalProgress ==
+StableInternalProgress ==
     \/ StartArchitect
     \/ QuiesceArchitect
     \/ SnapshotSkeleton
@@ -366,7 +386,32 @@ InternalProgress ==
     \/ ConfirmCancel
     \/ ResolveTriage
 
-Next ==
+InternalProgress ==
+    \/ /\ StableInternalProgress
+       /\ UNCHANGED taskRevisionPending
+    \/ AppendTaskRevision
+
+RestartManagerProgress ==
+    /\ RestartManager
+    /\ UNCHANGED taskRevisionPending
+
+CreateNextRevisionProgress ==
+    /\ CreateNextRevision
+    /\ UNCHANGED taskRevisionPending
+
+ConfirmPauseProgress ==
+    /\ ConfirmPause
+    /\ UNCHANGED taskRevisionPending
+
+ConfirmCancelProgress ==
+    /\ ConfirmCancel
+    /\ UNCHANGED taskRevisionPending
+
+ResolveTriageProgress ==
+    /\ ResolveTriage
+    /\ UNCHANGED taskRevisionPending
+
+StableNext ==
     \/ StartArchitect
     \/ SubmitSkeleton
     \/ QuiesceArchitect
@@ -375,11 +420,9 @@ Next ==
     \/ StartReview
     \/ ReviewFailed
     \/ ReviewPassed
-    \/ RequestClarification
-    \/ ProvideClarification
     \/ HumanAccept
     \/ HumanReject
-    \/ HumanEdit
+    \/ HumanArchitectureEdit
     \/ CreateNextRevision
     \/ RejectStaleDecision
     \/ RequestPause
@@ -401,15 +444,22 @@ Next ==
     \/ CrashManager
     \/ RestartManager
 
+Next ==
+    \/ /\ StableNext
+       /\ UNCHANGED taskRevisionPending
+    \/ RecordTaskRevisionAuthority
+    \/ AppendTaskRevision
+    \/ HumanRequirementsEdit
+
 Spec ==
     /\ Init
     /\ [][Next]_vars
-    /\ WF_vars(RestartManager)
+    /\ WF_vars(RestartManagerProgress)
     /\ SF_vars(InternalProgress)
-    /\ SF_vars(CreateNextRevision)
-    /\ SF_vars(ConfirmPause)
-    /\ SF_vars(ConfirmCancel)
-    /\ SF_vars(ResolveTriage)
+    /\ SF_vars(CreateNextRevisionProgress)
+    /\ SF_vars(ConfirmPauseProgress)
+    /\ SF_vars(ConfirmCancelProgress)
+    /\ SF_vars(ResolveTriageProgress)
 
 TypeOK ==
     /\ state \in States
@@ -429,6 +479,7 @@ TypeOK ==
     /\ failureKind \in FailureKinds
     /\ managerUp \in BOOLEAN
     /\ staleDecisionRejects \in 0..MaxRevision
+    /\ taskRevisionPending \in BOOLEAN
 
 LeaseOwnership ==
     /\ architectLease => state = "ArchitectRunning"
@@ -457,6 +508,12 @@ HumanWaitHasCurrentManifest ==
         /\ decisionState = "Issued"
         /\ tokenRevision = revision
         /\ tokenManifest = manifestVersion
+
+TaskRevisionGate ==
+    state \in {
+        "ArchitectQuiescing", "ArchitectSnapshotting", "ReviewQueued",
+        "Reviewing", "HumanReview", "Accepted", "Rejected"
+    } => ~taskRevisionPending
 
 TriageIsExplicit ==
     state = "Triage" =>

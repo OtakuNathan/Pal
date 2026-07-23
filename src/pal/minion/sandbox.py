@@ -327,6 +327,11 @@ def scrub_minion_sandbox_env(
         result[str(key)] = str(value)
     scratch = _coerce_scratch_dir(runtime_root, run_id, scratch_dir)
     result["PAL_MINION_SANDBOXED"] = "1"
+    agent_session = dict(dict(pack.metadata or {}).get("agent_session") or {}) if pack else {}
+    if str(agent_session.get("continuation_input_path") or "").strip():
+        result["PAL_MINION_CONTINUATION_RETRY"] = "1"
+    else:
+        result.pop("PAL_MINION_CONTINUATION_RETRY", None)
     result["PAL_MINION_LLM_BROKER"] = "1"
     result["PAL_DATABASE_READ_ONLY"] = "1"
     result[PAL_MINION_RUNTIME_ROOT_ENV] = str(Path(runtime_root).expanduser().resolve())

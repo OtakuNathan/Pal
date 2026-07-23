@@ -16,6 +16,7 @@ from pal.minion.v2.orchestration import (
 from pal.minion.v2.recovery import MinionV2Recovery
 from pal.minion.v2.replan import architecture_finding_semantic_view
 from pal.minion.v2.service import MinionV2WorkflowService
+from pal.minion.v2.task_ledger import TaskLedgerService
 
 
 class MinionV2ReplanTests(unittest.TestCase):
@@ -27,17 +28,14 @@ class MinionV2ReplanTests(unittest.TestCase):
         self.processor = MinionV2OutboxProcessor(self.service)
         self.workflow_id = "wf_replan"
         self.epoch_id = "epoch_replan"
-        self.requirements_ref = self.artifacts.put_json(
-            {
-                "requirements": [
-                    {
-                        "section": "Public API",
-                        "statement": "The public API remains ABI compatible.",
-                        "strength": "hard",
-                    }
-                ]
-            },
-            artifact_type="TaskSourceBundleArtifact",
+        self.requirements_ref = TaskLedgerService(
+            self.runtime_root,
+            self.artifacts,
+        ).publish(
+            title="ABI compatibility",
+            task_spec={"public_api": "The public API remains ABI compatible."},
+            actor="test",
+            source_channel="test",
         )
         self.manifest_ref = self.artifacts.put_json(
             {"requirements_ref": self.requirements_ref.to_dict()},
@@ -348,27 +346,19 @@ class MinionV2ReplanTests(unittest.TestCase):
             {"CANCEL_REQUESTED"},
         )
 
-    def test_divergent_requirement_patches_enter_triage(self) -> None:
+    def test_multiple_requirement_findings_share_the_unchanged_task_ledger(self) -> None:
         self._create_reviewing_node("node_a", "module_a")
         self._create_reviewing_node("node_b", "module_b")
-        patch_a = self.artifacts.put_json({"amendment": "a"}, artifact_type="TaskSourceAmendmentArtifact")
-        patch_b = self.artifacts.put_json({"amendment": "b"}, artifact_type="TaskSourceAmendmentArtifact")
-        revised_a = self.artifacts.put_json({"task_sources": ["a"]}, artifact_type="TaskSourceBundleArtifact")
-        revised_b = self.artifacts.put_json({"task_sources": ["b"]}, artifact_type="TaskSourceBundleArtifact")
-        for node_id, module, fingerprint, patch, revised in (
-            ("node_a", "module_a", "a", patch_a, revised_a),
-            ("node_b", "module_b", "b", patch_b, revised_b),
+        for node_id, module, fingerprint in (
+            ("node_a", "module_a", "a"),
+            ("node_b", "module_b", "b"),
         ):
             finding = self._finding(module, fingerprint, fingerprint)
             self._dispatch(
                 AggregateType.DAG_NODE_RUN,
                 node_id,
                 "CONTRACT_DEFECT",
-                {
-                    "repair_bill_ref": finding.to_dict(),
-                    "requirement_patch_ref": patch.to_dict(),
-                    "revised_requirements_ref": revised.to_dict(),
-                },
+                {"repair_bill_ref": finding.to_dict()},
             )
             self.processor._request_epoch_replan(
                 self._node_effect(node_id, f"requirement-{fingerprint}")
@@ -376,8 +366,10 @@ class MinionV2ReplanTests(unittest.TestCase):
 
         self.processor._freeze_epoch_for_replan(self._epoch_effect("freeze-requirements"))
         epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id)
-        self.assertEqual(epoch.state, "TRIAGE_REQUIRED")
-        self.assertEqual(epoch.payload["blocker"]["kind"], "replan_requirements_conflict")
+        self.assertEqual(epoch.state, "REPLAN_REQUIRED")
+        self.assertEqual(epoch.payload["requirements_ref"], self.requirements_ref.to_dict())
+        batch = self.artifacts.read_json(epoch.payload["replan_finding_batch_ref"])
+        self.assertEqual(len(batch["finding_groups"]), 2)
 
     def test_unseen_finding_after_frozen_batch_enters_triage(self) -> None:
         self._create_reviewing_node("node_a", "module_a")

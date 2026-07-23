@@ -311,6 +311,32 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(env["PAL_MINION_SANDBOXED"], "1")
             self.assertEqual(env["TMPDIR"], str(Path(tmp) / "tmp_scratch" / "run_env" / "tmp"))
 
+    def test_sandbox_env_marks_only_continuation_attempts_as_retries(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_retry_env_") as tmp:
+            retry_pack = MinionInvocationPack(
+                invocation_id="retry",
+                metadata={
+                    "agent_session": {
+                        "continuation_input_path": str(Path(tmp) / "continuation.json")
+                    }
+                },
+            )
+            retry_env = scrub_minion_sandbox_env(
+                {},
+                runtime_root=Path(tmp),
+                run_id="run_retry",
+                pack=retry_pack,
+            )
+            fresh_env = scrub_minion_sandbox_env(
+                {"PAL_MINION_CONTINUATION_RETRY": "1"},
+                runtime_root=Path(tmp),
+                run_id="run_fresh",
+                pack=MinionInvocationPack(invocation_id="fresh"),
+            )
+
+        self.assertEqual(retry_env["PAL_MINION_CONTINUATION_RETRY"], "1")
+        self.assertNotIn("PAL_MINION_CONTINUATION_RETRY", fresh_env)
+
     def test_sandbox_env_applies_workspace_execution_env(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_workspace_env_") as tmp:
             root = Path(tmp)
@@ -593,7 +619,7 @@ class MinionSandboxTests(unittest.TestCase):
             reference = root / "reference"
             repo.mkdir()
             reference.mkdir()
-            (reference / "TASK.md").write_text("framepipe\n", encoding="utf-8")
+            (reference / "task.yaml").write_text("framepipe\n", encoding="utf-8")
             (reference / "manifest.json").write_text('{"version":1}\n', encoding="utf-8")
             (reference / "private.txt").write_text("not projected\n", encoding="utf-8")
             pack = MinionInvocationPack(
@@ -604,7 +630,7 @@ class MinionSandboxTests(unittest.TestCase):
                     "reference_paths": [
                         {
                             "name": "task",
-                            "path": str(reference / "*.md"),
+                            "path": str(reference / "*.yaml"),
                             "truth_source": True,
                             "required": True,
                         },
@@ -633,10 +659,10 @@ class MinionSandboxTests(unittest.TestCase):
                         "/bin/sh",
                         "-c",
                         "tree -a -L 3 --filelimit 200 --noreport /pal/references/task; "
-                        "test -r /pal/references/task/TASK.md; "
+                        "test -r /pal/references/task/task.yaml; "
                         "test -f /pal/references/architecture_index/manifest.json; "
                         "test ! -e /pal/references/task/private.txt; "
-                        "if printf changed > /pal/references/task/TASK.md 2>/dev/null; then exit 31; fi; "
+                        "if printf changed > /pal/references/task/task.yaml 2>/dev/null; then exit 31; fi; "
                         "if printf new > /pal/references/task/new.txt 2>/dev/null; then exit 32; fi",
                     ],
                     env={"PATH": "/usr/bin:/bin"},
@@ -694,9 +720,9 @@ class MinionSandboxTests(unittest.TestCase):
                 timeout=20,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("TASK.md", result.stdout)
+            self.assertIn("task.yaml", result.stdout)
             self.assertNotIn("private.txt", result.stdout)
-            self.assertEqual((reference / "TASK.md").read_text(encoding="utf-8"), "framepipe\n")
+            self.assertEqual((reference / "task.yaml").read_text(encoding="utf-8"), "framepipe\n")
             self.assertFalse((reference / "new.txt").exists())
 
     def test_read_only_workspace_is_mounted_read_only(self) -> None:

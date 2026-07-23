@@ -427,11 +427,21 @@ class ExecutionCompiler:
         }
         if not scenarios:
             raise ValueError("ArchitectureSkeletonArtifact has no end-to-end verification scenarios")
+        obligations = {
+            str(name): dict(value or {})
+            for name, value in dict(submission.get("obligations") or {}).items()
+        }
+        if not obligations:
+            raise ValueError("ArchitectureSkeletonArtifact has no requirement obligations")
         topology_ref = self.architecture.artifacts.put_json(
             {
                 "contract_dependencies": contract_dependencies,
                 "verification_scenarios": {
                     name: list(scenario.get("modules") or [])
+                    for name, scenario in scenarios.items()
+                },
+                "scenario_obligations": {
+                    name: list(scenario.get("obligations") or [])
                     for name, scenario in scenarios.items()
                 },
             },
@@ -442,6 +452,17 @@ class ExecutionCompiler:
         contract_file_hashes = dict(artifact.get("contract_file_hashes") or {})
         for name, module in modules.items():
             paths = dict(module.get("paths") or {})
+            module_obligation_names = {
+                obligation_name
+                for scenario in scenarios.values()
+                if name in set(str(item) for item in list(scenario.get("modules") or []))
+                for obligation_name in list(scenario.get("obligations") or [])
+            }
+            module_obligation_names.update(
+                obligation_name
+                for obligation_name, obligation in obligations.items()
+                if str(obligation.get("owner") or "") == name
+            )
             module_refs[name] = self.architecture.artifacts.put_json(
                 {
                     "module_name": name,
@@ -452,12 +473,19 @@ class ExecutionCompiler:
                         path: str(contract_file_hashes.get(path) or "")
                         for path in list(paths.get("contract_paths") or [])
                     },
+                    "obligations": {
+                        obligation_name: obligations[obligation_name]
+                        for obligation_name in sorted(module_obligation_names)
+                    },
                 },
                 artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
             )
         scenario_refs: dict[str, ArtifactRef] = {}
         for name, scenario in scenarios.items():
+            scenario_obligation_names = [
+                str(item) for item in list(scenario.get("obligations") or [])
+            ]
             scenario_refs[name] = self.architecture.artifacts.put_json(
                 {
                     "verification_name": name,
@@ -466,6 +494,10 @@ class ExecutionCompiler:
                     "entrypoints": [str(scenario.get("entrypoint") or "")],
                     "observable_behavior": str(scenario.get("observable_behavior") or ""),
                     "environment": {"description": str(scenario.get("environment") or "")},
+                    "obligations": {
+                        obligation_name: obligations[obligation_name]
+                        for obligation_name in scenario_obligation_names
+                    },
                 },
                 artifact_type="VerificationScenarioContractArtifact",
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
@@ -1091,7 +1123,7 @@ def _candidate_reuse_signature(
     node: AggregateSnapshot,
     node_by_module: Mapping[str, AggregateSnapshot],
 ) -> str:
-    task_source_hash = str(dict(manifest.get("requirements_ref") or {}).get("sha256") or "")
+    task_ledger_hash = str(dict(manifest.get("requirements_ref") or {}).get("sha256") or "")
     dependency_modules = sorted(dependencies.get(unit_id) or [])
     dependency_interfaces = {
         dependency: dict(_contract_value(node_by_module.get(dependency), fragments)).get("provided_interfaces") or []
@@ -1111,7 +1143,7 @@ def _candidate_reuse_signature(
     ]
     return candidate_reuse_fingerprint(
         unit_contract_hash=str(contract_ref.get("sha256") or ""),
-        relevant_requirements_hash=task_source_hash,
+        relevant_requirements_hash=task_ledger_hash,
         relevant_evidence_hash=_stable_json_hash([]),
         global_constraint_hash=str(dict(manifest.get("global_constraints_ref") or {}).get("sha256") or ""),
         owned_area_hash=_stable_json_hash(list(contract.get("owned_area") or [])),
@@ -1448,6 +1480,10 @@ class UnitWorkViewBuilder:
             "verification_corpus": dict(path_policy.get("verification_corpus") or {}),
             "reference_only": list(path_policy.get("reference_only") or []),
             "contract_dependencies": list(contract.get("contract_dependencies") or []),
+            "obligations": {
+                str(name): dict(value or {})
+                for name, value in dict(contract.get("obligations") or {}).items()
+            },
             "dependency_outputs": semantic_dependency_outputs,
             "historical_repair_bills": [
                 repair_bill_semantic_view(self.architecture.artifacts, item) for item in historical_refs

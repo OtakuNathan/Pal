@@ -52,9 +52,10 @@ from pal.minion.v2.swe_verification import (
     _changed_paths,
     compile_swe_verification_tool_contract,
     swe_verification_tool_result,
+    validate_bound_obligation_coverage,
 )
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
-from pal.minion.v2.task_sources import TaskSourceBundleService
+from pal.minion.v2.task_ledger import TaskLedgerService
 from pal.minion.v2.role_protocol import RoleAssignmentRequest
 from pal.shared import RuntimeStatus
 from pal.minion.v2.semantic_orchestration.orchestrator import (
@@ -165,6 +166,48 @@ class MinionV2VerificationTests(unittest.TestCase):
         ).stdout.strip()
         return root, digest
 
+    @staticmethod
+    def _bound_obligations() -> dict[str, object]:
+        return {
+            "deterministic_routing": {
+                "claim": "routing is deterministic at empty and populated boundaries",
+                "owner": "router",
+                "states": {
+                    "empty": {
+                        "entry_condition": "no routing rules are configured",
+                        "decision_point": "route_selection",
+                        "outcome": "no_route",
+                        "required_outcome": "return the deterministic empty result",
+                    },
+                    "rules_loaded": {
+                        "entry_condition": "at least one routing rule is configured",
+                        "decision_point": "route_selection",
+                        "outcome": "selected_route",
+                        "required_outcome": "return the deterministically selected route",
+                    },
+                },
+                "boundaries": {"matching_rules": ["zero", "one", "multiple"]},
+                "observable_outcome": "the public result is deterministic",
+                "contract_path": ["router input", "route selection", "router result"],
+            }
+        }
+
+    @classmethod
+    def _obligation_coverage(cls) -> list[dict[str, object]]:
+        return [
+            {
+                "obligation": "deterministic_routing",
+                "states": ["empty", "rules_loaded"],
+                "boundaries": [
+                    {
+                        "axis": "matching_rules",
+                        "partitions": ["zero", "one", "multiple"],
+                    }
+                ],
+                "evidence_summary": "The retained corpus covers empty, one-match, and tie resolution paths.",
+            }
+        ]
+
     def test_swe_verifier_uses_semantic_outcomes_and_manager_recorded_evidence(self) -> None:
         repo, _digest = self._git_repo("semantic-tool")
         (repo / "tests" / "router" / "test_router.py").write_text(
@@ -196,8 +239,14 @@ class MinionV2VerificationTests(unittest.TestCase):
             },
             role="verifier",
         )
+        workspace["minion_v2"]["swe_verification_tool_contract"] = {
+            "obligations": self._bound_obligations(),
+        }
         result = swe_verification_tool_result(
-            CanonicalToolCall(name="op_minion_verification_pass", args={}),
+            CanonicalToolCall(
+                name="op_minion_verification_pass",
+                args={"obligation_coverage": self._obligation_coverage()},
+            ),
             workspace,
             [],
         )
@@ -211,6 +260,10 @@ class MinionV2VerificationTests(unittest.TestCase):
             ["tests/router/test_router.py"],
         )
         self.assertEqual(submission["findings"], [])
+        self.assertEqual(
+            submission["obligation_coverage"],
+            self._obligation_coverage(),
+        )
         self.assertNotIn("findings_markdown", submission)
 
         contract = compile_swe_verification_tool_contract(
@@ -240,6 +293,26 @@ class MinionV2VerificationTests(unittest.TestCase):
                 }
             ),
             ["review_scratch/unsafe_claim_probe.md"],
+        )
+
+    def test_verification_pass_requires_exact_obligation_partition_coverage(self) -> None:
+        incomplete = self._obligation_coverage()
+        incomplete[0]["boundaries"][0]["partitions"] = ["zero", "one"]
+
+        with self.assertRaisesRegex(ValueError, "must exactly cover: zero, one, multiple"):
+            validate_bound_obligation_coverage(
+                self._bound_obligations(),
+                incomplete,
+                required=True,
+            )
+
+        self.assertEqual(
+            validate_bound_obligation_coverage(
+                self._bound_obligations(),
+                self._obligation_coverage(),
+                required=True,
+            ),
+            self._obligation_coverage(),
         )
 
     def test_scenario_workspace_snapshot_never_treats_fingerprint_as_git_revision(self) -> None:
@@ -429,6 +502,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         }
         submission = {
             "outcome": "pass",
+            "obligation_coverage": self._obligation_coverage(),
             "changed_test_paths": ["tests/router/test_router.py"],
             "tool_receipts": [
                 {"kind": "test_write", "ok": True, "structured": {}},
@@ -464,6 +538,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 review_workspace=repo,
                 review_scratch=self.runtime_root / "semantic-pending-scratch",
                 execution_adapter="software_git.v2",
+                work_view={"obligations": self._bound_obligations()},
                 submission=submission,
                 terminal={},
                 prompt_ref=prompt_ref,
@@ -783,11 +858,12 @@ class MinionV2VerificationTests(unittest.TestCase):
             test_path.read_text(encoding="utf-8"),
         )
 
-    def test_verifier_receives_scoped_view_and_exact_task_sources(self) -> None:
-        requirements_ref = TaskSourceBundleService(self.runtime_root, self.store).publish(
+    def test_verifier_receives_scoped_view_and_exact_task_ledgers(self) -> None:
+        requirements_ref = TaskLedgerService(self.runtime_root, self.store).publish(
             title="Router",
-            request_text="Route matching must preserve the user's exact semantics.\n",
-            workspace={},
+            task_spec={
+                "objective": "Route matching must preserve the user's exact semantics."
+            },
             actor="test",
             source_channel="test",
         )
@@ -814,9 +890,11 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(references["module_work_view"], work_view_ref)
         self.assertEqual(references["candidate_diff"], candidate_view_ref)
         self.assertEqual(references["task"], requirements_ref)
-        task_sources = self.store.read_json(references["task"])
-        request = self.store.read_bytes(task_sources["documents"][0]["artifact_ref"]).decode("utf-8")
-        self.assertEqual(request, "Route matching must preserve the user's exact semantics.\n")
+        task_ledger = self.store.read_json(references["task"])
+        self.assertEqual(
+            task_ledger["original"]["objective"],
+            "Route matching must preserve the user's exact semantics.",
+        )
 
     def test_module_verifier_receives_candidate_contract_and_repair_git_diffs(self) -> None:
         repo, skeleton_sha = self._git_repo("verifier-diffs")
@@ -3178,21 +3256,13 @@ class MinionV2VerificationTests(unittest.TestCase):
                     )
                     self.assertNotIn("repair_bill_ref", result.snapshot.payload)
 
-    def test_contract_defect_carries_requirement_patch_into_replan_state(self) -> None:
-        node = self._reviewing_node("node_requirement_patch")
+    def test_contract_defect_routes_finding_without_mutating_task_truth(self) -> None:
+        node = self._reviewing_node("node_contract_defect")
         verification_ref = self.store.put_json(
             {"status": "FAIL"}, artifact_type="VerificationArtifact"
         )
         repair_ref = self.store.put_json(
             {"finding": "contract"}, artifact_type="RepairBillArtifact"
-        )
-        patch_ref = self.store.put_json(
-            {"requirement": "Reset preserves precedence."},
-            artifact_type="TaskSourceAmendmentArtifact",
-        )
-        revised_ref = self.store.put_json(
-            {"requirements": [{"statement": "Reset preserves precedence."}]},
-            artifact_type="TaskSourceBundleArtifact",
         )
         result = self.verification.submit_verdict(
             node=node,
@@ -3203,34 +3273,24 @@ class MinionV2VerificationTests(unittest.TestCase):
             finding_fingerprint_value="contract-fingerprint",
             candidate_tree_hash="candidate-tree",
             defect_kind=DefectKind.CONTRACT,
-            requirement_patch_ref=patch_ref,
-            revised_requirements_ref=revised_ref,
         )
         self.assertEqual(result.snapshot.state, "STALE")
-        self.assertEqual(result.snapshot.payload["requirement_patch_ref"], patch_ref.to_dict())
-        self.assertEqual(result.snapshot.payload["revised_requirements_ref"], revised_ref.to_dict())
+        self.assertEqual(result.snapshot.payload["repair_bill_ref"], repair_ref.to_dict())
 
-    def test_requirement_patch_replan_uses_revised_requirements_and_returns_to_human_review_path(self) -> None:
+    def test_requirement_finding_replan_keeps_the_accepted_task_ledger(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
-        base_requirements_ref = service.task_sources.publish(
+        base_requirements_ref = service.task_ledger.publish(
             title="Router",
-            request_text="Route matching must be deterministic.\n",
-            workspace={},
+            task_spec={
+                "objective": "Route matching must be deterministic.",
+                "reset": {"precedence": "unspecified"},
+            },
             actor="test",
             source_channel="test",
         )
         repair_ref = self.store.put_json(
             {"summary": "Reset changes route precedence."}, artifact_type="RepairBillArtifact"
         )
-        revised_ref = service.task_sources.append_amendment(
-            base_ref=base_requirements_ref,
-            amendment_text="Reset must preserve configured route precedence.\n",
-            workspace={},
-            actor="test",
-            source_channel="test",
-        )
-        revised_bundle = self.store.read_json(revised_ref)
-        patch_ref = ArtifactRef.from_mapping(revised_bundle["amendments"][0]["artifact_ref"])
         request_ref = self.store.put_json(
             {"requirements_ref": base_requirements_ref.to_dict()},
             artifact_type="WorkflowRequestArtifact",
@@ -3241,9 +3301,9 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         topology_ref = self.store.put_json({}, artifact_type="SkeletonTopologyArtifact")
         contract_ref = self.store.put_json({}, artifact_type="ArchitectureSkeletonModuleContractArtifact")
-        workflow_id = "wf_requirement_patch_replan"
-        epoch_id = "epoch_requirement_patch_replan"
-        node_id = "node_requirement_patch_replan"
+        workflow_id = "wf_task_ledger_replan"
+        epoch_id = "epoch_task_ledger_replan"
+        node_id = "node_task_ledger_replan"
         self.repository.dispatch(
             ActionEnvelope(
                 action_type="CREATE_WORKFLOW",
@@ -3324,7 +3384,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             ("START_REVIEW", {"fencing_token": 2}),
             (
                 "SUBMIT_SEMANTIC_VERIFICATION",
-                {"pending_verification_ref": {"sha256": "pending-requirement-patch"}},
+                {"pending_verification_ref": {"sha256": "pending-task-ledger-replan"}},
             ),
             (
                 "VERIFIER_QUIESCED",
@@ -3337,11 +3397,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             ),
             (
                 "CONTRACT_DEFECT",
-                {
-                    "repair_bill_ref": repair_ref.to_dict(),
-                    "requirement_patch_ref": patch_ref.to_dict(),
-                    "revised_requirements_ref": revised_ref.to_dict(),
-                },
+                {"repair_bill_ref": repair_ref.to_dict()},
             ),
         ]
         for action_type, payload in node_actions:
@@ -3362,21 +3418,21 @@ class MinionV2VerificationTests(unittest.TestCase):
         processor = MinionV2OutboxProcessor(service)
         processor._request_epoch_replan(
             {
-                "effect_key": "requirement-patch-replan",
+                "effect_key": "task-ledger-replan",
                 "aggregate_type": AggregateType.DAG_NODE_RUN.value,
                 "aggregate_id": node_id,
             }
         )
         processor._freeze_epoch_for_replan(
             {
-                "effect_key": "requirement-patch-freeze",
+                "effect_key": "task-ledger-freeze",
                 "aggregate_type": AggregateType.EXECUTION_EPOCH.value,
                 "aggregate_id": epoch_id,
             }
         )
         processor._create_replan_revision(
             {
-                "effect_key": "requirement-patch-create-revision",
+                "effect_key": "task-ledger-create-revision",
                 "aggregate_type": AggregateType.EXECUTION_EPOCH.value,
                 "aggregate_id": epoch_id,
             }
@@ -3389,8 +3445,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(len(revisions), 1)
         revision = revisions[0]
         self.assertEqual(revision.state, "ARCHITECT_QUEUED")
-        self.assertEqual(revision.payload["requirements_ref"], revised_ref.to_dict())
-        self.assertEqual(revision.payload["requirement_patch_refs"], [patch_ref.to_dict()])
+        self.assertEqual(revision.payload["requirements_ref"], base_requirements_ref.to_dict())
         self.assertIn("replan_finding_batch_ref", revision.payload)
         self.assertEqual(revision.payload["base_architecture_manifest_ref"], manifest_ref.to_dict())
 

@@ -18,12 +18,14 @@ In architecture mode, establish the exact binding task obligations and inspect t
 bound reference, briefly investigate what its supplied path currently contains and choose a tool that matches the observed shape. Never pass an unclassified
 reference path to read_file or assume it is a file; once an exact relevant file path is known, read it directly and reuse that discovery instead of probing again.
 Start from the bound ReviewRequest,
-architecture index, skeleton diff, and contract comments. Consult a task-source or other reference only when those materials are insufficient to verify a specific
+architecture index, skeleton diff, and contract comments. Consult the task.yaml ledger or another reference only when those materials are insufficient to verify a specific
 requirement-preservation claim, ambiguity, numeric/example constraint, or feasibility question; do not exhaust references merely because they are bound. Audit requirement preservation,
 directional contracts, ownership, lifecycle/state closure, dependency truthfulness, public compatibility, implementability, and end-to-end scenario
 reachability breadth-first. A PASS requires an empty finding Draft and local implementability without renegotiating architecture. Do not prescribe
 private algorithms or reject choices that remain local to one owner. Classify every defect as requirements_defect, contract_defect, or
 architecture_defect and include the smallest exact source location available.
+
+Read the single task.yaml ledger before recording a requirements_defect. original is the initial task; ordered revisions override only their exact JSON Pointer paths while unrelated earlier obligations remain binding. For every revision, compare its summary and changes with the embedded exact user question and answer. A revision that widens, narrows, omits, or reinterprets that authority is itself a requirements_defect. Do not edit the ledger.
 
 The Manager provides no semantic verdict; independently evaluate directional contracts and compare every binding obligation needed for the verdict, including relevant examples and qualifications, with the complete
 skeleton diff, semantic Contract Dependency Graph, declared end-to-end scenarios, frozen/writable/reference path policy, and prior findings. Reject any
@@ -53,6 +55,8 @@ Architecture review is complete only when all five conditions hold: contracts co
 
 The review object is semantic contract composition, not product implementation. Treat public declarations and their adjacent normative contract comments as the available semantics. Starting from each scenario's concrete entrypoint and environment, manually trace inputs, calls, data shapes, ownership transfers, state transitions, errors, cleanup, and outputs across the declared interfaces to the required observable terminal. An API name, compatible signature, successful compile, or plausible future implementation proves only that a call can be expressed; it does not prove that the declared semantics compose to satisfy a Requirement. Do not assume an unspecified transition, error, ordering rule, or observable behavior will be supplied later by implementation. Conversely, do not demand private algorithms or function bodies when the declared interface semantics already determine a valid end-to-end path. For compound scenario behavior, check every observable claim against a concrete semantic trace; if a claim is not derivable from its declared path and no other meaningful declared scenario covers the binding Requirement, record an architecture_defect rather than rationalizing hypothetical support.
 
+Treat the obligation ledger as a breadth-first audit index, never as evidence by assertion. For every obligation, compare its claim with the exact task source, then cross each declared semantic state with every declared boundary partition and trace the stated contract_path to observable_outcome. Reject an omitted boundary, a non-composable observation path, or a public contract that collapses materially different required states into the same observation when those states require different outcomes. Record the defect as architecture_defect and name the affected obligation and smallest contract location; do not invent the implementation that should repair it.
+
 Perform a semantic feasibility rehearsal for every module. Syntax, LSP, compile-only consumers, and well-formed declarations are supporting evidence,
 not semantic proof. For each stateful public object, service, callback boundary, or resource owner, identify where private state and resources can live,
 how construction acquires them, how destruction or cancellation releases them, how dependencies enter, and how every success and failure transition
@@ -70,8 +74,10 @@ functional implementation leaked into the skeleton, fabricated APIs, and modules
 output_contract_fragment = """
 Write probes only through verification_scratch_write and execute them through the dedicated verification run tools. Complete the breadth-first audit
 first, then record concrete defects with add_finding using stable finding_key values and batch independent calls in one tool round. In architecture mode,
-call architecture_review_fail after recording all defects or architecture_review_pass only when the finding Draft is empty. In standalone mode, record
-coverage/gaps through review_surface and the final approved/changes_requested/blocked judgment through review_conclusion, then call review_submit. Submit exactly once through the mode-appropriate no-argument terminal tool. The Manager compiles the report from the fenced Draft; never write Markdown findings,
+call architecture_review_fail with no arguments after recording all defects. Call architecture_review_pass only when the finding Draft is empty and supply
+the exact compact obligation_traces and Manager-bound decision_traces requested by that tool. For each decision side use the smallest witness satisfying its bound entry_condition before optional progress. Name only a declared public distinguishing signal that actually differs between the paired entry states; if none exists, record a defect and FAIL. Cite the exact declaration/comment lines that establish each observation; do not write a separate positive-audit artifact. In standalone mode, record coverage/gaps
+through review_surface and the final approved/changes_requested/blocked judgment through review_conclusion, then call review_submit. Submit exactly once
+through the mode-appropriate terminal tool. The Manager compiles the report from the fenced Draft; never write Markdown findings,
 construct a nested report, treat syntax or compilation as semantic proof, or expose internal identities.
 """
 capability_groups = ["software_verifier", "v2_standalone_review_builder", "v2_skeleton_review_builder"]

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pal.execution.generated_tool_models import (
-    MinionScopedExecutionOpMinionArtifactEditInput,
     MinionScopedExecutionOpMinionArtifactWriteInput,
     MinionScopedExecutionOpSearchInput,
 )
@@ -85,6 +84,18 @@ from pal.shared import (
 )
 
 
+class MinionScopedExecutionOpMinionArtifactEditInput(StrictToolModel):
+    """Reloadable contract matching the Minion-owned artifact edit handler."""
+
+    relative_path: str
+    content: Any
+    operation: Literal["append", "replace"] = "append"
+    create_if_missing: bool = True
+    title: str | None = None
+    role: str | None = None
+    mime_type: str | None = None
+
+
 _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_search": {
         "alias": "search",
@@ -101,8 +112,21 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_artifact_edit": {
         "alias": "artifact_edit",
-        "description": "Edit an existing profile output artifact by exact text replacement.",
+        "description": (
+            "Append to or replace one existing profile output artifact. Supply relative_path, "
+            "the complete content to write, and operation=append|replace; set "
+            "create_if_missing=false when absence must be rejected. This tool does not accept "
+            "old_string/new_string exact-replacement arguments."
+        ),
         "InputModel": MinionScopedExecutionOpMinionArtifactEditInput,
+        "examples": (
+            {
+                "relative_path": "report.md",
+                "content": "# Report\n",
+                "operation": "replace",
+                "create_if_missing": False,
+            },
+        ),
     },
     **CONTRACT_BUILDER_TOOL_SPECS,
     **CANDIDATE_BUILDER_TOOL_SPECS,
@@ -125,6 +149,18 @@ def _scoped_workspace_tool_spec(
     workspace: dict[str, Any],
 ) -> dict[str, Any]:
     value = dict(spec)
+    if name == "op_minion_architecture_review_pass":
+        contract = dict(
+            dict(workspace.get("minion_v2") or {}).get(
+                "architecture_review_tool_contract"
+            )
+            or {}
+        )
+        example = dict(contract.get("pass_example") or {})
+        if example:
+            value["examples"] = (example,)
+            value["InputModel"].model_validate(example, strict=True)
+        return value
     if name != ADD_FINDING_CAPABILITY:
         return value
     role = str(dict(workspace.get("minion_v2") or {}).get("role") or "")

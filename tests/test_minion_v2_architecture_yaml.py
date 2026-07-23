@@ -18,6 +18,41 @@ from pal.shared import MinionInvocationPack
 
 def _submission() -> dict[str, object]:
     return {
+        "obligations": {
+            "decode_stream_completion": {
+                "claim": "decode emits complete payloads and rejects incomplete EOF",
+                "owner": "cli_decode_stream",
+                "states": {
+                    "reading_header": {
+                        "entry_condition": "decoder starts or a prior frame completes",
+                        "decision_point": "decode_progress",
+                        "outcome": "await_more_input",
+                        "required_outcome": "retain input without emitting a frame",
+                    },
+                    "reading_payload": {
+                        "entry_condition": "a positive length header completes before payload progress",
+                        "decision_point": "decode_progress",
+                        "outcome": "await_more_input",
+                        "required_outcome": "retain input without emitting a frame",
+                    },
+                    "frame_complete": {
+                        "entry_condition": "the final required payload byte arrives",
+                        "decision_point": "decode_progress",
+                        "outcome": "emit_frame",
+                        "required_outcome": "emit exactly one complete frame",
+                    },
+                },
+                "boundaries": {
+                    "bytes_received": ["zero", "partial", "complete"],
+                },
+                "observable_outcome": "payload output or a nonzero incomplete-input error",
+                "contract_path": [
+                    "frame decoder state",
+                    "CLI EOF decision",
+                    "process output and exit",
+                ],
+            }
+        },
         "modules": {
             "frame_protocol": {
                 "module_kind": "implementation",
@@ -47,6 +82,7 @@ def _submission() -> dict[str, object]:
         "scenarios": {
             "cli_decode_stream": {
                 "modules": ["frame_protocol", "framepipe_cli"],
+                "obligations": ["decode_stream_completion"],
                 "entrypoint": "framepipe decode",
                 "observable_behavior": "prints decoded payloads",
                 "environment": "project host",
@@ -70,9 +106,13 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
     def test_initial_template_has_dynamic_empty_maps_and_examples(self) -> None:
         path = prepare_architecture_draft_file(self.workspace)
 
-        self.assertEqual(load_architecture_draft(self.workspace), {"modules": {}, "scenarios": {}})
+        self.assertEqual(
+            load_architecture_draft(self.workspace),
+            {"obligations": {}, "modules": {}, "scenarios": {}},
+        )
         text = path.read_text(encoding="utf-8")
-        self.assertIn("schema_version: 1", text)
+        self.assertIn("schema_version: 3", text)
+        self.assertIn("obligations: {}", text)
         self.assertIn("modules: {}", text)
         self.assertIn("Module example:", text)
 
@@ -97,7 +137,7 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
     def test_duplicate_keys_are_rejected_instead_of_overwritten(self) -> None:
         path = prepare_architecture_draft_file(self.workspace)
         path.write_text(
-            "schema_version: 1\nmodules: {}\nmodules: {}\nscenarios: {}\n",
+            "schema_version: 3\nobligations: {}\nmodules: {}\nmodules: {}\nscenarios: {}\n",
             encoding="utf-8",
         )
 
@@ -111,11 +151,11 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
         path = prepare_architecture_draft_file(self.workspace)
         for text, code in (
             (
-                "schema_version: 1\nmodules: &mods {}\nscenarios: *mods\n",
+                "schema_version: 3\nobligations: {}\nmodules: &mods {}\nscenarios: *mods\n",
                 "unsupported_yaml_feature",
             ),
             (
-                "schema_version: 1\nmodules: {}\nscenarios: {}\n---\n{}\n",
+                "schema_version: 3\nobligations: {}\nmodules: {}\nscenarios: {}\n---\n{}\n",
                 "multiple_yaml_documents",
             ),
         ):
@@ -128,7 +168,7 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
     def test_schema_errors_return_exact_yaml_path(self) -> None:
         path = prepare_architecture_draft_file(self.workspace)
         path.write_text(
-            "schema_version: 1\nmodules:\n  bad-name:\n    module_kind: implementation\n"
+            "schema_version: 3\nobligations: {}\nmodules:\n  bad-name:\n    module_kind: implementation\n"
             "    contract_dependencies: []\n    paths:\n      contract_mode: movable\n"
             "      contract_paths: []\n      implementation_scopes: []\n      reference_only: []\n"
             "scenarios: {}\n",
@@ -170,6 +210,36 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
         self.assertIn(str(draft_path), bound.instruction)
         self.assertIn("stable snake_case", bound.instruction)
         self.assertIn("any number of entries", bound.instruction)
+        self.assertIn("boundary partitions", bound.instruction)
+
+    def test_obligation_boundary_partition_must_be_nonempty(self) -> None:
+        submission = _submission()
+        submission["obligations"]["decode_stream_completion"]["boundaries"][
+            "bytes_received"
+        ] = []
+
+        with self.assertRaises(ArchitectureDraftFileError) as raised:
+            write_architecture_draft(self.workspace, submission)
+
+        self.assertEqual(raised.exception.code, "schema_validation_failed")
+        self.assertIn(
+            "obligations.decode_stream_completion.boundaries.bytes_received",
+            {item["path"] for item in raised.exception.errors},
+        )
+
+    def test_state_requires_entry_decision_and_outcome_contract(self) -> None:
+        submission = _submission()
+        del submission["obligations"]["decode_stream_completion"]["states"][
+            "reading_payload"
+        ]["entry_condition"]
+
+        with self.assertRaises(ArchitectureDraftFileError) as raised:
+            write_architecture_draft(self.workspace, submission)
+
+        self.assertIn(
+            "obligations.decode_stream_completion.states.reading_payload.entry_condition",
+            {item["path"] for item in raised.exception.errors},
+        )
 
 
 if __name__ == "__main__":

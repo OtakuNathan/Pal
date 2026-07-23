@@ -11,6 +11,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import yaml
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -96,7 +97,11 @@ from pal.minion.v2.skeleton import (
     module_verification_corpus_path,
     review_architecture_skeleton,
 )
-from pal.minion.v2.task_sources import TASK_SOURCE_BUNDLE_ARTIFACT, validate_task_source_bundle
+from pal.minion.v2.task_ledger import (
+    TASK_LEDGER_ARTIFACT,
+    task_revision_template_yaml,
+    validate_task_ledger,
+)
 from pal.minion.v2.skeleton_builder import (
     ARCHITECTURE_SKELETON_CAPABILITIES,
     SKELETON_REVIEW_CAPABILITIES,
@@ -105,6 +110,7 @@ from pal.minion.v2.skeleton_builder import (
 from pal.minion.v2.swe_verification import (
     SWE_VERIFICATION_CAPABILITIES,
     compile_swe_verification_tool_contract,
+    validate_bound_obligation_coverage,
 )
 from pal.minion.v2.integration import (
     CandidateUnionConflict,
@@ -427,6 +433,32 @@ def _prepare_role_workspace_before_environment(
         attempt_key=f"fence-{fencing_token}",
     )
     return dict(role_pack.workspace), uses_bound_durable_workspace
+
+
+def _bind_role_attempt_sandbox(
+    runtime_root: Path,
+    pack: MinionInvocationPack,
+    *,
+    run_id: str,
+    durable_prompt_reused: bool,
+) -> MinionInvocationPack:
+    """Finalize one attempt without losing a durable prompt's sandbox binds.
+
+    A persisted prompt already contains Manager-produced host-to-sandbox
+    reference bindings and projected ``/pal/references`` paths.  Sanitizing it
+    again would discard the bindings while leaving the projected paths behind,
+    so a retry would mistake those sandbox paths for host sources.  Fresh packs
+    still pass through the normal manager-metadata sanitizer.
+    """
+
+    if durable_prompt_reused:
+        if not isinstance(dict(pack.metadata or {}).get("sandbox"), dict):
+            raise SubmissionInvariantError(
+                "durable role prompt lost its sandbox reference binding"
+            )
+    else:
+        pack = sanitize_runner_session_pack(pack)
+    return with_minion_sandbox_metadata(runtime_root, pack, run_id=run_id)
 
 
 def _role_submission_kind(activation: RoleActivation, *, skeleton_mode: bool) -> str:
@@ -1008,6 +1040,12 @@ class SemanticOrchestrator:
             mode=str(assignment.get("mode") or ""),
             submission_kind=str(assignment.get("submission_kind") or ""),
             input_refs=dict(assignment.get("input_refs") or {}),
+            evaluation_generation=int(
+                dict(assignment.get("execution_spec") or {}).get(
+                    "evaluation_generation"
+                )
+                or 0
+            ),
             exclude_assignment_id=str(assignment.get("assignment_id") or ""),
         )
         if reusable is not None:
@@ -1024,6 +1062,7 @@ class SemanticOrchestrator:
         mode: str,
         submission_kind: str,
         input_refs: Mapping[str, Mapping[str, Any]],
+        evaluation_generation: int = 0,
         exclude_assignment_id: str = "",
     ) -> dict[str, Any] | None:
         semantic_inputs = _semantic_role_input_refs(input_refs, role=role, mode=mode)
@@ -1043,6 +1082,13 @@ class SemanticOrchestrator:
             if str(candidate.get("mode") or "") != mode:
                 continue
             if str(candidate.get("submission_kind") or "") != submission_kind:
+                continue
+            if int(
+                dict(candidate.get("execution_spec") or {}).get(
+                    "evaluation_generation"
+                )
+                or 0
+            ) != int(evaluation_generation):
                 continue
             if str(candidate.get("state") or "") not in {
                 RoleAssignmentState.RESULT_RECORDED.value,
@@ -1988,9 +2034,9 @@ class SemanticOrchestrator:
         references = {"unit_work_view": view_ref}
         architecture_ref = _ref_from_mapping(node.payload.get("architecture_manifest_ref"))
         architecture_payload = dict(self.service.artifacts.read_json(architecture_ref))
-        task_source_value = architecture_payload.get("requirements_ref")
-        if isinstance(task_source_value, Mapping) and task_source_value.get("sha256"):
-            references["task"] = _ref_from_mapping(task_source_value)
+        task_ledger_value = architecture_payload.get("requirements_ref")
+        if isinstance(task_ledger_value, Mapping) and task_ledger_value.get("sha256"):
+            references["task"] = _ref_from_mapping(task_ledger_value)
         repair_ref = node.payload.get("repair_bill_ref")
         if isinstance(repair_ref, Mapping) and repair_ref.get("sha256"):
             semantic_repair_view = repair_bill_semantic_view(
@@ -2457,9 +2503,9 @@ class SemanticOrchestrator:
                 RoleMode.SCENARIO if scenario_mode else RoleMode.MODULE,
             ),
             instruction=(
-                "Generate and run adversarial verification for the bound real usage scenario. Read every immutable task-source file directly, preserve its exact qualifications and examples, and prove only the obligations exercised by this exact module combination, entrypoint, and environment. Write executable probes only in the bound scenario review scratch, then submit one semantic outcome."
+                "Generate and run adversarial verification for the bound real usage scenario. Consult the immutable task.yaml ledger when the accepted scenario contracts are insufficient, preserve its exact qualifications and examples, and prove only the obligations exercised by this exact module combination, entrypoint, and environment. Write executable probes only in the bound scenario review scratch, then submit one semantic outcome."
                 if scenario_mode
-                else "Generate and run adversarial verification for the bound candidate. Read the Manager-bound Candidate diff and any Contract/Repair diff before judging the code. Treat the module source contracts and comments as primary truth, then use the immutable task sources for intent and scope. For review_guarded contracts, compare the Accepted Skeleton shape with the Candidate and reject semantic contract drift. Inspect and rerun the existing repository corpus first; add or strengthen only missing adversarial coverage under the bound tests/<module_name>/ corpus, then submit one semantic outcome."
+                else "Generate and run adversarial verification for the bound candidate. Read the Manager-bound Candidate diff and any Contract/Repair diff before judging the code. Treat the module source contracts and comments as primary truth, then consult the immutable task.yaml ledger only as upstream provenance for intent and scope. For review_guarded contracts, compare the Accepted Skeleton shape with the Candidate and reject semantic contract drift. Inspect and rerun the existing repository corpus first; add or strengthen only missing adversarial coverage under the bound tests/<module_name>/ corpus, then submit one semantic outcome."
             ),
             reference_refs=verifier_references,
             workspace_override={
@@ -2505,6 +2551,7 @@ class SemanticOrchestrator:
                 review_workspace=review_workspace,
                 review_scratch=review_scratch,
                 execution_adapter=adapter,
+                work_view=self.service.artifacts.read_json(view_ref),
                 submission=plan,
                 terminal=terminal,
                 prompt_ref=prompt_ref,
@@ -2529,6 +2576,7 @@ class SemanticOrchestrator:
         review_workspace: Path,
         review_scratch: Path,
         execution_adapter: str,
+        work_view: Mapping[str, Any],
         submission: Mapping[str, Any],
         terminal: Mapping[str, Any],
         prompt_ref: ArtifactRef,
@@ -2559,6 +2607,15 @@ class SemanticOrchestrator:
             errors.append(f"{outcome.upper()} requires an empty finding list")
         if outcome == "unknown" and not reason:
             errors.append("UNKNOWN requires an environmental reason")
+        if outcome == "pass":
+            try:
+                validate_bound_obligation_coverage(
+                    dict(work_view.get("obligations") or {}),
+                    submission.get("obligation_coverage") or [],
+                    required=True,
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
         scratch_only = scenario_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
         changed_paths = (
             _verification_scratch_paths(review_scratch)
@@ -3986,7 +4043,7 @@ class SemanticOrchestrator:
             raise ValueError("review_and_repair requires ReviewRequest.unit_contract_seed; reviewer may not invent the repair contract")
         report = self.service.artifacts.read_json(report_ref)
         requirements_ref = _ref_from_mapping(workflow_request.get("requirements_ref"))
-        validate_task_source_bundle(self.service.artifacts.read_json(requirements_ref))
+        validate_task_ledger(self.service.artifacts.read_json(requirements_ref))
         unit_contract = {
             **seed,
             "unit_id": str(seed.get("unit_id") or "review_repair"),
@@ -4119,7 +4176,13 @@ class SemanticOrchestrator:
                 prepare_workspace=True,
             )
             contract = _named_json_output(terminal, "architecture_bundle.json")
-            requirements_ref = _ref_from_mapping(revision.payload.get("requirements_ref"))
+            current = self.repository.read_snapshot(
+                AggregateType.ARCHITECTURE_REVISION,
+                revision.aggregate_id,
+            )
+            if current is None:
+                raise ValueError("architecture revision disappeared after Architect submission")
+            requirements_ref = _ref_from_mapping(current.payload.get("requirements_ref"))
             revision_base_manifest_ref = self._revision_input_base_manifest_ref(revision)
             result_ref = self._publish_planning_bundle(
                 revision,
@@ -4127,7 +4190,6 @@ class SemanticOrchestrator:
                 requirements_ref=requirements_ref,
                 base_manifest_ref=revision_base_manifest_ref,
             )
-            current = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
             self.repository.dispatch(
                 ActionEnvelope(
                     action_type="DATA_ARCHITECT_COMPLETED",
@@ -4285,6 +4347,13 @@ class SemanticOrchestrator:
                 )
             ).snapshot
             references: dict[str, ArtifactRef] = {"task": requirements_ref}
+            task_revision_authority_value = revision.payload.get(
+                "pending_task_revision_authority_ref"
+            )
+            if task_revision_authority_value:
+                references["task_revision_authority"] = _ref_from_mapping(
+                    task_revision_authority_value
+                )
             if finding_value:
                 references["revision_finding"] = self._publish_architecture_finding_view(
                     finding_value,
@@ -4302,6 +4371,9 @@ class SemanticOrchestrator:
                             revision_scope.get("affected_modules") or []
                         ),
                         "allowed_paths": list(revision_scope.get("allowed_paths") or []),
+                        "immutable_requirement_paths": list(
+                            revision_scope.get("immutable_requirement_paths") or []
+                        ),
                         "allow_topology_changes": bool(
                             revision_scope.get("allow_topology_changes")
                         ),
@@ -4368,6 +4440,13 @@ class SemanticOrchestrator:
                 prepare_workspace=True,
             )
             submission = _named_json_output(terminal, "architecture_submission.json")
+            current = self.repository.read_snapshot(
+                AggregateType.ARCHITECTURE_REVISION,
+                revision.aggregate_id,
+            )
+            if current is None:
+                raise ValueError("architecture revision disappeared after Architect submission")
+            requirements_ref = _ref_from_mapping(current.payload.get("requirements_ref"))
             submission_ref = self.service.artifacts.put_json(
                 submission,
                 artifact_type="ArchitectureSkeletonSubmissionIntentArtifact",
@@ -4384,7 +4463,6 @@ class SemanticOrchestrator:
                 tool_summary_ref=submission_ref.to_dict(),
                 **_recorded_role_metrics(terminal),
             )
-            current = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
             self.repository.dispatch(
                 ActionEnvelope(
                     action_type="ARCHITECT_SUBMITTED",
@@ -5055,10 +5133,12 @@ class SemanticOrchestrator:
                 profile=self._profile_for_role(revision.workflow_id, "reviewer"),
                 activation=RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
                 instruction=(
-                    "Review the candidate code skeleton against the exact same immutable Requirements received by the Architect. "
+                "Review the candidate code skeleton against the exact same effective task.yaml ledger received by the Architect. "
+                    "Read task.yaml as one ordered ledger before recording a requirements_defect: later revisions override only their exact JSON Pointer paths, and every unrelated original obligation remains binding. For each revision, compare its semantic changes with the embedded exact user question and answer; reject any widening, narrowing, or reinterpretation as a requirements_defect. "
                     "Inspect the module DAG, complete skeleton diff, declarations and comments, ownership, lifecycle, state, invariants, dependencies, and end-to-end contract. "
                     "For each implementation module, the Manager derives a verifier-owned tests/<module_name>/ corpus after architecture acceptance; the Architect is forbidden to declare test paths or synthetic test modules, and tests are verification evidence rather than product scenarios. Do not report missing test scopes, test sources, test scenarios, or Architect-owned test registration merely because they are absent from contract_paths or implementation_scopes. A coverage obligation remains reachable through the Verifier even when it has no CLI entrypoint. Reject only a missing product semantic seam or a missing task-mandated product build/delivery asset owned by a real product module. "
                     "Your completion conditions are: contracts compile and compose; key scenarios complete along the contract graph; every failure path has a legal terminal or recovery state; every binding Requirement maps to a contract and scenario; and no dependency is undeclared. "
+                    "Treat the architecture obligation ledger as an audit index, not as proof. For each obligation, verify that its claim faithfully preserves the exact task source, covers every boundary partition, and traces contract_path to observable_outcome. Review every Manager-bound pair of states that share a consumer decision_point but require different outcomes. On each side instantiate the smallest witness satisfying its bound entry_condition before optional progress, calculate only public values declared by the contract, and cite the exact declaration/comment lines that entail them. Reject when the paired entry states have no declared public signal whose value actually differs, when states at one consumer decision are split across artificial decision_point names, when a boundary partition is omitted, or when an obligation is merely asserted without a composable observation path. Record those as architecture_defect findings. "
                     "Review semantic contract composition rather than implementation: from each concrete scenario entrypoint, trace declared interface inputs, calls, data/state transitions, errors, cleanup, and outputs to the required observable terminal. API presence, compatible signatures, compilation, or a plausible future implementation are not semantic proof; do not assume unspecified behavior, and do not require private algorithms or function bodies when the declared semantics already close the path. "
                     "Run only focused compile-only declaration or protocol-consumer probes. Compilation confirms contract/protocol consistency, never product behavior; do not require implementation bodies or a linked product executable. "
                     "Reject new placeholder implementations, stub function bodies, TODO pseudocode control flow, or product source added merely to make the Architecture Skeleton compile. "
@@ -5087,6 +5167,10 @@ class SemanticOrchestrator:
                 {
                     **semantic.to_dict(),
                     "review_scope": dict(semantic_payload.get("review_scope") or {}),
+                    "obligation_traces": [
+                        dict(item or {})
+                        for item in list(semantic_payload.get("obligation_traces") or [])
+                    ],
                 },
                 artifact_type="ArchitectureReviewArtifact",
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
@@ -5208,6 +5292,19 @@ class SemanticOrchestrator:
                     "actions": list(card.actions),
                     "route": dict(workflow.payload.get("control_route") or {}),
                 }
+            manifest_payload = dict(self.service.artifacts.read_json(manifest_ref))
+            task_ledger_value = manifest_payload.get("requirements_ref")
+            if isinstance(task_ledger_value, Mapping) and task_ledger_value.get("sha256"):
+                task_ledger = validate_task_ledger(
+                    self.service.artifacts.read_json(_ref_from_mapping(task_ledger_value))
+                )
+                revision_markdown = _task_revision_review_markdown(task_ledger)
+                if revision_markdown:
+                    payload["markdown"] = (
+                        str(payload.get("markdown") or "").rstrip()
+                        + "\n\n"
+                        + revision_markdown
+                    )
             replan_batch_value = revision.payload.get("replan_finding_batch_ref")
             if replan_batch_value:
                 replan_payload = dict(
@@ -5236,13 +5333,11 @@ class SemanticOrchestrator:
                         "caption": "Architecture skeleton, contract graph, and verification scenarios",
                     }
                 )
-            manifest_payload = dict(self.service.artifacts.read_json(manifest_ref))
-            task_source_value = manifest_payload.get("requirements_ref")
-            if isinstance(task_source_value, Mapping) and task_source_value.get("sha256"):
-                task_source_ref = _ref_from_mapping(task_source_value)
-                task_record = self.repository.read_artifact_record(task_source_ref.sha256)
-                if task_record and str(task_record.get("artifact_type") or "") == TASK_SOURCE_BUNDLE_ARTIFACT:
-                    for source in self.service.task_sources.source_attachments(task_source_ref):
+            if isinstance(task_ledger_value, Mapping) and task_ledger_value.get("sha256"):
+                task_ledger_ref = _ref_from_mapping(task_ledger_value)
+                task_record = self.repository.read_artifact_record(task_ledger_ref.sha256)
+                if task_record and str(task_record.get("artifact_type") or "") == TASK_LEDGER_ARTIFACT:
+                    for source in self.service.task_ledger.source_attachments(task_ledger_ref):
                         source_ref = _ref_from_mapping(source["artifact_ref"])
                         source_record = self.repository.read_artifact_record(source_ref.sha256)
                         if source_record is None:
@@ -5252,10 +5347,10 @@ class SemanticOrchestrator:
                                 "path": str(source_record["storage_path"]),
                                 "file_name": str(source["name"]).replace("/", "__"),
                                 "mime_type": str(source["media_type"]),
-                                "caption": f"Immutable task source: {source['name']}",
+                                "caption": "Immutable task ledger: original plus ordered revisions",
                             }
                         )
-                        card_children.append((source_ref.sha256, "task_source"))
+                        card_children.append((source_ref.sha256, "task_ledger"))
             payload["attachments"] = attachments
             card_children.append((markdown_ref.sha256, "architecture_markdown"))
             if replan_batch_value:
@@ -5356,17 +5451,13 @@ class SemanticOrchestrator:
         if workflow is None:
             raise ValueError("architecture revision has no workflow")
         request = workflow_request_from_snapshot(self.service, workflow)
-        request_ref = _ref_from_mapping(revision.payload.get("request_ref") or workflow.payload.get("request_ref"))
         requirements_ref = _ref_from_mapping(revision.payload.get("requirements_ref"))
         finding_value = architecture_revision_finding_value(revision.payload)
         base_manifest_ref = self._revision_input_base_manifest_ref(revision)
         refs: dict[str, ArtifactRef]
         scoped_revision = base_manifest_ref is not None and finding_value is not None
         if base_manifest_ref is None:
-            refs = {
-                "workflow_request": request_ref,
-                "task": requirements_ref,
-            }
+            refs = {"task": requirements_ref}
         elif scoped_revision:
             refs = {
                 "task": requirements_ref,
@@ -5382,13 +5473,17 @@ class SemanticOrchestrator:
                 refs["edit_instruction"] = _ref_from_mapping(revision.payload.get("edit_instruction_ref"))
         if revision.payload.get("edit_instruction_ref"):
             refs["edit_instruction"] = _ref_from_mapping(revision.payload.get("edit_instruction_ref"))
+        if revision.payload.get("pending_task_revision_authority_ref"):
+            refs["task_revision_authority"] = _ref_from_mapping(
+                revision.payload["pending_task_revision_authority_ref"]
+            )
         if finding_value and not scoped_revision:
             refs["revision_finding"] = self._publish_architecture_finding_view(
                 finding_value,
                 audience="architect",
             )
         instruction = (
-            "Produce an implementation DAG from every immutable file under reference:task; preserve their exact meaning and do not create normalized Requirement records. Inspect local files and "
+            "Produce an implementation DAG from the effective single reference:task/task.yaml ledger. Apply ordered revisions over original only at their exact JSON Pointer paths, preserve every unrelated obligation, and do not create normalized Requirement records. Inspect local files and "
             "user references only to understand feasibility and architectural boundaries; do not build an evidence catalog or research private "
             "implementation details. Design high-level units, directional "
             "contracts, dataflow, ownership, lifecycle/state/invariants, work-start dependencies, and end-to-end integration. Existing user-provided "
@@ -5398,7 +5493,7 @@ class SemanticOrchestrator:
         )
         if scoped_revision:
             instruction += (
-                " This is a scoped revision: read revision_scope first and consult the bound immutable Requirements only when exact Requirement text is needed; "
+                " This is a scoped revision: read revision_scope first and consult task.yaml only when exact upstream task semantics are needed; "
                 "do not reread the repository, workflow request, or base manifest. The manager has preseeded the complete base "
                 "contract privately. Change only the named semantic targets with the same incremental Contract tools used for initial authoring. "
                 "Unrelated semantic drift is rejected mechanically; untouched fragments retain their existing artifact references."
@@ -5541,9 +5636,9 @@ class SemanticOrchestrator:
         value: Any,
     ) -> dict[str, Any]:
         selected = dict(value or {}) if isinstance(value, Mapping) else {}
-        if target.section == "task_source":
+        if target.section == "task_ledger":
             return {
-                "section": "task_source",
+                "section": "task_ledger",
                 "name": target.target_id,
             }
         if target.section in {"unit", "topology"}:
@@ -5624,6 +5719,16 @@ class SemanticOrchestrator:
         llm_policy = dict(family_policies.get("llm") or {})
         workspace_policy = dict(family_policies.get("workspace") or {})
         workspace = dict(workspace_override or request.get("workspace") or {})
+        task_revision_required = bool(
+            snapshot.payload.get("pending_task_revision_authority_ref")
+        )
+        if task_revision_required:
+            workspace["task_revision_required"] = True
+            instruction = (
+                "Before changing or submitting architecture, encode the pending exact user answer as the smallest semantic delta in "
+                "the Manager-preseeded task_revision.yaml, then call task_revision_submit. Do not restate the whole task. "
+                + instruction
+            )
         if not workspace:
             workspace = {"kind": "new_project", "project_name": f"workflow-{snapshot.workflow_id}"}
         role = activation.role.value
@@ -5712,16 +5817,19 @@ class SemanticOrchestrator:
             priority = {"repair_bill": 0, "unit_work_view": 1, "workspace_preparation": 2}
             reference_items.sort(key=lambda item: (priority.get(item[0], 3), item[0]))
         for name, ref in reference_items:
+            includes: list[str] = []
             if ref.artifact_type == "LocalPathReference":
                 path = str(ref.media_type)
-            elif ref.artifact_type == TASK_SOURCE_BUNDLE_ARTIFACT:
-                path = str(self.service.task_sources.materialize(ref).root)
+            elif ref.artifact_type == TASK_LEDGER_ARTIFACT:
+                materialized = self.service.task_ledger.materialize(ref)
+                path = str(materialized.root)
+                includes = list(materialized.files)
             else:
                 record = self.repository.read_artifact_record(ref.sha256)
                 if record is None:
                     raise ValueError(f"worker input artifact is unavailable: {name}")
                 path = str(
-                    self.service.task_sources.materialize_artifact(
+                    self.service.task_ledger.materialize_artifact(
                         ref,
                         semantic_name=name,
                     )
@@ -5734,6 +5842,7 @@ class SemanticOrchestrator:
                     "truth_source": True,
                     "required": True,
                     "bound_input": False,
+                    **({"include": includes} if includes else {}),
                 }
             )
         workspace["reference_paths"] = references
@@ -5750,10 +5859,11 @@ class SemanticOrchestrator:
         ):
             invocation_acceptance = [
                 "Before reading a bound reference, investigate what its supplied path currently contains and choose a matching tool; never pass an unclassified path to read_file or assume it is a file. Once an exact file is known, read it directly without repeating discovery.",
-                "Review the exact bound task sources, skeleton diff, code contracts, semantic dependencies, and scenarios.",
+                "Review the effective bound task.yaml ledger, skeleton diff, code contracts, semantic dependencies, and scenarios; audit every revision against its embedded exact user answer.",
                 "Treat the Manager-derived tests/<module_name>/ corpus as verifier-owned verification infrastructure: it is intentionally absent from Architect-declared paths and scenarios, so its absence is not a defect.",
                 "Compile only focused declaration/protocol consumers to confirm contracts compose; compilation is not product behavior proof and must not require implementation bodies.",
                 "For every Requirement and observable scenario claim, trace the declared interface semantics from a concrete entrypoint through data/state/error transitions to a legal terminal; API availability or hypothetical implementation support is insufficient.",
+                "For every Manager-bound decision pair in a PASS trace, instantiate the smallest witness satisfying each bound entry_condition before optional progress, calculate the declared public signals, and cite the exact declaration/comment lines. If no public signal actually differs, record a defect and FAIL.",
                 "PASS only when key scenarios traverse the contract graph, failure paths terminate legally, every Requirement maps, and no dependency is undeclared.",
                 "Inspect the complete Manager-bound scope, then call architecture_review_pass or submit every material defect once through architecture_review_fail.",
             ]
@@ -5781,6 +5891,15 @@ class SemanticOrchestrator:
         else:
             invocation_acceptance = ["Write the exact primary JSON artifact required by the profile output contract."]
         mandatory_inputs: list[str] = []
+        evaluation_generation = (
+            int(snapshot.payload.get("architecture_review_generation") or 0)
+            if activation
+            == RoleActivation(
+                OrchestrationRole.REVIEWER,
+                RoleMode.ARCHITECTURE,
+            )
+            else 0
+        )
         input_fingerprint = authoring_input_fingerprint(
             {
                 "role": role,
@@ -5797,6 +5916,7 @@ class SemanticOrchestrator:
                 "architecture_revision_scope": workspace.get(
                     "architecture_revision_scope"
                 ),
+                "evaluation_generation": evaluation_generation,
             }
         )
         pack = MinionInvocationPack(
@@ -5884,9 +6004,9 @@ class SemanticOrchestrator:
             requirements_ref = bound_reference_refs.get("task")
             architecture_ref = bound_reference_refs.get("architecture_index")
             if requirements_ref is None or architecture_ref is None:
-                raise ValueError("Architecture Reviewer requires bound task sources and architecture_index")
+                raise ValueError("Architecture Reviewer requires bound task ledger and architecture_index")
             tool_contract = compile_architecture_review_invocation_tool_contract(
-                task_sources=self.service.artifacts.read_json(requirements_ref),
+                task_ledger=self.service.artifacts.read_json(requirements_ref),
                 architecture=self.service.artifacts.read_json(architecture_ref),
             )
             pack_value = pack.to_dict()
@@ -5998,6 +6118,8 @@ class SemanticOrchestrator:
             pack = MinionInvocationPack.from_dict({**pack.to_dict(), "workspace": bound_workspace})
         if skeleton_mode and activation.role == OrchestrationRole.ARCHITECT:
             pack = _bind_architecture_yaml_draft(pack)
+        if activation.role == OrchestrationRole.ARCHITECT and task_revision_required:
+            pack = _bind_task_revision_yaml_draft(pack)
         if activation.role == OrchestrationRole.ARCHITECT and base_manifest_ref is not None and not skeleton_mode:
             seed_contract_builder_draft(
                 pack.workspace,
@@ -6028,6 +6150,7 @@ class SemanticOrchestrator:
                 mode=mode,
                 submission_kind=submission_kind,
                 input_refs=durable_input_refs,
+                evaluation_generation=evaluation_generation,
             )
         )
         if reusable_assignment is not None:
@@ -6088,6 +6211,7 @@ class SemanticOrchestrator:
             scope_kind=session_scope_kind,
             subject_key=session_subject_key,
         )
+        durable_prompt_reused = False
         if assignment is None:
             assignment = self.repository.create_role_assignment(
                 RoleAssignmentRequest(
@@ -6114,6 +6238,7 @@ class SemanticOrchestrator:
                         "aggregate_type": snapshot.aggregate_type.value,
                         "aggregate_id": snapshot.aggregate_id,
                         "payload": dict(effect.get("payload") or {}),
+                        "evaluation_generation": evaluation_generation,
                     },
                     submission_kind=submission_kind,
                 )
@@ -6127,6 +6252,7 @@ class SemanticOrchestrator:
                 pack = MinionInvocationPack.from_dict(
                     dict(self.service.artifacts.read_json(original_prompt_ref))
                 )
+                durable_prompt_reused = True
         self._signal_assignment_ready(effect, str(assignment["assignment_id"]))
         if assignment["state"] in {
             RoleAssignmentState.CLAIMED.value,
@@ -6235,8 +6361,12 @@ class SemanticOrchestrator:
             "continuation_output_path": str(continuation_output_path),
         }
         pack = MinionInvocationPack.from_dict({**pack_value, "metadata": metadata})
-        pack = sanitize_runner_session_pack(pack)
-        pack = with_minion_sandbox_metadata(self.service.runtime_root, pack, run_id=run_id)
+        pack = _bind_role_attempt_sandbox(
+            self.service.runtime_root,
+            pack,
+            run_id=run_id,
+            durable_prompt_reused=durable_prompt_reused,
+        )
         prompt_ref = self.service.artifacts.put_json(
             pack.to_dict(),
             artifact_type="RolePromptPackArtifact",
@@ -6998,6 +7128,9 @@ class SemanticOrchestrator:
                 "finding_artifact_ref": review_ref.to_dict(),
                 "findings": [item.to_dict() for item in review.findings],
             }
+        review_generation = int(
+            current.payload.get("architecture_review_generation") or 0
+        )
         self.repository.dispatch(
             ActionEnvelope(
                 action_type=action_type,
@@ -7006,7 +7139,10 @@ class SemanticOrchestrator:
                 aggregate_id=current.aggregate_id,
                 actor="minion-v2-architecture-reviewer",
                 expected_version=current.version,
-                idempotency_key=f"architecture-review:{current.aggregate_id}:{review_ref.sha256}",
+                idempotency_key=(
+                    f"architecture-review:{current.aggregate_id}:"
+                    f"generation-{review_generation}:{review_ref.sha256}"
+                ),
                 payload=payload,
             ),
             **self._role_submission_settlement(effect or {}),
@@ -7200,10 +7336,13 @@ def _bind_architecture_yaml_draft(pack: MinionInvocationPack) -> MinionInvocatio
     guidance = (
         f" The complete topology Draft is preseeded at `{path}`. Read that file before changing topology. "
         "It is control-plane metadata, not product source. Its fixed YAML shape is: "
-        "`schema_version: 1`; `modules` is a map from a stable snake_case name to "
+        "`schema_version: 3`; `obligations` is a map from a stable snake_case requirement key to "
+        "`{claim, owner, states, boundaries, observable_outcome, contract_path}`; states is a dynamic map to `{entry_condition, decision_point, outcome, required_outcome}` and each boundary maps a semantic axis to its required partitions; "
+        "`modules` is a map from a stable snake_case name to "
         "`{module_kind, contract_dependencies, paths: {contract_mode, contract_paths, implementation_scopes, reference_only}}`; "
         "each implementation scope is `{kind: file|directory, path: relative/path}`; and `scenarios` is a map from a stable "
-        "snake_case name to `{modules, entrypoint, observable_behavior, environment}`. The maps may contain any number of entries. "
+        "snake_case name to `{modules, obligations, entrypoint, observable_behavior, environment}`. The maps may contain any number of entries. "
+        "Map every binding task Requirement to at least one obligation and every obligation to a consuming scenario. Declare each semantic state with entry_condition, decision_point, outcome, and required_outcome, plus explicit boundary partitions; states examined by the same consumer decision must share one decision_point. Do not write test cases or algorithms in this metadata. "
         "Edit this preseeded file with read_file plus edit_file/write_file. Do not recreate unchanged revision entries."
     )
     return MinionInvocationPack.from_dict(
@@ -7216,6 +7355,69 @@ def _bind_architecture_yaml_draft(pack: MinionInvocationPack) -> MinionInvocatio
     )
 
 
+def _bind_task_revision_yaml_draft(pack: MinionInvocationPack) -> MinionInvocationPack:
+    value = pack.to_dict()
+    workspace = dict(value.get("workspace") or {})
+    root_value = str(
+        workspace.get("artifact_stage_dir") or workspace.get("artifact_dir") or ""
+    ).strip()
+    if not root_value:
+        raise ValueError("pending task revision has no artifact workspace")
+    path = Path(root_value).expanduser().resolve() / "task_revision.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(task_revision_template_yaml(), encoding="utf-8")
+    guidance = (
+        f" A pending exact user answer must be compiled before architecture work. Its fixed revision Draft is preseeded at `{path}`. "
+        "Read the bound task_revision_authority reference for the exact question and answer. "
+        "Use artifact_edit with relative_path=task_revision.yaml, content=<complete YAML>, operation=replace, and create_if_missing=false. Keep schema_version '1'; write one concise summary and the smallest changes list. "
+        "Each change uses op add|replace|remove and a JSON Pointer path rooted inside task.yaml.original, not at the task.yaml envelope; never prefix /original, /revisions, or /schema_version. Add/replace require value and remove forbids it. "
+        "Then call task_revision_submit with no arguments. Never copy or restate the complete task."
+    )
+    return MinionInvocationPack.from_dict(
+        {
+            **value,
+            "goal": str(value.get("goal") or "") + guidance,
+            "instruction": str(value.get("instruction") or "") + guidance,
+            "workspace": workspace,
+        }
+    )
+
+
+def _task_revision_review_markdown(task_ledger: Mapping[str, Any]) -> str:
+    revisions = [
+        dict(item or {}) for item in list(task_ledger.get("revisions") or [])
+    ]
+    if not revisions:
+        return ""
+    lines = ["## Task Revision Diff", ""]
+    for revision in revisions:
+        authority = dict(revision.get("authority") or {})
+        sequence = int(revision.get("sequence") or 0)
+        lines.extend(
+            [
+                f"### Revision {sequence}: {revision.get('summary', '')}",
+                "",
+                f"- User decision: {authority.get('question', '')}",
+                f"- Exact answer: {authority.get('answer', '')}",
+                f"- Observed: {authority.get('observed_at', '')}",
+                "",
+                "```yaml",
+                yaml.safe_dump(
+                    {
+                        "summary": revision.get("summary"),
+                        "changes": list(revision.get("changes") or []),
+                    },
+                    allow_unicode=True,
+                    sort_keys=False,
+                    default_flow_style=False,
+                ).rstrip(),
+                "```",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
 def _skeleton_architect_instruction(
     *,
     finding: Mapping[str, Any],
@@ -7223,7 +7425,7 @@ def _skeleton_architect_instruction(
     has_revision_scope: bool,
 ) -> str:
     instruction = (
-        "Design the requested software architecture in the bound writable worktree. The exact task sources are immutable product truth. "
+        "Design the requested software architecture in the bound writable worktree. The effective task in the single immutable task.yaml ledger is product truth. "
         "This invocation is declaration-only: design the whole system at module level, never at function or algorithm implementation level. "
         "Design modules and their interaction contracts; declare boundaries, responsibilities, directional dependencies, public interfaces, "
         "lifecycle, ownership, invariants, and state machines only when stateful behavior requires them. Build the overall skeleton and express "
@@ -7238,7 +7440,8 @@ def _skeleton_architect_instruction(
         "A scenario names the exact implementation modules, real entrypoint, observable behavior, and environment it verifies, but owns no product source. "
         "A universal all-module scenario is forbidden unless a real product entrypoint requires that exact combination."
         " Maintain the complete semantic graph in the Manager-preseeded architecture.yaml named in this invocation. "
-        "The file has fixed schema_version, modules, and scenarios fields; modules and scenarios are dynamic snake_case maps. "
+        "Before declaring modules, translate every binding Requirement into a named obligation with one semantic claim, exactly one module-or-scenario owner, a semantic state map, explicit boundary partitions, the required observable outcome, and the public contract path that makes that outcome decidable. Every state declares its exact earliest entry_condition, consumer decision_point, stable outcome key, and required_outcome. States examined at the same consumer decision must share decision_point across obligations so the Manager can derive every cross-outcome distinguishability pair. contract_path is an ordered semantic interface/signal chain such as module::API -> observation; it is not a filesystem allowlist and bare source filenames are insufficient. Distinguish zero-progress, partial-progress, complete, and terminal states whenever the Requirement assigns them different outcomes. This is semantic declaration, not test design or implementation. "
+        "The file has fixed schema_version, obligations, modules, and scenarios fields; all three collections are dynamic snake_case maps, and each scenario names the obligations it consumes. "
         "Use ordinary file tools to add, edit, or delete map entries, and call architecture_submit with no arguments only after the file and declaration skeleton agree."
     )
     if has_base_manifest:
@@ -7265,6 +7468,8 @@ def _skeleton_architect_instruction(
         instruction += (
             " Read the bound revision_scope before editing. If one physical reference or contract defect affects multiple named modules, "
             "repair every affected module in the same candidate; do not wait for stable preflight to report the same defect one module at a time. "
+            "Paths listed as immutable_requirement_paths identify evidence in task.yaml, never writable workspace targets. "
+            "If a requirements defect remains unresolved after applying ordered task.yaml revisions over original, call ask_question and wait; then append only the authorized delta through task_revision_submit. "
             "The Manager will mechanically reject semantic or source changes outside this scope."
         )
     return instruction
@@ -7521,12 +7726,7 @@ def apply_v2_role_capability_policy(
     current = set(pack.allowed_capabilities)
     skeleton_authoring = False
     if activation.role == OrchestrationRole.ARCHITECT:
-        skeleton_authoring = bool(
-            current.intersection(
-                set(ARCHITECTURE_SKELETON_CAPABILITIES)
-                - {"op_minion_ask_question"}
-            )
-        )
+        skeleton_authoring = "op_minion_architecture_submit" in current
         allowed_authoring = (
             set(ARCHITECTURE_SKELETON_CAPABILITIES)
             if skeleton_authoring
@@ -7564,10 +7764,10 @@ def apply_v2_role_capability_policy(
     }
     if activation.role in {OrchestrationRole.ARCHITECT, OrchestrationRole.REVIEWER}:
         forbidden_writes.update({"op_file_write", "op_file_edit", "op_path_delete"})
-    if activation.role == OrchestrationRole.ARCHITECT and current.intersection(
-        set(ARCHITECTURE_SKELETON_CAPABILITIES)
-        - {"op_minion_ask_question"}
-    ):
+    if activation.role == OrchestrationRole.ARCHITECT:
+        current.add("op_minion_artifact_edit")
+        forbidden_writes.discard("op_minion_artifact_edit")
+    if activation.role == OrchestrationRole.ARCHITECT and skeleton_authoring:
         forbidden_writes.difference_update({"op_file_write", "op_file_edit", "op_path_delete"})
     if (
         activation.role == OrchestrationRole.IMPLEMENTATION
@@ -7646,6 +7846,7 @@ def _is_authoring_capability_name(name: str) -> bool:
             "op_minion_requirements",
             "op_minion_contract",
             "op_minion_architecture",
+            "op_minion_task_revision",
             "op_minion_developer",
             "op_minion_candidate",
             "op_minion_verification",

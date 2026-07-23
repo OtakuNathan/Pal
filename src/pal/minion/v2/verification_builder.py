@@ -443,7 +443,7 @@ def compile_verification_invocation_tool_contract(
     overrides: dict[str, dict[str, str]] = {}
     for capability in (*_RUN_TO_KIND_TAG, "op_minion_verification_run_lsp_check", "op_minion_verification_check_unavailable"):
         overrides[capability] = {"use_when": (
-            "Record one semantic verification case. Read the immutable task sources directly; do not copy them into structured fields. "
+            "Record one semantic verification case. Consult the immutable task.yaml ledger when accepted contracts are insufficient; do not copy it into structured fields. "
             "Reusing a case name updates that case. The description may cite a source filename in any language. Set probe_path whenever the command "
             "consumes a verifier scratch file so exact evidence reuse is invalidated only by that file. "
             f"Bound verification context: {boundary_text}."
@@ -465,10 +465,10 @@ def compile_verification_invocation_tool_contract(
         )}
     overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
         "Record or replace one independently actionable, evidence-backed finding. Use a stable snake_case finding_key, "
-        "p0/p1/p2 priority, a self-contained summary, and exact task_source or workspace locations when available. "
+        "p0/p1/p2 priority, a self-contained summary, and exact task_ledger or workspace locations when available. "
         "Complete the breadth-first audit first and batch independent add_finding calls in one tool round when possible. "
         "Use module_defect for the current implementation, dependency_defect for upstream code, contract_defect for a "
-        "frozen boundary, architecture_defect for ownership/topology, requirements_defect for conflicting task sources, "
+        "frozen boundary, architecture_defect for ownership/topology, requirements_defect for a conflicting task ledger, "
         "and integration_defect for cross-module product behavior. Bound semantic modules: "
         f"{json.dumps(all_targets, ensure_ascii=False)}."
     )}

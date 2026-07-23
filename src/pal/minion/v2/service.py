@@ -21,9 +21,9 @@ from pal.minion.v2.skeleton import (
     compile_skeleton_markdown,
     review_architecture_skeleton,
 )
-from pal.minion.v2.task_sources import (
-    TASK_SOURCE_BUNDLE_ARTIFACT,
-    TaskSourceBundleService,
+from pal.minion.v2.task_ledger import (
+    TASK_LEDGER_ARTIFACT,
+    TaskLedgerService,
 )
 
 
@@ -43,7 +43,7 @@ class MinionV2WorkflowService:
     architecture: ArchitectureArtifactService = field(init=False)
     catalog: MinionV2Catalog = field(init=False)
     skeleton: GitBackedSkeletonService = field(init=False)
-    task_sources: TaskSourceBundleService = field(init=False)
+    task_ledger: TaskLedgerService = field(init=False)
 
     def __post_init__(self) -> None:
         self.repository = MinionV2Repository(Path(self.runtime_root))
@@ -51,7 +51,7 @@ class MinionV2WorkflowService:
         self.architecture = ArchitectureArtifactService(self.artifacts, self.repository)
         self.catalog = MinionV2Catalog(Path(self.runtime_root), self.artifacts)
         self.skeleton = GitBackedSkeletonService(Path(self.runtime_root), self.artifacts)
-        self.task_sources = TaskSourceBundleService(Path(self.runtime_root), self.artifacts)
+        self.task_ledger = TaskLedgerService(Path(self.runtime_root), self.artifacts)
 
     def create_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
@@ -112,11 +112,7 @@ class MinionV2WorkflowService:
         }
 
     def prepare_requirements(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        """Publish the immutable raw task source used by every V2 role.
-
-        This administrative helper intentionally accepts prose rather than a
-        normalized Requirement graph. Public callers should use start_workflow.
-        """
+        """Publish the immutable initial task specification used by every V2 role."""
 
         data = dict(request)
         forbidden = {
@@ -132,11 +128,12 @@ class MinionV2WorkflowService:
                 "V2 no longer accepts normalized Requirements fields: "
                 + ", ".join(sorted(forbidden))
             )
-        ref = self.task_sources.publish(
+        task_spec = data.get("task_spec")
+        if not isinstance(task_spec, Mapping) or not task_spec:
+            raise ValueError("prepare_requirements requires a non-empty task_spec object")
+        ref = self.task_ledger.publish(
             title=str(data.get("title") or "Task"),
-            request_text=str(data.get("request_text") or data.get("goal") or ""),
-            workspace=_normalize_workspace(data.get("workspace")),
-            source_files=[str(item) for item in list(data.get("source_files") or [])],
+            task_spec=dict(task_spec),
             actor=str(data.get("actor") or "pal"),
             source_channel=str(data.get("source_channel") or "local"),
         )
@@ -318,17 +315,19 @@ class MinionV2WorkflowService:
         actor = str(data.get("actor") or "pal").strip()
         source_channel = str(data.get("source_channel") or "local").strip()
         research_mode = ResearchMode(str(data.get("research_mode") or ResearchMode.LOCAL_ONLY))
-        source_files = [str(item) for item in list(data.get("source_files") or [])]
-        if operation != "new_requirement" and source_files:
-            raise ValueError("source_files are only valid for new_requirement workflows")
-        if requirements_ref and source_files:
-            raise ValueError("source_files cannot be combined with an existing task source bundle")
+        task_spec = data.get("task_spec")
+        if task_spec is not None and (not isinstance(task_spec, Mapping) or not task_spec):
+            raise ValueError("task_spec must be a non-empty object")
+        if operation != "new_requirement" and task_spec is not None:
+            raise ValueError("task_spec is only valid for new_requirement workflows")
+        if requirements_ref and task_spec is not None:
+            raise ValueError("task_spec cannot be combined with an existing task ledger")
         if operation == "new_requirement" and not requirements_ref:
-            requirements_ref = self.task_sources.publish(
+            if not isinstance(task_spec, Mapping) or not task_spec:
+                raise ValueError("new_requirement workflow requires task_spec")
+            requirements_ref = self.task_ledger.publish(
                 title=str(data.get("title") or goal or "Task"),
-                request_text=raw_goal,
-                workspace=workspace,
-                source_files=source_files,
+                task_spec=dict(task_spec),
                 actor=actor,
                 source_channel=source_channel,
             ).to_dict()
@@ -344,15 +343,14 @@ class MinionV2WorkflowService:
             )
             if requirements_ref and requirements_ref != architecture_requirements_ref:
                 raise ValueError(
-                    "workflow task sources differ from the imported architecture"
+                    "workflow task ledger differs from the imported architecture"
                 )
             requirements_ref = architecture_requirements_ref
         if requirements_ref:
             record = self.repository.read_artifact_record(str(requirements_ref.get("sha256") or ""))
-            if record is None or str(record.get("artifact_type") or "") != TASK_SOURCE_BUNDLE_ARTIFACT:
+            if record is None or str(record.get("artifact_type") or "") != TASK_LEDGER_ARTIFACT:
                 raise ValueError(
-                    "task source must reference a durable TaskSourceBundleArtifact; "
-                    "legacy RequirementsArtifact workflows cannot be resumed"
+                    "task truth must reference a durable TaskLedgerArtifact"
                 )
         if operation == "review_and_repair" and str(task.payload.get("family_id") or "") == "software_engineering":
             self._validate_external_architecture_ref(
@@ -384,7 +382,6 @@ class MinionV2WorkflowService:
             "constraints": data.get("constraints") or [],
             "approved_evidence": list(data.get("approved_evidence") or []),
             "workspace": workspace,
-            "source_files": source_files,
             "references": _normalize_references(
                 [*list(task_revision.get("references") or []), *list(data.get("references") or [])]
             ),
@@ -836,7 +833,7 @@ class MinionV2WorkflowService:
         manifest = dict(self.artifacts.read_json(manifest_ref))
         requirements_ref = dict(manifest.get("requirements_ref") or {})
         if not requirements_ref:
-            raise ValueError("accepted architecture has no bound task source bundle")
+            raise ValueError("accepted architecture has no bound task ledger")
         request = workflow_request_from_snapshot(self, workflow)
         task_id = str(workflow.payload.get("task_id") or request.get("task_id") or "")
         if not task_id:
@@ -956,10 +953,10 @@ class MinionV2WorkflowService:
             request = workflow_request_from_snapshot(self, workflow)
             request_requirements_ref = dict(request.get("requirements_ref") or {})
             if not manifest_requirements_ref:
-                raise ValueError("imported architecture has no task-source binding")
+                raise ValueError("imported architecture has no task-ledger binding")
             if request_requirements_ref != manifest_requirements_ref:
                 raise ValueError(
-                    "cannot recover architecture review: workflow and skeleton task sources differ"
+                    "cannot recover architecture review: workflow and skeleton task ledgers differ"
                 )
             resolution_payload.update(
                 {
@@ -1068,16 +1065,8 @@ class MinionV2WorkflowService:
         if decision not in {"accept", "edit", "reject"}:
             raise ValueError("human decision must be accept, edit, or reject")
         edit_scope = str(data.get("edit_scope") or "architecture").strip().lower()
-        source_files = data.get("source_files")
-        if source_files is not None and not isinstance(source_files, (list, tuple)):
-            raise ValueError("source_files must be an array")
-        if any(
-            not isinstance(item, str) or not item.strip()
-            for item in list(source_files or [])
-        ):
-            raise ValueError("source_files must contain non-empty workspace-relative paths")
         amendment = str(data.get("amendment") or "")
-        has_amendment = bool(amendment.strip() or list(source_files or []))
+        has_amendment = bool(amendment.strip())
         if decision == "edit":
             if edit_scope not in {"architecture", "requirements"}:
                 raise ValueError("edit_scope must be architecture or requirements")
@@ -1085,11 +1074,11 @@ class MinionV2WorkflowService:
                 if not str(data.get("edit_instruction") or "").strip():
                     raise ValueError("architecture edit requires edit_instruction")
                 if has_amendment:
-                    raise ValueError("architecture edit cannot amend the task source")
+                    raise ValueError("architecture edit cannot amend the task ledger")
             elif not has_amendment:
-                raise ValueError("requirements edit requires amendment prose or source_files")
+                raise ValueError("requirements edit requires amendment prose")
         elif data.get("edit_scope") or has_amendment:
-            raise ValueError("edit_scope and task-source amendments are valid only for decision=edit")
+            raise ValueError("edit_scope and task-ledger revisions are valid only for decision=edit")
         self._rebind_human_decision_channel(data)
         token = str(data.get("decision_token") or "")
         if not token:
@@ -1122,37 +1111,23 @@ class MinionV2WorkflowService:
         }
         if decision == "edit":
             instruction = str(data.get("edit_instruction") or "").strip()
-            revised_requirements_ref: dict[str, Any] = {}
+            task_revision_authority_ref: dict[str, Any] = {}
             if edit_scope == "requirements":
-                workflow = self._workflow_snapshot(workflow_id)
-                workflow_request = workflow_request_from_snapshot(self, workflow)
-                current_manifest = dict(self.artifacts.read_json(manifest_ref))
-                current_requirements_ref = dict(
-                    current_manifest.get("requirements_ref")
-                    or revision.payload.get("requirements_ref")
-                    or {}
-                )
-                revised_requirements_ref = self.task_sources.append_amendment(
-                    base_ref=current_requirements_ref,
-                    amendment_text=amendment,
-                    workspace=dict(workflow_request.get("workspace") or {}),
-                    source_files=[str(item) for item in list(source_files or [])],
+                task_revision_authority_ref = self.task_ledger.publish_authority(
+                    title="Human review task revision",
+                    question="What requirement change should supersede the reviewed task specification?",
+                    answer=amendment,
+                    origin="human_review_edit",
                     actor=str(data.get("actor") or "pal"),
                     source_channel=str(data.get("source_channel") or "local"),
                 ).to_dict()
                 instruction = instruction or (
-                    "Revise the existing architecture skeleton and topology against the amended immutable task sources."
+                    "First append the pending user-authorized task revision, then revise the existing architecture against the updated task ledger."
                 )
             edit_ref = self.artifacts.put_json(
                 {
                     "instruction": instruction,
                     "edit_scope": edit_scope,
-                    "manifest_sha": manifest_sha,
-                    **(
-                        {"revised_requirements_ref": revised_requirements_ref}
-                        if revised_requirements_ref
-                        else {}
-                    ),
                 },
                 artifact_type=(
                     "RequirementsEditInstructionArtifact"
@@ -1163,16 +1138,16 @@ class MinionV2WorkflowService:
                 child_refs=(
                     (manifest_sha, "revises"),
                     *(
-                        ((str(revised_requirements_ref["sha256"]), "replacement_requirements"),)
-                        if revised_requirements_ref
+                        ((str(task_revision_authority_ref["sha256"]), "task_revision_authority"),)
+                        if task_revision_authority_ref
                         else ()
                     ),
                 ),
             )
             payload["edit_instruction_ref"] = edit_ref.to_dict()
             payload["edit_scope"] = edit_scope
-            if revised_requirements_ref:
-                payload["revised_requirements_ref"] = revised_requirements_ref
+            if task_revision_authority_ref:
+                payload["task_revision_authority_ref"] = task_revision_authority_ref
         result = self.repository.dispatch(
             ActionEnvelope(
                 action_type=action_types[decision],
@@ -1193,8 +1168,8 @@ class MinionV2WorkflowService:
             "state": result.snapshot.state,
             **({"edit_scope": edit_scope} if decision == "edit" else {}),
             **(
-                {"revised_requirements_ref": payload["revised_requirements_ref"]}
-                if payload.get("revised_requirements_ref")
+                {"task_revision_authority_ref": payload["task_revision_authority_ref"]}
+                if payload.get("task_revision_authority_ref")
                 else {}
             ),
         }
@@ -1372,11 +1347,14 @@ def workflow_request_from_snapshot(
 
 
 def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
+    if "source_files" in data:
+        raise ValueError(
+            "source_files was removed; foreground Pal must synthesize the complete task_spec"
+        )
     workspace = data.get("workspace")
     if workspace is not None and not isinstance(workspace, Mapping):
         raise ValueError("workflow workspace must be an object")
     for field_name in (
-        "source_files",
         "constraints",
         "approved_evidence",
         "references",
@@ -1394,11 +1372,9 @@ def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
         value = data.get(field_name)
         if value is not None and not isinstance(value, Mapping):
             raise ValueError(f"workflow {field_name} must be an object")
-    source_files = data.get("source_files")
-    if isinstance(source_files, (list, tuple)) and any(
-        not isinstance(item, str) or not item.strip() for item in source_files
-    ):
-        raise ValueError("workflow source_files must contain non-empty strings")
+    task_spec = data.get("task_spec")
+    if task_spec is not None and not isinstance(task_spec, Mapping):
+        raise ValueError("workflow task_spec must be an object")
 
 
 def _normalize_workspace(value: Any) -> dict[str, Any]:

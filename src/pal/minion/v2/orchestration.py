@@ -20,10 +20,7 @@ from pal.minion.v2.execution import DagScheduler, ExecutionCompiler, workspace_c
 from pal.minion.v2.integration import CandidateUnionConflict, CandidateUnionService
 from pal.minion.v2.machine_dsl import ControlDisposition, ControlIntent
 from pal.minion.v2.machines import machine_spec_for
-from pal.minion.v2.replan import (
-    ReplanRequirementConflict,
-    collect_architecture_finding_batch,
-)
+from pal.minion.v2.replan import collect_architecture_finding_batch
 from pal.minion.v2.service import MinionV2WorkflowService, workflow_request_from_snapshot
 from pal.minion.v2.sessions import (
     architect_session_id_for_revision,
@@ -881,14 +878,20 @@ class MinionV2OutboxProcessor:
                 idempotency_key=f"effect:{effect['effect_key']}:revision",
                 payload={
                     "request_ref": previous.payload.get("request_ref"),
-                    "requirements_ref": (
-                        previous.payload.get("revised_requirements_ref")
-                        or previous.payload.get("requirements_ref")
-                    ),
+                    "requirements_ref": previous.payload.get("requirements_ref"),
                     "parent_revision_id": previous.aggregate_id,
                     "revision_number": int(previous.payload.get("revision_number") or 1) + 1,
                     "edit_instruction_ref": previous.payload.get("edit_instruction_ref"),
                     "edit_scope": previous.payload.get("edit_scope", "architecture"),
+                    **(
+                        {
+                            "pending_task_revision_authority_ref": dict(
+                                previous.payload["task_revision_authority_ref"]
+                            )
+                        }
+                        if previous.payload.get("task_revision_authority_ref")
+                        else {}
+                    ),
                     "base_architecture_manifest_ref": previous.payload.get("architecture_manifest_ref"),
                     "research_mode": previous.payload.get("research_mode", "local_only"),
                 },
@@ -960,16 +963,6 @@ class MinionV2OutboxProcessor:
                     "finding_artifact_ref": finding_ref,
                     "finding_fingerprint": fingerprint,
                     "source_node": str(source.payload.get("module_name") or source.payload.get("unit_id") or ""),
-                    **(
-                        {"requirement_patch_ref": dict(source.payload["requirement_patch_ref"])}
-                        if source.payload.get("requirement_patch_ref")
-                        else {}
-                    ),
-                    **(
-                        {"revised_requirements_ref": dict(source.payload["revised_requirements_ref"])}
-                        if source.payload.get("revised_requirements_ref")
-                        else {}
-                    ),
                 },
             )
         )
@@ -1056,47 +1049,14 @@ class MinionV2OutboxProcessor:
         }
         if any(node.state in unsettled for node in nodes):
             return
-        try:
-            batch = collect_architecture_finding_batch(
-                self.service.artifacts,
-                epoch=current,
-                nodes=nodes,
-            )
-        except ReplanRequirementConflict as exc:
-            conflict_ref = self.service.artifacts.put_json(
-                {
-                    "reason": str(exc),
-                    "revised_requirements_refs": [dict(item) for item in exc.revised_requirements_refs],
-                },
-                artifact_type="ReplanRequirementConflictArtifact",
-                child_refs=tuple(
-                    (str(item.get("sha256") or ""), "revised_requirements")
-                    for item in exc.revised_requirements_refs
-                ),
-            )
-            latest = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, current.aggregate_id)
-            if latest is not None and latest.state == "REPLAN_COLLECTING":
-                self.repository.dispatch(
-                    ActionEnvelope(
-                        action_type="ENTER_TRIAGE",
-                        workflow_id=latest.workflow_id,
-                        aggregate_type=AggregateType.EXECUTION_EPOCH,
-                        aggregate_id=latest.aggregate_id,
-                        actor="minion-v2-manager",
-                        expected_version=latest.version,
-                        idempotency_key=f"replan-requirements-conflict:{latest.aggregate_id}:{conflict_ref.sha256}",
-                        payload={
-                            "failure_artifact_ref": conflict_ref.to_dict(),
-                            "blocker": {"kind": "replan_requirements_conflict"},
-                        },
-                    )
-                )
-            return
+        batch = collect_architecture_finding_batch(
+            self.service.artifacts,
+            epoch=current,
+            nodes=nodes,
+        )
         manifest_ref = dict(current.payload.get("architecture_manifest_ref") or {})
         manifest = dict(self.service.artifacts.read_json(manifest_ref)) if manifest_ref else {}
-        requirements_ref = dict(
-            batch.revised_requirements_ref or manifest.get("requirements_ref") or {}
-        )
+        requirements_ref = dict(manifest.get("requirements_ref") or {})
         latest = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, current.aggregate_id)
         if latest is None or latest.state != "REPLAN_COLLECTING":
             return
@@ -1113,7 +1073,6 @@ class MinionV2OutboxProcessor:
                     "replan_finding_batch_ref": batch.artifact_ref.to_dict(),
                     "replan_finding_fingerprints": list(batch.finding_fingerprints),
                     "requirements_ref": requirements_ref,
-                    "requirement_patch_refs": [dict(item) for item in batch.requirement_patch_refs],
                 },
             )
         )
@@ -1142,7 +1101,6 @@ class MinionV2OutboxProcessor:
                     "requirements_ref": dict(epoch.payload.get("requirements_ref") or {}),
                     "base_architecture_manifest_ref": dict(epoch.payload.get("architecture_manifest_ref") or {}),
                     "replan_finding_batch_ref": batch_ref,
-                    "requirement_patch_refs": list(epoch.payload.get("requirement_patch_refs") or []),
                     "source_execution_epoch_id": epoch.aggregate_id,
                     "replan_generation": generation,
                     "research_mode": "local_only",
@@ -1445,6 +1403,10 @@ class MinionV2OutboxProcessor:
             "dependencies": dependencies,
             "entrypoints": list(scenario.get("entrypoints") or []),
             "environment": dict(scenario.get("environment") or {}),
+            "obligations": {
+                str(name): dict(value or {})
+                for name, value in dict(scenario.get("obligations") or {}).items()
+            },
             "environment_fingerprint": str(node.payload.get("environment_fingerprint") or ""),
             "scenario_tree_sha": _git_output(workspace, "rev-parse", f"{union_commit_sha}^{{tree}}"),
         }
@@ -1468,12 +1430,13 @@ class MinionV2OutboxProcessor:
                 "entrypoints": list(scenario.get("entrypoints") or []),
                 "environment": dict(scenario.get("environment") or {}),
                 "observable_behavior": str(scenario.get("observable_behavior") or ""),
+                "obligations": fingerprint_payload["obligations"],
             },
             artifact_type="VerificationScenarioWorkViewArtifact",
             child_refs=(
                 (str(scenario_ref.get("sha256") or ""), "verification_contract"),
                 (union_ref.sha256, "scenario_candidate_union"),
-                (str(requirements_ref.get("sha256") or ""), "task_sources"),
+                (str(requirements_ref.get("sha256") or ""), "task_ledger"),
             ),
         )
         current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)

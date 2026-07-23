@@ -12,6 +12,12 @@ from hypothesis_jsonschema import from_schema
 
 from pal.execution import generated_tool_models
 from pal.execution.tool_facade import StrictToolModel
+from pal.minion.scoped_execution import MinionScopedExecutionOpMinionArtifactEditInput
+from pal.minion.v2.capabilities import (
+    MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
+    MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
+)
+from pal.minion.v2.review_findings import MinionV2ReviewAddFindingInput
 
 
 class PropertyInput(StrictToolModel):
@@ -23,18 +29,31 @@ class PropertyInput(StrictToolModel):
 
 MODEL = PropertyInput
 GENERATED_SCHEMA = MODEL.model_json_schema(mode="validation")
-DECLARED_INPUT_MODELS = tuple(
-    sorted(
-        (
+DECLARED_INPUT_MODELS = tuple(sorted({
+    name: value
+    for name, value in (
+        *(
             (name, value)
             for name, value in vars(generated_tool_models).items()
             if name.endswith("Input")
             and isinstance(value, type)
             and issubclass(value, StrictToolModel)
         ),
-        key=lambda item: item[0],
+        ("MinionV2ReviewAddFindingInput", MinionV2ReviewAddFindingInput),
+        (
+            "MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput",
+            MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
+        ),
+        (
+            "MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput",
+            MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
+        ),
+        (
+            "MinionScopedExecutionOpMinionArtifactEditInput",
+            MinionScopedExecutionOpMinionArtifactEditInput,
+        ),
     )
-)
+}.items()))
 
 
 @given(from_schema(GENERATED_SCHEMA))

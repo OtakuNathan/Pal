@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.execution.file_state import FileStateCache
 from pal.execution.path_delete import (
@@ -44,6 +45,23 @@ class PathDeleteReadSafetyTests(_TempPathMixin, unittest.TestCase):
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
         self.assertEqual(result.structured["error_code"], ERR_NOT_READ)
         self.assertTrue(path.exists())
+
+    def test_sandboxed_continuation_retry_deletes_without_process_local_read(self) -> None:
+        path = self._path("retry.txt")
+        path.write_text("hello\n", encoding="utf-8")
+
+        with patch.dict(
+            "os.environ",
+            {
+                "PAL_MINION_SANDBOXED": "1",
+                "PAL_MINION_CONTINUATION_RETRY": "1",
+            },
+            clear=False,
+        ):
+            result = self.tool.invoke({"file_path": str(path)})
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertFalse(path.exists())
 
     def test_path_delete_file_after_read_succeeds_and_invalidates_cache(self) -> None:
         path = self._path("sample.txt")

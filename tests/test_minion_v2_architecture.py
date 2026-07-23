@@ -23,7 +23,7 @@ from pal.minion.v2.architecture import (
 from pal.minion.v2.contracts import UnknownTransitionError
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
-from pal.minion.v2.task_sources import TaskSourceBundleService
+from pal.minion.v2.task_ledger import TaskLedgerService
 from pal.minion.v2.semantic_orchestration import apply_v2_research_capability_policy
 from pal.shared import MinionInvocationPack
 
@@ -76,10 +76,9 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
     def _publish_contract(self):
-        requirements = TaskSourceBundleService(self.runtime_root, self.store).publish(
+        requirements = TaskLedgerService(self.runtime_root, self.store).publish(
             title="Geometry foundation",
-            request_text="Expose stable geometry value types.\n",
-            workspace={},
+            task_spec={"objective": "Expose stable geometry value types."},
             actor="test",
             source_channel="test",
         )
@@ -245,7 +244,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(result["edit_scope"], "architecture")
         superseded = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
         assert superseded is not None
-        self.assertNotIn("revised_requirements_ref", superseded.payload)
+        self.assertNotIn("task_revision_authority_ref", superseded.payload)
         MinionV2OutboxProcessor(service)._create_revision(
             {
                 "effect_key": "architecture-edit-child",
@@ -261,7 +260,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         )
         self.assertEqual(child.payload["requirements_ref"], requirements.to_dict())
 
-    def test_human_requirements_edit_publishes_replacement_before_revision(self) -> None:
+    def test_human_requirements_edit_queues_authority_for_architect_revision(self) -> None:
         requirements, _evidence, manifest = self._publish_contract()
         workflow_id = "wf_requirements_edit"
         revision_id = "arch_requirements_edit"
@@ -288,15 +287,23 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             }
         )
 
-        revised_ref = result["revised_requirements_ref"]
-        self.assertNotEqual(revised_ref["sha256"], requirements.sha256)
-        revised = self.store.read_json(revised_ref)
-        self.assertEqual(len(revised["amendments"]), 1)
-        amendment = self.store.read_bytes(revised["amendments"][0]["artifact_ref"]).decode("utf-8")
-        self.assertIn("Preserve the existing public C ABI.", amendment)
+        authority_ref = result["task_revision_authority_ref"]
+        authority = self.store.read_json(authority_ref)
+        self.assertEqual(
+            authority["answer"],
+            "Expose stable geometry values and deterministic validation.\n"
+            "Preserve the existing public C ABI.\n",
+        )
+        self.assertEqual(
+            authority["question"],
+            "What requirement change should supersede the reviewed task specification?",
+        )
+        self.assertEqual(authority["origin"], "human_review_edit")
         superseded = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
         assert superseded is not None
-        self.assertEqual(superseded.payload["revised_requirements_ref"], revised_ref)
+        self.assertEqual(superseded.payload["task_revision_authority_ref"], authority_ref)
+        edit_instruction = self.store.read_json(superseded.payload["edit_instruction_ref"])
+        self.assertNotIn("task_revision_authority_ref", edit_instruction)
         MinionV2OutboxProcessor(service)._create_revision(
             {
                 "effect_key": "requirements-edit-child",
@@ -310,7 +317,11 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
             and item.payload.get("parent_revision_id") == revision_id
         )
-        self.assertEqual(child.payload["requirements_ref"], revised_ref)
+        self.assertEqual(child.payload["requirements_ref"], requirements.to_dict())
+        self.assertEqual(
+            child.payload["pending_task_revision_authority_ref"],
+            authority_ref,
+        )
         self.assertEqual(child.payload["edit_scope"], "requirements")
 
     def test_invalid_requirements_edit_does_not_consume_human_decision(self) -> None:
@@ -324,7 +335,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             manifest_ref=manifest.to_dict(),
         )
 
-        with self.assertRaisesRegex(ValueError, "amendment prose or source_files"):
+        with self.assertRaisesRegex(ValueError, "amendment prose"):
             MinionV2WorkflowService(self.runtime_root).submit_human_decision(
                 {
                     "workflow_id": workflow_id,
@@ -552,9 +563,16 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
     def test_architect_clarification_is_not_a_hidden_aggregate_state(self) -> None:
         workflow_id = "wf_clarify"
         revision_id = "arch_clarify"
-        clarification = self.store.put_json(
-            {"questions": [{"question": "Which public ABI is authoritative?"}]},
-            artifact_type="ClarificationRequestArtifact",
+        clarification = TaskLedgerService(
+            self.runtime_root,
+            self.store,
+        ).publish_authority(
+            title="Public ABI",
+            question="Which public ABI is authoritative?",
+            answer="Preserve the C ABI.",
+            origin="architect_user_clarification",
+            actor="user",
+            source_channel="test",
         )
         self.repository.dispatch(
             ActionEnvelope(
@@ -579,6 +597,22 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                 payload={"fencing_token": 1},
             )
         )
+        recorded = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="TASK_REVISION_AUTHORITY_RECORDED",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=revision_id,
+                actor="worker",
+                expected_version=2,
+                idempotency_key="clarify:authority",
+                payload={
+                    "task_revision_authority_ref": clarification.to_dict(),
+                    "fencing_token": 1,
+                },
+            )
+        )
+        self.assertEqual(recorded.snapshot.state, "ARCHITECT_RUNNING")
         with self.assertRaises(UnknownTransitionError):
             self.repository.dispatch(
                 ActionEnvelope(
@@ -587,7 +621,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                     aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                     aggregate_id=revision_id,
                     actor="worker",
-                    expected_version=2,
+                    expected_version=3,
                     idempotency_key="clarify:required",
                     payload={"clarification_ref": clarification.to_dict()},
                 )
@@ -597,6 +631,10 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             revision_id,
         )
         self.assertEqual(current.state, "ARCHITECT_RUNNING")
+        self.assertEqual(
+            current.payload["pending_task_revision_authority_ref"],
+            clarification.to_dict(),
+        )
         self.assertNotIn(
             "CLARIFICATION_REQUIRED",
             self.repository.engine.legal_actions(

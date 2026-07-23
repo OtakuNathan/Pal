@@ -232,16 +232,6 @@ def _replan_finding_reducer(
         "finding_artifact_ref": finding_ref,
         "finding_fingerprint": str(action.payload.get("finding_fingerprint") or ""),
         "source_node": str(action.payload.get("source_node") or ""),
-        **(
-            {"requirement_patch_ref": dict(action.payload["requirement_patch_ref"])}
-            if action.payload.get("requirement_patch_ref")
-            else {}
-        ),
-        **(
-            {"revised_requirements_ref": dict(action.payload["revised_requirements_ref"])}
-            if action.payload.get("revised_requirements_ref")
-            else {}
-        ),
     }
     existing_index = next(
         (
@@ -316,6 +306,9 @@ def _architecture_review_reopened_reducer(
     action: ActionEnvelope,
 ) -> Mapping[str, Any]:
     updated = dict(_worker_finished_reducer(payload, action))
+    updated["architecture_review_generation"] = (
+        int(payload.get("architecture_review_generation") or 0) + 1
+    )
     for field in ("review_artifact_ref", "human_review_card_ref"):
         updated.pop(field, None)
     return updated
@@ -327,6 +320,34 @@ def _architecture_snapshotted_reducer(
 ) -> Mapping[str, Any]:
     updated = dict(_merge_payload(payload, action))
     updated.pop("architecture_repair_baseline_ref", None)
+    return updated
+
+
+def _task_revision_authority_reducer(
+    payload: Mapping[str, Any],
+    action: ActionEnvelope,
+) -> Mapping[str, Any]:
+    updated = dict(_merge_payload(payload, action))
+    updated["pending_task_revision_authority_ref"] = dict(
+        action.payload["task_revision_authority_ref"]
+    )
+    return updated
+
+
+def _task_revision_appended_reducer(
+    payload: Mapping[str, Any],
+    action: ActionEnvelope,
+) -> Mapping[str, Any]:
+    updated = dict(_merge_payload(payload, action))
+    updated.pop("pending_task_revision_authority_ref", None)
+    updated["task_revision_generation"] = int(
+        payload.get("task_revision_generation") or 0
+    ) + 1
+    updated["last_task_revision_authority_ref"] = dict(
+        action.payload["task_revision_authority_ref"]
+    )
+    updated["last_task_revision_ref"] = dict(action.payload["requirements_ref"])
+    updated["last_task_revision_digest"] = str(action.payload["task_revision_digest"])
     return updated
 
 
@@ -525,6 +546,37 @@ def _lease_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
     token = action.payload.get("fencing_token")
     if not isinstance(token, int) or token <= 0:
         raise TransitionGuardError(f"{action.action_type} requires a positive fencing_token")
+
+
+def _no_pending_task_revision(payload: Mapping[str, Any], _action: ActionEnvelope) -> None:
+    if payload.get("pending_task_revision_authority_ref"):
+        raise TransitionGuardError(
+            "the pending user-authorized task revision must be appended before architecture submission"
+        )
+
+
+def _task_revision_authority_guard(
+    payload: Mapping[str, Any],
+    action: ActionEnvelope,
+) -> None:
+    _all(_required("task_revision_authority_ref"), _lease_guard)(payload, action)
+    pending = payload.get("pending_task_revision_authority_ref")
+    if pending and dict(pending) != dict(action.payload["task_revision_authority_ref"]):
+        raise TransitionGuardError("an earlier task revision authority is still pending")
+
+
+def _task_revision_append_guard(
+    payload: Mapping[str, Any],
+    action: ActionEnvelope,
+) -> None:
+    _all(
+        _required("task_revision_authority_ref", "requirements_ref", "task_revision_digest"),
+        _lease_guard,
+    )(payload, action)
+    pending = dict(payload.get("pending_task_revision_authority_ref") or {})
+    authority = dict(action.payload.get("task_revision_authority_ref") or {})
+    if not pending or pending != authority:
+        raise TransitionGuardError("task revision does not match the pending user authority")
 
 
 def _role_failure_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
@@ -761,15 +813,42 @@ def _architecture_transitions() -> list[TransitionSpec]:
             S.ARCHITECT_RUNNING,
             "DATA_ARCHITECT_COMPLETED",
             S.REVIEW_QUEUED,
-            guard=_required("requirements_ref", "architecture_manifest_ref"),
+            guard=_all(
+                _required("requirements_ref", "architecture_manifest_ref"),
+                _no_pending_task_revision,
+            ),
             effects=_effect("run_reviewer_role", role_mode="architecture"),
+        ),
+        _spec(
+            kind,
+            S.ARCHITECT_RUNNING,
+            "TASK_REVISION_AUTHORITY_RECORDED",
+            S.ARCHITECT_RUNNING,
+            guard=_task_revision_authority_guard,
+            reducer=_task_revision_authority_reducer,
+        ),
+        _spec(
+            kind,
+            S.ARCHITECT_RUNNING,
+            "TASK_REVISION_APPENDED",
+            S.ARCHITECT_RUNNING,
+            guard=_task_revision_append_guard,
+            reducer=_task_revision_appended_reducer,
         ),
         _spec(
             kind,
             S.ARCHITECT_RUNNING,
             "ARCHITECT_SUBMITTED",
             S.ARCHITECT_QUIESCING,
-            guard=_all(_required("requirements_ref", "pending_architecture_submission_ref", "architecture_workspace_path"), _lease_guard),
+            guard=_all(
+                _required(
+                    "requirements_ref",
+                    "pending_architecture_submission_ref",
+                    "architecture_workspace_path",
+                ),
+                _lease_guard,
+                _no_pending_task_revision,
+            ),
             effects=_effect("quiesce_architect_role"),
         ),
         _spec(kind, S.ARCHITECT_QUIESCING, "REBIND_ARCHITECT_QUIESCER", S.ARCHITECT_QUIESCING, guard=_lease_guard),

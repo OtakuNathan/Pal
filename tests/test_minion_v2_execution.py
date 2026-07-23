@@ -30,7 +30,7 @@ from pal.minion.v2.execution import (
     _validate_manager_seeded_paths,
     _validate_skeleton_candidate_paths,
 )
-from pal.minion.v2.task_sources import TaskSourceBundleService
+from pal.minion.v2.task_ledger import TaskLedgerService
 
 
 class _StoppedProcessController:
@@ -194,10 +194,9 @@ class MinionV2ExecutionTests(unittest.TestCase):
         self.assertIn('"write_paths":["held.txt"]', rendered)
 
     def _manifest(self):
-        requirements = TaskSourceBundleService(self.runtime_root, self.store).publish(
+        requirements = TaskLedgerService(self.runtime_root, self.store).publish(
             title="A and B",
-            request_text="Implement A, then implement B using A.\n",
-            workspace={},
+            task_spec={"objective": "Implement A, then implement B using A."},
             actor="test",
             source_channel="test",
         )

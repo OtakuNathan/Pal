@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.file_state import FileStateCache, resolve_file_path
+from pal.execution.file_state import (
+    FileStateCache,
+    minion_retry_allows_uncached_mutation,
+    resolve_file_path,
+)
 from pal.shared import RuntimeStatus
 
 
@@ -135,6 +139,16 @@ class PathDeleteTool:
         cached_state = self.cache.get_valid_state(resolved)
         if cached_state is None:
             if not had_record:
+                if minion_retry_allows_uncached_mutation():
+                    try:
+                        return resolved.read_text(encoding="utf-8")
+                    except (OSError, UnicodeError) as exc:
+                        return _err(
+                            RuntimeStatus.ERROR,
+                            ERR_READ_FAILED,
+                            file_path=str(resolved),
+                            details=str(exc),
+                        )
                 return _err(RuntimeStatus.FORBIDDEN, ERR_NOT_READ, file_path=str(resolved))
             return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_PATH, file_path=str(resolved))
         if not cached_state.full_view:

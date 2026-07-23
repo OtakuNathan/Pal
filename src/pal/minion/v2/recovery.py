@@ -279,17 +279,6 @@ class MinionV2Recovery:
                     {
                         "finding_artifact_ref": ref,
                         "source_node": "recovered_replan",
-                        **(
-                            {"requirement_patch_ref": dict(revision.payload["requirement_patch_ref"])}
-                            if revision.payload.get("requirement_patch_ref")
-                            else {}
-                        ),
-                        **(
-                            {"revised_requirements_ref": dict(revision.payload["requirements_ref"])}
-                            if revision.payload.get("requirement_patch_ref")
-                            and revision.payload.get("requirements_ref")
-                            else {}
-                        ),
                     },
                 )
         return [entries[digest] for digest in sorted(entries)]

@@ -14,17 +14,18 @@ from pal.execution.generated_tool_models import (
     MinionV2CapabilitiesMinionV2PublicProviderSearchInput,
     MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput,
     MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInput,
-    MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
     MinionV2CapabilitiesMinionV2PublicProviderStatusInput,
     MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput,
-    MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
 )
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
+
+from pydantic import Field
 
 from pal.execution.contracts import CapabilityCall, CapabilityResult
+from pal.execution.tool_facade import StrictToolModel
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -39,6 +40,103 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
+
+
+class MinionV2StartWorkflowWorkspace(StrictToolModel):
+    kind: str | None = None
+    repo_path: str | None = None
+    repo_root: str | None = None
+    primary_language: str | None = None
+
+
+class MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput(StrictToolModel):
+    """Reloadable public contract for starting one Minion workflow."""
+
+    task: str | None = Field(
+        default=None,
+        description="Optional natural-language title of an existing Task.",
+    )
+    title: str | None = None
+    profile: str | None = Field(
+        default=None,
+        description=(
+            "Canonical Task profile, such as software_engineering.v2_coder or "
+            "lifestyle.nutritionist. Required when task is omitted and immutable after "
+            "Task creation."
+        ),
+    )
+    operation: Literal[
+        "new_requirement",
+        "execute_trusted",
+        "review_then_execute",
+        "standalone_review",
+        "review_and_repair",
+    ] = "new_requirement"
+    goal: str | None = Field(
+        default=None,
+        description=(
+            "Short routing objective. For new_requirement, task_spec is the complete "
+            "semantic source of truth."
+        ),
+    )
+    workspace: MinionV2StartWorkflowWorkspace | None = None
+    task_spec: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Complete structured task specification for new_requirement. This becomes "
+            "original in the immutable task.yaml ledger; later user-authorized changes "
+            "are append-only revisions."
+        ),
+    )
+    constraints: list[Any] | None = Field(
+        default=None,
+        description=(
+            "Optional machine/environment constraints for execution and fingerprinting. "
+            "Product-visible obligations belong in task_spec; Minion orchestration policy "
+            "belongs to the family binding."
+        ),
+    )
+    approved_evidence: list[Any] | None = Field(
+        default=None,
+        description=(
+            "Already-approved evidence entries used when research_mode=none; source_kind "
+            "must be approved, user_supplied, or input_artifact."
+        ),
+    )
+    references: list[Any] | None = None
+    research_mode: Literal["none", "local_only", "external_allowed"] = "local_only"
+    artifact: str | None = Field(
+        default=None,
+        description="Natural-language name previously given to minion_submit_artifact.",
+    )
+
+
+class MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput(StrictToolModel):
+    """Reloadable public contract for the architecture human-review decision."""
+
+    task: str | None = None
+    decision: Literal["accept", "edit", "reject"]
+    edit_scope: Literal["architecture", "requirements"] = Field(
+        default="architecture",
+        description=(
+            "For decision=edit, choose whether the task ledger changes or only the "
+            "architecture changes."
+        ),
+    )
+    edit_instruction: str | None = Field(
+        default=None,
+        description=(
+            "Required for architecture edits. This changes the architecture, not the "
+            "immutable task ledger."
+        ),
+    )
+    amendment: str | None = Field(
+        default=None,
+        description=(
+            "Exact user-authorized requirement change. Architect converts it to the "
+            "smallest structured task revision before revising architecture."
+        ),
+    )
 
 
 _STRING_MAP_SCHEMA = {"type": "object", "additionalProperties": {"type": ["string", "null"]}}
@@ -305,8 +403,8 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="start_workflow",
         description=(
-            "Start one durable Minion workflow and bind it to the current actor/channel. For a new Task, supply its canonical profile, exact goal, workspace, and optional "
-            "workspace-relative source files. The Manager preserves those bytes as the immutable task truth without extracting or normalizing requirements, "
+            "Start one durable Minion workflow and bind it to the current actor/channel. For a new Task, supply its canonical profile, short goal, workspace, and complete structured task_spec. "
+            "The Manager stores task_spec as original in one immutable append-only task.yaml ledger, "
             "derives the problem-domain Family from the profile, pins the full FamilyBinding for the Task, and creates all internal identities. Use "
             "review_then_execute with artifact for a named external architecture, execute_trusted only for a Manager-trusted named artifact, "
             "standalone_review for review-only, and review_and_repair for bounded repair. Never inspect or implement the target in the foreground first."

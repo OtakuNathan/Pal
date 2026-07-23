@@ -79,9 +79,15 @@ aggregate enters `TRIAGE_REQUIRED`.
 
 ## Architecture Contract
 
-The immutable `TaskSourceBundleArtifact` is product truth. It preserves the
-user's exact request, supplied source files, examples, qualifications, and
-later amendments without extracting normalized Requirement records. For software engineering, the
+The immutable `TaskLedgerArtifact` is product truth. The foreground Pal compiles
+the complete initial request into the ledger's structured `original` value.
+Ordered `revisions` are append-only and each carries the exact user question and
+answer that authorized it plus the smallest JSON-Pointer delta. A newer revision
+overrides only the exact paths it changes; all unrelated earlier obligations
+remain binding. Manager validates the fixed schema and applies deltas
+mechanically but never interprets their meaning. The only role projection is one
+read-only `task.yaml`; there is no parallel request, amendment, or compiled-task
+document. For software engineering, the
 accepted code-skeleton commit plus the semantic Contract Dependency Graph and
 end-to-end Scenario Topology are architecture
 truth. For artifact families, the equivalent
@@ -90,26 +96,38 @@ contracts. Internal IDs and hashes are Manager concerns and are absent from the
 LLM authoring surface.
 
 Manager pre-seeds one fixed-schema `architecture.yaml` control-plane Draft for
-each Architect invocation. Its `modules` and `scenarios` fields are dynamic maps
+each Architect invocation. Its `obligations`, `modules`, and `scenarios` fields are dynamic maps
 keyed by stable semantic names, so initial design and revision use ordinary file
 editing rather than per-node mutation tools. A revision starts from the complete
-accepted YAML and preserves it across process retries. Architect receives only
-the in-place user-question IO and no-argument terminal submit in addition to
-ordinary workspace tools. Each module contains its kind, contract dependencies,
+accepted YAML and preserves it across process retries. Architect receives the
+in-place user-question IO, fixed `task_revision.yaml` authoring path, and
+no-argument task-revision and architecture submits in addition to ordinary
+workspace tools. The Draft currently uses schema version 3. Each binding
+task claim becomes an obligation with one semantic owner, explicit boundary
+partitions, the required observable outcome, the public contract path that makes
+that outcome decidable, and a dynamic state map. Every state declares the exact
+earliest `entry_condition`, the consumer `decision_point`, a stable `outcome` key,
+and its `required_outcome`. States examined by the same consumer decision share
+one decision point even when they belong to different obligations. This lets the
+Manager derive every same-decision, cross-outcome pair that must be publicly
+distinguishable. Each module contains its kind, contract dependencies,
 contract enforcement mode and paths, writable implementation scopes, and
 reference-only paths.
 Manager derives one repository verification corpus at `tests/<module_name>/`
 for every implementation module; Architect does not declare or name it.
-Each scenario names the exact implementation-module combination, real product or
-build entrypoint, observable behavior, and environment it verifies.
+Each scenario names the exact implementation-module combination, obligations it
+consumes, real product or build entrypoint, observable behavior, and environment
+it verifies. Manager rejects missing/unknown owners and scenario references and
+unconsumed obligations before snapshotting the skeleton.
 `file_frozen` is reserved for a physically separate protocol/interface/schema
 file that remains Coder-read-only. `review_guarded` is the default when public
 shape and implementation share a module-owned file; Manager then binds an
 Accepted-Skeleton-to-Candidate contract diff that Verifier must read before
 submitting. Cross-module overlap remains invalid in both modes, and the derived
-verification corpus can never own contract or reference-only files. Software Architect writes contract-level declarations,
-concise adjacent semantic comments where useful, and minimal compile wiring in
-an isolated worktree. It may not write algorithms, functional implementations,
+verification corpus can never own contract or reference-only files. Software Architect writes contract-level declarations
+and concise adjacent semantic comments where useful in an isolated worktree. It
+may name required external libraries or runtimes, but build and test machinery
+belongs to implementation and verification. It may not write algorithms, functional implementations,
 milestones, test matrices, implementation checklists, or function-level
 construction steps.
 
@@ -117,10 +135,11 @@ Architecture submit performs only deterministic structure and safety checks.
 Malformed module/path records, unknown dependencies, cycles, overlapping
 writable scopes, missing declared paths, frozen/reference mutation, Git drift,
 and unstable snapshots remain blocking. The Manager does not parse comment
-chapters, bind task-source coverage, resolve evidence claims, infer consumers,
+chapters, bind task-ledger coverage, resolve evidence claims, infer consumers,
 or judge lifecycle/state/ownership/contract semantics. Architecture Reviewer
-receives every immutable task-source file and the skeleton diff and owns all of
-those semantic checks.
+receives the immutable task.yaml ledger and the skeleton diff and owns all of
+those semantic checks, including auditing every revision against its embedded
+question and answer.
 
 Research mode is explicit: `none`, `local_only`, or `external_allowed`.
 `local_only` removes web capabilities from the resolved role pack; this is
@@ -138,9 +157,9 @@ LLMs do not author canonical submission JSON. Software Architecture authors one
 Manager-preseeded YAML projection whose fixed schema is validated and compiled
 into the canonical immutable manifest only by `architecture_submit`. Candidate,
 verification, and standalone-review roles receive narrow semantic mutation or
-execution tools. The SWE Verifier writes executable tests and ends
-with one outcome tool carrying at most prose findings and semantic module
-names; it never maintains case/finding/evidence records. The Manager validates
+execution tools. The SWE Verifier writes executable tests, records failures
+through structured `add_finding` calls, and ends with one semantic outcome tool;
+it never maintains a separate case/finding/evidence manifest. The Manager validates
 the live workspace, derives hidden identities and Git deltas, and materializes
 the canonical artifact before allowing the worker to exit.
 
@@ -152,26 +171,42 @@ advancing the state machine. Duplicate YAML keys, aliases, custom tags, merges,
 unknown fields, and stale invocations are rejected.
 A replacement role invocation with the same immutable input fingerprint inherits only
 semantic definitions by default. Every family Verifier uses one semantic
-outcome and restarts from immutable task sources, candidate or artifact diff,
+outcome and restarts from the immutable task ledger, candidate or artifact diff,
 durable review-scratch probes, and prior Repair Packets. It never inherits an
 LLM-maintained case/finding database. Standalone review keeps its separate
 review-only Draft because it produces a report rather than a DAG-node verdict.
-Every authoring tool schema is bounded to at most 12 top-level properties and
-depth four, with no arrays of objects, schema-valued `additionalProperties`, or
+Dynamic topology stays in the fixed-schema YAML rather than per-node tools.
+Terminal tool schemas are compiled from the bound topology, use strict bounded
+Pydantic objects, and expose no schema-valued `additionalProperties` or
 `oneOf`/`anyOf`. Manager-owned identity fields such as IDs, refs, hashes,
 handles, and JSON pointers are rejected from role authoring schemas. Old
 monolithic builder and revision-read capabilities are not compatibility aliases.
 
-Architecture Reviewer receives every immutable task-source file that Architect
-received, every module and scenario, the complete skeleton diff, and prior
+Architecture Reviewer receives the same immutable task.yaml ledger as Architect,
+every obligation, module and scenario, the complete skeleton diff, and prior
 findings. It independently checks
 source-obligation preservation and coverage, contracts, consumers, ownership,
 lifecycle/state/invariants, implementation leakage, and end-to-end
-reachability. It records each material defect through `add_finding` with a stable
+reachability. An obligation record is an audit index, not proof by assertion.
+For PASS, Reviewer supplies one compact trace per obligation and every exact
+Manager-derived decision pair. Each side of a pair uses the smallest witness
+satisfying its bound state-entry condition; cited public observations must differ
+through a declared `distinguishing_signal` when the required outcomes differ.
+The Manager verifies exact pair coverage, restricts evidence to bound declaration
+contracts, and persists the cited source lines. This keeps the positive proof
+proportional to semantic decision risk instead of serializing every state × boundary
+row. It records each
+material defect through `add_finding` with a stable
 semantic key, p0/p1/p2 priority, summary, and optional structured source locations,
 preferably batching independent calls in one tool round. It then submits once:
-PASS with an empty finding Draft or FAIL with the structured Draft. It never emits
-Markdown as its machine contract or mirrors the input as positive audit rows.
+PASS with an empty finding Draft and the compact traces, or FAIL with the structured
+Draft. It never emits Markdown as its machine contract.
+
+Accepted obligations are projected unchanged into the related module and scenario
+work views. `verification_pass` reports each bound obligation once with exact
+state and boundary-partition coverage plus a concise evidence summary. Both the
+worker terminal and Manager settlement reject missing, extra, duplicate, or partial
+coverage.
 
 Sandboxed role processes cannot mount Minion's database or content-addressed store.
 They receive only an assignment-scoped gateway endpoint and an opaque attempt
@@ -213,11 +248,13 @@ transition are one database transaction. Human Accept marks only the revision
 accepted; starting execution is a separate outbox effect.
 
 Human Edit explicitly selects `architecture` or `requirements`. An architecture
-edit reuses the current immutable `TaskSourceBundleArtifact`. A requirements
-edit appends the user's raw amendment and/or workspace-relative source files,
-then publishes a new immutable task-source bundle before consuming the decision
-token or creating the child Architecture Revision. Existing source bytes are
-never mutated or normalized in place.
+edit reuses the current immutable `TaskLedgerArtifact`. A requirements edit
+records the exact human answer as immutable revision authority and creates a
+child Architecture Revision against the unchanged ledger. The Architect appends
+only the smallest semantic delta through `task_revision_submit` before changing
+the architecture. Manager validates and appends that delta to produce the next
+immutable ledger generation; it never rewrites `original` or paraphrases the
+answer.
 
 Human waivers are immutable artifacts bound to the manifest and relevant
 fragment hashes. A changed fragment invalidates the waiver.
@@ -225,9 +262,11 @@ fragment hashes. A changed fragment invalidates the waiver.
 Architect clarification is ordinary asynchronous tool IO, not a business state.
 The Architecture Revision remains `ARCHITECT_RUNNING` while Manager routes three
 inline choices plus a custom-answer path through the active channel. The same
-invocation receives the answer, which is persisted as an immutable task-source
-amendment and included in the exact source bundle later given to Architecture
-Reviewer, Coder, and Verifier.
+invocation receives the answer. Manager persists the exact question and answer
+as revision authority, seeds `task_revision.yaml`, and leaves the Architect
+running. Architecture submission is mechanically blocked until the Architect's
+validated delta has been appended. Reviewer compares every delta with its exact
+authority; human review displays the revision diff.
 
 ## Execution and Verification
 
@@ -248,9 +287,12 @@ all required implementation nodes and all declared scenario nodes to be
 `ACCEPTED`, with each scenario result matching its current combination
 fingerprint.
 
-Coder and Verifier receive the same immutable task-source files plus the
-accepted local module skeleton, path policy, semantic contract dependencies,
-assumptions, and RepairBills. The protocol surface is already present in the
+Coder and Verifier receive the same immutable task ledger plus the accepted
+local module skeleton, path policy, semantic contract dependencies, assumptions,
+and RepairBills. Coder treats the accepted local contract and work view as its
+primary truth and uses the ledger as upstream provenance when that contract is
+incomplete or contradictory. Verifier uses the accepted contract as adjudication
+truth and the ledger to detect upstream omissions or conflicts. The protocol surface is already present in the
 Accepted Skeleton, so a Coder may implement against another module's accepted
 contract before that module's Candidate exists. Verifier also receives a
 Manager-generated Git diff from the

@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.execution.file_edit import FileEditTool
 from pal.execution.file_state import FileStateCache
@@ -103,6 +104,23 @@ class OverwriteTests(_TempFileMixin, unittest.TestCase):
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
         self.assertEqual(result.structured["error_code"], ERR_NOT_READ)
         self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
+
+    def test_sandboxed_continuation_retry_rebuilds_missing_read_snapshot(self) -> None:
+        path = self._path("retry.txt")
+        path.write_text("old\n", encoding="utf-8")
+
+        with patch.dict(
+            "os.environ",
+            {
+                "PAL_MINION_SANDBOXED": "1",
+                "PAL_MINION_CONTINUATION_RETRY": "1",
+            },
+            clear=False,
+        ):
+            result = self.tool.invoke({"file_path": str(path), "content": "new\n"})
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
 
     def test_overwrite_after_partial_read_fails(self) -> None:
         path = self._path("partial.txt")

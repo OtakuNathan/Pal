@@ -16,18 +16,10 @@ _ARCHITECTURE_DEFECT_ACTIONS = frozenset(
 )
 
 
-class ReplanRequirementConflict(ValueError):
-    def __init__(self, revised_requirements_refs: Sequence[Mapping[str, Any]]) -> None:
-        self.revised_requirements_refs = tuple(dict(item) for item in revised_requirements_refs)
-        super().__init__("replan findings contain divergent revised Requirements artifacts")
-
-
 @dataclass(frozen=True)
 class ArchitectureFindingBatch:
     artifact_ref: ArtifactRef
     finding_fingerprints: tuple[str, ...]
-    requirement_patch_refs: tuple[Mapping[str, Any], ...]
-    revised_requirements_ref: Mapping[str, Any] | None
 
 
 def architecture_revision_finding_value(payload: Mapping[str, Any]) -> Any:
@@ -50,8 +42,6 @@ def collect_architecture_finding_batch(
         finding_value: Any,
         *,
         source_node: str = "",
-        requirement_patch_value: Any = None,
-        revised_requirements_value: Any = None,
     ) -> None:
         if not isinstance(finding_value, Mapping) or not finding_value.get("sha256"):
             return
@@ -62,28 +52,16 @@ def collect_architecture_finding_batch(
             {
                 "finding_artifact_ref": finding_ref,
                 "source_nodes": set(),
-                "requirement_patch_refs": {},
-                "revised_requirements_refs": {},
             },
         )
         if source_node:
             current["source_nodes"].add(source_node)
-        if isinstance(requirement_patch_value, Mapping) and requirement_patch_value.get("sha256"):
-            current["requirement_patch_refs"][str(requirement_patch_value["sha256"])] = dict(
-                requirement_patch_value
-            )
-        if isinstance(revised_requirements_value, Mapping) and revised_requirements_value.get("sha256"):
-            current["revised_requirements_refs"][str(revised_requirements_value["sha256"])] = dict(
-                revised_requirements_value
-            )
 
     for pending in list(epoch.payload.get("pending_replan_findings") or []):
         item = dict(pending or {})
         add_source(
             item.get("finding_artifact_ref"),
             source_node=str(item.get("source_node") or ""),
-            requirement_patch_value=item.get("requirement_patch_ref"),
-            revised_requirements_value=item.get("revised_requirements_ref"),
         )
     for node in nodes:
         if str(node.payload.get("last_action_type") or "") not in _ARCHITECTURE_DEFECT_ACTIONS:
@@ -91,15 +69,11 @@ def collect_architecture_finding_batch(
         add_source(
             node.payload.get("repair_bill_ref") or node.payload.get("finding_artifact_ref"),
             source_node=str(node.payload.get("module_name") or node.payload.get("unit_id") or ""),
-            requirement_patch_value=node.payload.get("requirement_patch_ref"),
-            revised_requirements_value=node.payload.get("revised_requirements_ref"),
         )
     if not sources:
         raise ValueError("replan collection has no persisted architecture findings")
 
     grouped: dict[str, dict[str, Any]] = {}
-    requirement_patch_refs: dict[str, Mapping[str, Any]] = {}
-    revised_requirements_refs: dict[str, Mapping[str, Any]] = {}
     child_refs: list[tuple[str, str]] = []
     for source_digest in sorted(sources):
         source = sources[source_digest]
@@ -123,20 +97,9 @@ def collect_architecture_finding_batch(
         group["source_nodes"].update(source["source_nodes"])
         group["findings"].extend(normalized_findings)
         child_refs.append((finding_ref.sha256, "architecture_finding"))
-        for digest, value in source["requirement_patch_refs"].items():
-            requirement_patch_refs[digest] = dict(value)
-        for digest, value in source["revised_requirements_refs"].items():
-            revised_requirements_refs[digest] = dict(value)
 
     if not grouped:
         raise ValueError("replan collection has no actionable FAIL findings")
-
-    if len(revised_requirements_refs) > 1:
-        raise ReplanRequirementConflict(tuple(revised_requirements_refs.values()))
-    for digest in sorted(requirement_patch_refs):
-        child_refs.append((digest, "requirement_patch"))
-    for digest in sorted(revised_requirements_refs):
-        child_refs.append((digest, "revised_requirements"))
 
     finding_groups: list[dict[str, Any]] = []
     flattened_findings: list[dict[str, Any]] = []
@@ -161,12 +124,6 @@ def collect_architecture_finding_batch(
         "base_architecture_manifest_ref": dict(epoch.payload.get("architecture_manifest_ref") or {}),
         "finding_groups": finding_groups,
         "findings": flattened_findings,
-        "requirement_patch_refs": [
-            dict(requirement_patch_refs[digest]) for digest in sorted(requirement_patch_refs)
-        ],
-        "revised_requirements_ref": (
-            dict(next(iter(revised_requirements_refs.values()))) if revised_requirements_refs else None
-        ),
     }
     artifact_ref = artifacts.put_json(
         payload,
@@ -177,12 +134,6 @@ def collect_architecture_finding_batch(
     return ArchitectureFindingBatch(
         artifact_ref=artifact_ref,
         finding_fingerprints=tuple(sorted(grouped)),
-        requirement_patch_refs=tuple(
-            dict(requirement_patch_refs[digest]) for digest in sorted(requirement_patch_refs)
-        ),
-        revised_requirements_ref=(
-            dict(next(iter(revised_requirements_refs.values()))) if revised_requirements_refs else None
-        ),
     )
 
 

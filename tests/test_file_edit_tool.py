@@ -6,6 +6,7 @@ import os
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.execution.file_edit import (
     ERR_EMPTY_OLD_STRING,
@@ -64,6 +65,28 @@ class NotReadErrorTests(_TempFileMixin, unittest.TestCase):
             "new_string": "goodbye",
         })
         self.assertIn("not been read", result.text.lower())
+
+    def test_sandboxed_continuation_retry_rebuilds_missing_read_snapshot(self) -> None:
+        path = self._write_tmp("retry.txt", "hello world")
+
+        with patch.dict(
+            os.environ,
+            {
+                "PAL_MINION_SANDBOXED": "1",
+                "PAL_MINION_CONTINUATION_RETRY": "1",
+            },
+            clear=False,
+        ):
+            result = self.tool.invoke(
+                {
+                    "file_path": str(path),
+                    "old_string": "hello",
+                    "new_string": "goodbye",
+                }
+            )
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(path.read_text(encoding="utf-8"), "goodbye world")
 
 
 class StaleFileErrorTests(_TempFileMixin, unittest.TestCase):

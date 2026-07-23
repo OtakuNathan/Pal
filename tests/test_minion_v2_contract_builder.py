@@ -29,9 +29,13 @@ class ContractBuilderTests(unittest.TestCase):
         self.invocation = "inv_contract"
         self.resource = "architecture:arch_1:contract"
         lease = self.repository.claim_lease(self.resource, self.invocation, ttl_seconds=60)
-        task_source_path = self.root / "request.md"
-        task_source_path.write_text(
-            "Produce a deterministic report through a real entrypoint.\n",
+        task_ledger_path = self.root / "task.yaml"
+        task_ledger_path.write_text(
+            "schema_version: '1'\n"
+            "title: Deterministic report\n"
+            "original:\n"
+            "  objective: Produce a deterministic report through a real entrypoint.\n"
+            "revisions: []\n",
             encoding="utf-8",
         )
         self.workspace = {
@@ -41,7 +45,7 @@ class ContractBuilderTests(unittest.TestCase):
             "reference_paths": [
                 {
                     "name": "task",
-                    "path": str(task_source_path),
+                    "path": str(task_ledger_path),
                     "truth_source": True,
                 }
             ],

@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
-from pal.execution.generated_tool_models import MinionV2ReviewAddFindingInput
+from pydantic import Field
+
+from pal.execution.tool_facade import StrictToolModel
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
@@ -29,6 +31,40 @@ FINDING_KINDS = frozenset(
 FINDING_PRIORITIES = ("p0", "p1", "p2")
 PRIORITY_TO_SEVERITY = {"p0": "blocker", "p1": "major", "p2": "minor"}
 
+
+class MinionV2ReviewFindingLocation(StrictToolModel):
+    """Minion-owned citation contract so plugin reloads do not depend on core model caches."""
+
+    scope: Literal["task_ledger", "workspace"]
+    file: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    symbol: str | None = Field(default=None, min_length=1)
+
+
+class MinionV2ReviewAddFindingInput(StrictToolModel):
+    """Structured finding authored by reviewer and verifier roles."""
+
+    finding_key: str = Field(
+        min_length=3,
+        max_length=96,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    finding_kind: Literal[
+        "requirements_defect",
+        "module_defect",
+        "dependency_defect",
+        "contract_defect",
+        "architecture_defect",
+        "integration_defect",
+    ]
+    priority: Literal["p0", "p1", "p2"]
+    summary: str = Field(min_length=1, max_length=4000)
+    locations: list[MinionV2ReviewFindingLocation] | None = Field(
+        default=None,
+        max_length=8,
+    )
+
+
 ADD_FINDING_EXAMPLES = (
     {
         "finding_key": "decode_example_header_mismatch",
@@ -40,8 +76,8 @@ ADD_FINDING_EXAMPLES = (
         ),
         "locations": [
             {
-                "scope": "task_source",
-                "file": "sources/TASK.md",
+                "scope": "task_ledger",
+                "file": "task.yaml",
                 "line": 78,
                 "symbol": "CLI behavior / Decode",
             }
@@ -67,7 +103,6 @@ ADD_FINDING_EXAMPLES = (
 )
 
 ADD_FINDING_TOOL_SPEC: dict[str, Any] = {
-    "alias": "add_finding",
     "alias": "add_finding",
     "description": (
         "Record or replace one actionable review finding in the current fenced Draft. "

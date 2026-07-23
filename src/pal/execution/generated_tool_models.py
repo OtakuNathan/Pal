@@ -13,38 +13,6 @@ def _strict_model(name: str, fields: dict[str, tuple[Any, Any]]):
     return create_model(name, __base__=StrictToolModel, **fields)
 
 
-MinionV2ReviewFindingLocation = _strict_model(
-    'MinionV2ReviewFindingLocation',
-    {
-        'scope': (Literal['task_source', 'workspace'], Field(...)),
-        'file': (str, Field(..., min_length=1)),
-        'line': (int, Field(..., ge=1)),
-        'symbol': (str | None, Field(None, min_length=1)),
-    },
-)
-
-MinionV2ReviewAddFindingInput = _strict_model(
-    'MinionV2ReviewAddFindingInput',
-    {
-        'finding_key': (str, Field(..., min_length=3, max_length=96, pattern=r'^[a-z][a-z0-9_]*$')),
-        'finding_kind': (
-            Literal[
-                'requirements_defect',
-                'module_defect',
-                'dependency_defect',
-                'contract_defect',
-                'architecture_defect',
-                'integration_defect',
-            ],
-            Field(...),
-        ),
-        'priority': (Literal['p0', 'p1', 'p2'], Field(...)),
-        'summary': (str, Field(..., min_length=1, max_length=4000)),
-        'locations': (list[MinionV2ReviewFindingLocation] | None, Field(None, max_length=8)),
-    },
-)
-
-
 ArtifactCapabilitiesArtifactIntrospectionProviderListInput = _strict_model(
     'ArtifactCapabilitiesArtifactIntrospectionProviderListInput',
     {
@@ -908,34 +876,6 @@ MinionV2CapabilitiesMinionV2PublicProviderRefreshInput = _strict_model(
     },
 )
 
-MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInputWorkspace = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInputWorkspace',
-    {
-        'kind': (str, Field(None)),
-        'repo_path': (str, Field(None)),
-        'repo_root': (str, Field(None)),
-        'primary_language': (str, Field(None)),
-    },
-)
-
-MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput',
-    {
-        'task': (str, Field(None, description='Optional natural-language title of an existing Task.')),
-        'title': (str, Field(None)),
-        'profile': (str, Field(None, description='Canonical Task profile, such as software_engineering.v2_coder or lifestyle.nutritionist. Required when task is omitted and immutable after Task creation.')),
-        'operation': (Literal['new_requirement', 'execute_trusted', 'review_then_execute', 'standalone_review', 'review_and_repair'], Field('new_requirement')),
-        'goal': (str, Field(None)),
-        'workspace': (MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInputWorkspace, Field(None)),
-        'source_files': (list[str], Field(None, description='Workspace-relative UTF-8 Markdown or text files whose exact bytes are additional immutable task truth sources. The Manager does not extract, normalize, deduplicate, classify, or reinterpret them. Valid only for new_requirement.')),
-        'constraints': (list[Any], Field(None, description='Optional machine/environment constraints for execution and fingerprinting. Product-visible obligations belong in the goal or source files; Minion orchestration policy belongs to the family binding.')),
-        'approved_evidence': (list[Any], Field(None, description='Already-approved evidence entries used when research_mode=none; source_kind must be approved, user_supplied, or input_artifact.')),
-        'references': (list[Any], Field(None)),
-        'research_mode': (Literal['none', 'local_only', 'external_allowed'], Field('local_only')),
-        'artifact': (str, Field(None, description='Natural-language name previously given to minion_submit_artifact.')),
-    },
-)
-
 MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput',
     {
@@ -986,19 +926,6 @@ MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput = _strict_model(
         'task': (str, Field(None)),
         'subject': (str, Field(None, description='Module or phase name. Optional only when the workflow has exactly one TRIAGE_REQUIRED item.')),
         'resolution': (str, Field(..., description='Auditable summary of the external or manual action that removed the blocker.', min_length=1)),
-    },
-)
-
-MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput = _strict_model(
-    'MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput',
-    {
-        'task': (str, Field(None)),
-        'decision': (Literal['accept', 'edit', 'reject', 'clarify'], Field(...)),
-        'edit_scope': (Literal['architecture', 'requirements'], Field('architecture', description='For decision=edit, choose whether product Requirements change or only the architecture changes.')),
-        'edit_instruction': (str, Field(None, description='Required for architecture edits. This changes the architecture, not the immutable task source.')),
-        'amendment': (str, Field(None, description='Raw user amendment appended verbatim to the immutable task sources. Valid only for edit_scope=requirements.')),
-        'source_files': (list[str], Field(None, description='Workspace-relative UTF-8 files appended verbatim to the task sources for a requirements edit.')),
-        'clarification_response': (str, Field(None)),
     },
 )
 
@@ -1497,15 +1424,6 @@ MinionScopedExecutionOpMinionArtifactWriteInput = _strict_model(
     },
 )
 
-MinionScopedExecutionOpMinionArtifactEditInput = _strict_model(
-    'MinionScopedExecutionOpMinionArtifactEditInput',
-    {
-        'relative_path': (str, Field(...)),
-        'old_string': (str, Field(...)),
-        'new_string': (str, Field(...)),
-    },
-)
-
 MinionV2CandidateBuilderOpMinionDeveloperNoteInput = _strict_model(
     'MinionV2CandidateBuilderOpMinionDeveloperNoteInput',
     {
@@ -1764,9 +1682,112 @@ MinionV2SkeletonBuilderOpMinionArchitectureSubmitInput = _strict_model(
     },
 )
 
+MinionV2ArchitectureReviewEvidenceLocation = _strict_model(
+    'MinionV2ArchitectureReviewEvidenceLocation',
+    {
+        'file': (
+            str,
+            Field(..., min_length=1, description='Repository-relative declared contract file.'),
+        ),
+        'line': (int, Field(..., ge=1)),
+        'symbol': (str | None, Field(None, min_length=1, max_length=300)),
+    },
+)
+
+MinionV2ArchitectureReviewObligationTrace = _strict_model(
+    'MinionV2ArchitectureReviewObligationTrace',
+    {
+        'obligation': (str, Field(..., min_length=1)),
+        'contract_trace': (
+            list[str],
+            Field(
+                ...,
+                min_length=1,
+                description='Ordered public semantic steps from the owning entrypoint or interface to the observable terminal; use module::interface -> signal form, not bare filenames.',
+            ),
+        ),
+        'boundary_summary': (
+            str,
+            Field(
+                ...,
+                min_length=1,
+                max_length=2000,
+                description='Compact conclusion covering every declared boundary partition without repeating one row per partition.',
+            ),
+        ),
+        'evidence': (
+            list[MinionV2ArchitectureReviewEvidenceLocation],
+            Field(..., min_length=1, max_length=4),
+        ),
+        'conclusion': (
+            str,
+            Field(..., min_length=1, max_length=2000),
+        ),
+    },
+)
+
+MinionV2ArchitectureReviewDecisionSide = _strict_model(
+    'MinionV2ArchitectureReviewDecisionSide',
+    {
+        'state_ref': (str, Field(..., min_length=1)),
+        'entry_witness': (
+            str,
+            Field(
+                ...,
+                min_length=1,
+                max_length=2000,
+                description='Smallest concrete witness satisfying the bound state entry_condition, with no optional progress beyond it.',
+            ),
+        ),
+        'public_observation': (
+            str,
+            Field(..., min_length=1, max_length=2000),
+        ),
+        'evidence': (
+            list[MinionV2ArchitectureReviewEvidenceLocation],
+            Field(..., min_length=1, max_length=4),
+        ),
+    },
+)
+
+MinionV2ArchitectureReviewDecisionTrace = _strict_model(
+    'MinionV2ArchitectureReviewDecisionTrace',
+    {
+        'scenario': (str, Field(..., min_length=1)),
+        'decision_point': (str, Field(..., min_length=1)),
+        'left': (MinionV2ArchitectureReviewDecisionSide, Field(...)),
+        'right': (MinionV2ArchitectureReviewDecisionSide, Field(...)),
+        'distinguishing_signal': (
+            str,
+            Field(
+                ...,
+                min_length=1,
+                max_length=2000,
+                description='Exact declared public signal whose value differs at the two bound state entries and lets the consumer select the required outcome.',
+            ),
+        ),
+        'conclusion': (str, Field(..., min_length=1, max_length=2000)),
+    },
+)
+
 MinionV2SkeletonBuilderOpMinionArchitectureReviewPassInput = _strict_model(
     'MinionV2SkeletonBuilderOpMinionArchitectureReviewPassInput',
     {
+        'obligation_traces': (
+            list[MinionV2ArchitectureReviewObligationTrace],
+            Field(
+                ...,
+                min_length=1,
+                description='Every bound obligation exactly once.',
+            ),
+        ),
+        'decision_traces': (
+            list[MinionV2ArchitectureReviewDecisionTrace],
+            Field(
+                ...,
+                description='Every Manager-bound cross-outcome state pair exactly once; may be empty when no scenario contains such a pair.',
+            ),
+        ),
     },
 )
 
@@ -1776,9 +1797,31 @@ MinionV2SkeletonBuilderOpMinionArchitectureReviewFailInput = _strict_model(
     },
 )
 
+MinionV2VerificationBoundaryCoverage = _strict_model(
+    'MinionV2VerificationBoundaryCoverage',
+    {
+        'axis': (str, Field(..., min_length=1)),
+        'partitions': (list[str], Field(..., min_length=1)),
+    },
+)
+
+MinionV2VerificationObligationCoverage = _strict_model(
+    'MinionV2VerificationObligationCoverage',
+    {
+        'obligation': (str, Field(..., min_length=1)),
+        'states': (list[str], Field(..., min_length=1)),
+        'boundaries': (list[MinionV2VerificationBoundaryCoverage], Field(..., min_length=1)),
+        'evidence_summary': (str, Field(..., min_length=1, max_length=2000)),
+    },
+)
+
 MinionV2SweVerificationOpMinionVerificationPassInput = _strict_model(
     'MinionV2SweVerificationOpMinionVerificationPassInput',
     {
+        'obligation_coverage': (
+            list[MinionV2VerificationObligationCoverage],
+            Field(..., min_length=1),
+        ),
     },
 )
 

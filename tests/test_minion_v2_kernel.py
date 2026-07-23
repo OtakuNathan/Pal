@@ -1693,6 +1693,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ),
         )
         self.assertEqual(reopened.snapshot.state, ArchitectureRevisionState.REVIEW_QUEUED)
+        self.assertEqual(reopened.snapshot.payload["architecture_review_generation"], 1)
         self.assertNotIn("review_artifact_ref", reopened.snapshot.payload)
         self.assertNotIn("human_review_card_ref", reopened.snapshot.payload)
         self.assertEqual([effect.effect_type for effect in reopened.effects], ["run_reviewer_role"])
@@ -2091,11 +2092,16 @@ class MinionV2PersistenceTests(unittest.TestCase):
 
     def test_artifact_is_published_before_action_can_reference_it(self) -> None:
         ref = self.artifacts.put_json(
-            {"requirements": [{"id": "R-1", "text": "do the thing"}]},
-            artifact_type="TaskSourceBundleArtifact",
+            {
+                "schema_version": "1",
+                "title": "Do the thing",
+                "original": {"objective": "do the thing"},
+                "revisions": [],
+            },
+            artifact_type="TaskLedgerArtifact",
         )
         self.assertTrue(self.repository.artifact_is_durable(ref.sha256))
-        self.assertEqual(self.artifacts.read_json(ref)["requirements"][0]["id"], "R-1")
+        self.assertEqual(self.artifacts.read_json(ref)["original"]["objective"], "do the thing")
 
         missing = {**ref.to_dict(), "sha256": "0" * 64}
         with self.assertRaises(ValueError):
@@ -2110,8 +2116,13 @@ class MinionV2PersistenceTests(unittest.TestCase):
 
     def test_artifact_manifest_requires_durable_children(self) -> None:
         requirements = self.artifacts.put_json(
-            {"requirements": []},
-            artifact_type="TaskSourceBundleArtifact",
+            {
+                "schema_version": "1",
+                "title": "Empty work",
+                "original": {"objective": "nothing"},
+                "revisions": [],
+            },
+            artifact_type="TaskLedgerArtifact",
         )
         manifest = self.artifacts.put_json(
             {"requirements_ref": requirements.to_dict()},

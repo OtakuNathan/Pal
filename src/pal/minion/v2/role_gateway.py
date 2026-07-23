@@ -8,8 +8,14 @@ from typing import Any, Mapping
 
 from pal.execution.git_tool import GitTool, classify_git_command
 from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
+from pal.minion.v2.contracts import ActionEnvelope, AggregateType
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.artifacts import ArtifactRef
+from pal.minion.v2.task_ledger import (
+    TASK_REVISION_AUTHORITY_ARTIFACT,
+    TaskRevisionAuthority,
+    validate_task_revision_draft,
+)
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
     SubmissionDraftSnapshot,
@@ -66,6 +72,10 @@ class RoleAssignmentGateway:
             return self._draft_submit(authenticated, payload)
         if method == "artifact_put":
             return self._artifact_put(authenticated, payload)
+        if method == "task_revision_authority_record":
+            return self._task_revision_authority_record(authenticated, payload)
+        if method == "task_revision_append":
+            return self._task_revision_append(authenticated, payload)
         if method == "git_read":
             return self._git_read(authenticated, payload)
         raise ValueError(f"role gateway method is not allowed: {method}")
@@ -133,6 +143,14 @@ class RoleAssignmentGateway:
             raise ValueError(f"unsupported role submission kind: {context.draft_kind}")
         store = SubmissionDraftStore(self.service.runtime_root)
         snapshot = store.read(context, seed={})
+        if context.draft_kind in {"architecture", "contract"} and str(
+            assignment.get("role") or ""
+        ) == "architect":
+            aggregate = self._architect_revision_snapshot(assignment)
+            if aggregate.payload.get("pending_task_revision_authority_ref"):
+                raise ValueError(
+                    "submit the pending task revision YAML before submitting architecture"
+                )
         if (
             context.draft_kind == "candidate"
             and str(assignment.get("role") or "") == "implementation"
@@ -258,6 +276,132 @@ class RoleAssignmentGateway:
             },
         )
         return {"artifact_ref": ref.to_dict()}
+
+    def _task_revision_authority_record(
+        self,
+        authenticated: Mapping[str, Any],
+        params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        assignment = self._architect_assignment(authenticated)
+        authority_ref = ArtifactRef.from_mapping(
+            dict(params.get("task_revision_authority_ref") or {})
+        )
+        record = self.repository.read_artifact_record(authority_ref.sha256)
+        if record is None or str(record.get("artifact_type") or "") != TASK_REVISION_AUTHORITY_ARTIFACT:
+            raise ValueError("task revision authority must be a durable TaskRevisionAuthorityArtifact")
+        try:
+            TaskRevisionAuthority.model_validate(
+                self.service.artifacts.read_json(authority_ref)
+            )
+        except Exception as exc:
+            raise ValueError("task revision authority has invalid structured content") from exc
+        current = self._architect_revision_snapshot(assignment)
+        pending = dict(current.payload.get("pending_task_revision_authority_ref") or {})
+        if pending:
+            if pending == authority_ref.to_dict():
+                return {
+                    "recorded": True,
+                    "task_revision_authority_ref": pending,
+                    "duplicate": True,
+                }
+            raise ValueError("an earlier user-authorized task revision is still pending")
+        result = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="TASK_REVISION_AUTHORITY_RECORDED",
+                workflow_id=str(assignment["workflow_id"]),
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=str(assignment["aggregate_id"]),
+                actor=str(authenticated["attempt_id"]),
+                expected_version=current.version,
+                idempotency_key=(
+                    f"task-revision-authority:{assignment['assignment_id']}:"
+                    f"{authority_ref.sha256}"
+                ),
+                payload={
+                    "task_revision_authority_ref": authority_ref.to_dict(),
+                    "fencing_token": int(authenticated["fencing_token"]),
+                },
+            )
+        )
+        return {
+            "recorded": True,
+            "task_revision_authority_ref": authority_ref.to_dict(),
+            "aggregate_version": result.snapshot.version,
+        }
+
+    def _task_revision_append(
+        self,
+        authenticated: Mapping[str, Any],
+        params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        assignment = self._architect_assignment(authenticated)
+        revision = validate_task_revision_draft(params.get("revision"))
+        current = self._architect_revision_snapshot(assignment)
+        pending = dict(current.payload.get("pending_task_revision_authority_ref") or {})
+        revision_digest = stable_hash(revision)
+        if not pending:
+            if str(current.payload.get("last_task_revision_digest") or "") == revision_digest:
+                return {
+                    "appended": True,
+                    "requirements_ref": dict(current.payload["requirements_ref"]),
+                    "generation": int(current.payload.get("task_revision_generation") or 0),
+                    "duplicate": True,
+                }
+            raise ValueError("there is no pending user-authorized task revision")
+        authority_ref = ArtifactRef.from_mapping(pending)
+        base_ref = ArtifactRef.from_mapping(dict(current.payload.get("requirements_ref") or {}))
+        next_ref = self.service.task_ledger.append_revision(
+            base_ref=base_ref,
+            authority_ref=authority_ref,
+            revision=revision,
+            actor=str(authenticated["attempt_id"]),
+            source_channel="role_gateway",
+        )
+        result = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="TASK_REVISION_APPENDED",
+                workflow_id=str(assignment["workflow_id"]),
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=str(assignment["aggregate_id"]),
+                actor=str(authenticated["attempt_id"]),
+                expected_version=current.version,
+                idempotency_key=(
+                    f"task-revision-append:{assignment['assignment_id']}:"
+                    f"{authority_ref.sha256}:{revision_digest}"
+                ),
+                payload={
+                    "task_revision_authority_ref": authority_ref.to_dict(),
+                    "requirements_ref": next_ref.to_dict(),
+                    "task_revision_digest": revision_digest,
+                    "fencing_token": int(authenticated["fencing_token"]),
+                },
+            )
+        )
+        return {
+            "appended": True,
+            "requirements_ref": next_ref.to_dict(),
+            "generation": int(result.snapshot.payload.get("task_revision_generation") or 0),
+        }
+
+    @staticmethod
+    def _architect_assignment(authenticated: Mapping[str, Any]) -> dict[str, Any]:
+        assignment = dict(authenticated["assignment"])
+        if str(assignment.get("aggregate_type") or "") != AggregateType.ARCHITECTURE_REVISION.value:
+            raise ValueError("task revisions are available only to an Architecture Revision")
+        if str(assignment.get("role") or "") != "architect":
+            raise ValueError("task revisions are available only to Architect")
+        if str(assignment.get("mode") or "") not in {"author", "revision"}:
+            raise ValueError("task revision is unavailable in this Architect mode")
+        return assignment
+
+    def _architect_revision_snapshot(self, assignment: Mapping[str, Any]):
+        current = self.repository.read_snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            str(assignment["aggregate_id"]),
+        )
+        if current is None or current.state != "ARCHITECT_RUNNING":
+            raise ValueError("Architect task revision requires an active ARCHITECT_RUNNING revision")
+        return current
 
     def _git_read(
         self,

@@ -344,22 +344,11 @@ class VerificationService:
         dependency_node_ids: Sequence[str] = (),
         module_node_ids: Sequence[str] = (),
         scenario_fingerprint: str = "",
-        requirement_patch_ref: ArtifactRef | None = None,
-        revised_requirements_ref: ArtifactRef | None = None,
         role_assignment_id: str = "",
         role_submission_payload_hash: str = "",
         accepted_candidate_ref: ArtifactRef | None = None,
         accepted_candidate_digest: str = "",
     ) -> DispatchResult:
-        if (requirement_patch_ref is None) != (revised_requirements_ref is None):
-            raise ValueError(
-                "RequirementPatch verdict routing requires both patch and revised Requirements artifacts"
-            )
-        if requirement_patch_ref is not None and defect_kind not in {
-            DefectKind.CONTRACT,
-            DefectKind.ARCHITECTURE,
-        }:
-            raise ValueError("RequirementPatch can only accompany a contract or architecture defect")
         if bool(accepted_candidate_ref) != bool(accepted_candidate_digest):
             raise ValueError(
                 "accepted verifier candidate requires both artifact ref and digest"
@@ -458,14 +447,6 @@ class VerificationService:
                     **common,
                     "repair_bill_ref": repair_bill_ref.to_dict(),
                     "failure_history": history,
-                    **(
-                        {
-                            "requirement_patch_ref": requirement_patch_ref.to_dict(),
-                            "revised_requirements_ref": revised_requirements_ref.to_dict(),
-                        }
-                        if requirement_patch_ref is not None and revised_requirements_ref is not None
-                        else {}
-                    ),
                 }
             elif defect_kind == DefectKind.ARCHITECTURE:
                 action_type = "ARCHITECTURE_DEFECT"
@@ -473,14 +454,6 @@ class VerificationService:
                     **common,
                     "repair_bill_ref": repair_bill_ref.to_dict(),
                     "failure_history": history,
-                    **(
-                        {
-                            "requirement_patch_ref": requirement_patch_ref.to_dict(),
-                            "revised_requirements_ref": revised_requirements_ref.to_dict(),
-                        }
-                        if requirement_patch_ref is not None and revised_requirements_ref is not None
-                        else {}
-                    ),
                 }
             elif scenario:
                 if not module_targets:

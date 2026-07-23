@@ -6,14 +6,14 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, Mapping
 
 import yaml
-from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from yaml.constructor import ConstructorError
 from yaml.events import AliasEvent
 from yaml.nodes import MappingNode
 from yaml.tokens import AliasToken, AnchorToken, TagToken
 
 
-ARCHITECTURE_DRAFT_SCHEMA_VERSION = 1
+ARCHITECTURE_DRAFT_SCHEMA_VERSION = 3
 ARCHITECTURE_DRAFT_FILENAME = "architecture.yaml"
 _MAX_ARCHITECTURE_DRAFT_BYTES = 2 * 1024 * 1024
 _SEMANTIC_NAME = Annotated[
@@ -24,6 +24,20 @@ _SEMANTIC_NAME = Annotated[
         pattern=r"^[a-z][a-z0-9_]{1,79}$",
     ),
 ]
+_NONEMPTY_TEXT = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=4000),
+]
+_SEMANTIC_LABEL = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=120,
+        pattern=r"^[a-z0-9][a-z0-9_\-]{0,119}$",
+    ),
+]
+_NONEMPTY_LABEL_LIST = Annotated[list[_SEMANTIC_LABEL], Field(min_length=1)]
 
 
 class _StrictModel(BaseModel):
@@ -48,8 +62,31 @@ class ArchitectureModule(_StrictModel):
     paths: ArchitectureModulePaths
 
 
+class ArchitectureObligationState(_StrictModel):
+    entry_condition: _NONEMPTY_TEXT
+    decision_point: _SEMANTIC_NAME
+    outcome: _SEMANTIC_NAME
+    required_outcome: _NONEMPTY_TEXT
+
+
+class ArchitectureObligation(_StrictModel):
+    claim: _NONEMPTY_TEXT
+    owner: _SEMANTIC_NAME
+    states: dict[_SEMANTIC_NAME, ArchitectureObligationState] = Field(min_length=1)
+    boundaries: dict[_SEMANTIC_NAME, _NONEMPTY_LABEL_LIST] = Field(min_length=1)
+    observable_outcome: _NONEMPTY_TEXT
+    contract_path: list[_NONEMPTY_TEXT] = Field(
+        min_length=1,
+        description=(
+            "Ordered public semantic interface/signal chain from owner to observable outcome; "
+            "not a filesystem allowlist and not bare source filenames."
+        ),
+    )
+
+
 class ArchitectureScenario(_StrictModel):
-    modules: list[str]
+    modules: list[_SEMANTIC_NAME] = Field(min_length=1)
+    obligations: list[_SEMANTIC_NAME] = Field(min_length=1)
     entrypoint: str
     observable_behavior: str
     environment: str
@@ -57,6 +94,7 @@ class ArchitectureScenario(_StrictModel):
 
 class ArchitectureDraft(_StrictModel):
     schema_version: Literal[ARCHITECTURE_DRAFT_SCHEMA_VERSION]
+    obligations: dict[_SEMANTIC_NAME, ArchitectureObligation]
     modules: dict[_SEMANTIC_NAME, ArchitectureModule]
     scenarios: dict[_SEMANTIC_NAME, ArchitectureScenario]
 
@@ -174,7 +212,11 @@ def prepare_architecture_draft_file(workspace: dict[str, Any]) -> Path:
             )
         return path
     base = workspace.get("architecture_revision_base_submission")
-    submission = dict(base) if isinstance(base, Mapping) else {"modules": {}, "scenarios": {}}
+    submission = (
+        dict(base)
+        if isinstance(base, Mapping)
+        else {"obligations": {}, "modules": {}, "scenarios": {}}
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_architecture_draft(submission), encoding="utf-8")
     return path
@@ -194,6 +236,7 @@ def write_architecture_draft(
 def render_architecture_draft(submission: Mapping[str, Any]) -> str:
     candidate = {
         "schema_version": ARCHITECTURE_DRAFT_SCHEMA_VERSION,
+        "obligations": dict(submission.get("obligations") or {}),
         "modules": dict(submission.get("modules") or {}),
         "scenarios": dict(submission.get("scenarios") or {}),
     }
@@ -203,10 +246,11 @@ def render_architecture_draft(submission: Mapping[str, Any]) -> str:
         raise _validation_error(exc) from exc
     header = (
         "# Pal Architect Draft. This is control-plane metadata, not product source.\n"
-        "# Add or remove any number of stable snake_case keys under modules and scenarios.\n"
+        "# Add or remove stable snake_case keys under obligations, modules, and scenarios.\n"
         "# architecture_submit validates this complete file and advances the workflow.\n"
+        "# Obligation example: {claim: incomplete input fails observably, owner: example_end_to_end, states: {reading_payload_entry: {entry_condition: a positive length header has completed before any payload byte arrives, decision_point: eof_classification, outcome: incomplete_exit, required_outcome: exits nonzero with an error}}, boundaries: {payload_bytes_received: [zero, partial]}, observable_outcome: exits nonzero with an error, contract_path: [decoder::status -> command::EOF decision, command::exit -> process status]}\n"
         "# Module example: {module_kind: implementation, contract_dependencies: [], paths: {contract_mode: file_frozen, contract_paths: [include/example.h], implementation_scopes: [{kind: file, path: src/example.cpp}], reference_only: []}}\n"
-        "# Scenario example: {modules: [example_module], entrypoint: example command, observable_behavior: externally visible result, environment: project host}\n"
+        "# Scenario example: {modules: [example_module], obligations: [incomplete_input], entrypoint: example command, observable_behavior: externally visible result, environment: project host}\n"
     )
     return header + yaml.safe_dump(
         normalized,

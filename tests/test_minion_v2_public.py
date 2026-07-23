@@ -19,8 +19,13 @@ from pal.execution.contracts import CapabilityCall
 from pal.minion import register_with_core as register_minion_with_core
 from pal.minion.capabilities import MinionManagerProvider, inspect_minion
 from pal.minion.ipc import minion_port_path, minion_socket_path
+from pal.minion.sandbox import build_sandboxed_runner_invocation
 from pal.minion.v2.adapters import prepare_v2_workspace_environment
-from pal.minion.v2.capabilities import MinionV2PublicProvider
+from pal.minion.v2.capabilities import (
+    MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
+    MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
+    MinionV2PublicProvider,
+)
 from pal.minion.v2.contract_builder import ARCHITECT_BUILDER_CAPABILITIES
 from pal.minion.v2.execution import WorkspaceProcessHolder
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor, reconcile_control_requests
@@ -31,6 +36,7 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     SemanticOrchestrator,
     _assignment_role_input_refs,
     _architecture_submit_idempotency_key,
+    _bind_role_attempt_sandbox,
     _candidate_tree_fingerprint,
     _durable_workspace_preparation,
     _named_json_output,
@@ -463,6 +469,56 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    def test_retry_reuses_durable_prompt_reference_binds(self) -> None:
+        repo = self.runtime_root / "repo"
+        task = self.runtime_root / "task"
+        repo.mkdir()
+        task.mkdir()
+        (task / "task.yaml").write_text("immutable task\n", encoding="utf-8")
+        fresh = MinionInvocationPack(
+            invocation_id="inv_retry_projection",
+            workspace={
+                "repo_path": str(repo),
+                "reference_paths": [
+                    {
+                        "name": "task",
+                        "path": str(task),
+                        "truth_source": True,
+                        "required": True,
+                    }
+                ],
+            },
+            metadata={"manager_only": "discard me"},
+        )
+
+        first_attempt = _bind_role_attempt_sandbox(
+            self.runtime_root,
+            fresh,
+            run_id="run_retry_projection",
+            durable_prompt_reused=False,
+        )
+        retry_attempt = _bind_role_attempt_sandbox(
+            self.runtime_root,
+            first_attempt,
+            run_id="run_retry_projection",
+            durable_prompt_reused=True,
+        )
+
+        self.assertEqual(
+            retry_attempt.workspace["reference_paths"][0]["path"],
+            "/pal/references/task",
+        )
+        self.assertEqual(
+            retry_attempt.metadata["sandbox"]["reference_binds"][0]["source_path"],
+            str(task),
+        )
+        argv, _ = build_sandboxed_runner_invocation(
+            runtime_root=self.runtime_root,
+            pack=retry_attempt,
+            argv=["/bin/true"],
+        )
+        self.assertIn(str(task), argv)
+
     def test_background_effect_returns_after_durable_assignment_is_ready(self) -> None:
         async def scenario() -> None:
             worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
@@ -583,6 +639,40 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "candidate_diff": {"sha256": "candidate-sha"},
                 "workspace_preparation": {"sha256": "new-environment-sha"},
             },
+        )
+
+        self.assertIsNone(reusable)
+
+    def test_architecture_reviewer_assignment_is_not_reused_across_review_generations(self) -> None:
+        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
+        worker.repository.list_role_assignments = lambda **_kwargs: (
+            {
+                "assignment_id": "old-review-generation",
+                "workflow_id": "workflow-review-generation",
+                "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
+                "aggregate_id": "architecture-review-generation",
+                "role": "reviewer",
+                "mode": "architecture",
+                "submission_kind": "architecture_review",
+                "state": "settled",
+                "submission_artifact_ref": {
+                    "artifact_type": "ArchitectureReviewRoleSubmissionArtifact",
+                    "sha256": "review-sha",
+                },
+                "input_refs": {"requirements": {"sha256": "requirements-sha"}},
+                "execution_spec": {"evaluation_generation": 0},
+            },
+        )
+
+        reusable = worker._reusable_role_assignment(
+            workflow_id="workflow-review-generation",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
+            aggregate_id="architecture-review-generation",
+            role="reviewer",
+            mode="architecture",
+            submission_kind="architecture_review",
+            input_refs={"requirements": {"sha256": "requirements-sha"}},
+            evaluation_generation=1,
         )
 
         self.assertIsNone(reusable)
@@ -1084,10 +1174,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_recovery_cancels_assignment_superseded_by_equivalent_submission(self) -> None:
         async def scenario() -> None:
             service = MinionV2WorkflowService(self.runtime_root)
-            requirements_ref = service.task_sources.publish(
+            requirements_ref = service.task_ledger.publish(
                 title="Requirements",
-                request_text="Review the submitted architecture.\n",
-                workspace={},
+                task_spec={"objective": "Review the submitted architecture."},
                 actor="test",
                 source_channel="test",
             )
@@ -1391,7 +1480,14 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     @staticmethod
     def _start_workflow(service: MinionV2WorkflowService, request: dict):
-        return service.start_workflow(dict(request))
+        data = dict(request)
+        if (
+            str(data.get("operation") or "new_requirement") == "new_requirement"
+            and not data.get("requirements_ref")
+            and not data.get("task_spec")
+        ):
+            data["task_spec"] = {"objective": str(data.get("goal") or "test task")}
+        return service.start_workflow(data)
 
     def test_supporting_artifact_does_not_complete_required_primary_output(self) -> None:
         pack = MinionInvocationPack(
@@ -1573,6 +1669,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         self.assertIn("Read the bound revision_scope before editing", scoped)
         self.assertIn("repair every affected module in the same candidate", scoped)
+        self.assertIn("immutable_requirement_paths", scoped)
+        self.assertIn("call ask_question and wait", scoped)
 
     def test_architecture_stage_resolves_snapshot_before_profile(self) -> None:
         worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
@@ -2124,10 +2222,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_skeleton_architect_submission_hands_live_lease_to_quiescer(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         worker = SemanticOrchestrator(service)
-        requirements_ref = service.task_sources.publish(
+        requirements_ref = service.task_ledger.publish(
             title="Routing",
-            request_text="Route requests deterministically.\n",
-            workspace={},
+            task_spec={"objective": "Route requests deterministically."},
             actor="test",
             source_channel="test",
         )
@@ -2213,10 +2310,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_skeleton_architect_failure_releases_writer_lease(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         worker = SemanticOrchestrator(service)
-        requirements_ref = service.task_sources.publish(
+        requirements_ref = service.task_ledger.publish(
             title="Routing",
-            request_text="Route requests deterministically.\n",
-            workspace={},
+            task_spec={"objective": "Route requests deterministically."},
             actor="test",
             source_channel="test",
         )
@@ -2284,10 +2380,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         service = MinionV2WorkflowService(self.runtime_root)
         worker = SemanticOrchestrator(service)
         request_ref = service.artifacts.put_json({"goal": "research"}, artifact_type="WorkflowRequestArtifact")
-        requirements_ref = service.task_sources.publish(
+        requirements_ref = service.task_ledger.publish(
             title="Architecture repair",
-            request_text="Repair the module boundary.\n",
-            workspace={},
+            task_spec={"objective": "Repair the module boundary."},
             actor="test",
             source_channel="test",
         )
@@ -2479,10 +2574,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_scoped_revision_reuses_unmodified_fragment_refs(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         worker = SemanticOrchestrator(service)
-        requirements = service.task_sources.publish(
+        requirements = service.task_ledger.publish(
             title="Implement the module",
-            request_text="Implement the module.\n",
-            workspace={},
+            task_spec={"objective": "Implement the module."},
             actor="test",
             source_channel="test",
         )
@@ -2723,6 +2817,14 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             )
 
     def test_minion_plugin_exposes_only_semantic_v2_business_capabilities(self) -> None:
+        self.assertEqual(
+            MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput.__module__,
+            "pal.minion.v2.capabilities",
+        )
+        self.assertEqual(
+            MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput.__module__,
+            "pal.minion.v2.capabilities",
+        )
         core = PalCore()
         register_minion_with_core(core.context, runtime_root=self.runtime_root)
         core.publish_module_capabilities("minion")
@@ -2773,6 +2875,23 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "decision_token",
             ):
                 self.assertNotIn(f'"{forbidden}"', schemas)
+            start_schema = next(
+                descriptor.InputModel.model_json_schema(mode="validation")
+                for descriptor in core.context.capability_registry.descriptors.values()
+                if descriptor.canonical_path == "op_minion_start_workflow"
+            )
+            self.assertIn("task_spec", start_schema["properties"])
+            self.assertNotIn("source_files", start_schema["properties"])
+            decision_schema = next(
+                descriptor.InputModel.model_json_schema(mode="validation")
+                for descriptor in core.context.capability_registry.descriptors.values()
+                if descriptor.canonical_path == "op_minion_submit_human_decision"
+            )
+            self.assertEqual(
+                decision_schema["properties"]["decision"]["enum"],
+                ["accept", "edit", "reject"],
+            )
+            self.assertNotIn("clarification_response", decision_schema["properties"])
             self.assertNotIn("op_minion_dispatch_workflow", canonical)
             self.assertNotIn("op_minion_tick_parent_dag", canonical)
             self.assertNotIn("op_minion_recover_work_order", canonical)
@@ -2795,6 +2914,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                     "title": "Tiny semantic router",
                     "profile": "software_engineering.v2_coder",
                     "goal": "Implement deterministic rule routing. Route matching must be deterministic.",
+                    "task_spec": {
+                        "objective": "Implement deterministic rule routing.",
+                        "requirements": ["Route matching must be deterministic."],
+                    },
                     "workspace": {"kind": "new_project", "project_name": "tiny-router"},
                 },
             )
@@ -2870,6 +2993,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                     "title": "鸿蒙字体渲染验证",
                     "profile": "software_engineering.v2_coder",
                     "goal": "验证 OpenHarmony 原生字体生命周期和渲染流程。原生字体必须由包装对象独占。",
+                    "task_spec": {
+                        "objective": "验证 OpenHarmony 原生字体生命周期和渲染流程。",
+                        "requirements": ["原生字体必须由包装对象独占。"],
+                    },
                     "workspace": {"kind": "new_project", "project_name": "ohos-font-probe"},
                 },
             )
@@ -3050,7 +3177,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         requirements_ref = service.prepare_requirements(
             {
                 "title": "Platform backend",
-                "request_text": "Use the selected platform backend in the production path.",
+                "task_spec": {
+                    "objective": "Use the selected platform backend in the production path."
+                },
             }
         )["requirements_ref"]
         manifest_ref = service.artifacts.put_json(
@@ -3236,10 +3365,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_execution_restart_cancelled_while_restarting_creates_no_replacement(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         repository = service.repository
-        requirements_ref = service.task_sources.publish(
+        requirements_ref = service.task_ledger.publish(
             title="Restart cancellation",
-            request_text="Restart the accepted execution.\n",
-            workspace={},
+            task_spec={"objective": "Restart the accepted execution."},
             actor="test",
             source_channel="test",
         ).to_dict()
@@ -3513,10 +3641,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_triage_resolution_restores_verified_imported_requirements_binding(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         repository = service.repository
-        requirements_ref = service.task_sources.publish(
+        requirements_ref = service.task_ledger.publish(
             title="Imported architecture",
-            request_text="Execute the imported architecture.\n",
-            workspace={},
+            task_spec={"objective": "Execute the imported architecture."},
             actor="test",
             source_channel="test",
         ).to_dict()
@@ -3733,31 +3860,21 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 }
             )
 
-    def test_start_workflow_preserves_workspace_markdown_as_exact_task_source(self) -> None:
+    def test_start_workflow_preserves_structured_task_spec_as_single_ledger(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         repo = self.runtime_root / "framepipe"
         repo.mkdir()
-        task = repo / "TASK.md"
-        task.write_text(
-            """# Framepipe
-
-## Protocol
-
-Implement a four-byte length-prefixed protocol.
-
-- Accept payloads up to 1024 bytes.
-- Reject larger payloads deterministically.
-
-```text
-framepipe encode 4869
-```
-
-## Build and acceptance
-
-- Run a real subprocess through stdin and stdout.
-""",
-            encoding="utf-8",
-        )
+        task_spec = {
+            "objective": "Implement Framepipe.",
+            "language": "C++17",
+            "protocol": {
+                "framing": "four-byte length prefix",
+                "maximum_payload_bytes": 1024,
+                "oversize_behavior": "reject deterministically",
+            },
+            "example": "framepipe encode 4869",
+            "acceptance": "Run a real subprocess through stdin and stdout.",
+        }
 
         started = service.start_workflow(
             {
@@ -3767,40 +3884,33 @@ framepipe encode 4869
                 "operation": "new_requirement",
                 "goal": "Implement Framepipe.\nUse C++17 only.\nThe verification node must launch the built executable.",
                 "workspace": {"repo_path": str(repo), "primary_language": "cpp"},
-                "source_files": ["TASK.md"],
+                "task_spec": task_spec,
             }
         )
         workflow = service.repository.read_snapshot(AggregateType.WORKFLOW, started["workflow_id"])
         request = service.artifacts.read_json(dict(workflow.payload["request_ref"]))
         artifact = service.artifacts.read_json(dict(request["requirements_ref"]))
-        entries = {item["name"]: item for item in artifact["documents"]}
-        self.assertEqual(set(entries), {"request.md", "sources/TASK.md"})
-        source_bytes = service.artifacts.read_bytes(entries["sources/TASK.md"]["artifact_ref"])
-        self.assertEqual(source_bytes, task.read_bytes())
-        self.assertIn(b"framepipe encode 4869", source_bytes)
-        self.assertEqual(request["source_files"], ["TASK.md"])
+        self.assertEqual(artifact["original"], task_spec)
+        self.assertEqual(artifact["revisions"], [])
+        materialized = service.task_ledger.materialize(request["requirements_ref"])
+        self.assertEqual(materialized.files, ("task.yaml",))
 
-    def test_requirement_files_cannot_escape_workspace(self) -> None:
+    def test_legacy_requirement_source_files_are_rejected(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         repo = self.runtime_root / "repo"
         repo.mkdir()
-        outside = self.runtime_root / "outside.md"
-        outside.write_text("Do not ingest me.\n", encoding="utf-8")
         base = {
             "title": "Unsafe requirement source",
             "profile": "software_engineering.v2_coder",
             "operation": "new_requirement",
             "goal": "Reject unsafe paths.",
+            "task_spec": {"objective": "Reject unsafe paths."},
             "workspace": {"repo_path": str(repo)},
         }
 
-        with self.assertRaisesRegex(ValueError, "safe relative path"):
+        with self.assertRaisesRegex(ValueError, "source_files was removed"):
             service.start_workflow(
-                {**base, "workflow_id": "wf_requirement_parent", "source_files": ["../outside.md"]}
-            )
-        with self.assertRaisesRegex(ValueError, "safe relative path"):
-            service.start_workflow(
-                {**base, "workflow_id": "wf_requirement_absolute", "source_files": [str(outside)]}
+                {**base, "workflow_id": "wf_requirement_legacy", "source_files": ["legacy.txt"]}
             )
 
     def test_effect_replay_after_side_effect_before_ack_is_idempotent(self) -> None:

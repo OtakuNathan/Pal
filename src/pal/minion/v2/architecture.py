@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType, DispatchResult
 from pal.minion.v2.repository import MinionV2Repository
-from pal.minion.v2.task_sources import validate_task_source_bundle
+from pal.minion.v2.task_ledger import validate_task_ledger
 
 
 class ResearchMode(StrEnum):
@@ -34,7 +34,7 @@ class ArchitectureFindingKind(StrEnum):
 
 REVISION_TARGET_SECTIONS = frozenset(
     {
-        "task_source",
+        "task_ledger",
         "constraint",
         "design_decision",
         "gate_check",
@@ -387,7 +387,7 @@ class ArchitectureArtifactService:
             if not edit_instruction.strip():
                 raise ValueError("edit decision requires edit_instruction")
             instruction_ref = self.artifacts.put_json(
-                {"instruction": edit_instruction.strip(), "manifest_sha": card.manifest_sha},
+                {"instruction": edit_instruction.strip()},
                 artifact_type="ArchitectureEditInstructionArtifact",
                 provenance={"actor_id": card.actor_id, "channel_id": card.active_channel_id},
                 child_refs=((card.manifest_sha, "revises"),),
@@ -749,14 +749,14 @@ def _interface_names_compatible(expected: str, actual: str) -> bool:
 
 def compile_architecture_markdown(manifest: Mapping[str, Any], fragments: Mapping[str, Any]) -> str:
     del manifest
-    task_sources = validate_task_source_bundle(dict(fragments.get("requirements") or {}))
+    task_ledger = validate_task_ledger(dict(fragments.get("requirements") or {}))
     modules = list(fragments.get("unit_contract") or [])
     topology = dict(fragments.get("topology") or {})
     assumptions = dict(fragments.get("assumption_ledger") or {})
     risks = dict(fragments.get("risk_ledger") or {})
-    lines = ["# Architecture Contract", "", "## Task Sources", ""]
-    for item in [*list(task_sources.get("documents") or []), *list(task_sources.get("amendments") or [])]:
-        lines.append(f"- `{item.get('name', '')}` ({item.get('origin', 'source')})")
+    lines = ["# Architecture Contract", "", "## Task Ledger", ""]
+    lines.append("- `task.yaml`: original plus ordered append-only revisions")
+    lines.append(f"- Revisions: {len(list(task_ledger.get('revisions') or []))}")
     lines.extend(["", "## Module Topology", ""])
     dependency_map = dict(topology.get("depends_on") or {})
     for module in modules:

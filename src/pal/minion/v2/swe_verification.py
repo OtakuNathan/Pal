@@ -46,7 +46,9 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "alias": "verification_pass",
         "description": (
             "Submit PASS only after the existing module corpus passes and you have added or materially strengthened "
-            "adversarial coverage for this exact candidate. The Manager validates tests/<module_name>/ changes and ordinary shell/LSP evidence."
+            "adversarial coverage for this exact candidate. Report every bound requirement obligation once, including "
+            "the exact covered semantic states, boundary axes and partitions, plus a concise evidence summary. The Manager "
+            "rejects missing, extra, duplicate, or partial obligation coverage and validates tests/<module_name>/ changes and ordinary shell/LSP evidence."
         ),
         "InputModel": MinionV2SweVerificationOpMinionVerificationPassInput,
     },
@@ -133,11 +135,15 @@ def compile_swe_verification_tool_contract(work_view: Mapping[str, Any]) -> dict
     verification_corpus = str(
         dict(work_view.get("verification_corpus") or {}).get("path") or ""
     ).strip()
+    obligations = {
+        str(name): dict(value or {})
+        for name, value in dict(work_view.get("obligations") or {}).items()
+    }
     guidance_overrides: dict[str, dict[str, str]] = {}
     guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
         "Record or replace one evidence-backed verifier finding. Use module_defect for the current implementation, "
         "dependency_defect for an upstream module, contract_defect for a frozen public contract, "
-        "architecture_defect for ownership/topology, requirements_defect for contradictory task sources, and "
+        "architecture_defect for ownership/topology, requirements_defect for a contradictory task ledger, and "
         "integration_defect for cross-module product behavior. Finish the breadth-first audit first and batch "
         "independent add_finding calls in one tool round when possible."
     )}
@@ -151,12 +157,21 @@ def compile_swe_verification_tool_contract(work_view: Mapping[str, Any]) -> dict
         guidance_overrides["op_minion_verification_pass"] = {"use_when": (
             f"Submit PASS only after reading and running the existing {verification_corpus}/ corpus, "
             "adding or strengthening missing adversarial coverage there, and running a successful "
-            "ordinary shell or LSP check after the final corpus edit. Takes no arguments."
+            "ordinary shell or LSP check after the final corpus edit. Include exact obligation_coverage for: "
+            + ", ".join(sorted(obligations))
+            + "."
+        )}
+    elif obligations:
+        guidance_overrides["op_minion_verification_pass"] = {"use_when": (
+            "Submit PASS only after testing the exact assembled scenario and include exact obligation_coverage for: "
+            + ", ".join(sorted(obligations))
+            + "."
         )}
     return {
         "module_name": module_name,
         "dependency_targets": dependency_targets,
         "verification_corpus": verification_corpus,
+        "obligations": obligations,
         "guidance_overrides": guidance_overrides,
     }
 
@@ -171,6 +186,11 @@ def swe_verification_tool_result(
         args = dict(call.args or {})
         reason = str(args.get("reason") or "").strip()
         target_modules = _validate_target_modules(workspace, args.get("modules") or [])
+        obligation_coverage = _validate_obligation_coverage(
+            workspace,
+            args.get("obligation_coverage") or [],
+            required=outcome == "pass",
+        )
         context = SubmissionDraftContext.from_workspace(
             workspace,
             draft_kind="verification",
@@ -199,6 +219,7 @@ def swe_verification_tool_result(
             "findings": findings,
             **({"reason": reason} if reason else {}),
             **({"target_modules": target_modules} if target_modules else {}),
+            **({"obligation_coverage": obligation_coverage} if obligation_coverage else {}),
             "changed_test_paths": changed_paths,
             "tool_receipts": receipts,
         }
@@ -364,6 +385,122 @@ def _validate_target_modules(workspace: Mapping[str, Any], values: Any) -> list[
             + (", ".join(sorted(allowed)) or "<none>")
         )
     return requested
+
+
+def _validate_obligation_coverage(
+    workspace: Mapping[str, Any],
+    values: Any,
+    *,
+    required: bool,
+) -> list[dict[str, Any]]:
+    contract = dict(
+        dict(workspace.get("minion_v2") or {}).get("swe_verification_tool_contract") or {}
+    )
+    obligations = {
+        str(name): dict(value or {})
+        for name, value in dict(contract.get("obligations") or {}).items()
+    }
+    return validate_bound_obligation_coverage(
+        obligations,
+        values,
+        required=required,
+    )
+
+
+def validate_bound_obligation_coverage(
+    obligations: Mapping[str, Any],
+    values: Any,
+    *,
+    required: bool,
+) -> list[dict[str, Any]]:
+    obligations = {
+        str(name): dict(value or {})
+        for name, value in dict(obligations or {}).items()
+    }
+    coverage = [dict(item or {}) for item in list(values or [])]
+    if not required:
+        if coverage:
+            raise ValueError("obligation_coverage is accepted only by verification_pass")
+        return []
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for item in coverage:
+        name = str(item.get("obligation") or "").strip()
+        if not name:
+            raise ValueError("obligation_coverage entries require obligation")
+        if name in seen:
+            raise ValueError(f"obligation_coverage repeats {name}")
+        seen.add(name)
+        obligation = obligations.get(name)
+        if obligation is None:
+            raise ValueError(f"obligation_coverage names unbound obligation: {name}")
+        expected_states = [
+            str(value) for value in dict(obligation.get("states") or {})
+        ]
+        actual_states = list(
+            dict.fromkeys(str(value).strip() for value in list(item.get("states") or []) if str(value).strip())
+        )
+        if set(actual_states) != set(expected_states) or len(actual_states) != len(expected_states):
+            raise ValueError(
+                f"obligation {name} states must exactly cover: "
+                + ", ".join(expected_states)
+            )
+        actual_boundaries: dict[str, list[str]] = {}
+        for raw_boundary in list(item.get("boundaries") or []):
+            boundary = dict(raw_boundary or {})
+            axis = str(boundary.get("axis") or "").strip()
+            if not axis:
+                raise ValueError(f"obligation {name} boundary coverage requires axis")
+            if axis in actual_boundaries:
+                raise ValueError(f"obligation {name} repeats boundary axis {axis}")
+            actual_boundaries[axis] = list(
+                dict.fromkeys(
+                    str(value).strip()
+                    for value in list(boundary.get("partitions") or [])
+                    if str(value).strip()
+                )
+            )
+        expected_boundaries = {
+            str(axis): [str(value) for value in list(partitions or [])]
+            for axis, partitions in dict(obligation.get("boundaries") or {}).items()
+        }
+        if set(actual_boundaries) != set(expected_boundaries):
+            raise ValueError(
+                f"obligation {name} boundary axes must exactly cover: "
+                + ", ".join(expected_boundaries)
+            )
+        for axis, expected_partitions in expected_boundaries.items():
+            actual_partitions = actual_boundaries[axis]
+            if (
+                set(actual_partitions) != set(expected_partitions)
+                or len(actual_partitions) != len(expected_partitions)
+            ):
+                raise ValueError(
+                    f"obligation {name} boundary {axis} must exactly cover: "
+                    + ", ".join(expected_partitions)
+                )
+        evidence_summary = str(item.get("evidence_summary") or "").strip()
+        if not evidence_summary:
+            raise ValueError(f"obligation {name} requires evidence_summary")
+        normalized.append(
+            {
+                "obligation": name,
+                "states": expected_states,
+                "boundaries": [
+                    {"axis": axis, "partitions": partitions}
+                    for axis, partitions in expected_boundaries.items()
+                ],
+                "evidence_summary": evidence_summary,
+            }
+        )
+    missing = sorted(set(obligations) - seen)
+    if missing:
+        raise ValueError(
+            "verification_pass is missing obligation coverage: " + ", ".join(missing)
+        )
+    if not obligations and coverage:
+        raise ValueError("verification_pass received coverage but no obligations are bound")
+    return normalized
 
 
 def _changed_paths(workspace: Mapping[str, Any]) -> list[str]:

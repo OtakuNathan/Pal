@@ -9,11 +9,29 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
+
+
+def minion_retry_allows_uncached_mutation() -> bool:
+    """Return whether a sandboxed continuation may rebuild lost read state.
+
+    File read snapshots are process-local.  A supervised Minion retry resumes
+    the durable model/tool transcript in a new process, so requiring the new
+    cache to observe every prior full read would add false NOT_READ turns.  The
+    bypass is limited to an OS-sandboxed continuation attempt; first attempts
+    and the host runtime retain normal read-before-mutate behavior.
+    """
+
+    return (
+        str(os.environ.get("PAL_MINION_SANDBOXED") or "").strip() == "1"
+        and str(os.environ.get("PAL_MINION_CONTINUATION_RETRY") or "").strip()
+        == "1"
+    )
 
 
 def resolve_file_path(file_path: str | Path) -> Path:

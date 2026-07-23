@@ -481,7 +481,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
     def test_search_uses_a_sandbox_visible_path_without_root_selector(self) -> None:
         reference = self.root / "projected-reference"
         reference.mkdir()
-        (reference / "TASK.md").write_text("framepipe contract\n", encoding="utf-8")
+        (reference / "task.yaml").write_text("framepipe contract\n", encoding="utf-8")
         scoped = MinionScopedExecutionRuntime(
             ExecutionRuntime(),
             ["op_search"],
@@ -502,7 +502,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result.text)
         self.assertEqual(result.structured["path"], str(reference))
-        self.assertEqual(result.structured["matches"][0]["path"], "TASK.md")
+        self.assertEqual(result.structured["matches"][0]["path"], "task.yaml")
 
     def test_workspace_tool_replaces_inherited_descriptor_once(self) -> None:
         core = PalCore()
@@ -786,21 +786,25 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         prepared = service.prepare_requirements(
             {
                 "title": "Tiny router",
-                "goal": "Route requests deterministically.",
+                "task_spec": {"objective": "Route requests deterministically."},
                 # Workflow policy belongs to FamilyBindingArtifact even if a
                 # caller accidentally includes it in this request envelope.
                 "policies": {"verification": {"require_warning_clean": True}},
             }
         )
-        task_sources = self.store.read_json(prepared["requirements_ref"])
+        task_ledger = self.store.read_json(prepared["requirements_ref"])
         binding = self.store.read_json(
             MinionV2Catalog(self.root, self.store).publish_family_binding(
                 "software_engineering.v2_coder"
             )
         )
 
-        self.assertEqual(task_sources["title"], "Tiny router")
-        self.assertNotIn("policies", task_sources)
+        self.assertEqual(task_ledger["title"], "Tiny router")
+        self.assertEqual(
+            task_ledger["original"],
+            {"objective": "Route requests deterministically."},
+        )
+        self.assertNotIn("policies", task_ledger["original"])
         self.assertTrue(binding["policies"]["verification"]["require_warning_clean"])
 
     def test_software_architecture_and_verification_profiles_preserve_rigorous_methods(self) -> None:
@@ -811,11 +815,13 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         verifier = str(self._pack("software_engineering.v2_verifier").resolved_profile["behavior_fragment"])
         generic = str(self._pack("general.generic").resolved_profile["behavior_fragment"])
 
-        self.assertIn("Every file under reference:task is immutable and authoritative", architect)
+        self.assertIn("single reference:task/task.yaml ledger is immutable and authoritative", architect)
         self.assertIn("Before designing modules or writing the skeleton", architect)
         self.assertIn("perform one bounded consistency pass", architect)
+        self.assertIn("later revision overrides only the exact JSON Pointer paths", architect)
         self.assertIn("Mechanically verify examples", architect)
         self.assertIn("call ask_question and wait", architect)
+        self.assertIn("call task_revision_submit", architect)
         self.assertIn("feasibility", architect)
         self.assertIn("foundation, language/runtime bridge", architect)
         self.assertIn("one candidate-review cycle", architect)
@@ -842,10 +848,12 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertNotIn("Shared build/bootstrap or composition-root glue", architect)
         coder = str(self._pack("software_engineering.v2_coder").resolved_profile["behavior_fragment"])
         self.assertIn("contract declarations and adjacent contract comments come first", coder)
-        self.assertIn("outrank the original task sources", coder)
+        self.assertIn("outrank the task.yaml ledger", coder)
         self.assertIn("evidence, not authority", coder)
         self.assertIn("Report the upstream defect instead of choosing a new contract", coder)
         self.assertIn("Audit breadth-first in one pass", architecture_review)
+        self.assertIn("Read the single task.yaml ledger", architecture_review)
+        self.assertIn("embedded exact user question and answer", architecture_review)
         self.assertIn("investigate what its supplied path currently contains", architecture_review)
         self.assertIn("Manager provides no semantic verdict", architecture_review)
         self.assertIn("independently evaluate directional contracts", architecture_review)
@@ -1064,7 +1072,9 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         prepared = service.prepare_requirements(
             {
                 "title": "Weekly nutrition check-in",
-                "goal": "Produce a non-medical structured check-in.",
+                "task_spec": {
+                    "objective": "Produce a non-medical structured check-in."
+                },
             }
         )
         service.start_workflow(
