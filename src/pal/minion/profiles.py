@@ -413,8 +413,6 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "web_research": ("op_web_search", "op_web_read"),
     "code_intel": (
         "op_lsp_status",
-        "op_lsp_prepare_workspace",
-        "op_lsp_doctor",
         "op_lsp_hover",
         "op_lsp_definition",
         "op_lsp_implementation",

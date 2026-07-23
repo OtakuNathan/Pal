@@ -469,6 +469,10 @@ language_ids = ["foo"]
     async def test_prepared_project_context_controls_workspace_session_args(self) -> None:
         workspace = self.root / "prepared_cpp"
         workspace.mkdir()
+        (workspace / "module.cpp").write_text(
+            "int value() { return 1; }\n",
+            encoding="utf-8",
+        )
         context = self.root / "lsp-context"
         context.mkdir()
         compile_commands = context / "compile_commands.json"
@@ -494,6 +498,13 @@ language_ids = ["foo"]
             async def request(self, method: str, params: dict) -> dict:
                 _ = method, params
                 return {"value": []}
+
+            async def ensure_document_open(self, file_path: Path, *, language_id: str) -> dict:
+                _ = language_id
+                return {
+                    "uri": file_path.resolve().as_uri(),
+                    "file_sha256": "probe-file",
+                }
 
             async def close(self) -> None:
                 return None
@@ -530,6 +541,16 @@ language_ids = ["foo"]
             )
 
         self.assertEqual(prepared["status"], "ok")
+        self.assertEqual(
+            prepared["servers"][0]["probe"],
+            {
+                "status": "ok",
+                "operation": "document_symbols",
+                "file": str((workspace / "module.cpp").resolve()),
+                "recognized": True,
+                "result_count": 0,
+            },
+        )
         self.assertEqual(result["status"], "ok")
         self.assertEqual(observed_args, [(f"--compile-commands-dir={context}",)])
 
@@ -555,6 +576,17 @@ language_ids = ["foo"]
 
             async def initialize(self) -> None:
                 initialized.append(self.extra_args)
+
+            async def request(self, method: str, params: dict) -> dict:
+                _ = method, params
+                return {"value": []}
+
+            async def ensure_document_open(self, file_path: Path, *, language_id: str) -> dict:
+                _ = language_id
+                return {
+                    "uri": file_path.resolve().as_uri(),
+                    "file_sha256": "probe-file",
+                }
 
             async def close(self) -> None:
                 closed.append(self.extra_args)
@@ -608,6 +640,68 @@ language_ids = ["foo"]
         restored = restarted_manager._workspace_environment(workspace)
         self.assertEqual(restored["fingerprint"], changed["environment_fingerprint"])
         self.assertEqual(restored["primary_language"], "cpp")
+
+    async def test_workspace_preparation_requires_a_recognized_source_file(self) -> None:
+        workspace = self.root / "prepared_without_source"
+        workspace.mkdir()
+
+        class FakeConnector:
+            def __init__(
+                self,
+                config: LspServerConfig,
+                *,
+                workspace_root: Path,
+                extra_args: tuple[str, ...] = (),
+            ) -> None:
+                _ = config, extra_args
+                self.workspace_root = workspace_root
+                self.server_info = {}
+
+            async def initialize(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="clangd",
+                    command=(sys.executable,),
+                    extensions=(".cpp",),
+                    language_ids=("cpp",),
+                ),
+                source="test",
+                config_path=str(self.root / "clangd.toml"),
+            ),
+            config_path=self.root / "clangd.toml",
+        )
+        self.manager.states = {state.server_id: state}
+
+        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+            prepared = await self.manager.prepare_workspace(
+                {
+                    "workspace_root": str(workspace),
+                    "primary_language": "cpp",
+                }
+            )
+
+        self.assertEqual(prepared["status"], "unavailable")
+        self.assertEqual(
+            prepared["servers"],
+            [
+                {
+                    "server_id": "clangd",
+                    "status": "unavailable",
+                    "reason": "recognition_probe_failed:no_matching_source_file",
+                    "probe": {
+                        "status": "unavailable",
+                        "operation": "document_symbols",
+                        "reason": "no_matching_source_file",
+                    },
+                }
+            ],
+        )
 
     async def test_cpp_fallback_context_includes_existing_public_include_root(self) -> None:
         workspace = self.root / "prepared_cpp_include"

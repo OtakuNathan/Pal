@@ -356,17 +356,28 @@ class LspManager:
                         "workspace_root": str(workspace_root),
                     }
                 )
-                prewarm_results.append(
-                    {
-                        "server_id": server_id,
-                        "status": str(result.get("status") or "unavailable"),
-                        **(
-                            {"reason": str(result.get("reason") or "")}
-                            if str(result.get("reason") or "").strip()
-                            else {}
-                        ),
-                    }
-                )
+                server_result = {
+                    "server_id": server_id,
+                    "status": str(result.get("status") or "unavailable"),
+                    **(
+                        {"reason": str(result.get("reason") or "")}
+                        if str(result.get("reason") or "").strip()
+                        else {}
+                    ),
+                }
+                if server_result["status"] == "ok":
+                    probe = await self._probe_workspace_server(
+                        self.states[server_id],
+                        workspace_root,
+                    )
+                    server_result["probe"] = probe
+                    if probe.get("status") != "ok":
+                        server_result["status"] = "unavailable"
+                        server_result["reason"] = (
+                            "recognition_probe_failed:"
+                            + str(probe.get("reason") or "unknown")
+                        )
+                prewarm_results.append(server_result)
 
         ready_count = len(
             [result for result in prewarm_results if result.get("status") == "ok"]
@@ -390,6 +401,46 @@ class LspManager:
             "prepared_at": record["prepared_at"],
             "servers": prewarm_results,
             "unavailable": unavailable,
+        }
+
+    async def _probe_workspace_server(
+        self,
+        state: LspServerState,
+        workspace_root: Path,
+    ) -> dict[str, Any]:
+        probe_file = _workspace_probe_file(workspace_root, state)
+        if probe_file is None:
+            return {
+                "status": "unavailable",
+                "operation": "document_symbols",
+                "reason": "no_matching_source_file",
+            }
+        result = await self.run_lsp_operation(
+            "document_symbols",
+            {
+                "server_id": state.server_id,
+                "workspace_root": str(workspace_root),
+                "file": str(probe_file),
+            },
+        )
+        if str(result.get("status") or "") != "ok":
+            return {
+                "status": "unavailable",
+                "operation": "document_symbols",
+                "file": str(probe_file),
+                "reason": str(
+                    result.get("reason")
+                    or result.get("error")
+                    or "operation_unavailable"
+                ),
+            }
+        symbols = result.get("result")
+        return {
+            "status": "ok",
+            "operation": "document_symbols",
+            "file": str(probe_file),
+            "recognized": True,
+            "result_count": len(symbols) if isinstance(symbols, list) else None,
         }
 
     async def run_lsp_operation(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -962,6 +1013,35 @@ def _workspace_environment_path(runtime_root: Path, workspace_root: Path) -> Pat
         str(Path(workspace_root).expanduser().resolve()).encode("utf-8")
     ).hexdigest()
     return lsp_runtime_dir(runtime_root) / "workspaces" / f"{key}.json"
+
+
+def _workspace_probe_file(
+    workspace_root: Path,
+    state: LspServerState,
+    *,
+    scan_limit: int = 5000,
+) -> Path | None:
+    extensions = {
+        str(extension).lower()
+        for extension in state.file_config.config.extensions
+        if str(extension).strip()
+    }
+    if not extensions:
+        return None
+    scanned = 0
+    ignored = {".git", ".hg", ".svn", ".venv", "node_modules", "build", "dist", "__pycache__"}
+    for directory, directory_names, file_names in os.walk(workspace_root):
+        directory_names[:] = sorted(
+            name for name in directory_names if name not in ignored
+        )
+        for file_name in sorted(file_names):
+            scanned += 1
+            candidate = Path(directory) / file_name
+            if candidate.suffix.lower() in extensions:
+                return candidate.resolve()
+            if scanned >= scan_limit:
+                return None
+    return None
 
 
 def _write_workspace_environment(

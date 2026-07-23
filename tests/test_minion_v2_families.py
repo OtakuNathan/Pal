@@ -643,8 +643,14 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("op_lsp_definition", coder.allowed_capabilities)
         self.assertIn("op_lsp_references", coder.allowed_capabilities)
         self.assertIn("op_lsp_diagnostics", coder.allowed_capabilities)
+        self.assertNotIn("op_lsp_prepare_workspace", coder.allowed_capabilities)
+        self.assertNotIn("op_lsp_doctor", coder.allowed_capabilities)
         self.assertNotIn("op_git", coder.allowed_capabilities)
         overrides = dict(coder.resolved_profile["capability_guidance_overrides"])
+        self.assertIn(
+            "Manager-prepared and recognition-probed",
+            overrides["op_lsp_status"]["use_when"],
+        )
         self.assertIn("After reading relevant source", overrides["op_lsp_definition"]["use_when"])
         self.assertIn("do not prove runtime behavior", overrides["op_lsp_diagnostics"]["use_when"])
         self.assertNotIn("op_git", overrides)
