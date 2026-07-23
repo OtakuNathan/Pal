@@ -190,7 +190,7 @@ The bwrap projection, not command parsing, limits readable and writable paths.
 
 Pal separates OS authority from workflow correctness:
 
-- The workspace is read-only by default. Coder receives only declared product implementation scopes writable; Module Verifier receives only its Manager-derived `tests/<module_name>/` corpus writable.
+- The workspace is read-only by default. Coder receives declared product implementation scopes plus `tests/<module_name>/developer` writable; Module Verifier receives only `tests/<module_name>/verification` writable. Each role reads the other durable corpus without modifying it.
 - Immutable inputs, verifier overlays, and Git metadata remain read-only.
 - Shell and structured file tools see the same sandbox paths; there is no command-name trap or second path namespace.
 - Submit handlers validate the final changed-path set, candidate ownership, and required evidence before a state transition.

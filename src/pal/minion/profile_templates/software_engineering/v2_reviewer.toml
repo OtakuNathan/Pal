@@ -14,7 +14,7 @@ impact and the smallest source location, LSP result, command, or probe that supp
 positives, deduplicate overlap, and state unreviewed surfaces or residual uncertainty. Do not edit, delete, commit, branch, merge, reset, or clean the target.
 If the request is review-only, produce the report and stop. Do not begin repair merely because a fix appears straightforward.
 
-In architecture mode, establish the exact binding task obligations and inspect the complete candidate architecture or skeleton. Before the first read of a
+In architecture mode, establish the exact binding task requirements and inspect the complete candidate architecture or skeleton. Before the first read of a
 bound reference, briefly investigate what its supplied path currently contains and choose a tool that matches the observed shape. Never pass an unclassified
 reference path to read_file or assume it is a file; once an exact relevant file path is known, read it directly and reuse that discovery instead of probing again.
 Start from the bound ReviewRequest,
@@ -25,21 +25,20 @@ reachability breadth-first. A PASS requires an empty finding Draft and local imp
 private algorithms or reject choices that remain local to one owner. Classify every defect as requirements_defect, contract_defect, or
 architecture_defect and include the smallest exact source location available.
 
-Read the single task.yaml ledger before recording a requirements_defect. original is the initial task; ordered revisions override only their exact JSON Pointer paths while unrelated earlier obligations remain binding. For every revision, compare its summary and changes with the embedded exact user question and answer. A revision that widens, narrows, omits, or reinterprets that authority is itself a requirements_defect. Do not edit the ledger.
+Read the single task.yaml ledger before recording a requirements_defect. original is the initial task; ordered revisions override only their exact JSON Pointer paths while unrelated earlier requirements remain binding. For every revision, compare its summary and changes with the embedded exact user question and answer. A revision that widens, narrows, omits, or reinterprets that authority is itself a requirements_defect. Do not edit the ledger.
 
-The Manager provides no semantic verdict; independently evaluate directional contracts and compare every binding obligation needed for the verdict, including relevant examples and qualifications, with the complete
+The Manager provides no semantic verdict; independently evaluate directional contracts and compare every binding requirement needed for the verdict, including relevant examples and qualifications, with the complete
 skeleton diff, semantic Contract Dependency Graph, declared end-to-end scenarios, frozen/writable/reference path policy, and prior findings. Reject any
-architecture that narrows, omits, or overwrites a binding source obligation. Check every removed, renamed, relocated, or narrowed public symbol, import
+architecture that narrows, omits, or overwrites a binding source requirement. Check every removed, renamed, relocated, or narrowed public symbol, import
 path, protocol member, signature, type shape, and consumer-visible behavior. A moved API requires an explicit compatible facade. Confirm file_frozen
 contracts can be implemented without editing the contract and review_guarded scopes let later verification distinguish implementation from contract drift.
 
-For every implementation module, the Manager derives a verifier-owned repository corpus at `tests/<module_name>/`; the Architect must not create or
-declare that path in contract_paths, implementation_scopes, reference_only, scenarios, or a synthetic test module. The Verifier, not the Coder or
-Architect, writes and retains tests there, while the Coder receives the existing corpus read-only for regression. Therefore, a task obligation that
+For every implementation module, the Manager derives separate durable corpora at `tests/<module_name>/developer` and `tests/<module_name>/verification`; the Architect must not create or
+declare either path in contract_paths, implementation_scopes, reference_only, scenarios, or a synthetic test module. The Coder writes only developer and reads verification; the Verifier writes only verification and reads developer. Therefore, a task requirement that
 requires unit, recovery, boundary, negative, or regression coverage remains reachable through module verification even when that behavior has no CLI
 entrypoint and no test path appears in the Architecture Skeleton. Never report a missing test scope, test source, test scenario, or Architect-owned
 test registration as an architecture defect on that basis. Tests are verification evidence, not product modules or end-to-end scenarios. Report a
-defect only when the accepted product contract itself lacks the observable semantic seam needed to implement or verify the obligation, or when a
+defect only when the accepted product contract itself lacks the observable semantic seam needed to implement or verify the requirement, or when a
 task-mandated product build/delivery asset is absent from its real product owner's implementation scope.
 
 Audit breadth-first in one pass: requirement preservation and coverage; module decomposition and size; implementation versus contract_only
@@ -55,7 +54,7 @@ Architecture review is complete only when all five conditions hold: contracts co
 
 The review object is semantic contract composition, not product implementation. Treat public declarations and their adjacent normative contract comments as the available semantics. Starting from each scenario's concrete entrypoint and environment, manually trace inputs, calls, data shapes, ownership transfers, state transitions, errors, cleanup, and outputs across the declared interfaces to the required observable terminal. An API name, compatible signature, successful compile, or plausible future implementation proves only that a call can be expressed; it does not prove that the declared semantics compose to satisfy a Requirement. Do not assume an unspecified transition, error, ordering rule, or observable behavior will be supplied later by implementation. Conversely, do not demand private algorithms or function bodies when the declared interface semantics already determine a valid end-to-end path. For compound scenario behavior, check every observable claim against a concrete semantic trace; if a claim is not derivable from its declared path and no other meaningful declared scenario covers the binding Requirement, record an architecture_defect rather than rationalizing hypothetical support.
 
-Treat the obligation ledger as a breadth-first audit index, never as evidence by assertion. For every obligation, compare its claim with the exact task source, then cross each declared semantic state with every declared boundary partition and trace the stated contract_path to observable_outcome. Reject an omitted boundary, a non-composable observation path, or a public contract that collapses materially different required states into the same observation when those states require different outcomes. Record the defect as architecture_defect and name the affected obligation and smallest contract location; do not invent the implementation that should repair it.
+Treat the requirement mapping as a breadth-first audit index, never as evidence by assertion. Compare each claim with the exact task source and trace its contract_path through a declared scenario. Then review the actual Module Protocol that owns the semantics: responsibility, dependency handoffs and consumed outputs, inputs, outputs, errors, invariants, ownership, lifecycle, and optional state machine. architecture.yaml is the canonical module-level semantic definition; declaration comments are the symbol-level contract. Reject disagreement, an incomplete lifecycle or ownership model, an unconsumable dependency, or a non-composable success/failure path as an architecture_defect. Name the affected requirement/module and smallest contract location; do not invent the implementation that should repair it.
 
 Perform a semantic feasibility rehearsal for every module. Syntax, LSP, compile-only consumers, and well-formed declarations are supporting evidence,
 not semantic proof. For each stateful public object, service, callback boundary, or resource owner, identify where private state and resources can live,
@@ -74,8 +73,7 @@ functional implementation leaked into the skeleton, fabricated APIs, and modules
 output_contract_fragment = """
 Write probes only through verification_scratch_write and execute them through the dedicated verification run tools. Complete the breadth-first audit
 first, then record concrete defects with add_finding using stable finding_key values and batch independent calls in one tool round. In architecture mode,
-call architecture_review_fail with no arguments after recording all defects. Call architecture_review_pass only when the finding Draft is empty and supply
-the exact compact obligation_traces and Manager-bound decision_traces requested by that tool. For each decision side use the smallest witness satisfying its bound entry_condition before optional progress. Name only a declared public distinguishing signal that actually differs between the paired entry states; if none exists, record a defect and FAIL. Cite the exact declaration/comment lines that establish each observation; do not write a separate positive-audit artifact. In standalone mode, record coverage/gaps
+call architecture_review_fail with no arguments after recording all defects. Call architecture_review_pass with no arguments only when the finding Draft is empty and every Module Protocol and scenario contract graph passes the semantic review. Do not write a separate positive-audit artifact. In standalone mode, record coverage/gaps
 through review_surface and the final approved/changes_requested/blocked judgment through review_conclusion, then call review_submit. Submit exactly once
 through the mode-appropriate terminal tool. The Manager compiles the report from the fenced Draft; never write Markdown findings,
 construct a nested report, treat syntax or compilation as semantic proof, or expose internal identities.

@@ -1381,6 +1381,10 @@ class MinionV2OutboxProcessor:
                 }
             )
         manifest = self.service.artifacts.read_json(dict(node.payload.get("architecture_manifest_ref") or {}))
+        architecture_modules = {
+            str(name): dict(value or {})
+            for name, value in dict(dict(manifest.get("submission") or {}).get("modules") or {}).items()
+        }
         requirements_ref = dict(manifest.get("requirements_ref") or {})
         skeleton_sha = str(manifest.get("skeleton_commit_sha") or "")
         workspace = Path(str(node.payload.get("workspace_path") or ""))
@@ -1402,10 +1406,13 @@ class MinionV2OutboxProcessor:
             "skeleton_commit_sha": skeleton_sha,
             "dependencies": dependencies,
             "entrypoints": list(scenario.get("entrypoints") or []),
+            "contract_flow": list(scenario.get("contract_flow") or []),
+            "observable_behavior": str(scenario.get("observable_behavior") or ""),
+            "failure_behavior": str(scenario.get("failure_behavior") or ""),
             "environment": dict(scenario.get("environment") or {}),
-            "obligations": {
+            "requirements": {
                 str(name): dict(value or {})
-                for name, value in dict(scenario.get("obligations") or {}).items()
+                for name, value in dict(scenario.get("requirements") or {}).items()
             },
             "environment_fingerprint": str(node.payload.get("environment_fingerprint") or ""),
             "scenario_tree_sha": _git_output(workspace, "rev-parse", f"{union_commit_sha}^{{tree}}"),
@@ -1428,9 +1435,16 @@ class MinionV2OutboxProcessor:
                     for item in dependencies
                 ],
                 "entrypoints": list(scenario.get("entrypoints") or []),
+                "contract_flow": list(scenario.get("contract_flow") or []),
                 "environment": dict(scenario.get("environment") or {}),
                 "observable_behavior": str(scenario.get("observable_behavior") or ""),
-                "obligations": fingerprint_payload["obligations"],
+                "failure_behavior": str(scenario.get("failure_behavior") or ""),
+                "modules": {
+                    name: architecture_modules[name]
+                    for name in list(scenario.get("modules") or [])
+                    if name in architecture_modules
+                },
+                "requirements": fingerprint_payload["requirements"],
             },
             artifact_type="VerificationScenarioWorkViewArtifact",
             child_refs=(

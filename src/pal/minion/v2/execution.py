@@ -35,6 +35,7 @@ from pal.minion.v2.skeleton import (
     ARCHITECTURE_SKELETON_ARTIFACT,
     SKELETON_MODULE_CONTRACT_ARTIFACT,
     compiled_module_write_scopes,
+    module_developer_test_path,
     module_verification_corpus_path,
 )
 from pal.minion.v2.verification import candidate_reuse_fingerprint, repair_bill_semantic_view
@@ -416,32 +417,32 @@ class ExecutionCompiler:
             raise ValueError("ArchitectureSkeletonArtifact has no implementation modules")
         if initial_repair_bill_ref and len(implementation_modules) != 1:
             raise ValueError("an initial RepairBill requires a bounded single-module skeleton")
-        contract_dependencies = {
-            name: [str(item) for item in list(module.get("contract_dependencies") or [])]
+        module_dependencies = {
+            name: [str(item) for item in dict(module.get("dependencies") or {})]
             for name, module in modules.items()
         }
-        _topological_module_order(contract_dependencies)
+        _topological_module_order(module_dependencies)
         scenarios = {
             str(name): dict(value or {})
             for name, value in dict(submission.get("scenarios") or {}).items()
         }
         if not scenarios:
             raise ValueError("ArchitectureSkeletonArtifact has no end-to-end verification scenarios")
-        obligations = {
+        requirements = {
             str(name): dict(value or {})
-            for name, value in dict(submission.get("obligations") or {}).items()
+            for name, value in dict(submission.get("requirements") or {}).items()
         }
-        if not obligations:
-            raise ValueError("ArchitectureSkeletonArtifact has no requirement obligations")
+        if not requirements:
+            raise ValueError("ArchitectureSkeletonArtifact has no requirement mappings")
         topology_ref = self.architecture.artifacts.put_json(
             {
-                "contract_dependencies": contract_dependencies,
+                "module_dependencies": module_dependencies,
                 "verification_scenarios": {
                     name: list(scenario.get("modules") or [])
                     for name, scenario in scenarios.items()
                 },
-                "scenario_obligations": {
-                    name: list(scenario.get("obligations") or [])
+                "scenario_requirements": {
+                    name: list(scenario.get("requirement_refs") or [])
                     for name, scenario in scenarios.items()
                 },
             },
@@ -452,39 +453,44 @@ class ExecutionCompiler:
         contract_file_hashes = dict(artifact.get("contract_file_hashes") or {})
         for name, module in modules.items():
             paths = dict(module.get("paths") or {})
-            module_obligation_names = {
-                obligation_name
-                for scenario in scenarios.values()
+            module_scenarios = {
+                scenario_name: scenario
+                for scenario_name, scenario in scenarios.items()
                 if name in set(str(item) for item in list(scenario.get("modules") or []))
-                for obligation_name in list(scenario.get("obligations") or [])
             }
-            module_obligation_names.update(
-                obligation_name
-                for obligation_name, obligation in obligations.items()
-                if str(obligation.get("owner") or "") == name
+            module_requirement_names = {
+                requirement_name
+                for scenario in module_scenarios.values()
+                for requirement_name in list(scenario.get("requirement_refs") or [])
+            }
+            module_requirement_names.update(
+                requirement_name
+                for requirement_name, requirement in requirements.items()
+                if str(requirement.get("owner") or "") == name
             )
+            semantic_module = {key: value for key, value in module.items() if key != "paths"}
             module_refs[name] = self.architecture.artifacts.put_json(
                 {
                     "module_name": name,
-                    "module_kind": str(module.get("module_kind") or ""),
-                    "contract_dependencies": contract_dependencies[name],
+                    "module": semantic_module,
                     "paths": paths,
                     "contract_file_hashes": {
                         path: str(contract_file_hashes.get(path) or "")
                         for path in list(paths.get("contract_paths") or [])
                     },
-                    "obligations": {
-                        obligation_name: obligations[obligation_name]
-                        for obligation_name in sorted(module_obligation_names)
+                    "requirements": {
+                        requirement_name: requirements[requirement_name]
+                        for requirement_name in sorted(module_requirement_names)
                     },
+                    "scenarios": module_scenarios,
                 },
                 artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
             )
         scenario_refs: dict[str, ArtifactRef] = {}
         for name, scenario in scenarios.items():
-            scenario_obligation_names = [
-                str(item) for item in list(scenario.get("obligations") or [])
+            scenario_requirement_names = [
+                str(item) for item in list(scenario.get("requirement_refs") or [])
             ]
             scenario_refs[name] = self.architecture.artifacts.put_json(
                 {
@@ -492,11 +498,13 @@ class ExecutionCompiler:
                     "kind": "end_to_end",
                     "modules": [str(item) for item in list(scenario.get("modules") or [])],
                     "entrypoints": [str(scenario.get("entrypoint") or "")],
+                    "contract_flow": list(scenario.get("contract_flow") or []),
                     "observable_behavior": str(scenario.get("observable_behavior") or ""),
+                    "failure_behavior": str(scenario.get("failure_behavior") or ""),
                     "environment": {"description": str(scenario.get("environment") or "")},
-                    "obligations": {
-                        obligation_name: obligations[obligation_name]
-                        for obligation_name in scenario_obligation_names
+                    "requirements": {
+                        requirement_name: requirements[requirement_name]
+                        for requirement_name in scenario_requirement_names
                     },
                 },
                 artifact_type="VerificationScenarioContractArtifact",
@@ -580,7 +588,7 @@ class ExecutionCompiler:
                         "dependency_node_ids": [],
                         "contract_dependency_node_ids": [
                             unit_node_ids[item]
-                            for item in contract_dependencies[name]
+                            for item in module_dependencies[name]
                             if item in unit_node_ids
                         ],
                         "accepted_dependency_node_ids": [],
@@ -591,6 +599,10 @@ class ExecutionCompiler:
                             "contract_mode": str(paths.get("contract_mode") or "review_guarded"),
                             "contract_paths": list(paths.get("contract_paths") or []),
                             "implementation_scopes": list(paths.get("implementation_scopes") or []),
+                            "developer_tests": {
+                                "kind": "directory",
+                                "path": module_developer_test_path(name),
+                            },
                             "verification_corpus": {
                                 "kind": "directory",
                                 "path": module_verification_corpus_path(name),
@@ -633,6 +645,7 @@ class ExecutionCompiler:
                             "contract_mode": "review_guarded",
                             "contract_paths": [],
                             "implementation_scopes": [],
+                            "developer_tests": None,
                             "verification_corpus": None,
                             "reference_only": [],
                         },
@@ -867,7 +880,10 @@ def _reuse_accepted_skeleton_candidates(
         for name, node in target_nodes.items()
     }
     dependencies = {
-        name: [str(item) for item in list(contract.get("contract_dependencies") or [])]
+        name: [
+            str(item)
+            for item in dict(dict(contract.get("module") or {}).get("dependencies") or {})
+        ]
         for name, (_ref, contract) in target_contracts.items()
     }
     if set(dependencies) != set(target_nodes):
@@ -1434,11 +1450,55 @@ class UnitWorkViewBuilder:
         contract_ref = dict(node.payload.get("unit_contract_ref") or {})
         contract = dict(self.architecture.artifacts.read_json(contract_ref))
         requirements_ref = dict(artifact.get("requirements_ref") or {})
-        path_policy = dict(node.payload.get("path_policy") or contract.get("paths") or {})
-        semantic_dependency_outputs: dict[str, Any] = {}
-        dependency_names = {
-            str(item) for item in list(contract.get("contract_dependencies") or [])
+        submission = dict(artifact.get("submission") or {})
+        all_modules = {
+            str(name): dict(value or {})
+            for name, value in dict(submission.get("modules") or {}).items()
         }
+        if str(node.payload.get("node_kind") or "") == "verification":
+            payload = {
+                "schema_version": "2",
+                "verification_name": str(contract.get("verification_name") or ""),
+                "scenario": {
+                    "modules": list(contract.get("modules") or []),
+                    "entrypoints": list(contract.get("entrypoints") or []),
+                    "contract_flow": list(contract.get("contract_flow") or []),
+                    "observable_behavior": str(contract.get("observable_behavior") or ""),
+                    "failure_behavior": str(contract.get("failure_behavior") or ""),
+                    "environment": dict(contract.get("environment") or {}),
+                },
+                "modules": {
+                    name: value
+                    for name, value in all_modules.items()
+                    if name in set(str(item) for item in list(contract.get("modules") or []))
+                },
+                "requirements": {
+                    str(name): dict(value or {})
+                    for name, value in dict(contract.get("requirements") or {}).items()
+                },
+                "dependency_outputs": dict(dependency_outputs),
+                "node_run_journal": dict(
+                    (self.architecture.repository.read_node_journal(node.aggregate_id) or {}).get("journal") or {}
+                ),
+            }
+            return self.architecture.artifacts.put_json(
+                payload,
+                artifact_type="ScenarioWorkViewArtifact",
+                child_refs=(
+                    (str(manifest_ref["sha256"]), "architecture_skeleton"),
+                    (str(contract_ref["sha256"]), "scenario_contract"),
+                    (str(requirements_ref["sha256"]), "requirements"),
+                ),
+            )
+        path_policy = dict(node.payload.get("path_policy") or contract.get("paths") or {})
+        module_name = str(contract.get("module_name") or node.payload.get("module_name") or "")
+        semantic_module = dict(contract.get("module") or {})
+        semantic_dependency_outputs: dict[str, Any] = {}
+        dependency_edges = {
+            str(name): dict(value or {})
+            for name, value in dict(semantic_module.get("dependencies") or {}).items()
+        }
+        dependency_names = set(dependency_edges)
         for dependency_id in list(node.payload.get("contract_dependency_node_ids") or []):
             dependency = self.architecture.repository.read_snapshot(
                 AggregateType.DAG_NODE_RUN, str(dependency_id)
@@ -1460,6 +1520,9 @@ class UnitWorkViewBuilder:
                 "contract_paths": list(
                     dict(dependency_contract.get("paths") or {}).get("contract_paths") or []
                 ),
+                "declared_contract_outputs": dict(
+                    dict(dict(dependency_contract.get("module") or {}).get("contract") or {}).get("outputs") or {}
+                ),
                 "declared_outputs": sorted(
                     str(key) for key in dict(dependency.payload.get("output_hashes") or {})
                 ),
@@ -1471,18 +1534,38 @@ class UnitWorkViewBuilder:
             if isinstance(item, Mapping) and item.get("sha256")
         ]
         payload = {
-            "schema_version": "1",
-            "module_name": str(contract.get("module_name") or node.payload.get("module_name") or ""),
-            "module_kind": str(contract.get("module_kind") or ""),
+            "schema_version": "2",
+            "module_name": module_name,
+            "module": semantic_module,
             "contract_mode": str(path_policy.get("contract_mode") or "review_guarded"),
             "contract_paths": list(path_policy.get("contract_paths") or []),
             "implementation_scopes": list(path_policy.get("implementation_scopes") or []),
+            "developer_tests": dict(path_policy.get("developer_tests") or {}),
             "verification_corpus": dict(path_policy.get("verification_corpus") or {}),
             "reference_only": list(path_policy.get("reference_only") or []),
-            "contract_dependencies": list(contract.get("contract_dependencies") or []),
-            "obligations": {
+            "dependencies": {
+                name: {
+                    "edge": edge,
+                    "module": {
+                        key: value
+                        for key, value in dict(all_modules.get(name) or {}).items()
+                        if key != "paths"
+                    },
+                }
+                for name, edge in dependency_edges.items()
+            },
+            "consumers": {
+                name: dict(dict(value.get("dependencies") or {}).get(module_name) or {})
+                for name, value in all_modules.items()
+                if module_name in dict(value.get("dependencies") or {})
+            },
+            "requirements": {
                 str(name): dict(value or {})
-                for name, value in dict(contract.get("obligations") or {}).items()
+                for name, value in dict(contract.get("requirements") or {}).items()
+            },
+            "scenarios": {
+                str(name): dict(value or {})
+                for name, value in dict(contract.get("scenarios") or {}).items()
             },
             "dependency_outputs": semantic_dependency_outputs,
             "historical_repair_bills": [

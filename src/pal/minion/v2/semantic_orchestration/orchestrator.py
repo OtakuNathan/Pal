@@ -94,6 +94,7 @@ from pal.minion.v2.skeleton import (
     architecture_revision_path_states,
     architecture_revision_scope,
     compile_skeleton_markdown,
+    module_developer_test_path,
     module_verification_corpus_path,
     review_architecture_skeleton,
 )
@@ -110,7 +111,6 @@ from pal.minion.v2.skeleton_builder import (
 from pal.minion.v2.swe_verification import (
     SWE_VERIFICATION_CAPABILITIES,
     compile_swe_verification_tool_contract,
-    validate_bound_obligation_coverage,
 )
 from pal.minion.v2.integration import (
     CandidateUnionConflict,
@@ -2063,7 +2063,7 @@ class SemanticOrchestrator:
             instruction = (
                 "Repair only the bound RepairBill against the accepted code skeleton; run its preinstalled read-only corpus reproducer first and change only the module's compiled product write paths. Keep file_frozen contracts unchanged and preserve accepted semantics in review_guarded contracts."
                 if repair
-                else "Implement the bound ModuleWorkView from the accepted code skeleton. Keep file_frozen contracts unchanged, preserve accepted semantics in review_guarded contracts, treat the repository module corpus as read-only, and change only the module's compiled product write paths."
+                else "Implement the bound ModuleWorkView from the accepted code skeleton. Satisfy the complete module protocol and its relevant scenario/requirement mappings. Keep file_frozen contracts unchanged, preserve accepted semantics in review_guarded contracts, write your own durable TDD/regression cases only under tests/<module_name>/developer, treat tests/<module_name>/verification as read-only Verifier evidence, and change only the compiled scopes. Do not over-abstract: once the protocol and local evidence are sufficient, implement and run focused checks instead of repeatedly re-investigating settled contracts."
             )
         path_policy = dict(node.payload.get("path_policy") or {})
         terminal, prompt_ref, terminal_ref = await self._run_profile(
@@ -2503,9 +2503,9 @@ class SemanticOrchestrator:
                 RoleMode.SCENARIO if scenario_mode else RoleMode.MODULE,
             ),
             instruction=(
-                "Generate and run adversarial verification for the bound real usage scenario. Consult the immutable task.yaml ledger when the accepted scenario contracts are insufficient, preserve its exact qualifications and examples, and prove only the obligations exercised by this exact module combination, entrypoint, and environment. Write executable probes only in the bound scenario review scratch, then submit one semantic outcome."
+                "Generate and run adversarial verification for the bound real usage scenario. Consult the immutable task.yaml ledger when the accepted scenario contracts are insufficient, preserve its exact qualifications and examples, and prove only the requirements exercised by this exact module combination, contract flow, entrypoint, and environment. Write executable probes only in the bound scenario review scratch, then submit one semantic outcome."
                 if scenario_mode
-                else "Generate and run adversarial verification for the bound candidate. Read the Manager-bound Candidate diff and any Contract/Repair diff before judging the code. Treat the module source contracts and comments as primary truth, then consult the immutable task.yaml ledger only as upstream provenance for intent and scope. For review_guarded contracts, compare the Accepted Skeleton shape with the Candidate and reject semantic contract drift. Inspect and rerun the existing repository corpus first; add or strengthen only missing adversarial coverage under the bound tests/<module_name>/ corpus, then submit one semantic outcome."
+                else "Generate and run adversarial verification for the bound candidate. Read the Manager-bound Candidate diff and any Contract/Repair diff before judging the code. Treat the module source contracts and comments as primary truth, then consult the immutable task.yaml ledger only as upstream provenance for intent and scope. For review_guarded contracts, compare the Accepted Skeleton shape with the Candidate and reject semantic contract drift. Read and run both durable corpora first; tests/<module_name>/developer is read-only Coder evidence, while you add or strengthen only missing adversarial coverage under tests/<module_name>/verification. Reuse existing cases for regression and do not regenerate equivalent probes, then submit one semantic outcome."
             ),
             reference_refs=verifier_references,
             workspace_override={
@@ -2607,15 +2607,6 @@ class SemanticOrchestrator:
             errors.append(f"{outcome.upper()} requires an empty finding list")
         if outcome == "unknown" and not reason:
             errors.append("UNKNOWN requires an environmental reason")
-        if outcome == "pass":
-            try:
-                validate_bound_obligation_coverage(
-                    dict(work_view.get("obligations") or {}),
-                    submission.get("obligation_coverage") or [],
-                    required=True,
-                )
-            except ValueError as exc:
-                errors.append(str(exc))
         scratch_only = scenario_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
         changed_paths = (
             _verification_scratch_paths(review_scratch)
@@ -5136,10 +5127,10 @@ class SemanticOrchestrator:
                 "Review the candidate code skeleton against the exact same effective task.yaml ledger received by the Architect. "
                     "Read task.yaml as one ordered ledger before recording a requirements_defect: later revisions override only their exact JSON Pointer paths, and every unrelated original obligation remains binding. For each revision, compare its semantic changes with the embedded exact user question and answer; reject any widening, narrowing, or reinterpretation as a requirements_defect. "
                     "Inspect the module DAG, complete skeleton diff, declarations and comments, ownership, lifecycle, state, invariants, dependencies, and end-to-end contract. "
-                    "For each implementation module, the Manager derives a verifier-owned tests/<module_name>/ corpus after architecture acceptance; the Architect is forbidden to declare test paths or synthetic test modules, and tests are verification evidence rather than product scenarios. Do not report missing test scopes, test sources, test scenarios, or Architect-owned test registration merely because they are absent from contract_paths or implementation_scopes. A coverage obligation remains reachable through the Verifier even when it has no CLI entrypoint. Reject only a missing product semantic seam or a missing task-mandated product build/delivery asset owned by a real product module. "
+                    "For each implementation module, the Manager derives separate tests/<module_name>/developer and tests/<module_name>/verification corpora after architecture acceptance; the Architect is forbidden to declare test paths or synthetic test modules, and tests are verification evidence rather than product scenarios. Do not report missing test scopes, test sources, test scenarios, or Architect-owned test registration merely because they are absent from contract_paths or implementation_scopes. A requirement remains reachable through the Verifier even when it has no CLI entrypoint. Reject only a missing product semantic seam or a missing task-mandated product build/delivery asset owned by a real product module. "
                     "Your completion conditions are: contracts compile and compose; key scenarios complete along the contract graph; every failure path has a legal terminal or recovery state; every binding Requirement maps to a contract and scenario; and no dependency is undeclared. "
-                    "Treat the architecture obligation ledger as an audit index, not as proof. For each obligation, verify that its claim faithfully preserves the exact task source, covers every boundary partition, and traces contract_path to observable_outcome. Review every Manager-bound pair of states that share a consumer decision_point but require different outcomes. On each side instantiate the smallest witness satisfying its bound entry_condition before optional progress, calculate only public values declared by the contract, and cite the exact declaration/comment lines that entail them. Reject when the paired entry states have no declared public signal whose value actually differs, when states at one consumer decision are split across artificial decision_point names, when a boundary partition is omitted, or when an obligation is merely asserted without a composable observation path. Record those as architecture_defect findings. "
-                    "Review semantic contract composition rather than implementation: from each concrete scenario entrypoint, trace declared interface inputs, calls, data/state transitions, errors, cleanup, and outputs to the required observable terminal. API presence, compatible signatures, compilation, or a plausible future implementation are not semantic proof; do not assume unspecified behavior, and do not require private algorithms or function bodies when the declared semantics already close the path. "
+                    "Treat the requirement mapping as an audit index, not as proof. Confirm each claim preserves the exact task source and its contract_path reaches a declared observable scenario outcome. For every module, review responsibility, dependency handoffs, inputs, outputs, errors, invariants, ownership, lifecycle, and optional state machine. Reject missing or contradictory semantics and disagreement between architecture.yaml and declaration comments as architecture defects. "
+                    "Review semantic contract composition rather than implementation: from each concrete scenario entrypoint, trace declared interface inputs, dependency handoffs, state transitions where declared, errors, cleanup, and outputs through contract_flow to both the required observable behavior and a legal failure endpoint. API presence, compatible signatures, compilation, or a plausible future implementation are not semantic proof; do not assume unspecified behavior, and do not require private algorithms or function bodies when the declared semantics already close the path. "
                     "Run only focused compile-only declaration or protocol-consumer probes. Compilation confirms contract/protocol consistency, never product behavior; do not require implementation bodies or a linked product executable. "
                     "Reject new placeholder implementations, stub function bodies, TODO pseudocode control flow, or product source added merely to make the Architecture Skeleton compile. "
                     "The Manager performs no semantic coverage or contract validation; independently review every hard Requirement and module in the bound scope. "
@@ -5167,10 +5158,6 @@ class SemanticOrchestrator:
                 {
                     **semantic.to_dict(),
                     "review_scope": dict(semantic_payload.get("review_scope") or {}),
-                    "obligation_traces": [
-                        dict(item or {})
-                        for item in list(semantic_payload.get("obligation_traces") or [])
-                    ],
                 },
                 artifact_type="ArchitectureReviewArtifact",
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
@@ -5860,22 +5847,22 @@ class SemanticOrchestrator:
             invocation_acceptance = [
                 "Before reading a bound reference, investigate what its supplied path currently contains and choose a matching tool; never pass an unclassified path to read_file or assume it is a file. Once an exact file is known, read it directly without repeating discovery.",
                 "Review the effective bound task.yaml ledger, skeleton diff, code contracts, semantic dependencies, and scenarios; audit every revision against its embedded exact user answer.",
-                "Treat the Manager-derived tests/<module_name>/ corpus as verifier-owned verification infrastructure: it is intentionally absent from Architect-declared paths and scenarios, so its absence is not a defect.",
+                "Treat the Manager-derived tests/<module_name>/developer and tests/<module_name>/verification corpora as implementation and verification infrastructure: they are intentionally absent from Architect-declared paths and scenarios, so their absence is not a defect.",
                 "Compile only focused declaration/protocol consumers to confirm contracts compose; compilation is not product behavior proof and must not require implementation bodies.",
                 "For every Requirement and observable scenario claim, trace the declared interface semantics from a concrete entrypoint through data/state/error transitions to a legal terminal; API availability or hypothetical implementation support is insufficient.",
-                "For every Manager-bound decision pair in a PASS trace, instantiate the smallest witness satisfying each bound entry_condition before optional progress, calculate the declared public signals, and cite the exact declaration/comment lines. If no public signal actually differs, record a defect and FAIL.",
+                "For every module, verify responsibility, dependency handoffs and consumed outputs, input/output/error/invariant contracts, ownership, lifecycle, optional state machine, and agreement between architecture.yaml and declaration comments.",
                 "PASS only when key scenarios traverse the contract graph, failure paths terminate legally, every Requirement maps, and no dependency is undeclared.",
                 "Inspect the complete Manager-bound scope, then call architecture_review_pass or submit every material defect once through architecture_review_fail.",
             ]
         elif activation.role == OrchestrationRole.VERIFIER:
             invocation_acceptance = [
-                "For module verification, read and extend only tests/<module_name>/; for scenario verification, write probes only in review scratch. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
+                "For module verification, read both durable corpora and extend only tests/<module_name>/verification; tests/<module_name>/developer is read-only. For scenario verification, write probes only in review scratch. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
                 "Call exactly one semantic verification outcome tool; do not construct a VerificationPlan or evidence JSON.",
             ]
         elif activation.role == OrchestrationRole.IMPLEMENTATION:
             if self._is_skeleton_manifest(snapshot.payload.get("architecture_manifest_ref")):
                 invocation_acceptance = [
-                    "Implement or repair only the bound module and run focused developer tests.",
+                    "Implement or repair only the bound module, write focused tests only in tests/<module_name>/developer, and keep tests/<module_name>/verification read-only.",
                     "Record checks with dedicated developer tools, then call candidate_submit with no arguments.",
                 ]
             else:
@@ -7336,13 +7323,11 @@ def _bind_architecture_yaml_draft(pack: MinionInvocationPack) -> MinionInvocatio
     guidance = (
         f" The complete topology Draft is preseeded at `{path}`. Read that file before changing topology. "
         "It is control-plane metadata, not product source. Its fixed YAML shape is: "
-        "`schema_version: 3`; `obligations` is a map from a stable snake_case requirement key to "
-        "`{claim, owner, states, boundaries, observable_outcome, contract_path}`; states is a dynamic map to `{entry_condition, decision_point, outcome, required_outcome}` and each boundary maps a semantic axis to its required partitions; "
-        "`modules` is a map from a stable snake_case name to "
-        "`{module_kind, contract_dependencies, paths: {contract_mode, contract_paths, implementation_scopes, reference_only}}`; "
-        "each implementation scope is `{kind: file|directory, path: relative/path}`; and `scenarios` is a map from a stable "
-        "snake_case name to `{modules, obligations, entrypoint, observable_behavior, environment}`. The maps may contain any number of entries. "
-        "Map every binding task Requirement to at least one obligation and every obligation to a consuming scenario. Declare each semantic state with entry_condition, decision_point, outcome, and required_outcome, plus explicit boundary partitions; states examined by the same consumer decision must share one decision_point. Do not write test cases or algorithms in this metadata. "
+        "`schema_version: 4`; `requirements` maps stable snake_case keys to `{claim, owner, contract_path}`; "
+        "`modules` maps stable names to a complete Module Protocol containing module_kind, behavior_kind, responsibility, dependencies, contract inputs/outputs/errors/invariants, ownership, lifecycle, optional state_machine, and paths; "
+        "each dependency names a provider and declares consumed output keys, purpose, and handoff; each implementation scope is `{kind: file|directory, path: relative/path}`. "
+        "`scenarios` maps stable names to `{modules, requirement_refs, entrypoint, contract_flow, observable_behavior, failure_behavior, environment}`. "
+        "Map every binding Requirement exactly enough to identify its owner and public contract path, and consume every mapping from at least one scenario. Do not write test cases or algorithms in this metadata. "
         "Edit this preseeded file with read_file plus edit_file/write_file. Do not recreate unchanged revision entries."
     )
     return MinionInvocationPack.from_dict(
@@ -7440,8 +7425,10 @@ def _skeleton_architect_instruction(
         "A scenario names the exact implementation modules, real entrypoint, observable behavior, and environment it verifies, but owns no product source. "
         "A universal all-module scenario is forbidden unless a real product entrypoint requires that exact combination."
         " Maintain the complete semantic graph in the Manager-preseeded architecture.yaml named in this invocation. "
-        "Before declaring modules, translate every binding Requirement into a named obligation with one semantic claim, exactly one module-or-scenario owner, a semantic state map, explicit boundary partitions, the required observable outcome, and the public contract path that makes that outcome decidable. Every state declares its exact earliest entry_condition, consumer decision_point, stable outcome key, and required_outcome. States examined at the same consumer decision must share decision_point across obligations so the Manager can derive every cross-outcome distinguishability pair. contract_path is an ordered semantic interface/signal chain such as module::API -> observation; it is not a filesystem allowlist and bare source filenames are insufficient. Distinguish zero-progress, partial-progress, complete, and terminal states whenever the Requirement assigns them different outcomes. This is semantic declaration, not test design or implementation. "
-        "The file has fixed schema_version, obligations, modules, and scenarios fields; all three collections are dynamic snake_case maps, and each scenario names the obligations it consumes. "
+        "Before declaring modules, map every binding Requirement to one semantic claim, exactly one module-or-scenario owner, and the ordered public contract path that makes it observable. This is a compact mapping index, not a substitute for module semantics. "
+        "Every module definition must close as a protocol: state one responsibility; declare behavior kind; name each provider dependency and the exact provider outputs consumed; define inputs, outputs, errors, and invariants; assign ownership; close creation, operation, shutdown, failure, and cleanup; and declare a reachable state machine only when stateful behavior needs one. Ensure declaration comments express the same symbol-level contract. "
+        "Every scenario must name its requirement mappings and implementation modules, then state its real entrypoint, ordered contract_flow, observable success behavior, legal failure behavior, and environment. "
+        "The file has fixed schema_version, requirements, modules, and scenarios fields; all three collections are dynamic snake_case maps. "
         "Use ordinary file tools to add, edit, or delete map entries, and call architecture_submit with no arguments only after the file and declaration skeleton agree."
     )
     if has_base_manifest:
@@ -7487,7 +7474,18 @@ def _skeleton_architecture_review_view(
     review_view["manager_derived_verification_policy"] = {
         "architect_declares_test_scopes": False,
         "tests_are_product_scenarios": False,
-        "corpora": {
+        "developer_corpora": {
+            str(name): {
+                "kind": "directory",
+                "path": module_developer_test_path(str(name)),
+                "owner": "coder",
+                "verifier_access": "read_only",
+            }
+            for name, raw_module in modules.items()
+            if str(dict(raw_module or {}).get("module_kind") or "")
+            == "implementation"
+        },
+        "verification_corpora": {
             str(name): {
                 "kind": "directory",
                 "path": module_verification_corpus_path(str(name)),

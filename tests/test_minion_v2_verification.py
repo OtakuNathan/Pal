@@ -52,7 +52,6 @@ from pal.minion.v2.swe_verification import (
     _changed_paths,
     compile_swe_verification_tool_contract,
     swe_verification_tool_result,
-    validate_bound_obligation_coverage,
 )
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.minion.v2.task_ledger import TaskLedgerService
@@ -151,9 +150,9 @@ class MinionV2VerificationTests(unittest.TestCase):
             check=True,
         )
         (root / "src").mkdir()
-        (root / "tests" / "router").mkdir(parents=True)
+        (root / "tests" / "router" / "verification").mkdir(parents=True)
         (root / "src" / "router.py").write_text("def route(value):\n    return value\n")
-        (root / "tests" / "router" / "test_router.py").write_text(
+        (root / "tests" / "router" / "verification" / "test_router.py").write_text(
             "def test_route():\n    assert True\n"
         )
         subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
@@ -166,51 +165,9 @@ class MinionV2VerificationTests(unittest.TestCase):
         ).stdout.strip()
         return root, digest
 
-    @staticmethod
-    def _bound_obligations() -> dict[str, object]:
-        return {
-            "deterministic_routing": {
-                "claim": "routing is deterministic at empty and populated boundaries",
-                "owner": "router",
-                "states": {
-                    "empty": {
-                        "entry_condition": "no routing rules are configured",
-                        "decision_point": "route_selection",
-                        "outcome": "no_route",
-                        "required_outcome": "return the deterministic empty result",
-                    },
-                    "rules_loaded": {
-                        "entry_condition": "at least one routing rule is configured",
-                        "decision_point": "route_selection",
-                        "outcome": "selected_route",
-                        "required_outcome": "return the deterministically selected route",
-                    },
-                },
-                "boundaries": {"matching_rules": ["zero", "one", "multiple"]},
-                "observable_outcome": "the public result is deterministic",
-                "contract_path": ["router input", "route selection", "router result"],
-            }
-        }
-
-    @classmethod
-    def _obligation_coverage(cls) -> list[dict[str, object]]:
-        return [
-            {
-                "obligation": "deterministic_routing",
-                "states": ["empty", "rules_loaded"],
-                "boundaries": [
-                    {
-                        "axis": "matching_rules",
-                        "partitions": ["zero", "one", "multiple"],
-                    }
-                ],
-                "evidence_summary": "The retained corpus covers empty, one-match, and tie resolution paths.",
-            }
-        ]
-
     def test_swe_verifier_uses_semantic_outcomes_and_manager_recorded_evidence(self) -> None:
         repo, _digest = self._git_repo("semantic-tool")
-        (repo / "tests" / "router" / "test_router.py").write_text(
+        (repo / "tests" / "router" / "verification" / "test_router.py").write_text(
             "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n"
         )
         workspace = self._bind_workspace(
@@ -219,33 +176,30 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "artifact_dir": str(self.runtime_root / "semantic-artifacts"),
                 "artifact_stage_dir": str(self.runtime_root / "semantic-stage"),
                 "write_path_scopes": [
-                    {"kind": "directory", "path": "tests/router"}
+                    {"kind": "directory", "path": "tests/router/verification"}
                 ],
                 "review_tool_evidence_refs": [
                     {
                         "kind": "test_write",
                         "tool_name": "op_file_edit",
                         "ok": True,
-                        "args": {"path": "tests/router/test_router.py"},
+                        "args": {"path": "tests/router/verification/test_router.py"},
                     },
                     {
                         "kind": "command",
                         "tool_name": "op_exec_shell",
                         "ok": True,
-                        "args": {"cmd": "python -m pytest tests/router/test_router.py"},
+                        "args": {"cmd": "python -m pytest tests/router/verification/test_router.py"},
                         "output_sha256": "ok",
                     },
                 ],
             },
             role="verifier",
         )
-        workspace["minion_v2"]["swe_verification_tool_contract"] = {
-            "obligations": self._bound_obligations(),
-        }
         result = swe_verification_tool_result(
             CanonicalToolCall(
                 name="op_minion_verification_pass",
-                args={"obligation_coverage": self._obligation_coverage()},
+                args={},
             ),
             workspace,
             [],
@@ -257,19 +211,19 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(submission["outcome"], "pass")
         self.assertEqual(
             submission["changed_test_paths"],
-            ["tests/router/test_router.py"],
+            ["tests/router/verification/test_router.py"],
         )
         self.assertEqual(submission["findings"], [])
-        self.assertEqual(
-            submission["obligation_coverage"],
-            self._obligation_coverage(),
-        )
+        self.assertNotIn("obligation_coverage", submission)
         self.assertNotIn("findings_markdown", submission)
 
         contract = compile_swe_verification_tool_contract(
             {
                 "module_name": "window_runtime",
-                "construction_dependencies": ["drawing_backend", "event_input"],
+                "dependencies": {
+                    "drawing_backend": {},
+                    "event_input": {},
+                },
             }
         )
         self.assertEqual(
@@ -293,26 +247,6 @@ class MinionV2VerificationTests(unittest.TestCase):
                 }
             ),
             ["review_scratch/unsafe_claim_probe.md"],
-        )
-
-    def test_verification_pass_requires_exact_obligation_partition_coverage(self) -> None:
-        incomplete = self._obligation_coverage()
-        incomplete[0]["boundaries"][0]["partitions"] = ["zero", "one"]
-
-        with self.assertRaisesRegex(ValueError, "must exactly cover: zero, one, multiple"):
-            validate_bound_obligation_coverage(
-                self._bound_obligations(),
-                incomplete,
-                required=True,
-            )
-
-        self.assertEqual(
-            validate_bound_obligation_coverage(
-                self._bound_obligations(),
-                self._obligation_coverage(),
-                required=True,
-            ),
-            self._obligation_coverage(),
         )
 
     def test_scenario_workspace_snapshot_never_treats_fingerprint_as_git_revision(self) -> None:
@@ -344,7 +278,7 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_workspace_snapshot_uses_explicit_git_base_not_semantic_identity(self) -> None:
         repo, candidate_commit_sha = self._git_repo("module-snapshot")
-        test_path = repo / "tests" / "router" / "test_router.py"
+        test_path = repo / "tests" / "router" / "verification" / "test_router.py"
         test_path.write_text(
             "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n",
             encoding="utf-8",
@@ -365,13 +299,13 @@ class MinionV2VerificationTests(unittest.TestCase):
         snapshot = self.store.read_json(ref)
         self.assertEqual(
             snapshot["changed_paths"],
-            ["tests/router/test_router.py"],
+            ["tests/router/verification/test_router.py"],
         )
         self.assertTrue(snapshot["workspace_patch_base64"])
 
     def test_semantic_repair_packet_installs_verifier_tests_before_repair(self) -> None:
         repo, candidate_digest = self._git_repo("repair-install")
-        test_path = repo / "tests" / "router" / "test_router.py"
+        test_path = repo / "tests" / "router" / "verification" / "test_router.py"
         test_path.write_text(
             "def test_route():\n    assert True\n\ndef test_empty_rejected():\n    assert False\n"
         )
@@ -428,7 +362,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "implementation_scopes": [{"kind": "directory", "path": "src"}],
                     "verification_corpus": {
                         "kind": "directory",
-                        "path": "tests/router",
+                        "path": "tests/router/verification",
                     },
                 },
             },
@@ -439,27 +373,27 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertIn("test_empty_rejected", test_path.read_text())
         self.assertEqual(
             installed["verifier_test_paths"],
-            ["tests/router/test_router.py"],
+            ["tests/router/verification/test_router.py"],
         )
         self.assertIn(
-            "tests/router/test_router.py",
+            "tests/router/verification/test_router.py",
             installed["manager_seeded_corpus_hashes"],
         )
 
     def test_semantic_verifier_changed_paths_preserve_both_sides_of_rename(self) -> None:
         repo, _candidate_digest = self._git_repo("renamed-verifier-test")
-        source = repo / "tests" / "router" / "test_router.py"
-        destination = repo / "tests" / "router" / "test_routes.py"
+        source = repo / "tests" / "router" / "verification" / "test_router.py"
+        destination = repo / "tests" / "router" / "verification" / "test_routes.py"
         source.rename(destination)
 
         self.assertEqual(
             _changed_paths({"repo_path": str(repo)}),
-            ["tests/router/test_router.py", "tests/router/test_routes.py"],
+            ["tests/router/verification/test_router.py", "tests/router/verification/test_routes.py"],
         )
 
     def test_semantic_verifier_submission_persists_original_candidate_for_snapshot(self) -> None:
         repo, candidate_digest = self._git_repo("semantic-pending")
-        (repo / "tests" / "router" / "test_router.py").write_text(
+        (repo / "tests" / "router" / "verification" / "test_router.py").write_text(
             "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n"
         )
         candidate_ref = self.store.put_json(
@@ -490,7 +424,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "path_policy": {
                     "verification_corpus": {
                         "kind": "directory",
-                        "path": "tests/router",
+                        "path": "tests/router/verification",
                     },
                 }
             },
@@ -502,8 +436,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         }
         submission = {
             "outcome": "pass",
-            "obligation_coverage": self._obligation_coverage(),
-            "changed_test_paths": ["tests/router/test_router.py"],
+            "changed_test_paths": ["tests/router/verification/test_router.py"],
             "tool_receipts": [
                 {"kind": "test_write", "ok": True, "structured": {}},
                 {"kind": "command", "ok": True, "structured": {}},
@@ -538,7 +471,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 review_workspace=repo,
                 review_scratch=self.runtime_root / "semantic-pending-scratch",
                 execution_adapter="software_git.v2",
-                work_view={"obligations": self._bound_obligations()},
+                work_view={"requirements": {}},
                 submission=submission,
                 terminal={},
                 prompt_ref=prompt_ref,
@@ -558,7 +491,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         role_workspace = self.runtime_root / "role-review"
         subprocess.run(["git", "clone", "-q", str(source), str(provisioned)], check=True)
         subprocess.run(["git", "clone", "-q", str(source), str(role_workspace)], check=True)
-        (role_workspace / "tests" / "router" / "test_router.py").write_text(
+        (role_workspace / "tests" / "router" / "verification" / "test_router.py").write_text(
             "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n"
         )
         review_scratch = self.runtime_root / "role-review-scratch"
@@ -583,7 +516,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(actual_scratch, review_scratch)
         self.assertEqual(
             _verification_workspace_changed_paths(actual_workspace, candidate_digest),
-            ["tests/router/test_router.py"],
+            ["tests/router/verification/test_router.py"],
         )
         self.assertEqual(
             _verification_workspace_changed_paths(provisioned, candidate_digest),
@@ -635,7 +568,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "implementation_scopes": [{"kind": "directory", "path": "src"}],
                     "verification_corpus": {
                         "kind": "directory",
-                        "path": "tests/router",
+                        "path": "tests/router/verification",
                     },
                 },
             },
@@ -663,7 +596,7 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_pass_promotes_verifier_test_delta_into_candidate(self) -> None:
         repo, candidate_digest = self._git_repo("pass-promotion")
-        test_path = repo / "tests" / "router" / "test_router.py"
+        test_path = repo / "tests" / "router" / "verification" / "test_router.py"
         test_path.write_text(
             "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n"
         )
@@ -684,7 +617,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             artifact_type="CandidateSnapshotArtifact",
         )
         test_delta_ref = self.store.put_json(
-            {"changed_paths": ["tests/router/test_router.py"]},
+            {"changed_paths": ["tests/router/verification/test_router.py"]},
             artifact_type="VerificationTestWorkspaceArtifact",
         )
         node = AggregateSnapshot(
@@ -706,10 +639,10 @@ class MinionV2VerificationTests(unittest.TestCase):
             candidate=candidate,
             candidate_digest=candidate_digest,
             test_delta_ref=test_delta_ref,
-            changed_test_paths=["tests/router/test_router.py"],
+            changed_test_paths=["tests/router/verification/test_router.py"],
         )
         self.assertNotEqual(promoted_digest, candidate_digest)
-        self.assertIn("tests/router/test_router.py", promoted["changed_paths"])
+        self.assertIn("tests/router/verification/test_router.py", promoted["changed_paths"])
         self.assertEqual(
             subprocess.run(
                 [
@@ -717,7 +650,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "-C",
                     str(repo),
                     "show",
-                    f"{promoted_digest}:tests/router/test_router.py",
+                    f"{promoted_digest}:tests/router/verification/test_router.py",
                 ],
                 stdout=subprocess.PIPE,
                 text=True,
@@ -752,7 +685,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             ["git", "clone", "-q", str(node_repo), str(review_repo)],
             check=True,
         )
-        test_path = review_repo / "tests" / "router" / "test_router.py"
+        test_path = review_repo / "tests" / "router" / "verification" / "test_router.py"
         test_path.write_text(
             "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n",
             encoding="utf-8",
@@ -774,7 +707,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             artifact_type="CandidateSnapshotArtifact",
         )
         test_delta_ref = self.store.put_json(
-            {"changed_paths": ["tests/router/test_router.py"]},
+            {"changed_paths": ["tests/router/verification/test_router.py"]},
             artifact_type="VerificationTestWorkspaceArtifact",
         )
         node = AggregateSnapshot(
@@ -799,7 +732,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             candidate=candidate,
             candidate_digest=candidate_digest,
             test_delta_ref=test_delta_ref,
-            changed_test_paths=["tests/router/test_router.py"],
+            changed_test_paths=["tests/router/verification/test_router.py"],
         )
 
         self.assertEqual(
@@ -818,7 +751,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "-C",
                     str(node_repo),
                     "show",
-                    f"{promoted_digest}:tests/router/test_router.py",
+                    f"{promoted_digest}:tests/router/verification/test_router.py",
                 ],
                 stdout=subprocess.PIPE,
                 text=True,
@@ -852,7 +785,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             "def route(value):\n    return str(value)\n",
         )
         self.assertEqual(
-            (consumer / "tests" / "router" / "test_router.py").read_text(
+            (consumer / "tests" / "router" / "verification" / "test_router.py").read_text(
                 encoding="utf-8"
             ),
             test_path.read_text(encoding="utf-8"),
@@ -1932,7 +1865,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         work_view = {
             "module_name": "rule_router",
             "contract_paths": ["src/rule_router/protocol.py"],
-            "construction_dependencies": ["rule_model"],
+            "dependencies": {"rule_model": {}},
             "contract_consumption": [
                 {
                     "module": "rule_model",

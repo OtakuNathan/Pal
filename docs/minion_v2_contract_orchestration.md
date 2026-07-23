@@ -96,47 +96,53 @@ contracts. Internal IDs and hashes are Manager concerns and are absent from the
 LLM authoring surface.
 
 Manager pre-seeds one fixed-schema `architecture.yaml` control-plane Draft for
-each Architect invocation. Its `obligations`, `modules`, and `scenarios` fields are dynamic maps
-keyed by stable semantic names, so initial design and revision use ordinary file
-editing rather than per-node mutation tools. A revision starts from the complete
-accepted YAML and preserves it across process retries. Architect receives the
-in-place user-question IO, fixed `task_revision.yaml` authoring path, and
-no-argument task-revision and architecture submits in addition to ordinary
-workspace tools. The Draft currently uses schema version 3. Each binding
-task claim becomes an obligation with one semantic owner, explicit boundary
-partitions, the required observable outcome, the public contract path that makes
-that outcome decidable, and a dynamic state map. Every state declares the exact
-earliest `entry_condition`, the consumer `decision_point`, a stable `outcome` key,
-and its `required_outcome`. States examined by the same consumer decision share
-one decision point even when they belong to different obligations. This lets the
-Manager derive every same-decision, cross-outcome pair that must be publicly
-distinguishable. Each module contains its kind, contract dependencies,
-contract enforcement mode and paths, writable implementation scopes, and
-reference-only paths.
-Manager derives one repository verification corpus at `tests/<module_name>/`
-for every implementation module; Architect does not declare or name it.
-Each scenario names the exact implementation-module combination, obligations it
-consumes, real product or build entrypoint, observable behavior, and environment
-it verifies. Manager rejects missing/unknown owners and scenario references and
-unconsumed obligations before snapshotting the skeleton.
+each Architect invocation. Its `requirements`, `modules`, and `scenarios` fields
+are dynamic maps keyed by stable semantic names, so initial design and revision
+use ordinary file editing rather than per-node mutation tools. A revision starts
+from the complete accepted YAML and preserves it across process retries.
+Architect receives the in-place user-question IO, fixed `task_revision.yaml`
+authoring path, and no-argument task-revision and architecture submits in
+addition to ordinary workspace tools. The Draft uses schema version 4.
+
+`requirements` is a compact mapping index. Each entry has one claim, one
+module-or-scenario owner, and an ordered public semantic `contract_path`; it does
+not duplicate module state or test partitions. Each module is a complete Module
+Protocol: kind, behavior kind, one responsibility, provider dependencies with
+the exact provider outputs consumed plus purpose and handoff, contract inputs,
+outputs, errors and invariants, ownership rules, a closed lifecycle, an optional
+reachable state machine, and physical path policy. `architecture.yaml` is the
+canonical module-level semantic definition. Target-language declarations and
+adjacent comments provide the symbol-level contract; disagreement is an
+architecture defect.
+
+Each scenario names the exact implementation-module combination, requirement
+mappings it consumes, real product or build entrypoint, ordered contract flow,
+observable success behavior, legal failure behavior, and environment. Manager
+rejects missing/unknown owners and scenario references, unconsumed requirements,
+cycles, and dependency edges that consume undeclared provider outputs before
+snapshotting the skeleton. For every implementation module, Manager derives two
+durable repository corpora: Coder-owned `tests/<module_name>/developer` and
+Verifier-owned `tests/<module_name>/verification`. Architect declares neither.
 `file_frozen` is reserved for a physically separate protocol/interface/schema
 file that remains Coder-read-only. `review_guarded` is the default when public
 shape and implementation share a module-owned file; Manager then binds an
 Accepted-Skeleton-to-Candidate contract diff that Verifier must read before
-submitting. Cross-module overlap remains invalid in both modes, and the derived
-verification corpus can never own contract or reference-only files. Software Architect writes contract-level declarations
+submitting. Cross-module overlap remains invalid in both modes, and neither
+derived test corpus can own contract or reference-only files. Software Architect writes contract-level declarations
 and concise adjacent semantic comments where useful in an isolated worktree. It
 may name required external libraries or runtimes, but build and test machinery
 belongs to implementation and verification. It may not write algorithms, functional implementations,
 milestones, test matrices, implementation checklists, or function-level
 construction steps.
 
-Architecture submit performs only deterministic structure and safety checks.
-Malformed module/path records, unknown dependencies, cycles, overlapping
+Architecture submit performs deterministic protocol, graph, and safety checks.
+Malformed module/path records, incomplete state graphs, unknown dependencies or
+consumed outputs, cycles, overlapping
 writable scopes, missing declared paths, frozen/reference mutation, Git drift,
-and unstable snapshots remain blocking. The Manager does not parse comment
-chapters, bind task-ledger coverage, resolve evidence claims, infer consumers,
-or judge lifecycle/state/ownership/contract semantics. Architecture Reviewer
+and unstable snapshots remain blocking. Manager validates declared shape and
+reference closure but does not judge whether prose semantics are correct,
+whether declaration comments agree in meaning, or whether a contract graph
+actually satisfies product intent. Architecture Reviewer
 receives the immutable task.yaml ledger and the skeleton diff and owns all of
 those semantic checks, including auditing every revision against its embedded
 question and answer.
@@ -183,30 +189,26 @@ handles, and JSON pointers are rejected from role authoring schemas. Old
 monolithic builder and revision-read capabilities are not compatibility aliases.
 
 Architecture Reviewer receives the same immutable task.yaml ledger as Architect,
-every obligation, module and scenario, the complete skeleton diff, and prior
-findings. It independently checks
-source-obligation preservation and coverage, contracts, consumers, ownership,
-lifecycle/state/invariants, implementation leakage, and end-to-end
-reachability. An obligation record is an audit index, not proof by assertion.
-For PASS, Reviewer supplies one compact trace per obligation and every exact
-Manager-derived decision pair. Each side of a pair uses the smallest witness
-satisfying its bound state-entry condition; cited public observations must differ
-through a declared `distinguishing_signal` when the required outcomes differ.
-The Manager verifies exact pair coverage, restricts evidence to bound declaration
-contracts, and persists the cited source lines. This keeps the positive proof
-proportional to semantic decision risk instead of serializing every state × boundary
-row. It records each
+every requirement mapping, complete Module Protocol, scenario, skeleton diff,
+and prior finding. It independently checks requirement preservation, protocol
+completeness, declaration-comment agreement, dependency handoffs, ownership,
+lifecycle/state/invariants, implementation leakage, and end-to-end success and
+failure reachability. The requirement mapping is an audit index, not proof by
+assertion. It records each
 material defect through `add_finding` with a stable
 semantic key, p0/p1/p2 priority, summary, and optional structured source locations,
 preferably batching independent calls in one tool round. It then submits once:
-PASS with an empty finding Draft and the compact traces, or FAIL with the structured
+PASS with no arguments and an empty finding Draft, or FAIL with the structured
 Draft. It never emits Markdown as its machine contract.
 
-Accepted obligations are projected unchanged into the related module and scenario
-work views. `verification_pass` reports each bound obligation once with exact
-state and boundary-partition coverage plus a concise evidence summary. Both the
-worker terminal and Manager settlement reject missing, extra, duplicate, or partial
-coverage.
+Each module work view contains the full Module Protocol, direct dependency
+definitions and edges, direct consumer edges, relevant requirements and
+scenarios, both test scopes, dependency availability, RepairBills, and the
+durable node journal. Coder and Verifier derive tests from those semantics and
+store executable cases in their respective corpora. `verification_pass` has no
+manually maintained coverage payload; Manager mechanically requires a
+Verifier-owned test delta and a successful final shell or LSP receipt after the
+last edit.
 
 Sandboxed role processes cannot mount Minion's database or content-addressed store.
 They receive only an assignment-scoped gateway endpoint and an opaque attempt
@@ -316,9 +318,11 @@ fencing, and holds an exclusive worktree lock. Manager then checks owned and
 reference-only paths, verifies Git HEAD did not move, compares pre/post content
 fingerprints, creates the candidate commit, and publishes a candidate artifact.
 
-Module Verifier runs with product code read-only and write authority only over
-the Manager-derived `tests/<module_name>/` corpus. Coder sees that corpus
-read-only. Scenario Verifier receives a read-only
+Coder may add durable TDD/regression cases only under the Manager-derived
+`tests/<module_name>/developer` corpus and reads the Verifier corpus without
+write authority. Module Verifier runs with product code and the developer
+corpus read-only and writes only `tests/<module_name>/verification`. Scenario
+Verifier receives a read-only
 Manager-assembled Candidate union and writes executable probes/tests only to a
 durable review-scratch Artifact. Both derive adversarial cases from contracts,
 lifecycle, state, ownership, invariants, and the diff, write real regression

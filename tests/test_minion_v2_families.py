@@ -877,7 +877,9 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Reject synthetic build_system modules", architecture_review)
         self.assertIn("entrypoint/composition-root owner's writable implementation scope", architecture_review)
         self.assertIn("Missing mandatory scope is an architecture_defect", architecture_review)
-        self.assertIn("Manager derives a verifier-owned repository corpus", architecture_review)
+        self.assertIn("Manager derives separate durable corpora", architecture_review)
+        self.assertIn("tests/<module_name>/developer", architecture_review)
+        self.assertIn("tests/<module_name>/verification", architecture_review)
         self.assertIn("Architect must not create or", architecture_review)
         self.assertIn("Never report a missing test scope", architecture_review)
         self.assertIn("Tests are verification evidence, not product modules", architecture_review)
@@ -909,10 +911,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("do not invent facts", generic)
         self.assertIn("Perform the detailed local", str(self._pack("software_engineering.v2_coder").resolved_profile["behavior_fragment"]))
         self.assertIn(
-            "review_guarded contract_paths and implementation_scopes",
+            "review_guarded contract_paths, implementation_scopes, and developer test scope",
             coder,
         )
-        self.assertIn("tests/<module_name>/ remain read-only", coder)
+        self.assertIn("tests/<module_name>/verification remain read-only", coder)
         self.assertIn("Use the minimum sufficient build path", coder)
         self.assertIn("direct compiler/interpreter commands", coder)
         self.assertIn("owns the assembly code", coder)

@@ -2206,10 +2206,18 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             {
                 "architect_declares_test_scopes": False,
                 "tests_are_product_scenarios": False,
-                "corpora": {
+                "developer_corpora": {
                     "router": {
                         "kind": "directory",
-                        "path": "tests/router",
+                        "path": "tests/router/developer",
+                        "owner": "coder",
+                        "verifier_access": "read_only",
+                    }
+                },
+                "verification_corpora": {
+                    "router": {
+                        "kind": "directory",
+                        "path": "tests/router/verification",
                         "owner": "verifier",
                         "coder_access": "read_only",
                     }

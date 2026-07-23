@@ -18,45 +18,73 @@ from pal.shared import MinionInvocationPack
 
 def _submission() -> dict[str, object]:
     return {
-        "obligations": {
+        "requirements": {
             "decode_stream_completion": {
                 "claim": "decode emits complete payloads and rejects incomplete EOF",
                 "owner": "cli_decode_stream",
-                "states": {
-                    "reading_header": {
-                        "entry_condition": "decoder starts or a prior frame completes",
-                        "decision_point": "decode_progress",
-                        "outcome": "await_more_input",
-                        "required_outcome": "retain input without emitting a frame",
-                    },
-                    "reading_payload": {
-                        "entry_condition": "a positive length header completes before payload progress",
-                        "decision_point": "decode_progress",
-                        "outcome": "await_more_input",
-                        "required_outcome": "retain input without emitting a frame",
-                    },
-                    "frame_complete": {
-                        "entry_condition": "the final required payload byte arrives",
-                        "decision_point": "decode_progress",
-                        "outcome": "emit_frame",
-                        "required_outcome": "emit exactly one complete frame",
-                    },
-                },
-                "boundaries": {
-                    "bytes_received": ["zero", "partial", "complete"],
-                },
-                "observable_outcome": "payload output or a nonzero incomplete-input error",
                 "contract_path": [
-                    "frame decoder state",
-                    "CLI EOF decision",
-                    "process output and exit",
+                    "frame_protocol::feed -> decoder status",
+                    "framepipe_cli::decode -> process output and exit",
                 ],
             }
         },
         "modules": {
             "frame_protocol": {
                 "module_kind": "implementation",
-                "contract_dependencies": [],
+                "behavior_kind": "resource_owner",
+                "responsibility": "decode framed byte streams without emitting partial frames",
+                "dependencies": {},
+                "contract": {
+                    "inputs": {
+                        "chunks": {
+                            "interface": "frame_protocol::feed",
+                            "semantics": "accept arbitrary byte chunks in stream order",
+                        }
+                    },
+                    "outputs": {
+                        "frames": {
+                            "interface": "frame_protocol::feed",
+                            "semantics": "return complete payloads in stream order",
+                        },
+                        "status": {
+                            "interface": "frame_protocol::finish",
+                            "semantics": "distinguish complete input from incomplete EOF",
+                        },
+                    },
+                    "errors": ["oversized frames fail deterministically"],
+                    "invariants": ["partial payloads are never emitted"],
+                },
+                "ownership": ["each decoder instance owns its buffered input"],
+                "lifecycle": {
+                    "creation": "starts with an empty buffer",
+                    "operation": "accepts chunks until finish",
+                    "shutdown": "finish classifies remaining input",
+                    "failure": "reports a deterministic error",
+                    "cleanup": "destruction releases buffered bytes",
+                },
+                "state_machine": {
+                    "initial": "reading_header",
+                    "states": {
+                        "reading_header": {
+                            "meaning": "waiting for a complete length header",
+                            "transitions": {
+                                "header_ready": {
+                                    "to": "reading_payload",
+                                    "effect": "retain the decoded payload length",
+                                }
+                            },
+                        },
+                        "reading_payload": {
+                            "meaning": "waiting for the declared payload bytes",
+                            "transitions": {
+                                "frame_ready": {
+                                    "to": "reading_header",
+                                    "effect": "emit one complete frame",
+                                }
+                            },
+                        },
+                    },
+                },
                 "paths": {
                     "contract_mode": "file_frozen",
                     "contract_paths": ["include/frame_protocol.h"],
@@ -68,7 +96,40 @@ def _submission() -> dict[str, object]:
             },
             "framepipe_cli": {
                 "module_kind": "implementation",
-                "contract_dependencies": ["frame_protocol"],
+                "behavior_kind": "workflow",
+                "responsibility": "expose frame decoding through the command line",
+                "dependencies": {
+                    "frame_protocol": {
+                        "consumes": ["frames", "status"],
+                        "purpose": "decode standard input",
+                        "handoff": "feed bytes, print frames, then classify EOF status",
+                    }
+                },
+                "contract": {
+                    "inputs": {
+                        "stdin_bytes": {
+                            "interface": "framepipe_cli::decode",
+                            "semantics": "read encoded bytes from standard input",
+                        }
+                    },
+                    "outputs": {
+                        "process_result": {
+                            "interface": "framepipe_cli::decode",
+                            "semantics": "write payloads and return an observable exit status",
+                        }
+                    },
+                    "errors": ["incomplete EOF exits nonzero with a diagnostic"],
+                    "invariants": ["only complete frames reach standard output"],
+                },
+                "ownership": ["the command owns its decoder for one invocation"],
+                "lifecycle": {
+                    "creation": "constructs a decoder when decode starts",
+                    "operation": "streams standard input through the decoder",
+                    "shutdown": "finishes the decoder at EOF",
+                    "failure": "writes a diagnostic and exits nonzero",
+                    "cleanup": "releases command-local resources before exit",
+                },
+                "state_machine": None,
                 "paths": {
                     "contract_mode": "review_guarded",
                     "contract_paths": ["src/cli.h"],
@@ -82,9 +143,15 @@ def _submission() -> dict[str, object]:
         "scenarios": {
             "cli_decode_stream": {
                 "modules": ["frame_protocol", "framepipe_cli"],
-                "obligations": ["decode_stream_completion"],
+                "requirement_refs": ["decode_stream_completion"],
                 "entrypoint": "framepipe decode",
+                "contract_flow": [
+                    "stdin -> framepipe_cli::decode",
+                    "framepipe_cli -> frame_protocol::feed",
+                    "frames/status -> stdout/stderr/exit",
+                ],
                 "observable_behavior": "prints decoded payloads",
+                "failure_behavior": "incomplete input exits nonzero with a diagnostic",
                 "environment": "project host",
             }
         },
@@ -108,11 +175,11 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
 
         self.assertEqual(
             load_architecture_draft(self.workspace),
-            {"obligations": {}, "modules": {}, "scenarios": {}},
+            {"requirements": {}, "modules": {}, "scenarios": {}},
         )
         text = path.read_text(encoding="utf-8")
-        self.assertIn("schema_version: 3", text)
-        self.assertIn("obligations: {}", text)
+        self.assertIn("schema_version: 4", text)
+        self.assertIn("requirements: {}", text)
         self.assertIn("modules: {}", text)
         self.assertIn("Module example:", text)
 
@@ -137,7 +204,7 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
     def test_duplicate_keys_are_rejected_instead_of_overwritten(self) -> None:
         path = prepare_architecture_draft_file(self.workspace)
         path.write_text(
-            "schema_version: 3\nobligations: {}\nmodules: {}\nmodules: {}\nscenarios: {}\n",
+            "schema_version: 4\nrequirements: {}\nmodules: {}\nmodules: {}\nscenarios: {}\n",
             encoding="utf-8",
         )
 
@@ -151,11 +218,11 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
         path = prepare_architecture_draft_file(self.workspace)
         for text, code in (
             (
-                "schema_version: 3\nobligations: {}\nmodules: &mods {}\nscenarios: *mods\n",
+                "schema_version: 4\nrequirements: {}\nmodules: &mods {}\nscenarios: *mods\n",
                 "unsupported_yaml_feature",
             ),
             (
-                "schema_version: 3\nobligations: {}\nmodules: {}\nscenarios: {}\n---\n{}\n",
+                "schema_version: 4\nrequirements: {}\nmodules: {}\nscenarios: {}\n---\n{}\n",
                 "multiple_yaml_documents",
             ),
         ):
@@ -168,8 +235,8 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
     def test_schema_errors_return_exact_yaml_path(self) -> None:
         path = prepare_architecture_draft_file(self.workspace)
         path.write_text(
-            "schema_version: 3\nobligations: {}\nmodules:\n  bad-name:\n    module_kind: implementation\n"
-            "    contract_dependencies: []\n    paths:\n      contract_mode: movable\n"
+            "schema_version: 4\nrequirements: {}\nmodules:\n  bad-name:\n    module_kind: implementation\n"
+            "    paths:\n      contract_mode: movable\n"
             "      contract_paths: []\n      implementation_scopes: []\n      reference_only: []\n"
             "scenarios: {}\n",
             encoding="utf-8",
@@ -209,35 +276,33 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
         self.assertEqual(load_architecture_draft(bound.workspace), _submission())
         self.assertIn(str(draft_path), bound.instruction)
         self.assertIn("stable snake_case", bound.instruction)
-        self.assertIn("any number of entries", bound.instruction)
-        self.assertIn("boundary partitions", bound.instruction)
+        self.assertIn("complete Module Protocol", bound.instruction)
+        self.assertIn("contract_flow", bound.instruction)
 
-    def test_obligation_boundary_partition_must_be_nonempty(self) -> None:
+    def test_module_output_contract_must_be_nonempty(self) -> None:
         submission = _submission()
-        submission["obligations"]["decode_stream_completion"]["boundaries"][
-            "bytes_received"
-        ] = []
+        submission["modules"]["frame_protocol"]["contract"]["outputs"] = {}
 
         with self.assertRaises(ArchitectureDraftFileError) as raised:
             write_architecture_draft(self.workspace, submission)
 
         self.assertEqual(raised.exception.code, "schema_validation_failed")
         self.assertIn(
-            "obligations.decode_stream_completion.boundaries.bytes_received",
+            "modules.frame_protocol.contract.outputs",
             {item["path"] for item in raised.exception.errors},
         )
 
-    def test_state_requires_entry_decision_and_outcome_contract(self) -> None:
+    def test_state_transition_target_must_exist(self) -> None:
         submission = _submission()
-        del submission["obligations"]["decode_stream_completion"]["states"][
+        submission["modules"]["frame_protocol"]["state_machine"]["states"][
             "reading_payload"
-        ]["entry_condition"]
+        ]["transitions"]["frame_ready"]["to"] = "missing_state"
 
         with self.assertRaises(ArchitectureDraftFileError) as raised:
             write_architecture_draft(self.workspace, submission)
 
         self.assertIn(
-            "obligations.decode_stream_completion.states.reading_payload.entry_condition",
+            "modules.frame_protocol.state_machine",
             {item["path"] for item in raised.exception.errors},
         )
 

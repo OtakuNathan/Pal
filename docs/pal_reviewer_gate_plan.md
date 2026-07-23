@@ -283,7 +283,7 @@ Historical note: this proposed audit was superseded by fail-closed bwrap path pr
 
 Current enforcement is:
 
-- mount the workspace read-only except for the active role's explicit product implementation scopes or Manager-derived module verification corpus
+- mount the workspace read-only except for the active role's explicit product implementation scopes, Coder-owned `tests/<module_name>/developer`, or Verifier-owned `tests/<module_name>/verification`
 - keep immutable inputs, verifier overlays, and Git metadata read-only
 - validate the final diff and role-owned scopes before accepting a submission
 

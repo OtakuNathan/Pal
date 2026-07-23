@@ -19,6 +19,7 @@ from pal.minion.v2.paths import (
     project_git_layout_lock,
     resolve_project_git_layout,
 )
+from pal.minion.v2.module_protocol import ModuleDefinition
 from pal.minion.v2.task_ledger import validate_task_ledger
 
 
@@ -31,7 +32,6 @@ SKELETON_MODULE_CONTRACT_ARTIFACT = "SkeletonModuleContractArtifact"
 
 MODULE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,79}$")
 PATH_SCOPE_KINDS = frozenset({"file", "directory"})
-MODULE_KINDS = frozenset({"implementation", "contract_only"})
 _IGNORED_SNAPSHOT_PARTS = frozenset(
     {
         ".git",
@@ -188,6 +188,14 @@ def compiled_module_write_scopes(path_policy: Mapping[str, Any]) -> tuple[dict[s
         }
         for raw in list(policy.get("implementation_scopes") or [])
     )
+    developer_tests = dict(policy.get("developer_tests") or {})
+    if developer_tests:
+        scopes.append(
+            {
+                "kind": str(developer_tests.get("kind") or ""),
+                "path": _normalized_repo_path(str(developer_tests.get("path") or "")),
+            }
+        )
     return tuple(
         {"kind": kind, "path": path}
         for kind, path in dict.fromkeys((item["kind"], item["path"]) for item in scopes)
@@ -195,15 +203,25 @@ def compiled_module_write_scopes(path_policy: Mapping[str, Any]) -> tuple[dict[s
     )
 
 
-def module_verification_corpus_path(module_name: str) -> str:
-    """Return the Manager-owned repository path for one module's test corpus."""
-
+def _module_test_root(module_name: str) -> str:
     normalized_name = str(module_name or "").strip()
     if MODULE_NAME_PATTERN.fullmatch(normalized_name) is None:
         raise ValueError(
             f"invalid semantic module name: {normalized_name or '<empty>'}"
         )
     return f"tests/{normalized_name}"
+
+
+def module_developer_test_path(module_name: str) -> str:
+    """Return the module Coder-owned durable test corpus path."""
+
+    return f"{_module_test_root(module_name)}/developer"
+
+
+def module_verification_corpus_path(module_name: str) -> str:
+    """Return the module Verifier-owned durable test corpus path."""
+
+    return f"{_module_test_root(module_name)}/verification"
 
 
 @dataclass(frozen=True)
@@ -384,21 +402,21 @@ def analyze_architecture_submission(
 ) -> ArchitectureValidationResult:
     del requirements_payload, reference_roots, evidence_catalog
     errors: list[Any] = []
-    raw_obligations = submission.get("obligations")
-    if not isinstance(raw_obligations, Mapping) or not raw_obligations:
-        errors.append("Architecture submission requires a non-empty obligations map")
-        raw_obligations = {}
-    obligations: dict[str, dict[str, Any]] = {}
-    for raw_name, raw_obligation in raw_obligations.items():
+    raw_requirements = submission.get("requirements")
+    if not isinstance(raw_requirements, Mapping) or not raw_requirements:
+        errors.append("Architecture submission requires a non-empty requirements map")
+        raw_requirements = {}
+    requirements: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_requirement in raw_requirements.items():
         name = str(raw_name or "").strip()
         if MODULE_NAME_PATTERN.fullmatch(name) is None:
-            errors.append(f"invalid semantic obligation name: {name or '<empty>'}")
+            errors.append(f"invalid semantic requirement name: {name or '<empty>'}")
             continue
-        if not isinstance(raw_obligation, Mapping):
-            errors.append(f"obligation {name} must be an object")
+        if not isinstance(raw_requirement, Mapping):
+            errors.append(f"requirement {name} must be an object")
             continue
         try:
-            obligations[name] = _normalize_architecture_obligation(name, raw_obligation)
+            requirements[name] = _normalize_architecture_requirement(name, raw_requirement)
         except ValueError as exc:
             errors.append(exc)
     raw_modules = submission.get("modules")
@@ -433,7 +451,7 @@ def analyze_architecture_submission(
         {
             dependency
             for module in modules.values()
-            for dependency in module["contract_dependencies"]
+            for dependency in dict(module["dependencies"])
             if dependency not in declared_module_names
         }
     )
@@ -443,7 +461,7 @@ def analyze_architecture_submission(
         {
             dependency
             for module in modules.values()
-            for dependency in module["contract_dependencies"]
+            for dependency in dict(module["dependencies"])
             if dependency in invalid_module_names
         }
     )
@@ -457,6 +475,20 @@ def analyze_architecture_submission(
             _validate_construction_graph(modules)
         except ValueError as exc:
             errors.append(exc)
+        for consumer_name, module in modules.items():
+            for provider_name, raw_dependency in dict(module["dependencies"]).items():
+                if provider_name not in modules:
+                    continue
+                provider_outputs = set(
+                    dict(dict(modules[provider_name].get("contract") or {}).get("outputs") or {})
+                )
+                consumed_outputs = set(dict(raw_dependency or {}).get("consumes") or [])
+                unavailable = sorted(consumed_outputs - provider_outputs)
+                if unavailable:
+                    errors.append(
+                        f"module {consumer_name} consumes unknown outputs from {provider_name}: "
+                        + ", ".join(unavailable)
+                    )
     raw_scenarios = submission.get("scenarios")
     if not isinstance(raw_scenarios, Mapping) or not raw_scenarios:
         errors.append("Architecture submission requires at least one end-to-end scenario")
@@ -497,7 +529,7 @@ def analyze_architecture_submission(
             pending = list(selected)
             while pending:
                 module_name = pending.pop()
-                for dependency in modules[module_name]["contract_dependencies"]:
+                for dependency in dict(modules[module_name]["dependencies"]):
                     if dependency not in implementation_names or dependency in required:
                         continue
                     required.add(dependency)
@@ -509,35 +541,35 @@ def analyze_architecture_submission(
                     + ", ".join(missing)
                 )
         scenarios[name] = scenario
-    declared_obligations = set(obligations)
-    referenced_obligations: set[str] = set()
+    declared_requirements = set(requirements)
+    referenced_requirements: set[str] = set()
     for scenario_name, scenario in scenarios.items():
-        scenario_obligations = set(scenario["obligations"])
-        referenced_obligations.update(scenario_obligations)
-        unknown_obligations = sorted(scenario_obligations - declared_obligations)
-        if unknown_obligations:
+        scenario_requirements = set(scenario["requirement_refs"])
+        referenced_requirements.update(scenario_requirements)
+        unknown_requirements = sorted(scenario_requirements - declared_requirements)
+        if unknown_requirements:
             errors.append(
-                f"scenario {scenario_name} references unknown obligations: "
-                + ", ".join(unknown_obligations)
+                f"scenario {scenario_name} references unknown requirements: "
+                + ", ".join(unknown_requirements)
             )
-    unreferenced_obligations = sorted(declared_obligations - referenced_obligations)
-    if unreferenced_obligations:
+    unreferenced_requirements = sorted(declared_requirements - referenced_requirements)
+    if unreferenced_requirements:
         errors.append(
-            "Architecture obligations must be consumed by at least one scenario: "
-            + ", ".join(unreferenced_obligations)
+            "Architecture requirements must be consumed by at least one scenario: "
+            + ", ".join(unreferenced_requirements)
         )
     declared_owners = set(modules) | set(scenarios)
-    obligation_name_conflicts = sorted(set(obligations) & declared_owners)
-    if obligation_name_conflicts:
+    requirement_name_conflicts = sorted(set(requirements) & declared_owners)
+    if requirement_name_conflicts:
         errors.append(
-            "obligation names must not conflict with module or scenario names: "
-            + ", ".join(obligation_name_conflicts)
+            "requirement names must not conflict with module or scenario names: "
+            + ", ".join(requirement_name_conflicts)
         )
-    for obligation_name, obligation in obligations.items():
-        owner = str(obligation.get("owner") or "")
+    for requirement_name, requirement in requirements.items():
+        owner = str(requirement.get("owner") or "")
         if owner not in declared_owners:
             errors.append(
-                f"obligation {obligation_name} owner references an unknown module or scenario: {owner}"
+                f"requirement {requirement_name} owner references an unknown module or scenario: {owner}"
             )
     validators = (
         lambda: _validate_path_policy(modules),
@@ -553,7 +585,7 @@ def analyze_architecture_submission(
         for item in _unique_architecture_errors(errors)
     )
     return ArchitectureValidationResult(
-        {"obligations": obligations, "modules": modules, "scenarios": scenarios},
+        {"requirements": requirements, "modules": modules, "scenarios": scenarios},
         issues,
     )
 
@@ -588,22 +620,22 @@ def validate_architecture_module_definition(
         raise ValueError(
             f"invalid semantic module name: {normalized_name or '<empty>'}"
         )
-    contract_dependencies = _unique_text(module.get("contract_dependencies"))
-    module_kind = str(module.get("module_kind") or "").strip()
-    if module_kind not in MODULE_KINDS:
-        raise ValueError(
-            f"module {normalized_name} module_kind must be implementation or contract_only"
-        )
+    semantic_payload = dict(module)
+    raw_paths = semantic_payload.pop("paths", None)
+    try:
+        semantic = ModuleDefinition.model_validate(
+            semantic_payload,
+            strict=True,
+        ).model_dump(mode="python")
+    except ValueError as exc:
+        raise ValueError(f"module {normalized_name} definition is invalid: {exc}") from exc
+    module_kind = str(semantic["module_kind"])
     paths = _normalize_module_paths(
         normalized_name,
-        module.get("paths"),
+        raw_paths,
         module_kind=module_kind,
     )
-    return {
-        "module_kind": module_kind,
-        "contract_dependencies": contract_dependencies,
-        "paths": paths,
-    }
+    return {**semantic, "paths": paths}
 
 
 def _normalize_architecture_scenario(
@@ -615,88 +647,37 @@ def _normalize_architecture_scenario(
         raise ValueError(f"scenario {name} requires at least one implementation module")
     result = {
         "modules": modules,
-        "obligations": _unique_text(scenario.get("obligations")),
+        "requirement_refs": _unique_text(scenario.get("requirement_refs")),
         "entrypoint": str(scenario.get("entrypoint") or "").strip(),
+        "contract_flow": _unique_text(scenario.get("contract_flow")),
         "observable_behavior": str(scenario.get("observable_behavior") or "").strip(),
+        "failure_behavior": str(scenario.get("failure_behavior") or "").strip(),
         "environment": str(scenario.get("environment") or "").strip(),
     }
-    for field in ("entrypoint", "observable_behavior", "environment"):
+    for field in ("entrypoint", "observable_behavior", "failure_behavior", "environment"):
         if not result[field]:
             raise ValueError(f"scenario {name} requires {field}")
-    if not result["obligations"]:
-        raise ValueError(f"scenario {name} requires at least one obligation")
+    if not result["requirement_refs"]:
+        raise ValueError(f"scenario {name} requires at least one requirement reference")
+    if not result["contract_flow"]:
+        raise ValueError(f"scenario {name} requires at least one contract flow step")
     return result
 
 
-def _normalize_architecture_obligation(
+def _normalize_architecture_requirement(
     name: str,
-    obligation: Mapping[str, Any],
+    requirement: Mapping[str, Any],
 ) -> dict[str, Any]:
-    claim = str(obligation.get("claim") or "").strip()
-    owner = str(obligation.get("owner") or "").strip()
-    raw_states = obligation.get("states")
-    states: dict[str, dict[str, str]] = {}
-    if isinstance(raw_states, Mapping):
-        for raw_state_name, raw_state in raw_states.items():
-            state_name = str(raw_state_name or "").strip()
-            if MODULE_NAME_PATTERN.fullmatch(state_name) is None:
-                raise ValueError(
-                    f"obligation {name} has invalid state name: {state_name or '<empty>'}"
-                )
-            if not isinstance(raw_state, Mapping):
-                raise ValueError(
-                    f"obligation {name} state {state_name} must be a semantic mapping"
-                )
-            state = {
-                "entry_condition": str(raw_state.get("entry_condition") or "").strip(),
-                "decision_point": str(raw_state.get("decision_point") or "").strip(),
-                "outcome": str(raw_state.get("outcome") or "").strip(),
-                "required_outcome": str(raw_state.get("required_outcome") or "").strip(),
-            }
-            for field, value in state.items():
-                if not value:
-                    raise ValueError(
-                        f"obligation {name} state {state_name} requires {field}"
-                    )
-            for field in ("decision_point", "outcome"):
-                if MODULE_NAME_PATTERN.fullmatch(state[field]) is None:
-                    raise ValueError(
-                        f"obligation {name} state {state_name} {field} must be a stable snake_case semantic name"
-                    )
-            states[state_name] = state
-    observable_outcome = str(obligation.get("observable_outcome") or "").strip()
-    contract_path = _unique_text(obligation.get("contract_path"))
-    raw_boundaries = obligation.get("boundaries")
-    boundaries: dict[str, list[str]] = {}
-    if isinstance(raw_boundaries, Mapping):
-        for raw_boundary_name, raw_partitions in raw_boundaries.items():
-            boundary_name = str(raw_boundary_name or "").strip()
-            if MODULE_NAME_PATTERN.fullmatch(boundary_name) is None:
-                raise ValueError(
-                    f"obligation {name} has invalid boundary name: {boundary_name or '<empty>'}"
-                )
-            partitions = _unique_text(raw_partitions)
-            if not partitions:
-                raise ValueError(
-                    f"obligation {name} boundary {boundary_name} requires at least one partition"
-                )
-            boundaries[boundary_name] = partitions
-    required_text = {
-        "claim": claim,
-        "owner": owner,
-        "observable_outcome": observable_outcome,
-    }
-    for field, value in required_text.items():
+    claim = str(requirement.get("claim") or "").strip()
+    owner = str(requirement.get("owner") or "").strip()
+    contract_path = _unique_text(requirement.get("contract_path"))
+    for field, value in {"claim": claim, "owner": owner}.items():
         if not value:
-            raise ValueError(f"obligation {name} requires {field}")
+            raise ValueError(f"requirement {name} requires {field}")
     if MODULE_NAME_PATTERN.fullmatch(owner) is None:
-        raise ValueError(f"obligation {name} owner must be a stable snake_case semantic name")
-    if not states:
-        raise ValueError(f"obligation {name} requires at least one semantic state")
-    if not boundaries:
-        raise ValueError(f"obligation {name} requires at least one boundary partition axis")
+        raise ValueError(f"requirement {name} owner must be a stable snake_case semantic name")
     if not contract_path:
-        raise ValueError(f"obligation {name} requires a non-empty contract_path")
+        raise ValueError(f"requirement {name} requires a non-empty contract_path")
     bare_files = [
         value
         for value in contract_path
@@ -705,15 +686,12 @@ def _normalize_architecture_obligation(
     ]
     if bare_files:
         raise ValueError(
-            f"obligation {name} contract_path must name public interfaces/signals, not bare files: "
+            f"requirement {name} contract_path must name public interfaces/signals, not bare files: "
             + ", ".join(bare_files)
         )
     return {
         "claim": claim,
         "owner": owner,
-        "states": states,
-        "boundaries": boundaries,
-        "observable_outcome": observable_outcome,
         "contract_path": contract_path,
     }
 
@@ -788,53 +766,59 @@ def compile_skeleton_markdown(
             f"  - {item.get('sequence')}: {item.get('summary', '')} "
             f"({authority.get('origin', 'user')}, {authority.get('observed_at', '')})"
         )
-    lines.extend(["", "## Requirement Obligations", ""])
-    for name, raw_obligation in dict(submission.get("obligations") or {}).items():
-        obligation = dict(raw_obligation or {})
-        boundaries = "; ".join(
-            f"{axis}=[{', '.join(str(item) for item in list(partitions or []))}]"
-            for axis, partitions in dict(obligation.get("boundaries") or {}).items()
-        )
+    lines.extend(["", "## Requirement Mapping", ""])
+    for name, raw_requirement in dict(submission.get("requirements") or {}).items():
+        requirement = dict(raw_requirement or {})
         lines.extend(
             [
                 f"### {name}",
                 "",
-                f"- Claim: {obligation.get('claim', '')}",
-                f"- Owner: {obligation.get('owner', '')}",
-                f"- Semantic states: {', '.join(str(item) for item in list(obligation.get('states') or []))}",
-                f"- Boundary partitions: {boundaries}",
-                f"- Observable outcome: {obligation.get('observable_outcome', '')}",
-                f"- Contract path: {' -> '.join(str(item) for item in list(obligation.get('contract_path') or []))}",
+                f"- Claim: {requirement.get('claim', '')}",
+                f"- Owner: {requirement.get('owner', '')}",
+                f"- Contract path: {' -> '.join(str(item) for item in list(requirement.get('contract_path') or []))}",
                 "",
             ]
         )
-    lines.extend(["", "## Contract Dependency Graph", ""])
+    lines.extend(["", "## Module Protocol", ""])
     for name, raw_module in dict(submission.get("modules") or {}).items():
         module = dict(raw_module)
         paths = dict(module.get("paths") or {})
-        dependencies = ", ".join(module.get("contract_dependencies") or []) or "none"
+        dependencies = dict(module.get("dependencies") or {})
+        contract = dict(module.get("contract") or {})
+        lifecycle = dict(module.get("lifecycle") or {})
+        state_machine = dict(module.get("state_machine") or {})
         implementation_scope = ", ".join(
             f"`{dict(item).get('path', '')}`"
             for item in list(paths.get("implementation_scopes") or [])
         ) or "none"
-        verification_corpus = (
-            f"`{module_verification_corpus_path(str(name))}/`"
-            if str(module.get("module_kind") or "") == "implementation"
-            else "none"
-        )
         lines.extend(
             [
                 f"### {name}",
                 "",
                 f"- Module kind: {module.get('module_kind', '')}",
-                f"- Contract dependencies: {dependencies}",
+                f"- Behavior kind: {module.get('behavior_kind', '')}",
+                f"- Responsibility: {module.get('responsibility', '')}",
+                f"- Dependencies: {', '.join(dependencies) or 'none'}",
+                f"- Contract inputs: {', '.join(dict(contract.get('inputs') or {})) or 'none'}",
+                f"- Contract outputs: {', '.join(dict(contract.get('outputs') or {})) or 'none'}",
+                f"- Errors: {'; '.join(str(item) for item in list(contract.get('errors') or [])) or 'none'}",
+                f"- Invariants: {'; '.join(str(item) for item in list(contract.get('invariants') or [])) or 'none'}",
+                f"- Ownership: {'; '.join(str(item) for item in list(module.get('ownership') or []))}",
+                f"- Lifecycle: creation={lifecycle.get('creation', '')}; operation={lifecycle.get('operation', '')}; shutdown={lifecycle.get('shutdown', '')}; failure={lifecycle.get('failure', '')}; cleanup={lifecycle.get('cleanup', '')}",
+                f"- State machine: initial={state_machine.get('initial', 'none')}; states={', '.join(dict(state_machine.get('states') or {})) or 'none'}",
                 f"- Contract enforcement: {paths.get('contract_mode', 'review_guarded')}",
                 f"- Contracts: {', '.join(f'`{item}`' for item in list(paths.get('contract_paths') or []))}",
                 f"- Implementation scope: {implementation_scope}",
-                f"- Verification corpus: {verification_corpus}",
+                f"- Developer tests: `{module_developer_test_path(str(name))}/`",
+                f"- Verification corpus: `{module_verification_corpus_path(str(name))}/`",
                 f"- Reference only: {', '.join(f'`{item}`' for item in list(paths.get('reference_only') or [])) or 'none'}",
             ]
         )
+        for provider, raw_dependency in dependencies.items():
+            dependency = dict(raw_dependency or {})
+            lines.append(
+                f"  - `{provider}`: consumes {', '.join(str(item) for item in list(dependency.get('consumes') or []))}; purpose={dependency.get('purpose', '')}; handoff={dependency.get('handoff', '')}"
+            )
         lines.append("")
     lines.extend(["## End-to-End Scenarios", ""])
     for name, raw_scenario in dict(submission.get("scenarios") or {}).items():
@@ -844,9 +828,11 @@ def compile_skeleton_markdown(
                 f"### {name}",
                 "",
                 f"- Modules: {', '.join(str(item) for item in list(scenario.get('modules') or []))}",
-                f"- Obligations: {', '.join(str(item) for item in list(scenario.get('obligations') or []))}",
+                f"- Requirements: {', '.join(str(item) for item in list(scenario.get('requirement_refs') or []))}",
                 f"- Entrypoint: {scenario.get('entrypoint', '')}",
+                f"- Contract flow: {' -> '.join(str(item) for item in list(scenario.get('contract_flow') or []))}",
                 f"- Observable behavior: {scenario.get('observable_behavior', '')}",
+                f"- Failure behavior: {scenario.get('failure_behavior', '')}",
                 f"- Environment: {scenario.get('environment', '')}",
                 "",
             ]
@@ -1541,7 +1527,7 @@ def _normalize_module_paths(
     if "test_scopes" in paths:
         raise ValueError(
             f"module {module_name} cannot declare paths.test_scopes; "
-            "the Manager owns tests/<module_name>/"
+            "the Manager owns tests/<module_name>/developer and tests/<module_name>/verification"
         )
     if module_kind == "contract_only" and implementation:
         raise ValueError(
@@ -1602,6 +1588,13 @@ def _validate_path_policy(modules: Mapping[str, Mapping[str, Any]]) -> None:
             owners.append(
                 (
                     name,
+                    "developer_tests",
+                    PathScope("directory", module_developer_test_path(name)),
+                )
+            )
+            owners.append(
+                (
+                    name,
                     "verification_corpus",
                     PathScope("directory", module_verification_corpus_path(name)),
                 )
@@ -1611,7 +1604,7 @@ def _validate_path_policy(modules: Mapping[str, Mapping[str, Any]]) -> None:
         for other_owner, other_scope_kind, other_scope in owners[index + 1 :]:
             if _path_scopes_overlap(scope, other_scope) and (
                 owner != other_owner
-                or "verification_corpus" in {scope_kind, other_scope_kind}
+                or scope_kind != other_scope_kind
             ):
                 errors.append(
                     "writable path scopes overlap between "
@@ -1639,16 +1632,16 @@ def _validate_path_policy(modules: Mapping[str, Mapping[str, Any]]) -> None:
 def _validate_construction_graph(
     modules: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    contract_dependencies = {
-        name: set(str(item) for item in list(module.get("contract_dependencies") or []))
+    dependencies_by_module = {
+        name: set(str(item) for item in dict(module.get("dependencies") or {}))
         for name, module in modules.items()
     }
     unknown = sorted(
         {
             dependency
-            for dependencies in contract_dependencies.values()
+            for dependencies in dependencies_by_module.values()
             for dependency in dependencies
-            if dependency not in contract_dependencies
+            if dependency not in dependencies_by_module
         }
     )
     if unknown:
@@ -1657,7 +1650,7 @@ def _validate_construction_graph(
             + ", ".join(unknown)
         )
     cycle = _cycle_nodes(
-        {name: sorted(dependencies) for name, dependencies in contract_dependencies.items()}
+        {name: sorted(dependencies) for name, dependencies in dependencies_by_module.items()}
     )
     if cycle:
         raise ValueError("Architecture contract dependency graph contains a cycle: " + ", ".join(cycle))
@@ -1692,6 +1685,14 @@ def _compiled_path_policy(submission: Mapping[str, Any]) -> dict[str, Any]:
             "contract_mode": str(paths.get("contract_mode") or "review_guarded"),
             "contract_paths": list(paths.get("contract_paths") or []),
             "implementation_scopes": list(paths.get("implementation_scopes") or []),
+            "developer_tests": (
+                {
+                    "kind": "directory",
+                    "path": module_developer_test_path(str(name)),
+                }
+                if str(dict(raw_module).get("module_kind") or "") == "implementation"
+                else None
+            ),
             "verification_corpus": (
                 {
                     "kind": "directory",

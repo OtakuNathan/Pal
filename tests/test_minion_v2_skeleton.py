@@ -150,7 +150,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         shutil.rmtree(self.runtime_root, ignore_errors=True)
         shutil.rmtree(self.repo, ignore_errors=True)
 
-    def test_normalized_architecture_contains_obligation_ledger_module_dag_and_paths(self) -> None:
+    def test_normalized_architecture_contains_requirement_mapping_module_protocol_and_paths(self) -> None:
         (self.repo / "include").mkdir()
         (self.repo / "include" / "router.h").write_text(
             _contract("router"), encoding="utf-8"
@@ -161,17 +161,27 @@ class MinionV2SkeletonTests(unittest.TestCase):
             workspace_root=self.repo,
         )
 
-        self.assertEqual(set(normalized), {"obligations", "modules", "scenarios"})
+        self.assertEqual(set(normalized), {"requirements", "modules", "scenarios"})
         self.assertEqual(
             set(normalized["modules"]["router"]),
-            {"module_kind", "contract_dependencies", "paths"},
+            {
+                "module_kind",
+                "behavior_kind",
+                "responsibility",
+                "dependencies",
+                "contract",
+                "ownership",
+                "lifecycle",
+                "state_machine",
+                "paths",
+            },
         )
         self.assertEqual(
             normalized["modules"]["router"]["paths"]["contract_mode"],
             "file_frozen",
         )
 
-    def test_obligation_ledger_requires_reference_and_owner_closure(self) -> None:
+    def test_requirement_mapping_requires_reference_and_owner_closure(self) -> None:
         (self.repo / "include").mkdir()
         (self.repo / "include" / "router.h").write_text(
             _contract("router"), encoding="utf-8"
@@ -179,21 +189,21 @@ class MinionV2SkeletonTests(unittest.TestCase):
         for mutate, expected in (
             (
                 lambda value: value["scenarios"]["router_end_to_end"].update(
-                    {"obligations": ["unknown_obligation"]}
+                    {"requirement_refs": ["unknown_requirement"]}
                 ),
-                "references unknown obligations",
+                "references unknown requirements",
             ),
             (
-                lambda value: value["obligations"]["deterministic_routing"].update(
+                lambda value: value["requirements"]["deterministic_routing"].update(
                     {"owner": "unknown_owner"}
                 ),
                 "owner references an unknown module or scenario",
             ),
             (
                 lambda value: value["scenarios"]["router_end_to_end"].update(
-                    {"obligations": []}
+                    {"requirement_refs": []}
                 ),
-                "requires at least one obligation",
+                "requires at least one requirement reference",
             ),
         ):
             with self.subTest(expected=expected):
@@ -254,13 +264,40 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "contract_mode": "review_guarded",
             "contract_paths": ["src/main.cpp"],
             "implementation_scopes": [{"kind": "file", "path": "CMakeLists.txt"}],
-            "verification_corpus": {"kind": "directory", "path": "tests/cli"},
+            "developer_tests": {"kind": "directory", "path": "tests/cli/developer"},
+            "verification_corpus": {"kind": "directory", "path": "tests/cli/verification"},
             "reference_only": [],
         }
 
         _validate_skeleton_candidate_paths(["src/main.cpp"], policy)
         with self.assertRaisesRegex(ValueError, "outside its compiled module write scopes"):
             _validate_skeleton_candidate_paths(["src/other.cpp"], policy)
+
+    def test_coder_can_write_developer_tests_but_not_verifier_corpus(self) -> None:
+        policy = {
+            "contract_mode": "file_frozen",
+            "contract_paths": ["include/router.h"],
+            "implementation_scopes": [{"kind": "file", "path": "src/router.cpp"}],
+            "developer_tests": {
+                "kind": "directory",
+                "path": "tests/router/developer",
+            },
+            "verification_corpus": {
+                "kind": "directory",
+                "path": "tests/router/verification",
+            },
+            "reference_only": [],
+        }
+
+        _validate_skeleton_candidate_paths(
+            ["src/router.cpp", "tests/router/developer/test_router.cpp"],
+            policy,
+        )
+        with self.assertRaisesRegex(ValueError, "outside its compiled module write scopes"):
+            _validate_skeleton_candidate_paths(
+                ["tests/router/verification/test_router.cpp"],
+                policy,
+            )
 
     def test_file_frozen_contract_overrides_its_module_writable_overlap(self) -> None:
         submission = self._submission()
@@ -282,14 +319,14 @@ class MinionV2SkeletonTests(unittest.TestCase):
             )
 
     def test_review_guarded_contract_cannot_be_owned_by_verification_corpus(self) -> None:
-        corpus_contract = self.repo / "tests" / "router" / "contract.h"
-        corpus_contract.parent.mkdir()
+        corpus_contract = self.repo / "tests" / "router" / "verification" / "contract.h"
+        corpus_contract.parent.mkdir(parents=True)
         corpus_contract.write_text(_contract("router"), encoding="utf-8")
         submission = self._submission()
         submission["modules"]["router"]["paths"] = {
             **submission["modules"]["router"]["paths"],
             "contract_mode": "review_guarded",
-            "contract_paths": ["tests/router/contract.h"],
+            "contract_paths": ["tests/router/verification/contract.h"],
         }
 
         with self.assertRaisesRegex(ValueError, "verification_corpus.*review_guarded contract"):
@@ -390,16 +427,29 @@ class MinionV2SkeletonTests(unittest.TestCase):
         (self.repo / "src" / "consumer.cpp").write_text("// consumer\n", encoding="utf-8")
         (self.repo / "tests" / "test_consumer.cpp").write_text("// consumer test\n", encoding="utf-8")
         submission = self._submission()
-        submission["modules"]["consumer"] = {
-            "module_kind": "implementation",
-            "contract_dependencies": ["router"],
-            "paths": {
-                "contract_paths": ["include/consumer.h"],
-                "implementation_scopes": [{"kind": "file", "path": "src/consumer.cpp"}],
-                "reference_only": [],
-            },
+        consumer = json.loads(json.dumps(submission["modules"]["router"]))
+        consumer["responsibility"] = "consume routed results"
+        consumer["dependencies"] = {
+            "router": {
+                "consumes": ["route_result"],
+                "purpose": "obtain deterministic routes",
+                "handoff": "submit a request and consume its route result",
+            }
         }
-        submission["modules"]["router"]["contract_dependencies"] = ["consumer"]
+        consumer["paths"] = {
+            "contract_mode": "file_frozen",
+            "contract_paths": ["include/consumer.h"],
+            "implementation_scopes": [{"kind": "file", "path": "src/consumer.cpp"}],
+            "reference_only": [],
+        }
+        submission["modules"]["consumer"] = consumer
+        submission["modules"]["router"]["dependencies"] = {
+            "consumer": {
+                "consumes": ["route_result"],
+                "purpose": "form the deliberate cycle under test",
+                "handoff": "consume the consumer result",
+            }
+        }
         with self.assertRaisesRegex(ValueError, "cycle"):
             validate_architecture_submission(
                 submission,
@@ -407,22 +457,28 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 workspace_root=self.repo,
             )
 
-    def test_contract_dependencies_do_not_serialize_implementation_coders(self) -> None:
+    def test_semantic_dependencies_do_not_serialize_implementation_coders(self) -> None:
         workspace = self._provision_complete_workspace("parallel-contracts", "initial")
         (workspace.worktree / "include" / "consumer.h").write_text(
             _contract("consumer"), encoding="utf-8"
         )
         submission = self._submission()
-        submission["modules"]["consumer"] = {
-            "module_kind": "implementation",
-            "contract_dependencies": ["router"],
-            "paths": {
-                "contract_mode": "file_frozen",
-                "contract_paths": ["include/consumer.h"],
-                "implementation_scopes": [{"kind": "file", "path": "src/consumer.cpp"}],
-                "reference_only": [],
-            },
+        consumer = json.loads(json.dumps(submission["modules"]["router"]))
+        consumer["responsibility"] = "consume routed results"
+        consumer["dependencies"] = {
+            "router": {
+                "consumes": ["route_result"],
+                "purpose": "obtain deterministic routes",
+                "handoff": "submit a request and consume its route result",
+            }
         }
+        consumer["paths"] = {
+            "contract_mode": "file_frozen",
+            "contract_paths": ["include/consumer.h"],
+            "implementation_scopes": [{"kind": "file", "path": "src/consumer.cpp"}],
+            "reference_only": [],
+        }
+        submission["modules"]["consumer"] = consumer
         submission["scenarios"]["router_end_to_end"]["modules"] = ["router", "consumer"]
         manifest_ref = self.service.snapshot_architect_result(
             workflow_name="parallel-contracts",
@@ -464,7 +520,11 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         self.assertEqual(
             consumer.payload["path_policy"]["verification_corpus"],
-            {"kind": "directory", "path": "tests/consumer"},
+            {"kind": "directory", "path": "tests/consumer/verification"},
+        )
+        self.assertEqual(
+            consumer.payload["path_policy"]["developer_tests"],
+            {"kind": "directory", "path": "tests/consumer/developer"},
         )
         self.assertEqual(scenario.state, "BLOCKED_BY_DEPS")
         self.assertEqual(
@@ -596,15 +656,16 @@ class MinionV2SkeletonTests(unittest.TestCase):
             encoding="utf-8",
         )
         submission = self._submission()
-        submission["modules"]["route_types"] = {
-            "module_kind": "contract_only",
-            "contract_dependencies": [],
-            "paths": {
-                "contract_paths": ["include/route_types.h"],
-                "implementation_scopes": [],
-                "reference_only": [],
-            },
+        route_types = json.loads(json.dumps(submission["modules"]["router"]))
+        route_types["module_kind"] = "contract_only"
+        route_types["responsibility"] = "define the immutable route data shape"
+        route_types["paths"] = {
+            "contract_mode": "file_frozen",
+            "contract_paths": ["include/route_types.h"],
+            "implementation_scopes": [],
+            "reference_only": [],
         }
+        submission["modules"]["route_types"] = route_types
 
         normalized = validate_architecture_submission(
             submission,
@@ -676,30 +737,69 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 workspace_root=self.repo,
             )
 
-    def test_contract_dependencies_can_consume_contract_only_module(self) -> None:
+    def test_semantic_dependencies_can_consume_contract_only_module(self) -> None:
         (self.repo / "include").mkdir()
         (self.repo / "include" / "router.h").write_text(_contract("router"), encoding="utf-8")
         (self.repo / "include" / "route_types.h").write_text(_contract("route_types"), encoding="utf-8")
         submission = self._submission()
-        submission["modules"]["route_types"] = {
-            "module_kind": "contract_only",
-            "contract_dependencies": [],
-            "paths": {
-                "contract_paths": ["include/route_types.h"],
-                "implementation_scopes": [],
-                "reference_only": [],
-            },
+        route_types = json.loads(json.dumps(submission["modules"]["router"]))
+        route_types["module_kind"] = "contract_only"
+        route_types["responsibility"] = "define the immutable route data shape"
+        route_types["paths"] = {
+            "contract_mode": "file_frozen",
+            "contract_paths": ["include/route_types.h"],
+            "implementation_scopes": [],
+            "reference_only": [],
         }
-        submission["modules"]["router"]["contract_dependencies"] = ["route_types"]
+        submission["modules"]["route_types"] = route_types
+        submission["modules"]["router"]["dependencies"] = {
+            "route_types": {
+                "consumes": ["route_result"],
+                "purpose": "reuse the accepted route result shape",
+                "handoff": "return the shared route result",
+            }
+        }
         normalized = validate_architecture_submission(
             submission,
             requirements_payload=self.requirements,
             workspace_root=self.repo,
         )
         self.assertEqual(
-            normalized["modules"]["router"]["contract_dependencies"],
-            ["route_types"],
+            set(normalized["modules"]["router"]["dependencies"]),
+            {"route_types"},
         )
+
+    def test_semantic_dependency_must_consume_declared_provider_outputs(self) -> None:
+        (self.repo / "include").mkdir()
+        (self.repo / "include" / "router.h").write_text(_contract("router"), encoding="utf-8")
+        (self.repo / "include" / "route_types.h").write_text(_contract("route_types"), encoding="utf-8")
+        submission = self._submission()
+        route_types = json.loads(json.dumps(submission["modules"]["router"]))
+        route_types["module_kind"] = "contract_only"
+        route_types["paths"] = {
+            "contract_mode": "file_frozen",
+            "contract_paths": ["include/route_types.h"],
+            "implementation_scopes": [],
+            "reference_only": [],
+        }
+        submission["modules"]["route_types"] = route_types
+        submission["modules"]["router"]["dependencies"] = {
+            "route_types": {
+                "consumes": ["missing_output"],
+                "purpose": "exercise provider-output validation",
+                "handoff": "consume the shared shape",
+            }
+        }
+
+        with self.assertRaisesRegex(
+            ArchitectureValidationError,
+            "consumes unknown outputs from route_types: missing_output",
+        ):
+            validate_architecture_submission(
+                submission,
+                requirements_payload=self.requirements,
+                workspace_root=self.repo,
+            )
 
     def test_dirty_workspace_snapshot_and_skeleton_bundle_are_self_contained(self) -> None:
         (self.repo / "README.md").write_text("dirty tracked\n", encoding="utf-8")
@@ -999,9 +1099,10 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertEqual(router.payload["historical_repair_bill_refs"], [repair_ref.to_dict()])
         module_contract = self.artifacts.read_json(router.payload["unit_contract_ref"])
         self.assertEqual(
-            set(module_contract["obligations"]),
+            set(module_contract["requirements"]),
             {"deterministic_routing"},
         )
+        self.assertEqual(module_contract["module"]["responsibility"], self._submission()["modules"]["router"]["responsibility"])
         scenario_node = self.repository.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             compilation.verification_node_ids["router_end_to_end"],
@@ -1011,19 +1112,28 @@ class MinionV2SkeletonTests(unittest.TestCase):
             scenario_node.payload["unit_contract_ref"]
         )
         self.assertEqual(
-            set(scenario_contract["obligations"]),
+            set(scenario_contract["requirements"]),
             {"deterministic_routing"},
         )
         work_view_ref = UnitWorkViewBuilder(architecture).build(router, dependency_outputs={})
         work_view = self.artifacts.read_json(work_view_ref)
         encoded = json.dumps(work_view, sort_keys=True)
         self.assertEqual(work_view["module_name"], "router")
-        self.assertNotIn("requirements", work_view)
+        self.assertIn("requirements", work_view)
         self.assertNotIn("coverage_claims", work_view)
         self.assertNotIn("contract_consumption", work_view)
         self.assertEqual(
-            set(work_view["obligations"]),
+            set(work_view["requirements"]),
             {"deterministic_routing"},
+        )
+        self.assertEqual(work_view["module"]["responsibility"], self._submission()["modules"]["router"]["responsibility"])
+        self.assertEqual(
+            work_view["developer_tests"],
+            {"kind": "directory", "path": "tests/router/developer"},
+        )
+        self.assertEqual(
+            work_view["verification_corpus"],
+            {"kind": "directory", "path": "tests/router/verification"},
         )
         self.assertEqual(
             work_view["historical_repair_bills"][0]["case_name"],
@@ -1245,14 +1355,14 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_architecture_yaml_schema_accepts_dynamic_semantic_name_maps(self) -> None:
         schema = ArchitectureDraft.model_json_schema(mode="validation")
-        obligation_map = schema["properties"]["obligations"]
+        requirement_map = schema["properties"]["requirements"]
         module_map = schema["properties"]["modules"]
         scenario_map = schema["properties"]["scenarios"]
-        self.assertIn(r"^[a-z][a-z0-9_]{1,79}$", obligation_map["patternProperties"])
+        self.assertIn(r"^[a-z][a-z0-9_]{1,79}$", requirement_map["patternProperties"])
         self.assertIn(r"^[a-z][a-z0-9_]{1,79}$", module_map["patternProperties"])
         self.assertIn(r"^[a-z][a-z0-9_]{1,79}$", scenario_map["patternProperties"])
 
-        payload = {"schema_version": 3, **self._submission()}
+        payload = {"schema_version": 4, **self._submission()}
         ArchitectureDraft.model_validate(payload, strict=True)
         for invalid_name in ("CLI Decode Streaming", "a", "2fast", "bad-name", "a" * 81):
             with self.subTest(invalid_name=invalid_name), self.assertRaises(ValueError):
@@ -1289,15 +1399,14 @@ class MinionV2SkeletonTests(unittest.TestCase):
             SKELETON_BUILDER_TOOL_SPECS["op_minion_architecture_review_pass"]["description"]
         )
 
-        self.assertIn("one compact obligation_trace per bound obligation", description)
-        self.assertIn("smallest witness satisfying its bound entry_condition", description)
-        self.assertIn("distinguishing_signal", description)
-        self.assertIn("records the cited source lines", description)
-        self.assertIn("Manager-bound decision_trace", description)
-        self.assertIn("hypothetical future implementation support are not semantic proof", description)
-        self.assertIn("do not require private algorithms or function bodies", description)
+        self.assertIn("PASS with no arguments", description)
+        self.assertIn("every module protocol is complete", description)
+        self.assertIn("ownership and lifecycle close", description)
+        self.assertIn("provider outputs satisfy consumer dependencies", description)
+        self.assertIn("success and failure observations", description)
+        self.assertIn("hypothetical implementation behavior is not semantic proof", description)
 
-    def test_architecture_submit_persists_requirement_obligation_ledger(self) -> None:
+    def test_architecture_submit_persists_requirement_mapping(self) -> None:
         (self.repo / "include").mkdir()
         (self.repo / "include" / "router.h").write_text(_contract("router"), encoding="utf-8")
         requirements_path = self.runtime_root / "requirements.json"
@@ -1321,9 +1430,9 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertEqual(set(artifact), {"obligations", "modules", "scenarios"})
+        self.assertEqual(set(artifact), {"requirements", "modules", "scenarios"})
         self.assertEqual(
-            artifact["scenarios"]["router_end_to_end"]["obligations"],
+            artifact["scenarios"]["router_end_to_end"]["requirement_refs"],
             ["deterministic_routing"],
         )
 
@@ -1439,15 +1548,10 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def test_architecture_review_submit_needs_no_positive_audit_bookkeeping(self) -> None:
         workspace = self._review_builder_workspace()
-        pass_args = compile_architecture_review_invocation_tool_contract(
-            task_ledger={},
-            architecture=self._submission(),
-        )["pass_example"]
-
         result = self._builder_call(
             workspace,
             "op_minion_architecture_review_pass",
-            pass_args,
+            {},
         )
 
         self.assertTrue(result.ok, result.llm_text)
@@ -1459,105 +1563,23 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertEqual(artifact["verdict"], "PASS")
         self.assertEqual(artifact["review_scope"]["module_names"], ["router"])
         self.assertEqual(
-            artifact["review_scope"]["obligation_names"],
+            artifact["review_scope"]["requirement_names"],
             ["deterministic_routing"],
         )
-        self.assertEqual(
-            [item["obligation"] for item in artifact["obligation_traces"]],
-            ["deterministic_routing"],
-        )
-        self.assertEqual(
-            artifact["obligation_traces"][0]["evidence"][0]["source_text"],
-            "/*",
-        )
-        self.assertEqual(len(artifact["decision_traces"]), 1)
-        self.assertEqual(
-            artifact["decision_traces"][0]["left"]["evidence"][0]["source_text"],
-            "/*",
-        )
+        self.assertNotIn("obligation_traces", artifact)
+        self.assertNotIn("decision_traces", artifact)
         self.assertNotIn("verification_node_names", artifact["review_scope"])
 
-    def test_architecture_review_pass_rejects_state_without_entry_witness(self) -> None:
+    def test_architecture_review_pass_rejects_legacy_trace_arguments(self) -> None:
         workspace = self._review_builder_workspace()
-        pass_args = compile_architecture_review_invocation_tool_contract(
-            task_ledger={},
-            architecture=self._submission(),
-        )["pass_example"]
-        del pass_args["decision_traces"][0]["left"]["entry_witness"]
-
         result = self._builder_call(
             workspace,
             "op_minion_architecture_review_pass",
-            pass_args,
+            {"decision_traces": []},
         )
 
         self.assertFalse(result.ok)
-        self.assertIn(
-            "requires entry_witness and public_observation",
-            result.llm_text,
-        )
-
-    def test_architecture_review_pass_rejects_partial_obligation_trace(self) -> None:
-        workspace = self._review_builder_workspace()
-        pass_args = compile_architecture_review_invocation_tool_contract(
-            task_ledger={},
-            architecture=self._submission(),
-        )["pass_example"]
-        pass_args["obligation_traces"] = []
-
-        result = self._builder_call(
-            workspace,
-            "op_minion_architecture_review_pass",
-            pass_args,
-        )
-
-        self.assertFalse(result.ok)
-        self.assertIn(
-            "obligation_traces must exactly cover bound obligations: missing=deterministic_routing",
-            result.llm_text,
-        )
-
-    def test_architecture_review_pass_requires_every_bound_decision_pair(self) -> None:
-        workspace = self._review_builder_workspace()
-        pass_args = compile_architecture_review_invocation_tool_contract(
-            task_ledger={},
-            architecture=self._submission(),
-        )["pass_example"]
-        pass_args["decision_traces"] = []
-
-        result = self._builder_call(
-            workspace,
-            "op_minion_architecture_review_pass",
-            pass_args,
-        )
-
-        self.assertFalse(result.ok)
-        self.assertIn(
-            "decision_traces must exactly cover Manager-bound pairs",
-            result.llm_text,
-        )
-
-    def test_architecture_review_pass_rejects_implementation_file_as_contract_evidence(self) -> None:
-        workspace = self._review_builder_workspace()
-        pass_args = compile_architecture_review_invocation_tool_contract(
-            task_ledger={},
-            architecture=self._submission(),
-        )["pass_example"]
-        pass_args["obligation_traces"][0]["evidence"] = [
-            {"file": "src/router.cpp", "line": 1}
-        ]
-
-        result = self._builder_call(
-            workspace,
-            "op_minion_architecture_review_pass",
-            pass_args,
-        )
-
-        self.assertFalse(result.ok)
-        self.assertIn(
-            "evidence must cite a declared contract path: src/router.cpp",
-            result.llm_text,
-        )
+        self.assertIn("takes no arguments", result.llm_text)
 
     def test_architecture_review_finding_compiles_fail(self) -> None:
         workspace = self._review_builder_workspace()
@@ -1583,7 +1605,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertEqual(artifact["verdict"], "FAIL")
         self.assertEqual(artifact["findings"][0]["finding_key"], "router_result_flow_missing")
 
-    def test_architecture_review_tool_contract_binds_module_and_obligation_catalog(self) -> None:
+    def test_architecture_review_tool_contract_binds_module_and_requirement_catalog(self) -> None:
         contract = compile_architecture_review_invocation_tool_contract(
             task_ledger={},
             architecture=self._submission(),
@@ -1591,106 +1613,17 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
         self.assertNotIn("hard_requirements", contract)
         self.assertEqual(contract["module_names"], ["router"])
-        self.assertEqual(contract["obligation_names"], ["deterministic_routing"])
-        self.assertEqual(contract["contract_version"], "5")
-        self.assertEqual(len(contract["decision_pairs"]), 1)
-        self.assertEqual(
-            [
-                item["obligation"]
-                for item in contract["pass_example"]["obligation_traces"]
-            ],
-            ["deterministic_routing"],
-        )
+        self.assertEqual(contract["requirement_names"], ["deterministic_routing"])
+        self.assertEqual(contract["contract_version"], "6")
+        self.assertNotIn("decision_pairs", contract)
+        self.assertNotIn("pass_example", contract)
         self.assertNotIn("verification_node_names", contract)
         descriptions = json.dumps(contract["guidance_overrides"], ensure_ascii=False)
         self.assertIn("router", descriptions)
-        self.assertIn("where private state/resources live", descriptions)
-        self.assertIn("syntax and compilation are not semantic proof", descriptions)
-        self.assertIn("missing legal storage seam", descriptions)
+        self.assertIn("responsibility", descriptions)
+        self.assertIn("lifecycle", descriptions)
+        self.assertIn("Syntax and compilation are supporting checks", descriptions)
         self.assertNotIn("workflow_id", descriptions)
-
-    def test_architecture_review_pairs_cross_obligation_states_at_one_decision_point(self) -> None:
-        architecture = self._submission()
-        routing = architecture["obligations"]["deterministic_routing"]
-        loaded = routing["states"].pop("rules_loaded")
-        architecture["obligations"]["selected_routing"] = {
-            "claim": "a populated rule set returns one selected route",
-            "owner": "router",
-            "states": {"rules_loaded": loaded},
-            "boundaries": {"matching_rules": ["one", "multiple"]},
-            "observable_outcome": "the selected route is returned",
-            "contract_path": ["router::route -> selected route"],
-        }
-        architecture["scenarios"]["router_end_to_end"]["obligations"].append(
-            "selected_routing"
-        )
-
-        contract = compile_architecture_review_invocation_tool_contract(
-            task_ledger={},
-            architecture=architecture,
-        )
-
-        self.assertEqual(
-            [
-                (
-                    pair["scenario"],
-                    pair["decision_point"],
-                    pair["left"]["state_ref"],
-                    pair["right"]["state_ref"],
-                )
-                for pair in contract["decision_pairs"]
-            ],
-            [
-                (
-                    "router_end_to_end",
-                    "route_selection",
-                    "deterministic_routing.empty",
-                    "selected_routing.rules_loaded",
-                )
-            ],
-        )
-
-    def test_architecture_review_pairs_preserve_cross_outcome_pairs_without_scenario_duplicates(self) -> None:
-        architecture = self._submission()
-        states = architecture["obligations"]["deterministic_routing"]["states"]
-        states["rules_disabled"] = {
-            "entry_condition": "configured rules are disabled",
-            "decision_point": "route_selection",
-            "outcome": "no_route",
-            "required_outcome": "return the deterministic empty result",
-        }
-        states["fallback_loaded"] = {
-            "entry_condition": "only a fallback routing rule is configured",
-            "decision_point": "route_selection",
-            "outcome": "selected_route",
-            "required_outcome": "return the deterministic fallback route",
-        }
-        architecture["scenarios"]["router_repeated"] = {
-            **architecture["scenarios"]["router_end_to_end"],
-        }
-
-        contract = compile_architecture_review_invocation_tool_contract(
-            task_ledger={},
-            architecture=architecture,
-        )
-
-        pairs = contract["decision_pairs"]
-        self.assertEqual(len(pairs), 4)
-        self.assertEqual({pair["scenario"] for pair in pairs}, {"router_end_to_end"})
-        covered_states = {
-            side["state_ref"]
-            for pair in pairs
-            for side in (pair["left"], pair["right"])
-        }
-        self.assertEqual(
-            covered_states,
-            {
-                "deterministic_routing.empty",
-                "deterministic_routing.fallback_loaded",
-                "deterministic_routing.rules_disabled",
-                "deterministic_routing.rules_loaded",
-            },
-        )
 
     def test_revision_submit_merges_semantic_patch_and_rejects_out_of_scope_paths(self) -> None:
         (self.repo / "include").mkdir()
@@ -2032,7 +1965,17 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         self.assertEqual(
             set(payload["modules"]["router"]),
-            {"module_kind", "contract_dependencies", "paths"},
+            {
+                "module_kind",
+                "behavior_kind",
+                "responsibility",
+                "dependencies",
+                "contract",
+                "ownership",
+                "lifecycle",
+                "state_machine",
+                "paths",
+            },
         )
 
     def test_invalid_yaml_schema_is_rejected_without_advancing_submission(self) -> None:
@@ -2067,7 +2010,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
         submission = self._submission()
         submission["modules"]["router"] = {
             "module_kind": "implementation",
-            "contract_dependencies": [],
             "paths": {"contract_paths": []},
         }
 
@@ -2241,16 +2183,16 @@ class MinionV2SkeletonTests(unittest.TestCase):
         produced: list[dict[str, object]] = []
 
         revised = load_architecture_draft(workspace)
-        revised["modules"]["route_status"] = {
-            "module_kind": "contract_only",
-            "contract_dependencies": [],
-            "paths": {
-                "contract_mode": "file_frozen",
-                "contract_paths": ["include/route_status.h"],
-                "implementation_scopes": [],
-                "reference_only": [],
-            },
+        route_status = json.loads(json.dumps(revised["modules"]["router"]))
+        route_status["module_kind"] = "contract_only"
+        route_status["responsibility"] = "define the shared route status shape"
+        route_status["paths"] = {
+            "contract_mode": "file_frozen",
+            "contract_paths": ["include/route_status.h"],
+            "implementation_scopes": [],
+            "reference_only": [],
         }
+        revised["modules"]["route_status"] = route_status
         write_architecture_draft(workspace, revised)
         result = self._builder_call(
             workspace, "op_minion_architecture_submit", produced=produced
@@ -2744,35 +2686,44 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
     def _submission(self) -> dict[str, object]:
         return {
-            "obligations": {
+            "requirements": {
                 "deterministic_routing": {
                     "claim": "routing remains deterministic for empty and populated rule sets",
                     "owner": "router",
-                    "states": {
-                        "empty": {
-                            "entry_condition": "no routing rules are configured",
-                            "decision_point": "route_selection",
-                            "outcome": "no_route",
-                            "required_outcome": "return the deterministic empty result",
-                        },
-                        "rules_loaded": {
-                            "entry_condition": "at least one routing rule is configured",
-                            "decision_point": "route_selection",
-                            "outcome": "selected_route",
-                            "required_outcome": "return the deterministically selected route",
-                        },
-                    },
-                    "boundaries": {
-                        "matching_rules": ["zero", "one", "multiple"],
-                    },
-                    "observable_outcome": "the public router returns the same selected route for the same input",
-                    "contract_path": ["router public input", "rule selection", "router public result"],
+                    "contract_path": ["router::route -> router public result"],
                 }
             },
             "modules": {
                 "router": {
                     "module_kind": "implementation",
-                    "contract_dependencies": [],
+                    "behavior_kind": "service",
+                    "responsibility": "select one deterministic route from immutable rules",
+                    "dependencies": {},
+                    "contract": {
+                        "inputs": {
+                            "route_request": {
+                                "interface": "router::route",
+                                "semantics": "accept one immutable route request",
+                            }
+                        },
+                        "outputs": {
+                            "route_result": {
+                                "interface": "router::route",
+                                "semantics": "return the same selected route for the same rules and input",
+                            }
+                        },
+                        "errors": ["invalid rules fail deterministically"],
+                        "invariants": ["routing does not mutate the configured rules"],
+                    },
+                    "ownership": ["each router owns its configured immutable rules"],
+                    "lifecycle": {
+                        "creation": "constructs from validated immutable rules",
+                        "operation": "routes requests without mutating rules",
+                        "shutdown": "accepts no new requests after destruction begins",
+                        "failure": "returns a deterministic invalid-rule error",
+                        "cleanup": "releases owned rules at destruction",
+                    },
+                    "state_machine": None,
                     "paths": {
                         "contract_mode": "file_frozen",
                         "contract_paths": ["include/router.h"],
@@ -2784,9 +2735,11 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "scenarios": {
                 "router_end_to_end": {
                     "modules": ["router"],
-                    "obligations": ["deterministic_routing"],
+                    "requirement_refs": ["deterministic_routing"],
                     "entrypoint": "tests/test_router.cpp",
+                    "contract_flow": ["consumer -> router::route -> route_result"],
                     "observable_behavior": "A consumer can route one rule through the public router contract.",
+                    "failure_behavior": "Invalid rules produce the declared deterministic error.",
                     "environment": "Project host test environment",
                 }
             },
