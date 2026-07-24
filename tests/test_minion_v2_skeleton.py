@@ -837,6 +837,21 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertIn("### router", markdown)
         self.assertNotIn(artifact_ref.sha256, markdown)
 
+    def test_workspace_snapshot_rejects_actual_private_key_content(self) -> None:
+        marker = b"-----BEGIN " + b"PRIVATE KEY-----"
+        (self.repo / "leaked.txt").write_bytes(marker + b"\nnot-a-real-key\n")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "workspace snapshot rejected private key content: leaked.txt",
+        ):
+            self.service.provision_architecture_workspace(
+                workflow_id="private-key-rejection",
+                revision_name="initial",
+                workspace={"repo_path": str(self.repo)},
+                requirements_ref=self.requirements_ref,
+            )
+
     def test_project_repo_contains_readable_workflow_and_is_shared_with_execution(self) -> None:
         workflow_id = "wf_4ee6259e8d2b41f0b6db35b04b87deca"
         workspace = self.service.provision_architecture_workspace(

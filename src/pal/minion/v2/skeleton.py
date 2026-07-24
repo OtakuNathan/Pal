@@ -57,7 +57,9 @@ _SENSITIVE_BASENAMES = frozenset(
         "id_rsa",
     }
 )
-_PRIVATE_KEY_MARKER = b"-----BEGIN PRIVATE KEY-----"
+# Keep the marker split so this source file does not match the content scanner
+# when Pal snapshots its own repository.
+_PRIVATE_KEY_MARKER = b"-----BEGIN " + b"PRIVATE KEY-----"
 _MAX_SNAPSHOT_FILE_BYTES = 25 * 1024 * 1024
 
 
