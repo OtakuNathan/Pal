@@ -512,6 +512,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             retry_attempt.metadata["sandbox"]["reference_binds"][0]["source_path"],
             str(task),
         )
+        role_socket = self.runtime_root / "data" / "minion-role" / "role.sock"
+        role_socket.parent.mkdir(parents=True, exist_ok=True)
+        role_socket.write_text("test endpoint", encoding="utf-8")
         argv, _ = build_sandboxed_runner_invocation(
             runtime_root=self.runtime_root,
             pack=retry_attempt,
@@ -4771,10 +4774,18 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             run_id="run-architect-question",
             pack=MinionInvocationPack(
                 invocation_id="inv-architect-question",
-                metadata={"minion_v2": {"workflow_id": "wf-architect-question"}},
+                metadata={
+                    "minion_v2": {
+                        "workflow_id": "wf-architect-question",
+                        "aggregate_type": "architecture_revision",
+                        "aggregate_id": "arch-architect-question",
+                        "role": "architect",
+                    }
+                },
             ),
             pending_clarification={
                 "clarification_id": "clarification-1",
+                "title": "Compatibility",
                 "questions": [
                     {
                         "question_id": "compatibility-boundary",
@@ -4786,11 +4797,24 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         manager.runs[state.run_id] = state
         controls: list[dict[str, object]] = []
+        event_order: list[str] = []
+
+        def append_revision(request: dict[str, object]) -> dict[str, object]:
+            event_order.append("ledger")
+            self.assertEqual(request["question"], "Which public API is binding?")
+            self.assertEqual(request["answer"], "Preserve the checked-in public API.")
+            return {
+                "appended": True,
+                "sequence": 1,
+                "requirements_ref": {"sha256": "task-ledger-generation-2"},
+            }
 
         async def send_control(run_id: str, message: dict[str, object]) -> bool:
+            event_order.append("worker")
             controls.append({"run_id": run_id, "message": dict(message)})
             return True
 
+        manager.v2_service.append_architect_clarification = append_revision
         manager.v2_semantic_orchestrator.send_worker_control = send_control
         result = asyncio.run(
             manager.answer_workflow_question(
@@ -4802,6 +4826,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"])
+        self.assertEqual(event_order, ["ledger", "worker"])
         self.assertEqual(state.status, "running")
         self.assertEqual(state.pending_clarification, {})
         self.assertEqual(
@@ -4821,6 +4846,13 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                                     "answer": "Preserve the checked-in public API.",
                                 }
                             ],
+                            "task_revision": {
+                                "appended": True,
+                                "sequence": 1,
+                                "requirements_ref": {
+                                    "sha256": "task-ledger-generation-2"
+                                },
+                            },
                         },
                     },
                 }

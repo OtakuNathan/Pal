@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from pal.execution.generated_tool_models import (
+    ExecutionShellExecShellExecCapabilityMixinShellInput,
     MinionScopedExecutionOpMinionArtifactWriteInput,
-    MinionScopedExecutionOpSearchInput,
 )
 
 import asyncio
@@ -17,20 +17,25 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from pal.execution.runtime import ExecutionRuntime
-from pydantic import create_model
+from pydantic import Field, create_model
 from pal.execution.tool_facade import (
+    CompleteResult,
     EffectKind,
     EffectOutcome,
     EffectReceipt,
+    FailedResult,
     Idempotency,
     InvocationMode,
     PagingMode,
+    PagedResult,
+    RejectedResult,
     RetryPolicy,
     StrictToolModel,
     Tool,
     ToolExecutionSemantics,
     ToolGuidance,
     ToolHandlerResult,
+    ToolInvocationResult,
 )
 from pal.execution.tool_registry import _example_from_schema
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
@@ -96,15 +101,20 @@ class MinionScopedExecutionOpMinionArtifactEditInput(StrictToolModel):
     mime_type: str | None = None
 
 
-_WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
-    "op_search": {
-        "alias": "search",
-        "description": (
-            "Search text below a sandbox-visible file or directory path. Use the path "
-            "shown under Immutable Inputs for references; omit path to search the project workspace."
+class MinionScopedExecutionShellInput(
+    ExecutionShellExecShellExecCapabilityMixinShellInput
+):
+    cmd: str = Field(
+        ...,
+        description=(
+            "Task-scoped shell command for bounded discovery, tests, builds, "
+            "scripts, process probes, and ordinary file operations inside the "
+            "assigned worktree."
         ),
-        "InputModel": MinionScopedExecutionOpSearchInput,
-    },
+    )
+
+
+_WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_artifact_write": {
         "alias": "artifact_write",
         "description": "Write the profile-declared structured output artifact. Architecture roles must use their bound Contract Builder instead.",
@@ -223,7 +233,7 @@ def _immutable_workflow_tool(
         )
     )
 
-    async def invoke(value: Any, **kwargs: Any) -> ToolHandlerResult:
+    async def invoke(value: Any, **kwargs: Any) -> ToolHandlerResult | ToolInvocationResult:
         args = value.model_dump(mode="python", exclude_none=True)
         call = CanonicalToolCall(
             name=name,
@@ -234,6 +244,11 @@ def _immutable_workflow_tool(
         if inspect.isawaitable(result):
             result = await result
         if isinstance(result, CanonicalToolResult):
+            if isinstance(
+                result.invocation_result,
+                (CompleteResult, PagedResult, RejectedResult, FailedResult),
+            ):
+                return result.invocation_result
             if not result.ok:
                 raise RuntimeError(result.llm_text or result.text or "workflow tool failed")
             payload = dict(result.structured or {"text": result.text})
@@ -362,6 +377,11 @@ class _ExecutionOverlay:
                     self.runtime.register_tool(
                         replace(
                             facade_tool,
+                            InputModel=(
+                                MinionScopedExecutionShellInput
+                                if record.canonical_path == "op_exec_shell"
+                                else facade_tool.InputModel
+                            ),
                             guidance=minion_tool_guidance(
                                 record.canonical_path,
                                 facade_tool.guidance,
@@ -511,12 +531,10 @@ class MinionScopedExecutionRuntime:
                 self.produced_artifacts,
             )
         if is_candidate_builder_capability(name):
-            return lambda call, ctx: candidate_builder_tool_result(
+            return lambda call, _ctx: candidate_builder_tool_result(
                 call,
                 self.workspace,
                 self.produced_artifacts,
-                original_adapter=self._original_adapter,
-                turn_id=str(ctx.get("turn_id") or "") or None,
             )
         if is_skeleton_builder_capability(name):
             if name == "op_minion_ask_question":
@@ -537,7 +555,7 @@ class MinionScopedExecutionRuntime:
             )
         if is_contract_builder_capability(name):
             return lambda call, _ctx: contract_builder_tool_result(call, self.workspace, self.produced_artifacts)
-        if name in {"op_search", "op_minion_artifact_write", "op_minion_artifact_edit"}:
+        if name in {"op_minion_artifact_write", "op_minion_artifact_edit"}:
             return lambda call, _ctx: asyncio.to_thread(_workspace_tool_result, call, self.workspace)
         return None
 
@@ -604,8 +622,15 @@ class MinionScopedExecutionRuntime:
             return admission.to_result()
         if not allow_tools:
             return _error_result(admission.call, "tool execution disabled in finalization mode", "finalization_only")
-        result = await self.base_runtime.execute_tool_async(
+        guarded_call, guard_error = _guard_scoped_workspace_mutation(
             admission.call,
+            target_name=admission.target_name,
+            workspace=self.workspace,
+        )
+        if guard_error is not None:
+            return guard_error
+        result = await self.base_runtime.execute_tool_async(
+            guarded_call,
             allow_tools=True,
             budget=budget,
             turn_id=turn_id,
@@ -625,6 +650,151 @@ def _supported_kwargs(callable_obj: Any, values: dict[str, Any]) -> dict[str, An
     if any(item.kind == inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values()):
         return dict(values)
     return {key: value for key, value in values.items() if key in signature.parameters}
+
+
+_SCOPED_FILE_MUTATIONS = frozenset(
+    {
+        "op_file_edit",
+        "op_file_write",
+        "op_path_delete",
+    }
+)
+
+
+def _guard_scoped_workspace_mutation(
+    call: CanonicalToolCall,
+    *,
+    target_name: str,
+    workspace: dict[str, Any],
+) -> tuple[CanonicalToolCall, CanonicalToolResult | None]:
+    """Reject host-side file mutations outside the role's compiled write set.
+
+    Shell commands run inside bubblewrap and receive read-only overlays there.
+    File tools execute through the host runtime, so they need the same policy at
+    the facade boundary instead of discovering an illegal edit during candidate
+    snapshotting.
+    """
+
+    if target_name not in _SCOPED_FILE_MUTATIONS:
+        return call, None
+    repo_raw = str(
+        workspace.get("repo_path")
+        or workspace.get("workspace_path")
+        or workspace.get("task_repo_path")
+        or workspace.get("target_repo_path")
+        or ""
+    ).strip()
+    args = effective_minion_tool_args(call)
+    raw_path = str(args.get("file_path") or "").strip()
+    if not repo_raw or not raw_path:
+        return call, None
+    has_compiled_write_scopes = "write_path_scopes" in workspace
+    has_read_only_overlays = "read_only_overlay_paths" in workspace
+    if not has_compiled_write_scopes and not has_read_only_overlays:
+        return call, None
+    repo = Path(repo_raw).expanduser().resolve()
+    candidate = Path(raw_path).expanduser()
+    target = (
+        candidate.resolve()
+        if candidate.is_absolute()
+        else (repo / candidate).resolve()
+    )
+    try:
+        relative = target.relative_to(repo).as_posix()
+    except ValueError:
+        return call, _path_not_writable_result(
+            call,
+            raw_path=raw_path,
+            relative_path="",
+            reason="path_outside_workspace",
+        )
+    overlays = [
+        str(item or "").replace("\\", "/").strip("/")
+        for item in list(workspace.get("read_only_overlay_paths") or [])
+        if str(item or "").strip()
+    ]
+    if any(
+        relative == overlay or relative.startswith(overlay + "/")
+        for overlay in overlays
+    ):
+        return call, _path_not_writable_result(
+            call,
+            raw_path=raw_path,
+            relative_path=relative,
+            reason="read_only_overlay",
+        )
+    scopes = [
+        dict(item or {})
+        for item in list(workspace.get("write_path_scopes") or [])
+        if isinstance(item, dict)
+    ]
+    if has_compiled_write_scopes and not any(
+        _workspace_scope_matches(relative, scope) for scope in scopes
+    ):
+        return call, _path_not_writable_result(
+            call,
+            raw_path=raw_path,
+            relative_path=relative,
+            reason="outside_write_scope",
+        )
+    args["file_path"] = str(target)
+    return _tool_call_with_effective_args(call, args), None
+
+
+def _workspace_scope_matches(path: str, scope: dict[str, Any]) -> bool:
+    target = str(scope.get("path") or "").replace("\\", "/").strip("/")
+    kind = str(scope.get("kind") or "").strip().lower()
+    if not target:
+        return False
+    if kind == "file":
+        return path == target
+    if kind == "directory":
+        return path == target or path.startswith(target + "/")
+    return False
+
+
+def _tool_call_with_effective_args(
+    call: CanonicalToolCall,
+    args: dict[str, Any],
+) -> CanonicalToolCall:
+    if call.name == "op_tool_call":
+        outer = dict(call.args or {})
+        outer["args"] = args
+        return CanonicalToolCall(
+            name=call.name,
+            args=outer,
+            call_id=call.call_id,
+        )
+    return CanonicalToolCall(name=call.name, args=args, call_id=call.call_id)
+
+
+def _path_not_writable_result(
+    call: CanonicalToolCall,
+    *,
+    raw_path: str,
+    relative_path: str,
+    reason: str,
+) -> CanonicalToolResult:
+    display = relative_path or raw_path
+    text = (
+        f"path is not writable in this role: {display}. "
+        "Change only the paths in the bound write scope; verifier-owned corpus "
+        "must be repaired by its Verifier."
+    )
+    return CanonicalToolResult(
+        name=call.name,
+        ok=False,
+        text=text,
+        structured={
+            "reason": "path_not_writable",
+            "policy_reason": reason,
+            "file_path": raw_path,
+            "workspace_path": relative_path,
+        },
+        call_id=call.call_id,
+        llm_text=text,
+        status=RuntimeStatus.FORBIDDEN,
+    )
 
 
 def _scope_descriptor(
@@ -740,7 +910,6 @@ def _review_tool_evidence_ref(
         or str(target_name) in {
             "op_file_write",
             "op_file_edit",
-            "op_path_delete",
             "op_minion_verification_scratch_write",
         }
     ):
@@ -765,7 +934,6 @@ def _review_tool_evidence_ref(
             if str(target_name) in {
                 "op_file_write",
                 "op_file_edit",
-                "op_path_delete",
                 "op_minion_verification_scratch_write",
             }
             else "lsp"

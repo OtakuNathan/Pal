@@ -763,7 +763,9 @@ def compile_architecture_markdown(manifest: Mapping[str, Any], fragments: Mappin
     assumptions = dict(fragments.get("assumption_ledger") or {})
     risks = dict(fragments.get("risk_ledger") or {})
     lines = ["# Architecture Contract", "", "## Task Ledger", ""]
-    lines.append("- `task.yaml`: original plus ordered append-only revisions")
+    lines.append(
+        "- `task.yaml`: immutable original plus Manager-recorded append-only revisions; newer conflicting revisions take precedence"
+    )
     lines.append(f"- Revisions: {len(list(task_ledger.get('revisions') or []))}")
     lines.extend(["", "## Module Topology", ""])
     dependency_map = dict(topology.get("depends_on") or {})

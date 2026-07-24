@@ -14,7 +14,7 @@ from pal.minion.v2.role_contracts import RoleActivation
 from pal.minion.v2.schema import ensure_minion_v2_schema
 
 
-AUTHORING_CONTRACT_VERSION = "7"
+AUTHORING_CONTRACT_VERSION = "8"
 ACTIVE_DRAFT_STATUS = "active"
 SUBMITTED_DRAFT_STATUS = "submitted"
 

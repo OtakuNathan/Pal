@@ -6,25 +6,16 @@ from pal.execution.generated_tool_models import (
     MinionV2SkeletonBuilderOpMinionArchitectureSubmitInput,
 )
 
-import base64
 import json
 import subprocess
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from pal.execution.tool_facade import EmptyToolInput
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
-from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.architecture_yaml import (
     ArchitectureDraftFileError,
     load_architecture_draft,
-)
-from pal.minion.v2.repository import MinionV2Repository
-from pal.minion.v2.task_ledger import (
-    TaskRevisionAuthority,
-    load_task_revision_yaml,
-    task_revision_template_yaml,
 )
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
@@ -55,7 +46,6 @@ from pal.shared import RuntimeStatus
 
 ARCHITECTURE_SKELETON_CAPABILITIES = (
     "op_minion_ask_question",
-    "op_minion_task_revision_submit",
     "op_minion_architecture_submit",
 )
 SKELETON_REVIEW_CAPABILITIES = (
@@ -68,15 +58,8 @@ SKELETON_BUILDER_CAPABILITIES = (*ARCHITECTURE_SKELETON_CAPABILITIES, *SKELETON_
 SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_ask_question": {
         "alias": "ask_question",
-        "description": "Use this tool proactively before architecture design or revision when task.yaml contains or may contain a contradiction, material ambiguity, incorrect or infeasible requirement, or missing decision; when the result depends on user preference; or when a choice would materially change product behavior, compatibility, architecture, modification scope, or implementation scope. Do not silently choose precedence, repair or reinterpret a requirement, or widen or narrow scope. Ask one decisive question without ending the Architect invocation: identify the exact issue and the decision needed, then supply a short title, precise question, and three option strings. Each option contains a readable choice and its impact or tradeoff. The channel also permits a custom free-text answer. Calling suspends the current tool call until the user answers, the long timeout expires, or the invocation is paused, cancelled, or restarted. After an answer, immediately encode only its semantic consequence in the preseeded task_revision.yaml and call task_revision_submit before continuing architecture work.",
+        "description": "Use this tool proactively before architecture design or revision when task.yaml contains or may contain a contradiction, material ambiguity, incorrect or infeasible requirement, or missing decision; when the result depends on user preference; or when a choice would materially change product behavior, compatibility, architecture, modification scope, or implementation scope. Do not silently choose precedence, repair or reinterpret a requirement, or widen or narrow scope. Ask one decisive question without ending the Architect invocation: identify the exact issue and the decision needed, then supply a short title, precise question, and three option strings. Each option contains a readable choice and its impact or tradeoff. The channel also permits a custom free-text answer. Calling suspends the current tool call until the user answers, the long timeout expires, or the invocation is paused, cancelled, or restarted. Before the answer is returned to you, the Manager appends the exact question and answer to the immutable task.yaml ledger; no follow-up task-edit or submit action is allowed or required. Continue architecture work using that answer as the newest and therefore highest-priority task revision.",
         "InputModel": MinionV2SkeletonBuilderOpMinionAskQuestionInput,
-    },
-    "op_minion_task_revision_submit": {
-        "alias": "task_revision_submit",
-        "description": "Validate and append the Manager-preseeded task_revision.yaml after a user-authorized clarification or requirements edit. Takes no arguments. Use artifact_edit with relative_path=task_revision.yaml, content=<complete YAML>, operation=replace, and create_if_missing=false to fill the fixed schema: schema_version '1', a concise summary, and one or more changes with op add|replace|remove, a JSON Pointer path into the effective task document, and value for add/replace only. The JSON Pointer root is the content under task.yaml.original, not the task.yaml envelope: never prefix a path with /original, /revisions, or /schema_version; for example use /cli/decode/example/stdin_lines. Record the smallest semantic delta authorized by the exact user answer; never restate, rewrite, or dump the whole task. The Manager validates the YAML against the current task ledger, appends it atomically, preserves the exact question and answer as authority, and updates the running Architecture Revision. A rejected submit leaves the revision pending; correct the named YAML path and retry before architecture_submit or contract_submit.",
-        "InputModel": EmptyToolInput,
-        "idempotency": "keyed_idempotent",
-        "retry_policy": "reconcile_first",
     },
     "op_minion_architecture_submit": {
         "alias": "architecture_submit",
@@ -85,7 +68,7 @@ SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_architecture_review_pass": {
         "alias": "architecture_review_pass",
-        "description": "Submit PASS with no arguments only after a breadth-first semantic review finds no material defect. Confirm the effective task ledger maps to the architecture, every module protocol is complete, ownership and lifecycle close, provider outputs satisfy consumer dependencies, scenario contract graphs can produce the required success and failure observations, and declarations/comments agree with architecture.yaml. Compilation is only supporting evidence that contracts compose; API presence or hypothetical implementation behavior is not semantic proof.",
+        "description": "Submit PASS with no arguments only after a breadth-first semantic review finds no material defect or unresolved public semantic ambiguity. Confirm the ordered task ledger maps to the architecture, every module protocol is complete, ownership and lifecycle close, provider outputs satisfy consumer dependencies, scenario contract graphs can produce the required success and failure observations, and declarations/comments agree with architecture.yaml. Every observable input edge, partial-success failure path, and operation on public stateful values must have one declared result or an explicit set of outcomes safe for every consumer. Compilation is only supporting evidence that contracts compose; API presence, a successful probe, review_guarded implementation freedom, or hypothetical implementation behavior is not semantic proof.",
         "InputModel": EmptyToolInput,
     },
     "op_minion_architecture_review_fail": {
@@ -128,11 +111,16 @@ def compile_architecture_review_invocation_tool_contract(
             "Submit FAIL with no arguments only after all material defects are present in the structured finding Draft."
         )},
         "op_minion_architecture_review_pass": {"use_when": (
-            "Submit PASS only after independently reading task.yaml, auditing each revision against its embedded exact user answer, and reviewing every module and end-to-end scenario. "
+            "Submit PASS only after independently reading task.yaml, reconciling each exact Manager-recorded question and answer in order, and reviewing every module and end-to-end scenario. "
             "Use the bound original-to-skeleton Git diff to detect removed, relocated, or narrowed public APIs and reject compatibility drift. "
             "For every module, inspect responsibility, contract, ownership, lifecycle, optional state machine, dependencies, and declaration comments; "
             "walk each end-to-end contract graph for both success and failure and confirm every requirement has a legal observable path. "
             "Syntax and compilation are supporting checks, not semantic proof, and a missing dependency, ownership seam, failure endpoint, or requirement mapping is a material defect. "
+            "PASS is forbidden while any public input, state, or call-sequence ambiguity remains. Explicitly audit absent/null/empty/zero-length and size-coupled inputs; "
+            "partial output followed by failure, including commitment, consumption, ordering, post-error state, and retry; and copy/move/clone/share/reset/reuse semantics "
+            "for public stateful values in initial, partial, and failed states. If two conforming implementations could make observably different choices that a consumer must know, "
+            "record a finding instead of selecting one. A compile probe cannot establish that its test value is contractually legal, and review_guarded private implementation freedom "
+            "cannot supply missing public behavior. "
             "Do not submit positive audit rows or partial findings. PASS takes no arguments."
         )},
     }
@@ -156,6 +144,7 @@ async def ask_question_tool_result(
     *,
     request_user: Callable[[dict[str, Any], float | None], Awaitable[dict[str, Any]]] | None,
 ) -> CanonicalToolResult:
+    del workspace, produced_artifacts
     if request_user is None:
         return CanonicalToolResult(
             name=call.name,
@@ -206,37 +195,26 @@ async def ask_question_tool_result(
                 call_id=call.call_id,
                 status=RuntimeStatus.ERROR,
             )
-        authority = TaskRevisionAuthority(
-            title=title,
-            question=question,
-            answer=answer,
-            observed_at=datetime.now(UTC).isoformat(),
-            origin="architect_user_clarification",
-        )
-        ref = await _publish_task_revision_authority(
-            workspace,
-            authority.model_dump_json().encode("utf-8"),
-        )
-        await _record_task_revision_authority(workspace, ref)
-        draft_path = _seed_task_revision_draft(workspace)
+        revision = dict(response.get("task_revision") or {})
+        if not bool(revision.get("appended")):
+            raise RuntimeError(
+                "Manager returned an Architect answer without appending the task revision"
+            )
         return CanonicalToolResult(
             name=call.name,
             ok=True,
             text=f"User answered: {answer}",
             llm_text=(
                 f"User answered: {answer}\n"
-                "The answer is authoritative but has not yet changed task semantics. "
-                "Immediately replace task_revision.yaml with the smallest authorized semantic delta using "
-                "artifact_edit(relative_path='task_revision.yaml', content=<complete YAML>, "
-                "operation='replace', create_if_missing=false). JSON Pointer paths start inside "
-                "task.yaml.original; never prefix them with /original. "
-                "Then call task_revision_submit before continuing architecture work. "
-                f"Draft path: {draft_path}"
+                f"The Manager already appended this exact communication as task revision "
+                f"{int(revision.get('sequence') or 0)}. Continue architecture work directly. "
+                "Do not edit or restate task.yaml; this newest revision has precedence over "
+                "conflicting older revisions and original text."
             ),
             structured={
-                "status": "answered_revision_required",
+                "status": "answered_revision_recorded",
                 "answer": answer,
-                "task_revision_path": str(draft_path),
+                "task_revision": revision,
             },
             call_id=call.call_id,
             status=RuntimeStatus.OK,
@@ -254,106 +232,6 @@ async def ask_question_tool_result(
         )
 
 
-async def _publish_task_revision_authority(
-    workspace: Mapping[str, Any],
-    data: bytes,
-) -> dict[str, Any]:
-    from pal.minion.v2.role_gateway import role_gateway_client_from_env
-
-    runtime_root = Path(str(workspace["runtime_root"]))
-    gateway = role_gateway_client_from_env(runtime_root)
-    if gateway is not None:
-        response = await gateway.request(
-            "artifact_put",
-            {
-                "data_base64": base64.b64encode(data).decode("ascii"),
-                "artifact_type": "TaskRevisionAuthorityArtifact",
-                "schema_version": "1",
-                "media_type": "application/json",
-            },
-        )
-        return dict(response.get("artifact_ref") or {})
-    artifacts = ContentAddressedArtifactStore(runtime_root, MinionV2Repository(runtime_root))
-    return artifacts.put_bytes(
-        data,
-        artifact_type="TaskRevisionAuthorityArtifact",
-        media_type="application/json",
-        provenance={"origin": "architect_user_clarification"},
-    ).to_dict()
-
-
-async def _record_task_revision_authority(
-    workspace: Mapping[str, Any],
-    authority_ref: Mapping[str, Any],
-) -> None:
-    from pal.minion.v2.role_gateway import role_gateway_client_from_env
-
-    gateway = role_gateway_client_from_env(Path(str(workspace["runtime_root"])))
-    if gateway is None:
-        if isinstance(workspace, dict):
-            workspace["_pending_task_revision_authority_ref"] = dict(authority_ref)
-        return
-    await gateway.request(
-        "task_revision_authority_record",
-        {"task_revision_authority_ref": dict(authority_ref)},
-    )
-
-
-def _task_revision_draft_path(workspace: Mapping[str, Any]) -> Path:
-    root_value = str(
-        workspace.get("artifact_stage_dir") or workspace.get("artifact_dir") or ""
-    ).strip()
-    if not root_value:
-        raise ValueError("task revision requires workspace.artifact_dir")
-    root = Path(root_value).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root / "task_revision.yaml"
-
-
-def _seed_task_revision_draft(workspace: Mapping[str, Any]) -> Path:
-    path = _task_revision_draft_path(workspace)
-    path.write_text(task_revision_template_yaml(), encoding="utf-8")
-    return path
-
-
-def _submit_task_revision(
-    call: CanonicalToolCall,
-    workspace: dict[str, Any],
-) -> CanonicalToolResult:
-    if dict(call.args or {}):
-        raise ValueError("task_revision_submit takes no arguments")
-    revision = load_task_revision_yaml(_task_revision_draft_path(workspace))
-    from pal.minion.v2.role_gateway import role_gateway_client_from_env
-
-    gateway = role_gateway_client_from_env(Path(str(workspace["runtime_root"])))
-    if gateway is None:
-        if not workspace.get("_pending_task_revision_authority_ref"):
-            raise ValueError("there is no pending user-authorized task revision")
-        workspace.pop("_pending_task_revision_authority_ref", None)
-        result = {"appended": True, "generation": 1, "local_test_fallback": True}
-    else:
-        result = gateway.request_sync("task_revision_append", {"revision": revision})
-    public_result = {
-        "appended": bool(result.get("appended")),
-        "generation": int(result.get("generation") or 0),
-        "duplicate": bool(result.get("duplicate")),
-        "revision": revision,
-    }
-    return CanonicalToolResult(
-        name=call.name,
-        ok=True,
-        text="Task revision appended",
-        llm_text=(
-            f"Task revision generation {public_result['generation']} is durably current. "
-            "Continue the same Architect invocation by applying the exact delta you just submitted to the immutable task.yaml projection; "
-            "later roles receive the refreshed single task.yaml ledger. Do not restate the whole task."
-        ),
-        structured=public_result,
-        call_id=call.call_id,
-        status=RuntimeStatus.OK,
-    )
-
-
 def skeleton_builder_tool_result(
     call: CanonicalToolCall,
     workspace: dict[str, Any],
@@ -361,8 +239,6 @@ def skeleton_builder_tool_result(
 ) -> CanonicalToolResult:
     try:
         name = str(call.name or "")
-        if name == "op_minion_task_revision_submit":
-            return _submit_task_revision(call, workspace)
         if name == "op_minion_architecture_submit":
             output, version = _compile_architecture_submission(call, workspace)
             filename, title, draft_kind = "architecture_submission.json", "V2 architecture skeleton submission", "architecture"

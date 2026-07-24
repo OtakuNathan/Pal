@@ -26,6 +26,7 @@ FINDING_KINDS = frozenset(
         "contract_defect",
         "architecture_defect",
         "integration_defect",
+        "verification_defect",
     }
 )
 FINDING_PRIORITIES = ("p0", "p1", "p2")
@@ -56,6 +57,7 @@ class MinionV2ReviewAddFindingInput(StrictToolModel):
         "contract_defect",
         "architecture_defect",
         "integration_defect",
+        "verification_defect",
     ]
     priority: Literal["p0", "p1", "p2"]
     summary: str = Field(min_length=1, max_length=4000)

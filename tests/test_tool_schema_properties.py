@@ -12,7 +12,10 @@ from hypothesis_jsonschema import from_schema
 
 from pal.execution import generated_tool_models
 from pal.execution.tool_facade import StrictToolModel
-from pal.minion.scoped_execution import MinionScopedExecutionOpMinionArtifactEditInput
+from pal.minion.scoped_execution import (
+    MinionScopedExecutionOpMinionArtifactEditInput,
+    MinionScopedExecutionShellInput,
+)
 from pal.minion.v2.capabilities import (
     MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
     MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
@@ -51,6 +54,10 @@ DECLARED_INPUT_MODELS = tuple(sorted({
         (
             "MinionScopedExecutionOpMinionArtifactEditInput",
             MinionScopedExecutionOpMinionArtifactEditInput,
+        ),
+        (
+            "MinionScopedExecutionShellInput",
+            MinionScopedExecutionShellInput,
         ),
     )
 }.items()))

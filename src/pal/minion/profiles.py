@@ -404,7 +404,6 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "workspace_write": (
         "op_file_edit",
         "op_file_write",
-        "op_path_delete",
     ),
     "web_research": ("op_web_search", "op_web_read"),
     "code_intel": (
@@ -437,7 +436,6 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
         "op_file_read",
         "op_file_edit",
         "op_file_write",
-        "op_path_delete",
         "op_exec_shell",
     ),
 }
@@ -446,6 +444,8 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
 DEFAULT_MINION_DENIED_CAPABILITIES = frozenset(
     {
         "op_git",
+        "op_path_delete",
+        "op_search",
         "op_behavior_advise",
         "op_behavior_save",
         "op_channel_send_attachment",

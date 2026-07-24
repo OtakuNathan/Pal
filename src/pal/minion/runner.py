@@ -7,7 +7,6 @@ import inspect
 import json
 import os
 import re
-import shlex
 import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -80,6 +79,7 @@ from pal.minion.compact import (
 )
 from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.llm_broker import MinionBrokerLLMRuntime
+from pal.minion.web_broker import MinionBrokerWebClient
 from pal.minion.profiles import filter_minion_allowed_capabilities
 from pal.minion.scoped_execution import (
     MinionScopedExecutionRuntime,
@@ -1402,20 +1402,6 @@ class MinionRunner:
         if not admission.ok:
             self.blocked_summary = f"{admission.message}: {target_name}"
             return admission.to_result()
-        policy_error = self._dedicated_shell_command_error(target_name, policy_call)
-        if policy_error:
-            return CanonicalToolResult(
-                name=tool_call.name,
-                ok=False,
-                text=policy_error,
-                structured={
-                    "reason": "use_dedicated_capability",
-                    "capability": target_name,
-                },
-                call_id=tool_call.call_id,
-                llm_text=policy_error,
-                status=RuntimeStatus.FORBIDDEN,
-            )
         approval_runtime = ApprovalExecutionDecorator(
             delegate=execution_runtime,
             classify=lambda _call: self._execution_approval_request(target_name),
@@ -1438,26 +1424,6 @@ class MinionRunner:
         self._record_web_research_usage(target_name)
         self._record_review_tool_evidence(target_name, policy_call, result)
         return result
-
-    def _dedicated_shell_command_error(
-        self,
-        target_name: str,
-        tool_call: CanonicalToolCall,
-    ) -> str:
-        if not _is_shell_capability_name(target_name):
-            return ""
-        cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
-        if _shell_invokes_command(cmd, {"rm", "unlink", "rmdir"}) or _shell_invokes_find_delete(cmd):
-            return (
-                "Do not delete paths through shell. Use delete_path so the resolved path stays within your "
-                "assigned workspace."
-            )
-        if _shell_invokes_command(cmd, {"touch"}):
-            return (
-                "Do not create files or placeholders through shell. Use write_file with the intended complete "
-                "UTF-8 content; it creates missing files and parent directories."
-            )
-        return ""
 
     def _tool_call_with_minion_defaults(self, tool_call: CanonicalToolCall) -> CanonicalToolCall:
         target_name = _effective_capability_name(tool_call)
@@ -2215,6 +2181,13 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
     config = RuntimeConfig.load(Path(runtime_root))
     core = PalCore(config=config)
     core.context.execution_runtime.runtime_root = Path(runtime_root)
+    tool_result_root = str(
+        os.environ.get("PAL_MINION_TOOL_RESULT_ROOT") or ""
+    ).strip()
+    if tool_result_root:
+        core.context.execution_runtime.tool_result_pager.storage_root = Path(
+            tool_result_root
+        )
     artifact_service = ArtifactManager(runtime_root=Path(runtime_root), repository=ArtifactRepository())
     if os.environ.get("PAL_MINION_LLM_BROKER") == "1":
         llm_runtime = MinionBrokerLLMRuntime(runtime_root=Path(runtime_root), run_id=run_id)
@@ -2247,7 +2220,19 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
     )
     memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
     register_l3_with_core(core.context, l3_plugin)
-    register_web_search_with_core(core.context, WebSearchService(repository=web_search_repository, settings_repository=settings))
+    broker_web = (
+        MinionBrokerWebClient(runtime_root=Path(runtime_root), run_id=run_id)
+        if os.environ.get("PAL_MINION_WEB_BROKER") == "1"
+        else None
+    )
+    register_web_search_with_core(
+        core.context,
+        WebSearchService(
+            repository=web_search_repository,
+            settings_repository=settings,
+        ),
+        query_delegate=broker_web.search if broker_web is not None else None,
+    )
     register_web_fetch_with_core(
         core.context,
         WebFetchService(
@@ -2255,6 +2240,7 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
             settings_repository=settings,
             browser_manager=BrowserServiceManager(runtime_root=Path(runtime_root)),
         ),
+        read_delegate=broker_web.read if broker_web is not None else None,
     )
     build_lsp_plugin(runtime_root=Path(runtime_root)).register_with_core(core.context)
     for module_id in ("core", "execution", "artifact", "memory", l3_plugin.module_id, "web_search", "web_fetch", "lsp"):
@@ -2588,44 +2574,6 @@ def _max_output_tokens_from_context_window(context_window: int, llm_runtime: Any
     usable = max(512, context_window - margin)
     context_fraction = max(512, context_window // 4)
     return max(512, min(cap, max(floor, context_fraction), usable))
-
-
-def _is_shell_capability_name(name: object) -> bool:
-    return str(name or "").strip() in {"op_exec_shell", "run_shell"}
-
-
-def _shell_invokes_command(command: str, names: set[str]) -> bool:
-    for tokens in _shell_command_segments(command):
-        index = 0
-        while index < len(tokens) and (
-            "=" in tokens[index] and not tokens[index].startswith(("/", "./"))
-        ):
-            index += 1
-        while index < len(tokens) and tokens[index] in {"command", "exec", "nohup"}:
-            index += 1
-        if index < len(tokens) and Path(tokens[index]).name in names:
-            return True
-    return False
-
-
-def _shell_invokes_find_delete(command: str) -> bool:
-    for tokens in _shell_command_segments(command):
-        if tokens and Path(tokens[0]).name == "find" and "-delete" in tokens[1:]:
-            return True
-    return False
-
-
-def _shell_command_segments(command: str) -> list[list[str]]:
-    segments = re.split(r"&&|\|\||[;|()\n]", str(command or ""))
-    parsed: list[list[str]] = []
-    for segment in segments:
-        try:
-            tokens = shlex.split(segment, posix=(os.name != "nt"))
-        except ValueError:
-            continue
-        if tokens:
-            parsed.append(tokens)
-    return parsed
 
 
 def _web_research_capability_name(name: object) -> str | None:

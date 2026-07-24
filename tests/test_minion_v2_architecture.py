@@ -266,7 +266,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         )
         self.assertEqual(child.payload["requirements_ref"], requirements.to_dict())
 
-    def test_human_requirements_edit_queues_authority_for_architect_revision(self) -> None:
+    def test_human_requirements_edit_appends_revision_before_architect_revision(self) -> None:
         requirements, _evidence, manifest = self._publish_contract()
         workflow_id = "wf_requirements_edit"
         revision_id = "arch_requirements_edit"
@@ -293,8 +293,9 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             }
         )
 
-        authority_ref = result["task_revision_authority_ref"]
-        authority = self.store.read_json(authority_ref)
+        requirements_ref = result["requirements_ref"]
+        ledger = self.store.read_json(requirements_ref)
+        authority = ledger["revisions"][-1]["authority"]
         self.assertEqual(
             authority["answer"],
             "Expose stable geometry values and deterministic validation.\n"
@@ -307,7 +308,8 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(authority["origin"], "human_review_edit")
         superseded = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
         assert superseded is not None
-        self.assertEqual(superseded.payload["task_revision_authority_ref"], authority_ref)
+        self.assertEqual(superseded.payload["requirements_ref"], requirements_ref)
+        self.assertEqual(superseded.payload["task_revision"], authority)
         edit_instruction = self.store.read_json(superseded.payload["edit_instruction_ref"])
         self.assertNotIn("task_revision_authority_ref", edit_instruction)
         MinionV2OutboxProcessor(service)._create_revision(
@@ -323,11 +325,8 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
             and item.payload.get("parent_revision_id") == revision_id
         )
-        self.assertEqual(child.payload["requirements_ref"], requirements.to_dict())
-        self.assertEqual(
-            child.payload["pending_task_revision_authority_ref"],
-            authority_ref,
-        )
+        self.assertEqual(child.payload["requirements_ref"], requirements_ref)
+        self.assertNotIn("pending_task_revision_authority_ref", child.payload)
         self.assertEqual(child.payload["edit_scope"], "requirements")
 
     def test_invalid_requirements_edit_does_not_consume_human_decision(self) -> None:
@@ -566,18 +565,16 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             )
         )
 
-    def test_architect_clarification_is_not_a_hidden_aggregate_state(self) -> None:
+    def test_manager_appends_architect_clarification_without_hidden_state(self) -> None:
         workflow_id = "wf_clarify"
         revision_id = "arch_clarify"
-        clarification = TaskLedgerService(
+        requirements = TaskLedgerService(
             self.runtime_root,
             self.store,
-        ).publish_authority(
-            title="Public ABI",
-            question="Which public ABI is authoritative?",
-            answer="Preserve the C ABI.",
-            origin="architect_user_clarification",
-            actor="user",
+        ).publish(
+            title="ABI task",
+            task_spec={"objective": "Choose a stable ABI."},
+            actor="pal",
             source_channel="test",
         )
         self.repository.dispatch(
@@ -589,6 +586,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                 actor="test",
                 expected_version=0,
                 idempotency_key="clarify:create",
+                payload={"requirements_ref": requirements.to_dict()},
             )
         )
         self.repository.dispatch(
@@ -600,25 +598,31 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                 actor="worker",
                 expected_version=1,
                 idempotency_key="clarify:start",
-                payload={"fencing_token": 1},
-            )
-        )
-        recorded = self.repository.dispatch(
-            ActionEnvelope(
-                action_type="TASK_REVISION_AUTHORITY_RECORDED",
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                aggregate_id=revision_id,
-                actor="worker",
-                expected_version=2,
-                idempotency_key="clarify:authority",
                 payload={
-                    "task_revision_authority_ref": clarification.to_dict(),
                     "fencing_token": 1,
+                    "active_worker_id": "worker",
                 },
             )
         )
-        self.assertEqual(recorded.snapshot.state, "ARCHITECT_RUNNING")
+        clarification_request = {
+            "workflow_id": workflow_id,
+            "architecture_revision_id": revision_id,
+            "worker_id": "worker",
+            "clarification_id": "clarify-1",
+            "title": "Public ABI",
+            "question": "Which public ABI is authoritative?",
+            "answer": "Preserve the C ABI.",
+            "observed_at": "2026-07-20T12:00:00+00:00",
+        }
+        clarification_service = MinionV2WorkflowService(self.runtime_root)
+        recorded = clarification_service.append_architect_clarification(
+            clarification_request
+        )
+        duplicate = clarification_service.append_architect_clarification(
+            clarification_request
+        )
+        self.assertTrue(recorded["appended"])
+        self.assertEqual(duplicate["requirements_ref"], recorded["requirements_ref"])
         with self.assertRaises(UnknownTransitionError):
             self.repository.dispatch(
                 ActionEnvelope(
@@ -629,7 +633,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                     actor="worker",
                     expected_version=3,
                     idempotency_key="clarify:required",
-                    payload={"clarification_ref": clarification.to_dict()},
+                    payload={"clarification_ref": recorded["requirements_ref"]},
                 )
             )
         current = self.repository.read_snapshot(
@@ -637,9 +641,12 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             revision_id,
         )
         self.assertEqual(current.state, "ARCHITECT_RUNNING")
+        self.assertNotIn("pending_task_revision_authority_ref", current.payload)
+        task = self.store.read_json(current.payload["requirements_ref"])
+        self.assertEqual(len(task["revisions"]), 1)
         self.assertEqual(
-            current.payload["pending_task_revision_authority_ref"],
-            clarification.to_dict(),
+            task["revisions"][-1]["authority"]["answer"],
+            "Preserve the C ABI.",
         )
         self.assertNotIn(
             "CLARIFICATION_REQUIRED",

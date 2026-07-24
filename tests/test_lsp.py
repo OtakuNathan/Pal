@@ -506,6 +506,14 @@ language_ids = ["foo"]
                     "file_sha256": "probe-file",
                 }
 
+            async def diagnostics(self, file_path: Path, *, language_id: str) -> dict:
+                _ = file_path, language_id
+                return {
+                    "status": "ok",
+                    "diagnostics": [],
+                    "diagnostics_state": "fresh",
+                }
+
             async def close(self) -> None:
                 return None
 
@@ -545,10 +553,10 @@ language_ids = ["foo"]
             prepared["servers"][0]["probe"],
             {
                 "status": "ok",
-                "operation": "document_symbols",
+                "operation": "diagnostics",
                 "file": str((workspace / "module.cpp").resolve()),
                 "recognized": True,
-                "result_count": 0,
+                "diagnostic_count": 0,
             },
         )
         self.assertEqual(result["status"], "ok")
@@ -586,6 +594,14 @@ language_ids = ["foo"]
                 return {
                     "uri": file_path.resolve().as_uri(),
                     "file_sha256": "probe-file",
+                }
+
+            async def diagnostics(self, file_path: Path, *, language_id: str) -> dict:
+                _ = file_path, language_id
+                return {
+                    "status": "ok",
+                    "diagnostics": [],
+                    "diagnostics_state": "fresh",
                 }
 
             async def close(self) -> None:
@@ -696,11 +712,108 @@ language_ids = ["foo"]
                     "reason": "recognition_probe_failed:no_matching_source_file",
                     "probe": {
                         "status": "unavailable",
-                        "operation": "document_symbols",
+                        "operation": "diagnostics",
                         "reason": "no_matching_source_file",
                     },
                 }
             ],
+        )
+
+    async def test_workspace_preparation_rejects_unresolved_project_include(self) -> None:
+        workspace = self.root / "prepared_with_unresolved_include"
+        source = workspace / "src" / "module.cpp"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            '#include "package/missing.hpp"\nint value() { return 1; }\n',
+            encoding="utf-8",
+        )
+        header = workspace / "include" / "package" / "public.hpp"
+        header.parent.mkdir(parents=True)
+        header.write_text("int value();\n", encoding="utf-8")
+
+        class FakeConnector:
+            def __init__(
+                self,
+                config: LspServerConfig,
+                *,
+                workspace_root: Path,
+                extra_args: tuple[str, ...] = (),
+            ) -> None:
+                _ = config, extra_args
+                self.workspace_root = workspace_root
+                self.server_info = {}
+
+            async def initialize(self) -> None:
+                return None
+
+            async def ensure_document_open(
+                self,
+                file_path: Path,
+                *,
+                language_id: str,
+            ) -> dict:
+                _ = language_id
+                return {
+                    "uri": file_path.resolve().as_uri(),
+                    "file_sha256": "probe-file",
+                }
+
+            async def diagnostics(self, file_path: Path, *, language_id: str) -> dict:
+                _ = language_id
+                if file_path.suffix == ".hpp":
+                    return {
+                        "status": "ok",
+                        "diagnostics_state": "fresh",
+                        "diagnostics": [],
+                    }
+                return {
+                    "status": "ok",
+                    "diagnostics_state": "fresh",
+                    "diagnostics": [
+                        {
+                            "code": "pp_file_not_found",
+                            "message": "'package/missing.hpp' file not found",
+                            "severity": 1,
+                        }
+                    ],
+                }
+
+            async def close(self) -> None:
+                return None
+
+        state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="clangd",
+                    command=(sys.executable,),
+                    extensions=(".cpp",),
+                    language_ids=("cpp",),
+                ),
+                source="test",
+                config_path=str(self.root / "clangd.toml"),
+            ),
+            config_path=self.root / "clangd.toml",
+        )
+        self.manager.states = {state.server_id: state}
+
+        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+            prepared = await self.manager.prepare_workspace(
+                {
+                    "workspace_root": str(workspace),
+                    "primary_language": "cpp",
+                }
+            )
+
+        self.assertEqual(prepared["status"], "unavailable")
+        server = prepared["servers"][0]
+        self.assertEqual(server["status"], "unavailable")
+        self.assertIn(
+            "recognition_probe_failed:unresolved_project_include:",
+            server["reason"],
+        )
+        self.assertEqual(
+            server["probe"]["diagnostic"]["code"],
+            "pp_file_not_found",
         )
 
     async def test_cpp_fallback_context_includes_existing_public_include_root(self) -> None:
@@ -731,6 +844,41 @@ language_ids = ["foo"]
         flags = Path(context["source_path"]).read_text(encoding="utf-8").splitlines()
         self.assertIn(f"-I{workspace.resolve()}", flags)
         self.assertIn(f"-I{include.resolve()}", flags)
+
+    async def test_cpp_fallback_context_is_materialized_per_worktree(self) -> None:
+        worktree_a = self.root / "worktree_a"
+        worktree_b = self.root / "worktree_b"
+        for worktree in (worktree_a, worktree_b):
+            (worktree / "include").mkdir(parents=True)
+            (worktree / "module.cpp").write_text(
+                "int value() { return 1; }\n",
+                encoding="utf-8",
+            )
+
+        setup_a, unavailable_a = prepare_workspace_lsp_environment(
+            workspace_root=worktree_a,
+            primary_language="cpp",
+            context_root=self.root / "contexts",
+            workspace={"cpp_standard": "c++17"},
+        )
+        setup_b, unavailable_b = prepare_workspace_lsp_environment(
+            workspace_root=worktree_b,
+            primary_language="cpp",
+            context_root=self.root / "contexts",
+            workspace={"cpp_standard": "c++17"},
+        )
+
+        self.assertEqual(unavailable_a, [])
+        self.assertEqual(unavailable_b, [])
+        context_a = setup_a["project_contexts"]["clangd"]
+        context_b = setup_b["project_contexts"]["clangd"]
+        self.assertNotEqual(context_a["source_path"], context_b["source_path"])
+        flags_a = Path(context_a["source_path"]).read_text(encoding="utf-8")
+        flags_b = Path(context_b["source_path"]).read_text(encoding="utf-8")
+        self.assertIn(str((worktree_a / "include").resolve()), flags_a)
+        self.assertNotIn(str(worktree_b.resolve()), flags_a)
+        self.assertIn(str((worktree_b / "include").resolve()), flags_b)
+        self.assertNotIn(str(worktree_a.resolve()), flags_b)
 
     async def test_required_project_context_rejects_unprepared_lsp_session(self) -> None:
         workspace = self.root / "unprepared_cpp"

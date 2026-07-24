@@ -757,13 +757,15 @@ def compile_skeleton_markdown(
     submission = dict(artifact.get("submission") or {})
     task_ledger = validate_task_ledger(requirements_payload)
     lines = ["# Architecture Skeleton", "", "## Task Ledger", ""]
-    lines.append("- `task.yaml`: original plus ordered append-only revisions")
+    lines.append(
+        "- `task.yaml`: immutable original plus Manager-recorded append-only revisions; newer conflicting revisions take precedence"
+    )
     lines.append(f"- Revisions: {len(list(task_ledger.get('revisions') or []))}")
     for raw in list(task_ledger.get("revisions") or []):
         item = dict(raw or {})
         authority = dict(item.get("authority") or {})
         lines.append(
-            f"  - {item.get('sequence')}: {item.get('summary', '')} "
+            f"  - {item.get('sequence')}: {authority.get('title', '')} "
             f"({authority.get('origin', 'user')}, {authority.get('observed_at', '')})"
         )
     lines.extend(["", "## Requirement Mapping", ""])

@@ -323,29 +323,12 @@ def _architecture_snapshotted_reducer(
     return updated
 
 
-def _task_revision_authority_reducer(
-    payload: Mapping[str, Any],
-    action: ActionEnvelope,
-) -> Mapping[str, Any]:
-    updated = dict(_merge_payload(payload, action))
-    updated["pending_task_revision_authority_ref"] = dict(
-        action.payload["task_revision_authority_ref"]
-    )
-    return updated
-
-
 def _task_revision_appended_reducer(
     payload: Mapping[str, Any],
     action: ActionEnvelope,
 ) -> Mapping[str, Any]:
     updated = dict(_merge_payload(payload, action))
-    updated.pop("pending_task_revision_authority_ref", None)
-    updated["task_revision_generation"] = int(
-        payload.get("task_revision_generation") or 0
-    ) + 1
-    updated["last_task_revision_authority_ref"] = dict(
-        action.payload["task_revision_authority_ref"]
-    )
+    updated["last_task_revision"] = dict(action.payload["task_revision"])
     updated["last_task_revision_ref"] = dict(action.payload["requirements_ref"])
     updated["last_task_revision_digest"] = str(action.payload["task_revision_digest"])
     return updated
@@ -548,35 +531,21 @@ def _lease_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
         raise TransitionGuardError(f"{action.action_type} requires a positive fencing_token")
 
 
-def _no_pending_task_revision(payload: Mapping[str, Any], _action: ActionEnvelope) -> None:
-    if payload.get("pending_task_revision_authority_ref"):
-        raise TransitionGuardError(
-            "the pending user-authorized task revision must be appended before architecture submission"
-        )
-
-
-def _task_revision_authority_guard(
-    payload: Mapping[str, Any],
-    action: ActionEnvelope,
-) -> None:
-    _all(_required("task_revision_authority_ref"), _lease_guard)(payload, action)
-    pending = payload.get("pending_task_revision_authority_ref")
-    if pending and dict(pending) != dict(action.payload["task_revision_authority_ref"]):
-        raise TransitionGuardError("an earlier task revision authority is still pending")
-
-
 def _task_revision_append_guard(
-    payload: Mapping[str, Any],
+    _payload: Mapping[str, Any],
     action: ActionEnvelope,
 ) -> None:
-    _all(
-        _required("task_revision_authority_ref", "requirements_ref", "task_revision_digest"),
-        _lease_guard,
-    )(payload, action)
-    pending = dict(payload.get("pending_task_revision_authority_ref") or {})
-    authority = dict(action.payload.get("task_revision_authority_ref") or {})
-    if not pending or pending != authority:
-        raise TransitionGuardError("task revision does not match the pending user authority")
+    _required(
+        "requirements_ref",
+        "task_revision",
+        "task_revision_digest",
+        "task_revision_sequence",
+    )(
+        _payload,
+        action,
+    )
+    if not isinstance(action.payload.get("task_revision"), Mapping):
+        raise TransitionGuardError("task revision must contain structured communication")
 
 
 def _role_failure_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
@@ -813,19 +782,8 @@ def _architecture_transitions() -> list[TransitionSpec]:
             S.ARCHITECT_RUNNING,
             "DATA_ARCHITECT_COMPLETED",
             S.REVIEW_QUEUED,
-            guard=_all(
-                _required("requirements_ref", "architecture_manifest_ref"),
-                _no_pending_task_revision,
-            ),
+            guard=_required("requirements_ref", "architecture_manifest_ref"),
             effects=_effect("run_reviewer_role", role_mode="architecture"),
-        ),
-        _spec(
-            kind,
-            S.ARCHITECT_RUNNING,
-            "TASK_REVISION_AUTHORITY_RECORDED",
-            S.ARCHITECT_RUNNING,
-            guard=_task_revision_authority_guard,
-            reducer=_task_revision_authority_reducer,
         ),
         _spec(
             kind,
@@ -847,7 +805,6 @@ def _architecture_transitions() -> list[TransitionSpec]:
                     "architecture_workspace_path",
                 ),
                 _lease_guard,
-                _no_pending_task_revision,
             ),
             effects=_effect("quiesce_architect_role"),
         ),
@@ -1373,6 +1330,7 @@ def _node_transitions() -> list[TransitionSpec]:
         _spec(kind, S.VERIFY_SNAPSHOTTING, "VERIFICATION_UNKNOWN_ALLOWED", S.ACCEPTED, guard=_all(_required("verification_artifact_ref", "scenario_fingerprint"), _allowed_unknown_guard), effects=_effect("notify_node_accepted"), reducer=_worker_finished_reducer),
         _spec(kind, S.VERIFY_SNAPSHOTTING, "MODULE_DEFECT", S.STALE, guard=_required("repair_bill_ref", "repair_target_node_id"), effects=_effect("reopen_dependency_and_stale_descendants"), reducer=_worker_finished_reducer),
         _spec(kind, S.VERIFY_SNAPSHOTTING, "DEPENDENCY_DEFECT", S.STALE, guard=_required("repair_bill_ref", "repair_target_node_id"), effects=_effect("reopen_dependency_and_stale_descendants"), reducer=_worker_finished_reducer),
+        _spec(kind, S.VERIFY_SNAPSHOTTING, "VERIFICATION_DEFECT", S.STALE, guard=_required("repair_bill_ref", "repair_target_node_id"), effects=_effect("reopen_verifier_and_stale_descendants"), reducer=_worker_finished_reducer),
         _spec(kind, S.VERIFY_SNAPSHOTTING, "CONTRACT_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
         _spec(kind, S.VERIFY_SNAPSHOTTING, "ARCHITECTURE_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
         _spec(kind, S.STALE, "REQUEUE_STALE", S.QUEUED, guard=_all(_node_kind("unit"), _required("unit_contract_ref", "dependency_fingerprint"), _ready_dependencies), effects=_effect("admit_implementation_role", role_mode="produce")),
@@ -1410,6 +1368,15 @@ def _node_transitions() -> list[TransitionSpec]:
             S.REPAIR_QUEUED,
             guard=_required("repair_bill_ref"),
             effects=_effect("admit_implementation_role", role_mode="repair"),
+            reducer=_new_node_role_generation_reducer,
+        ),
+        _spec(
+            kind,
+            S.ACCEPTED,
+            "REOPEN_VERIFICATION",
+            S.REVIEW_QUEUED,
+            guard=_required("repair_bill_ref"),
+            effects=_effect("admit_verifier_role", role_mode="module"),
             reducer=_new_node_role_generation_reducer,
         ),
         _spec(kind, S.ACCEPTED, "MEMORY_CANDIDATE_PUBLISHED", S.ACCEPTED, guard=_required("memory_candidate_ref")),

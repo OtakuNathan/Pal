@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -184,6 +185,7 @@ class MinionRoleGatewayClient:
         self._client = SidecarRpcClient(
             endpoint=_minion_role_endpoint(self.runtime_root),
             request_timeout_seconds=self.request_timeout_seconds,
+            unix_only=os.environ.get("PAL_MINION_SANDBOXED") == "1",
         )
 
     @property

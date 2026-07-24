@@ -199,6 +199,7 @@ _NAMED_CASE_SCHEMA = {
 }
 
 _DEFECT_PRECEDENCE = {
+    "verification_defect": -1,
     "module_defect": 0,
     "integration_defect": 1,
     "dependency_defect": 2,
@@ -210,7 +211,12 @@ _DEFECT_PRECEDENCE = {
 VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_scratch_write": {
         "alias": "verification_scratch_write",
-        "description": "Write one verifier-owned test/probe file under the bound scratch directory. This cannot modify product source.",
+        "description": (
+            "Create or replace one complete verifier-owned test/probe file under the bound scratch directory. "
+            "The result returns the exact scratch_path to execute. Call this same tool again with the complete "
+            "replacement content when revising a probe; do not switch to ordinary file editing tools. "
+            "This cannot modify product source."
+        ),
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationScratchWriteInput,
     },
     **{
@@ -441,6 +447,20 @@ def compile_verification_invocation_tool_contract(
         sort_keys=True,
     )
     overrides: dict[str, dict[str, str]] = {}
+    if policy["mode"] in {"scenario", "standalone"}:
+        overrides["op_minion_verification_scratch_write"] = {
+            "use_when": (
+                "Create or replace a complete executable verifier probe in the bound durable review scratch. "
+                "Use the returned scratch_path directly in a dedicated verification run command and set that run "
+                "tool's probe_path to the same relative path. To correct the probe, call verification_scratch_write "
+                "again with the same relative path and complete replacement content; do not use read_file, "
+                "edit_file, or write_file on scenario scratch."
+            ),
+            "do_not_use_when": (
+                "Do not use this for product source, module developer/verification corpora, or any path outside "
+                "the bound scenario or standalone-review scratch."
+            ),
+        }
     for capability in (*_RUN_TO_KIND_TAG, "op_minion_verification_run_lsp_check", "op_minion_verification_check_unavailable"):
         overrides[capability] = {"use_when": (
             "Record one semantic verification case. Consult the immutable task.yaml ledger when accepted contracts are insufficient; do not copy it into structured fields. "
@@ -467,7 +487,11 @@ def compile_verification_invocation_tool_contract(
         "Record or replace one independently actionable, evidence-backed finding. Use a stable snake_case finding_key, "
         "p0/p1/p2 priority, a self-contained summary, and exact task_ledger or workspace locations when available. "
         "Complete the breadth-first audit first and batch independent add_finding calls in one tool round when possible. "
-        "Use module_defect for the current implementation, dependency_defect for upstream code, contract_defect for a "
+        "A performance finding is valid when a representative scaling probe or source-level complexity trace shows a "
+        "material asymptotic, latency, memory, resource, copying, scanning, serialization, blocking, or I/O-amplification "
+        "problem; do not record speculative micro-optimizations. Include the triggering workload, measured or derived "
+        "impact, exact hot path, and a bounded contract-preserving optimization direction in the summary. "
+        "Use verification_defect only for an incorrect Verifier-owned probe or corpus, module_defect for the current implementation, dependency_defect for upstream code, contract_defect for a "
         "frozen boundary, architecture_defect for ownership/topology, requirements_defect for a conflicting task ledger, "
         "and integration_defect for cross-module product behavior. Bound semantic modules: "
         f"{json.dumps(all_targets, ensure_ascii=False)}."
@@ -595,7 +619,16 @@ def _scratch_write(call: CanonicalToolCall, workspace: Mapping[str, Any], *, dra
         reducer=reducer,
         seed=_empty_payload(),
     )
-    return _ok(call, f"scratch file written: {relative}", result)
+    scratch_path = str(target.resolve())
+    return _ok(
+        call,
+        f"scratch file created or replaced: {scratch_path}",
+        {
+            **result,
+            "path": str(relative),
+            "scratch_path": scratch_path,
+        },
+    )
 
 
 def _draft_status(

@@ -24,6 +24,7 @@ class VerificationStatus(StrEnum):
 class DefectKind(StrEnum):
     MODULE = "module_defect"
     DEPENDENCY = "dependency_defect"
+    VERIFICATION = "verification_defect"
     CONTRACT = "contract_defect"
     ARCHITECTURE = "architecture_defect"
     INTEGRATION = "integration_defect"
@@ -455,6 +456,20 @@ class VerificationService:
                     "repair_bill_ref": repair_bill_ref.to_dict(),
                     "failure_history": history,
                 }
+            elif defect_kind == DefectKind.VERIFICATION:
+                if not scenario or not module_targets:
+                    raise ValueError(
+                        "verification defect requires a scenario and verifier-owned module target"
+                    )
+                action_type = "VERIFICATION_DEFECT"
+                payload = {
+                    **common,
+                    "repair_bill_ref": repair_bill_ref.to_dict(),
+                    "repair_target_node_id": module_targets[0],
+                    "repair_target_node_ids": list(module_targets),
+                    "finding_fingerprint": finding_fingerprint_value,
+                    "failure_history": history,
+                }
             elif scenario:
                 if not module_targets:
                     raise ValueError("scenario module defect requires module_node_id")
@@ -505,7 +520,10 @@ class DefectPropagationService:
         dependency_node_id: str,
         repair_bill_ref: ArtifactRef,
         actor: str = "minion-manager",
+        reopen_action: str = "REOPEN_DEPENDENCY",
     ) -> tuple[str, ...]:
+        if reopen_action not in {"REOPEN_DEPENDENCY", "REOPEN_VERIFICATION"}:
+            raise ValueError(f"unsupported defect reopen action: {reopen_action}")
         snapshots = self.repository.list_workflow_snapshots(workflow_id)
         nodes = {
             item.aggregate_id: item
@@ -520,7 +538,7 @@ class DefectPropagationService:
             self.repository.dispatch(
                 _node_action(
                     dependency,
-                    "REOPEN_DEPENDENCY",
+                    reopen_action,
                     actor,
                     {"repair_bill_ref": repair_bill_ref.to_dict()},
                 )

@@ -18,6 +18,7 @@ from pal.execution.tool_facade import (
     ToolGuidance,
     ToolHandlerResult,
     ToolInvocationResult,
+    ToolRejectedError,
 )
 __all__ = [
     "ApprovalExecutionDecorator",
@@ -50,6 +51,7 @@ __all__ = [
     "ToolGuidance",
     "ToolHandlerResult",
     "ToolInvocationResult",
+    "ToolRejectedError",
     "ToolRegistryGeneration",
     "ToolCallBudget",
     "get_file_state_cache",

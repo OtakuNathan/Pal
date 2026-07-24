@@ -56,7 +56,6 @@ class NodeRunJournal:
     completed_checklist: tuple[str, ...] = ()
     files_inspected: tuple[str, ...] = ()
     files_changed: tuple[str, ...] = ()
-    tests_run: tuple[Mapping[str, Any], ...] = ()
     open_questions: tuple[str, ...] = ()
     known_failures: tuple[str, ...] = ()
     last_safe_point: str = ""
@@ -67,7 +66,6 @@ class NodeRunJournal:
             "completed_checklist": list(self.completed_checklist),
             "files_inspected": list(self.files_inspected),
             "files_changed": list(self.files_changed),
-            "tests_run": [dict(item) for item in self.tests_run],
             "open_questions": list(self.open_questions),
             "known_failures": list(self.known_failures),
             "last_safe_point": self.last_safe_point,

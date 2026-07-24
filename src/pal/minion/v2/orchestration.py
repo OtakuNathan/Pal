@@ -59,6 +59,7 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "freeze_epoch_nodes",
     "suspend_stale_node_assignments",
     "reopen_dependency_and_stale_descendants",
+    "reopen_verifier_and_stale_descendants",
     "request_epoch_replan",
     "freeze_epoch_for_replan",
     "create_replan_revision",
@@ -297,7 +298,10 @@ class MinionV2OutboxProcessor:
                 reason="node became stale before its queued activation started",
             )
             return {}
-        if effect_type == "reopen_dependency_and_stale_descendants":
+        if effect_type in {
+            "reopen_dependency_and_stale_descendants",
+            "reopen_verifier_and_stale_descendants",
+        }:
             node = self._effect_snapshot(effect)
             repair_ref = ArtifactRef.from_mapping(dict(node.payload.get("repair_bill_ref") or {}))
             targets = tuple(
@@ -318,6 +322,11 @@ class MinionV2OutboxProcessor:
                     epoch_id=str(node.payload.get("epoch_id") or ""),
                     dependency_node_id=target,
                     repair_bill_ref=repair_ref,
+                    reopen_action=(
+                        "REOPEN_VERIFICATION"
+                        if effect_type == "reopen_verifier_and_stale_descendants"
+                        else "REOPEN_DEPENDENCY"
+                    ),
                 )
             return {}
         if effect_type == "request_epoch_replan":
@@ -883,15 +892,6 @@ class MinionV2OutboxProcessor:
                     "revision_number": int(previous.payload.get("revision_number") or 1) + 1,
                     "edit_instruction_ref": previous.payload.get("edit_instruction_ref"),
                     "edit_scope": previous.payload.get("edit_scope", "architecture"),
-                    **(
-                        {
-                            "pending_task_revision_authority_ref": dict(
-                                previous.payload["task_revision_authority_ref"]
-                            )
-                        }
-                        if previous.payload.get("task_revision_authority_ref")
-                        else {}
-                    ),
                     "base_architecture_manifest_ref": previous.payload.get("architecture_manifest_ref"),
                     "research_mode": previous.payload.get("research_mode", "local_only"),
                 },

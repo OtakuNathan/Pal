@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from pal.execution import CapabilityCall
 from pal.foundation import utc_now
 from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import dispatch_sidecar_request, pack_sidecar_message, read_sidecar_message
@@ -29,6 +30,7 @@ from pal.minion.llm_broker import (
     preflight_request_from_payload,
     stream_event_to_payload,
 )
+from pal.minion.web_broker import web_result_to_payload
 from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.recovery import MinionV2Recovery
@@ -138,7 +140,7 @@ class MinionManager:
     v2_outbox: MinionV2OutboxProcessor = field(init=False)
     v2_semantic_orchestrator: SemanticOrchestrator = field(init=False)
     role_gateway: RoleAssignmentGateway = field(init=False)
-    _llm_broker_bundle: Any | None = field(default=None, init=False, repr=False)
+    _host_broker_bundle: Any | None = field(default=None, init=False, repr=False)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _drain_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _v2_wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -299,6 +301,8 @@ class MinionManager:
             "llm_generate_stream": self.llm_broker_generate_stream,
             "llm_resolve_max_output_tokens": self.llm_broker_resolve_max_output_tokens,
             "llm_resolve_endpoint_facts": self.llm_broker_resolve_endpoint_facts,
+            "web_search": self.web_broker_search,
+            "web_read": self.web_broker_read,
         }
         if method in broker_handlers:
             payload = dict(params or {})
@@ -517,14 +521,81 @@ class MinionManager:
         )
         if state is None:
             raise KeyError(f"unknown clarification target: {clarification_id or run_id}")
+        pending_id = str(state.pending_clarification.get("clarification_id") or "")
+        if not clarification_id or clarification_id != pending_id:
+            raise ValueError("clarification response does not match the pending question")
+        clarification = dict(payload)
+        task_revision = await asyncio.to_thread(
+            self._append_architect_clarification,
+            state,
+            clarification,
+        )
+        if task_revision:
+            clarification["task_revision"] = task_revision
         if not await self.v2_semantic_orchestrator.send_worker_control(
             state.run_id,
-            {"type": "clarification", "clarification": dict(payload)},
+            {"type": "clarification", "clarification": clarification},
         ):
             raise RuntimeError("V2 worker is no longer available for clarification")
         state.pending_clarification = {}
         state.status = "running"
-        return {"ok": True, "run": state.summary(), "clarification": dict(payload)}
+        return {"ok": True, "run": state.summary(), "clarification": clarification}
+
+    def _append_architect_clarification(
+        self,
+        state: MinionRunState,
+        clarification: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        binding = dict(dict(state.pack.metadata or {}).get("minion_v2") or {})
+        if (
+            str(binding.get("role") or "") != "architect"
+            or str(binding.get("aggregate_type") or "") != "architecture_revision"
+        ):
+            return {}
+        questions = [
+            dict(item)
+            for item in list(state.pending_clarification.get("questions") or [])
+            if isinstance(item, Mapping)
+        ]
+        answers = [
+            dict(item)
+            for item in list(clarification.get("answers") or [])
+            if isinstance(item, Mapping)
+        ]
+        if len(questions) != 1 or not answers:
+            raise ValueError(
+                "Architect task-ledger clarification requires one question and one answer"
+            )
+        question = questions[0]
+        question_id = str(question.get("question_id") or question.get("id") or "")
+        answer_item = next(
+            (
+                item
+                for item in answers
+                if not question_id
+                or str(item.get("question_id") or item.get("id") or "") == question_id
+            ),
+            answers[0],
+        )
+        answer = str(answer_item.get("answer") or "")
+        if not answer.strip():
+            raise ValueError("Architect task-ledger clarification answer is blank")
+        return self.v2_service.append_architect_clarification(
+            {
+                "workflow_id": str(binding.get("workflow_id") or ""),
+                "architecture_revision_id": str(binding.get("aggregate_id") or ""),
+                "worker_id": state.pack.invocation_id,
+                "clarification_id": str(clarification.get("clarification_id") or ""),
+                "title": str(
+                    question.get("title")
+                    or state.pending_clarification.get("title")
+                    or "Architecture clarification"
+                ),
+                "question": str(question.get("question") or ""),
+                "answer": answer,
+                "observed_at": utc_now(),
+            }
+        )
 
     def _pending_clarification_runs(self, workflow_id: str) -> list[MinionRunState]:
         matches: list[MinionRunState] = []
@@ -635,11 +706,68 @@ class MinionManager:
         return state
 
     async def _llm_broker_runtime(self) -> Any:
-        if self._llm_broker_bundle is None:
+        return (await self._host_broker_runtime_bundle()).llm_runtime
+
+    async def _host_broker_runtime_bundle(self) -> Any:
+        if self._host_broker_bundle is None:
             from pal.minion.runner import build_slim_minion_runtime
 
-            self._llm_broker_bundle = await asyncio.to_thread(build_slim_minion_runtime, self.runtime_root)
-        return self._llm_broker_bundle.llm_runtime
+            self._host_broker_bundle = await asyncio.to_thread(
+                build_slim_minion_runtime,
+                self.runtime_root,
+            )
+        return self._host_broker_bundle
+
+    async def web_broker_search(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._web_broker_call(
+            params,
+            canonical_path="op_web_search",
+            alias="search_web",
+        )
+
+    async def web_broker_read(self, params: dict[str, Any]) -> dict[str, Any]:
+        return await self._web_broker_call(
+            params,
+            canonical_path="op_web_read",
+            alias="read_web",
+        )
+
+    async def _web_broker_call(
+        self,
+        params: dict[str, Any],
+        *,
+        canonical_path: str,
+        alias: str,
+    ) -> dict[str, Any]:
+        state = self._require_broker_run(params)
+        allowed = {
+            str(item or "").strip()
+            for item in list(state.pack.allowed_capabilities or [])
+            if str(item or "").strip()
+        }
+        if canonical_path not in allowed:
+            raise PermissionError(
+                f"role assignment does not allow {canonical_path}"
+            )
+        bundle = await self._host_broker_runtime_bundle()
+        runtime = bundle.execution_runtime
+        record = runtime.registry_generation.direct_aliases.get(alias)
+        if record is None or record.canonical_path != canonical_path:
+            raise RuntimeError(f"host web broker capability is unavailable: {alias}")
+        if record.input_model is None:
+            raise RuntimeError(f"host web broker has no input contract: {alias}")
+        validated = record.input_model.model_validate(
+            dict(params.get("args") or {}),
+            strict=True,
+        )
+        result = await runtime.call_registered_async(
+            CapabilityCall(
+                name=canonical_path,
+                args=validated.model_dump(mode="python", exclude_none=True),
+                meta={"broker_run_id": state.run_id},
+            )
+        )
+        return {"ok": True, "result": web_result_to_payload(result)}
 
     def _llm_progress_sink(self, state: MinionRunState):
         loop = asyncio.get_running_loop()
@@ -787,11 +915,11 @@ class MinionManager:
         await self.v2_semantic_orchestrator.stop_background_workers(
             timeout_seconds=self.graceful_shutdown_timeout_seconds,
         )
-        if self._llm_broker_bundle is not None:
-            close = getattr(self._llm_broker_bundle, "close", None)
+        if self._host_broker_bundle is not None:
+            close = getattr(self._host_broker_bundle, "close", None)
             if callable(close):
                 await close()
-            self._llm_broker_bundle = None
+            self._host_broker_bundle = None
 
     def _install_signal_handlers(self):
         loop = asyncio.get_running_loop()

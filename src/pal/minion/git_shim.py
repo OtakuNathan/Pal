@@ -130,10 +130,6 @@ def role_gateway_client_from_env(runtime_root: Path) -> _RoleGatewayClient | Non
 
 def _open_role_gateway(runtime_root: Path) -> socket.socket:
     endpoint_root = runtime_root / "data" / "minion-role"
-    port_path = endpoint_root / "role.port"
-    if port_path.exists():
-        port = int(port_path.read_text(encoding="utf-8").strip())
-        return socket.create_connection(("127.0.0.1", port), timeout=_ROLE_GATEWAY_TIMEOUT_SECONDS)
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(_ROLE_GATEWAY_TIMEOUT_SECONDS)
     connection.connect(str(endpoint_root / "role.sock"))

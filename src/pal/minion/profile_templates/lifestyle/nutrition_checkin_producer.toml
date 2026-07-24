@@ -12,8 +12,8 @@ boundary. Write the contracted JSON artifacts inside the workspace and stay with
 If the unit cannot fit its complexity budget, return architecture_defect instead of widening scope. Do not claim acceptance.
 """
 output_contract_fragment = """
-Write the contracted workspace artifact. Run one focused validation through a developer test/check tool, then call
-candidate_submit with no arguments. The Manager generates producer_report.json. Never write or edit that report yourself. If the frozen contract cannot
+Write the contracted workspace artifact. Use update_checklist as a compact work ledger, run one focused self-check with ordinary available tools, complete the
+checklist, then call candidate_submit with no arguments. The Manager generates producer_report.json. Never write or edit that report yourself. If the frozen contract cannot
 satisfy the Requirement, use candidate_report_architecture_defect instead of fabricating output.
 """
 capability_groups = ["lifestyle_producer", "v2_candidate_builder"]

@@ -12,7 +12,7 @@ from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.shared import (
@@ -83,6 +83,7 @@ class WebFetchModuleSnapshot:
 class WebFetchIntrospectionProvider:
     service: WebFetchService
     artifact_manager: Any | None = None
+    read_delegate: Callable[[dict[str, object]], IntrospectionResult] | None = None
     module_id: str = "web_fetch"
     mounted: bool = True
     degraded: bool = False
@@ -243,6 +244,8 @@ class WebFetchIntrospectionProvider:
         url = str(call.args.get("url") or "").strip()
         if not url:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text="url is required", llm_text="url is required")
+        if self.read_delegate is not None:
+            return self.read_delegate(dict(call.args))
         try:
             result = self.service.read(
                 WebFetchRequest(
@@ -454,10 +457,16 @@ def inspect_web_fetch(provider: WebFetchIntrospectionProvider) -> WebFetchModule
     )
 
 
-def register_with_core(context: MainContext, service: WebFetchService) -> ModuleHandle:
+def register_with_core(
+    context: MainContext,
+    service: WebFetchService,
+    *,
+    read_delegate: Callable[[dict[str, object]], IntrospectionResult] | None = None,
+) -> ModuleHandle:
     provider = WebFetchIntrospectionProvider(
         service=service,
         artifact_manager=context.port_registry.get("artifact:artifact"),
+        read_delegate=read_delegate,
     )
     handle = ModuleHandle(
         module_id="web_fetch",

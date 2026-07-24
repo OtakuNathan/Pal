@@ -223,6 +223,20 @@ SettleVerifierFail ==
     /\ coderCorpusVersion' = corpusVersion
     /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
 
+ReopenVerification ==
+    /\ managerUp
+    /\ desiredControl = "Run"
+    /\ nodeState = "Accepted"
+    /\ candidateVersion > 0
+    /\ activeRole = "None"
+    /\ ~writerLease
+    /\ nodeState' = "VerifyReady"
+    /\ verifierState' = "Ready"
+    /\ verifiedVersion' = candidateVersion - 1
+    /\ receiptState' = "None"
+    /\ resultKind' = "None"
+    /\ UNCHANGED <<coderState, activeRole, writerLease, candidateVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+
 RecordFailure(kind) ==
     /\ kind \in FailureKinds
     /\ managerUp
@@ -367,6 +381,7 @@ SettleRecordedResult ==
     \/ SettleCandidateReceipt
     \/ SettleVerifierPass
     \/ SettleVerifierFail
+    \/ ReopenVerification
     \/ SettleFailure
 
 Next ==

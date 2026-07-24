@@ -412,11 +412,11 @@ class LspManager:
         if probe_file is None:
             return {
                 "status": "unavailable",
-                "operation": "document_symbols",
+                "operation": "diagnostics",
                 "reason": "no_matching_source_file",
             }
         result = await self.run_lsp_operation(
-            "document_symbols",
+            "diagnostics",
             {
                 "server_id": state.server_id,
                 "workspace_root": str(workspace_root),
@@ -426,7 +426,7 @@ class LspManager:
         if str(result.get("status") or "") != "ok":
             return {
                 "status": "unavailable",
-                "operation": "document_symbols",
+                "operation": "diagnostics",
                 "file": str(probe_file),
                 "reason": str(
                     result.get("reason")
@@ -434,13 +434,58 @@ class LspManager:
                     or "operation_unavailable"
                 ),
             }
-        symbols = result.get("result")
+        diagnostic_result = result.get("result")
+        if not isinstance(diagnostic_result, dict):
+            return {
+                "status": "unavailable",
+                "operation": "diagnostics",
+                "file": str(probe_file),
+                "reason": "invalid_diagnostics_result",
+            }
+        diagnostics_state = str(
+            diagnostic_result.get("diagnostics_state")
+            or diagnostic_result.get("status")
+            or ""
+        ).strip()
+        if diagnostics_state in {"pending", "timed_out"}:
+            return {
+                "status": "unavailable",
+                "operation": "diagnostics",
+                "file": str(probe_file),
+                "reason": f"diagnostics_not_ready:{diagnostics_state}",
+            }
+        diagnostics = diagnostic_result.get("diagnostics")
+        if not isinstance(diagnostics, list):
+            return {
+                "status": "unavailable",
+                "operation": "diagnostics",
+                "file": str(probe_file),
+                "reason": "invalid_diagnostics_payload",
+            }
+        blockers = [
+            item
+            for item in diagnostics
+            if isinstance(item, dict)
+            and _is_project_recognition_blocker(state, item)
+        ]
+        if blockers:
+            blocker = blockers[0]
+            return {
+                "status": "unavailable",
+                "operation": "diagnostics",
+                "file": str(probe_file),
+                "reason": (
+                    "unresolved_project_include:"
+                    + str(blocker.get("message") or blocker.get("code") or "unknown")
+                ),
+                "diagnostic": blocker,
+            }
         return {
             "status": "ok",
-            "operation": "document_symbols",
+            "operation": "diagnostics",
             "file": str(probe_file),
             "recognized": True,
-            "result_count": len(symbols) if isinstance(symbols, list) else None,
+            "diagnostic_count": len(diagnostics),
         }
 
     async def run_lsp_operation(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -1029,6 +1074,8 @@ def _workspace_probe_file(
     if not extensions:
         return None
     scanned = 0
+    best_candidate: Path | None = None
+    best_priority = 10
     ignored = {".git", ".hg", ".svn", ".venv", "node_modules", "build", "dist", "__pycache__"}
     for directory, directory_names, file_names in os.walk(workspace_root):
         directory_names[:] = sorted(
@@ -1038,10 +1085,43 @@ def _workspace_probe_file(
             scanned += 1
             candidate = Path(directory) / file_name
             if candidate.suffix.lower() in extensions:
-                return candidate.resolve()
+                priority = _workspace_probe_priority(state, candidate)
+                if priority < best_priority:
+                    best_candidate = candidate.resolve()
+                    best_priority = priority
+                if priority == 0:
+                    return best_candidate
             if scanned >= scan_limit:
-                return None
-    return None
+                return best_candidate
+    return best_candidate
+
+
+def _workspace_probe_priority(
+    state: LspServerState,
+    candidate: Path,
+) -> int:
+    if state.server_id != "clangd":
+        return 0
+    return (
+        0
+        if candidate.suffix.lower()
+        in {".c", ".cc", ".cpp", ".cxx", ".m", ".mm"}
+        else 1
+    )
+
+
+def _is_project_recognition_blocker(
+    state: LspServerState,
+    diagnostic: dict[str, Any],
+) -> bool:
+    if state.server_id != "clangd":
+        return False
+    code = str(diagnostic.get("code") or "").strip().lower()
+    message = str(diagnostic.get("message") or "").strip().lower()
+    return code == "pp_file_not_found" or (
+        "file not found" in message
+        and ("#include" in message or "included file" in message)
+    )
 
 
 def _write_workspace_environment(

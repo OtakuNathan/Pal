@@ -154,6 +154,25 @@ class ToolExecutionError(RuntimeError):
         self.details = dict(details or {})
 
 
+class ToolRejectedError(ValueError):
+    """Pre-effect refusal with a correctable input or state precondition."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "rejected",
+        retry: RetryDirective = RetryDirective.CORRECT_INPUT,
+        affordances: list[ToolAffordance] | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = str(error_code or "rejected")
+        self.retry = retry
+        self.affordances = list(affordances or ())
+        self.details = dict(details or {})
+
+
 T = TypeVar("T")
 
 
@@ -423,6 +442,7 @@ __all__ = [
     "ToolGuidance",
     "ToolHandlerResult",
     "ToolExecutionError",
+    "ToolRejectedError",
     "ToolInvocationResult",
     "compile_tool_description",
     "derive_retry_directive",

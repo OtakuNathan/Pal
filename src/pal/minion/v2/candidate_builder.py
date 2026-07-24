@@ -4,27 +4,23 @@ from pal.execution.generated_tool_models import (
     MinionV2CandidateBuilderOpMinionCandidateReportArchitectureDefectInput,
     MinionV2CandidateBuilderOpMinionCandidateRequestModuleSplitInput,
     MinionV2CandidateBuilderOpMinionCandidateSubmitInput,
-    MinionV2CandidateBuilderOpMinionDeveloperCheckUnavailableInput,
-    MinionV2CandidateBuilderOpMinionDeveloperCompileCheckInput,
-    MinionV2CandidateBuilderOpMinionDeveloperLspCheckInput,
-    MinionV2CandidateBuilderOpMinionDeveloperTestInput,
 )
 
 import hashlib
 import json
 import subprocess
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Mapping
+from typing import Annotated, Any, Literal, Mapping
 
-from pydantic import Field
-from pal.execution.tool_facade import StrictToolModel
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
-from pal.minion.v2.semantic_evidence import (
-    record_unavailable_evidence,
-    recorded_cases,
-    run_lsp_evidence,
-    run_shell_evidence,
+from pydantic import Field, model_validator
+from pal.execution.tool_facade import (
+    RetryDirective,
+    StrictToolModel,
+    ToolAffordance,
+    ToolRejectedError,
+    rejection,
 )
+from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.skeleton import compiled_module_write_scopes
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
@@ -38,10 +34,6 @@ from pal.shared import RuntimeStatus
 
 CANDIDATE_BUILDER_CAPABILITIES = (
     "op_minion_candidate_update_checklist",
-    "op_minion_developer_test",
-    "op_minion_developer_compile_check",
-    "op_minion_developer_lsp_check",
-    "op_minion_developer_check_unavailable",
     "op_minion_candidate_submit",
     "op_minion_candidate_report_architecture_defect",
     "op_minion_candidate_request_module_split",
@@ -51,103 +43,72 @@ CANDIDATE_BUILDER_CAPABILITIES = (
 _ChecklistStep = Annotated[str, Field(min_length=1, max_length=240)]
 
 
+class MinionV2CandidateChecklistItem(StrictToolModel):
+    """One Coder micro-plan item with exactly one current state."""
+
+    step: _ChecklistStep
+    status: Literal["pending", "in_progress", "completed"]
+
+
 class MinionV2CandidateUpdateChecklistInput(StrictToolModel):
     """Complete replacement for the Coder's durable, evidence-free micro-plan."""
 
-    pending: list[_ChecklistStep] = Field(max_length=32)
-    in_progress: _ChecklistStep | None
-    completed: list[_ChecklistStep] = Field(max_length=64)
+    plan: list[MinionV2CandidateChecklistItem] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> "MinionV2CandidateUpdateChecklistInput":
+        steps = [item.step for item in self.plan]
+        duplicates = sorted({step for step in steps if steps.count(step) > 1})
+        if duplicates:
+            raise ValueError(
+                "Coder checklist steps must be unique: " + ", ".join(duplicates)
+            )
+        in_progress = [item.step for item in self.plan if item.status == "in_progress"]
+        if len(in_progress) > 1:
+            raise ValueError(
+                "Coder checklist allows at most one in_progress item: "
+                + ", ".join(in_progress)
+            )
+        return self
 
 
 _CHECKLIST_EXAMPLE = {
-    "pending": ["handle incomplete EOF at the CLI boundary"],
-    "in_progress": "finish failed-state reset behavior",
-    "completed": ["implement split-header buffering"],
+    "plan": [
+        {
+            "step": "implement split-header buffering",
+            "status": "completed",
+        },
+        {
+            "step": "cover incomplete EOF at the CLI boundary",
+            "status": "completed",
+        },
+    ],
 }
-
-_RUN_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "command": {"type": "string", "minLength": 1},
-        "description": {"type": "string"},
-        "expected_exit_codes": {"type": "array", "items": {"type": "integer"}},
-        "timeout_seconds": {"type": "integer", "minimum": 1},
-    },
-    "required": ["name", "command"],
-    "additionalProperties": False,
-}
-_LSP_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "file": {"type": "string", "minLength": 1},
-        "description": {"type": "string"},
-    },
-    "required": ["name", "file"],
-    "additionalProperties": False,
-}
-_UNAVAILABLE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "obligation": {"type": "string", "enum": ["focused_tests", "compile", "warning_clean", "lsp"]},
-        "reason": {"type": "string", "minLength": 1},
-    },
-    "required": ["name", "obligation", "reason"],
-    "additionalProperties": False,
-}
-_DEFECT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string", "minLength": 1},
-        "source_file": {"type": "string"},
-        "path": {"type": "string"},
-        "symbol": {"type": "string"},
-        "contract_section": {"type": "string"},
-    },
-    "required": ["summary"],
-    "additionalProperties": False,
-}
-_NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 
 CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_candidate_update_checklist": {
         "alias": "update_checklist",
         "description": (
-            "Replace your complete durable Coder checklist. Put work not started in pending, "
-            "at most one current step in in_progress, and finished work in completed. Keep steps "
-            "short and update only when the plan materially changes. This checklist is a private "
-            "micro-plan and completion declaration, never test evidence or proof of correctness."
+            "Replace your complete durable Coder micro-plan. Each unique plan item has exactly "
+            "one status: pending, in_progress, or completed; at most one item may be in_progress. "
+            "Keep steps short and update only when work state materially changes. candidate_submit "
+            "is a terminal tool call, never a checklist item. Before calling candidate_submit, "
+            "mark every plan item completed as shown in the valid example. The checklist is a "
+            "self-reported reminder, never test evidence or proof of correctness."
         ),
         "InputModel": MinionV2CandidateUpdateChecklistInput,
         "examples": (_CHECKLIST_EXAMPLE,),
         "idempotency": "idempotent",
         "retry_policy": "automatic",
     },
-    "op_minion_developer_test": {
-        "alias": "developer_test",
-        "description": "Run and durably record one focused developer test. Provide a shell command, not a nested test report.",
-        "InputModel": MinionV2CandidateBuilderOpMinionDeveloperTestInput,
-    },
-    "op_minion_developer_compile_check": {
-        "alias": "developer_compile_check",
-        "description": "Run and durably record one compile or warning-clean check. The command is executed inside the bound module sandbox.",
-        "InputModel": MinionV2CandidateBuilderOpMinionDeveloperCompileCheckInput,
-    },
-    "op_minion_developer_lsp_check": {
-        "alias": "developer_lsp_check",
-        "description": "Run and durably record LSP diagnostics for one changed source file when a matching server is available.",
-        "InputModel": MinionV2CandidateBuilderOpMinionDeveloperLspCheckInput,
-    },
-    "op_minion_developer_check_unavailable": {
-        "alias": "developer_check_unavailable",
-        "description": "Record why focused_tests, compile, warning_clean, or lsp cannot run in this environment. This records UNKNOWN, not PASS.",
-        "InputModel": MinionV2CandidateBuilderOpMinionDeveloperCheckUnavailableInput,
-    },
     "op_minion_candidate_submit": {
         "alias": "candidate_submit",
-        "description": "Submit the current module Candidate after all developer checks pass. Takes no arguments; Manager derives Git delta and journal fields.",
+        "description": (
+            "Submit the current module Candidate after every update_checklist plan item is completed "
+            "and the implementation is ready for independent verification. The checklist is a "
+            "self-reported work ledger, not proof. candidate_submit itself must never be a "
+            "checklist item. Takes no arguments; Manager derives Git delta and journal fields."
+        ),
         "InputModel": MinionV2CandidateBuilderOpMinionCandidateSubmitInput,
     },
     "op_minion_candidate_report_architecture_defect": {
@@ -179,46 +140,15 @@ async def candidate_builder_tool_result(
     call: CanonicalToolCall,
     workspace: dict[str, Any],
     produced_artifacts: list[dict[str, Any]],
-    *,
-    original_adapter: Any | None = None,
-    turn_id: str | None = None,
 ) -> CanonicalToolResult:
     name = str(call.name or "")
     if name == "op_minion_candidate_update_checklist":
         try:
             return _replace_checklist(call, workspace)
+        except ToolRejectedError as exc:
+            return _rejected(call, exc)
         except Exception as exc:
             return _error(call, exc)
-    if name == "op_minion_developer_test":
-        return await run_shell_evidence(
-            call,
-            workspace=workspace,
-            original_adapter=_require_adapter(original_adapter),
-            draft_kind="candidate",
-            case_kind="unit",
-            obligation_tag="focused_tests",
-            turn_id=turn_id,
-        )
-    if name == "op_minion_developer_compile_check":
-        return await run_shell_evidence(
-            call,
-            workspace=workspace,
-            original_adapter=_require_adapter(original_adapter),
-            draft_kind="candidate",
-            case_kind="compile",
-            obligation_tag="compile",
-            turn_id=turn_id,
-        )
-    if name == "op_minion_developer_lsp_check":
-        return await run_lsp_evidence(
-            call,
-            workspace=workspace,
-            original_adapter=_require_adapter(original_adapter),
-            draft_kind="candidate",
-            turn_id=turn_id,
-        )
-    if name == "op_minion_developer_check_unavailable":
-        return record_unavailable_evidence(call, workspace=workspace, draft_kind="candidate")
     try:
         if name == "op_minion_candidate_submit":
             return _submit_candidate(call, workspace, produced_artifacts, status="candidate_ready")
@@ -227,6 +157,8 @@ async def candidate_builder_tool_result(
         if name == "op_minion_candidate_request_module_split":
             return _submit_candidate(call, workspace, produced_artifacts, status="module_split_request")
         raise ValueError(f"unknown candidate authoring capability: {name}")
+    except ToolRejectedError as exc:
+        return _rejected(call, exc)
     except Exception as exc:
         return _error(call, exc)
 
@@ -245,8 +177,13 @@ def _replace_checklist(
         return payload, {
             "updated": True,
             "checklist": checklist,
-            "unfinished_count": len(checklist["pending"])
-            + (1 if checklist["in_progress"] else 0),
+            "unfinished_count": len(
+                [
+                    item
+                    for item in checklist["plan"]
+                    if item["status"] != "completed"
+                ]
+            ),
         }
 
     result = store.mutate(
@@ -282,29 +219,63 @@ def _submit_candidate(
     store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
     snapshot = store.read(context, seed=_empty_candidate_payload())
     work_view = bound_reference_payload(workspace, "unit_work_view")
-    cases = recorded_cases(snapshot.payload)
     raw_checklist = snapshot.payload.get("checklist")
-    checklist = _normalize_checklist(
-        raw_checklist if isinstance(raw_checklist, Mapping) else {},
-        require_nonempty=False,
-    )
     if status == "candidate_ready":
+        if not isinstance(raw_checklist, Mapping):
+            raise ToolRejectedError(
+                "candidate checklist is not initialized; create the micro-plan before submission",
+                error_code="checklist_required",
+                affordances=[_initialize_checklist_affordance()],
+            )
+        try:
+            checklist = _normalize_checklist(
+                raw_checklist,
+                require_nonempty=True,
+            )
+        except ValueError as exc:
+            raise ToolRejectedError(
+                f"candidate checklist is invalid: {exc}",
+                error_code="checklist_invalid",
+                affordances=[_initialize_checklist_affordance()],
+            ) from exc
         if args:
-            raise ValueError("candidate_submit takes no arguments")
+            raise ToolRejectedError(
+                "candidate_submit takes no arguments",
+                error_code="invalid_arguments",
+            )
         unfinished = [
-            *checklist["pending"],
-            *([checklist["in_progress"]] if checklist["in_progress"] else []),
+            str(item["step"])
+            for item in checklist["plan"]
+            if item["status"] != "completed"
         ]
         if unfinished:
-            raise ValueError(
-                "candidate checklist still has unfinished work: " + ", ".join(unfinished)
+            raise ToolRejectedError(
+                "candidate checklist still has unfinished work: " + ", ".join(unfinished),
+                error_code="checklist_unfinished",
+                affordances=[
+                    ToolAffordance(
+                        tool="update_checklist",
+                        arguments={
+                            "plan": [
+                                {
+                                    "step": str(item["step"]),
+                                    "status": "completed",
+                                }
+                                for item in checklist["plan"]
+                            ]
+                        },
+                        reason=(
+                            "Update the existing micro-plan states; do not add candidate_submit "
+                            "as a plan item."
+                        ),
+                    )
+                ],
             )
-        failures = [item for item in cases if str(item.get("status")) == "FAIL"]
-        if failures:
-            raise ValueError("developer checks still fail: " + ", ".join(str(item.get("name")) for item in failures))
-        if not cases:
-            raise ValueError("candidate_submit requires at least one recorded developer check")
     else:
+        checklist = _normalize_checklist(
+            raw_checklist if isinstance(raw_checklist, Mapping) else {"plan": []},
+            require_nonempty=False,
+        )
         _validate_defect_args(args, work_view=work_view)
     files_changed = _live_worktree_delta(workspace, work_view=work_view)
     reserved_paths = {
@@ -314,18 +285,19 @@ def _submit_candidate(
     }
     polluted = sorted(reserved_paths.intersection(files_changed))
     if polluted:
-        raise ValueError(
+        raise ToolRejectedError(
             "candidate workspace contains Manager-owned submission files: "
-            + ", ".join(polluted)
+            + ", ".join(polluted),
+            error_code="candidate_workspace_polluted",
         )
     if status == "candidate_ready" and _is_artifact_unit_view(work_view) and not files_changed:
-        raise ValueError(
-            "candidate_submit requires at least one contracted product file in the artifact workspace"
+        raise ToolRejectedError(
+            "candidate_submit requires at least one contracted product file in the artifact workspace",
+            error_code="candidate_product_required",
         )
     report = {
         "checklist": checklist,
         "files_changed": files_changed,
-        "tests_run": [f"{item.get('name')}: {item.get('status')}" for item in cases],
         "status": status,
     }
     if status != "candidate_ready":
@@ -388,7 +360,6 @@ def validate_candidate_submission(
     required = {
         "checklist",
         "files_changed",
-        "tests_run",
         "status",
     }
     missing = required - set(value)
@@ -408,9 +379,9 @@ def validate_candidate_submission(
         if str(value.get("affected_module") or "") != _bound_unit_name(work_view):
             raise ValueError("candidate defect must target the bound module")
         return ()
-    if checklist["pending"] or checklist["in_progress"]:
+    if any(item["status"] != "completed" for item in checklist["plan"]):
         raise ValueError(
-            "candidate_ready requires no pending or in-progress checklist work"
+            "candidate_ready requires every checklist plan item to be completed"
         )
     return ()
 
@@ -513,7 +484,7 @@ def _defect_locations(args: Mapping[str, Any]) -> list[dict[str, str]]:
 
 
 def _empty_candidate_payload() -> dict[str, Any]:
-    return {"definitions": {}, "evidence": {"cases": {}}, "findings": [], "summary": {}}
+    return {}
 
 
 def candidate_checklist_context(workspace: Mapping[str, Any]) -> str:
@@ -534,7 +505,7 @@ def candidate_checklist_context(workspace: Mapping[str, Any]) -> str:
     if not isinstance(raw, Mapping):
         return (
             "Coder checklist: not initialized. Use update_checklist to record a short "
-            "pending / in_progress / completed micro-plan before submission."
+            "plan whose items each have pending / in_progress / completed status."
         )
     return _render_checklist(_normalize_checklist(raw, require_nonempty=False))
 
@@ -546,64 +517,66 @@ def _normalize_checklist(
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("Coder checklist must be an object")
-    pending = _checklist_steps(value.get("pending"), field="pending")
-    completed = _checklist_steps(value.get("completed"), field="completed")
-    raw_in_progress = value.get("in_progress")
-    in_progress = str(raw_in_progress).strip() if raw_in_progress is not None else None
-    if in_progress == "":
-        raise ValueError("Coder checklist in_progress must be null or non-empty")
-    all_steps = [*pending, *([in_progress] if in_progress else []), *completed]
-    if require_nonempty and not all_steps:
+    raw_plan = value.get("plan")
+    if not isinstance(raw_plan, list):
+        raise ValueError("Coder checklist plan must be an array")
+    if require_nonempty and not raw_plan:
         raise ValueError("Coder checklist must contain at least one step")
-    duplicates = sorted({step for step in all_steps if all_steps.count(step) > 1})
+    plan: list[dict[str, str]] = []
+    for index, raw_item in enumerate(raw_plan):
+        if not isinstance(raw_item, Mapping):
+            raise ValueError(f"Coder checklist plan[{index}] must be an object")
+        unexpected = sorted(set(raw_item) - {"step", "status"})
+        if unexpected:
+            raise ValueError(
+                f"Coder checklist plan[{index}] has unknown fields: "
+                + ", ".join(unexpected)
+            )
+        step = str(raw_item.get("step") or "").strip()
+        status = str(raw_item.get("status") or "").strip()
+        if not step:
+            raise ValueError(f"Coder checklist plan[{index}].step must be non-empty")
+        if status not in {"pending", "in_progress", "completed"}:
+            raise ValueError(
+                f"Coder checklist plan[{index}].status must be pending, in_progress, or completed"
+            )
+        plan.append({"step": step, "status": status})
+    steps = [item["step"] for item in plan]
+    duplicates = sorted({step for step in steps if steps.count(step) > 1})
     if duplicates:
+        raise ValueError("Coder checklist steps must be unique: " + ", ".join(duplicates))
+    in_progress = [item["step"] for item in plan if item["status"] == "in_progress"]
+    if len(in_progress) > 1:
         raise ValueError(
-            "Coder checklist steps must occur in exactly one state: "
-            + ", ".join(duplicates)
+            "Coder checklist allows at most one in_progress item: "
+            + ", ".join(in_progress)
         )
-    return {
-        "pending": pending,
-        "in_progress": in_progress,
-        "completed": completed,
-    }
-
-
-def _checklist_steps(value: Any, *, field: str) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ValueError(f"Coder checklist {field} must be a string array")
-    steps = [item.strip() for item in value]
-    if any(not item for item in steps):
-        raise ValueError(f"Coder checklist {field} entries must be non-empty")
-    return steps
+    return {"plan": plan}
 
 
 def _render_checklist(checklist: Mapping[str, Any]) -> str:
-    pending = [str(item) for item in list(checklist.get("pending") or [])]
-    completed = [str(item) for item in list(checklist.get("completed") or [])]
-    in_progress = str(checklist.get("in_progress") or "").strip()
     lines = ["Coder checklist (self-reported micro-plan; not verification evidence):"]
-    lines.extend(f"- pending: {item}" for item in pending)
-    if in_progress:
-        lines.append(f"- in_progress: {in_progress}")
-    lines.extend(f"- completed: {item}" for item in completed)
+    for item in list(checklist.get("plan") or []):
+        entry = dict(item or {})
+        lines.append(f"- {entry.get('status')}: {entry.get('step')}")
     if len(lines) == 1:
         lines.append("- (empty)")
     return "\n".join(lines)
 
 
-def _has_bound_reference(workspace: Mapping[str, Any], name: str) -> bool:
-    return any(
-        str(dict(item or {}).get("name") or "") == name
-        for item in list(workspace.get("reference_paths") or [])
+def _initialize_checklist_affordance() -> ToolAffordance:
+    return ToolAffordance(
+        tool="update_checklist",
+        arguments={
+            "plan": [
+                {
+                    "step": "implement the bound module contract",
+                    "status": "pending",
+                }
+            ]
+        },
+        reason="Create a short implementation micro-plan before submitting the Candidate.",
     )
-
-
-def _require_adapter(adapter: Any | None) -> Any:
-    if adapter is None:
-        raise ValueError("developer check requires scoped execution")
-    return adapter
 
 
 def _ok(call: CanonicalToolCall, text: str, structured: Mapping[str, Any]) -> CanonicalToolResult:
@@ -613,3 +586,26 @@ def _ok(call: CanonicalToolCall, text: str, structured: Mapping[str, Any]) -> Ca
 def _error(call: CanonicalToolCall, exc: Exception) -> CanonicalToolResult:
     text = f"{exc.__class__.__name__}: {exc}"
     return CanonicalToolResult(name=call.name, ok=False, text=text, llm_text=text + " Correct only this issue and retry.", structured={"error": str(exc), "error_type": exc.__class__.__name__}, call_id=call.call_id, status=RuntimeStatus.INVALID)
+
+
+def _rejected(
+    call: CanonicalToolCall,
+    exc: ToolRejectedError,
+) -> CanonicalToolResult:
+    result = rejection(
+        exc.error_code,
+        str(exc),
+        retry=exc.retry,
+        affordances=list(exc.affordances),
+        details=dict(exc.details),
+    )
+    return CanonicalToolResult(
+        name=call.name,
+        ok=False,
+        text=result.llm_text,
+        llm_text=result.llm_text,
+        structured=result.model_dump(mode="json"),
+        call_id=call.call_id,
+        status=result.error_code,
+        invocation_result=result,
+    )

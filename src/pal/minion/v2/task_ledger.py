@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import copy
 import os
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Mapping
 from uuid import uuid4
@@ -24,7 +22,6 @@ from pal.minion.v2.paths import runtime_spool_root
 
 
 TASK_LEDGER_ARTIFACT = "TaskLedgerArtifact"
-TASK_REVISION_AUTHORITY_ARTIFACT = "TaskRevisionAuthorityArtifact"
 TASK_LEDGER_YAML_ARTIFACT = "TaskLedgerYamlArtifact"
 
 _SAFE_STAMP = re.compile(r"[^0-9A-Za-z._-]+")
@@ -49,35 +46,23 @@ class TaskRevisionAuthority(_StrictModel):
         return value
 
 
-class TaskRevisionChange(_StrictModel):
-    op: Literal["add", "replace", "remove"]
-    path: str = Field(min_length=1)
-    value: Any = None
-
-    @model_validator(mode="after")
-    def _validate_value_presence(self) -> TaskRevisionChange:
-        supplied = "value" in self.model_fields_set
-        if self.op in {"add", "replace"} and not supplied:
-            raise ValueError(f"{self.op} requires value")
-        if self.op == "remove" and supplied:
-            raise ValueError("remove must not contain value")
-        if not self.path.startswith("/") or self.path == "/":
-            raise ValueError("path must be a non-root JSON Pointer")
-        _json_pointer_tokens(self.path)
-        return self
-
-
-class TaskRevisionDraft(_StrictModel):
-    schema_version: Literal["1"]
-    summary: str = Field(min_length=1)
-    changes: list[TaskRevisionChange] = Field(min_length=1)
-
-
 class TaskRevisionEntry(_StrictModel):
     sequence: int = Field(ge=1)
     authority: TaskRevisionAuthority
-    summary: str = Field(min_length=1)
-    changes: list[TaskRevisionChange] = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_historical_entries(cls, value: Any) -> Any:
+        # Earlier ledgers carried an LLM-compiled summary and JSON patch beside
+        # the exact communication record. Those derived fields are deliberately
+        # ignored when old immutable artifacts are read; authority is the only
+        # task-revision truth projected to roles.
+        if isinstance(value, Mapping):
+            normalized = dict(value)
+            normalized.pop("summary", None)
+            normalized.pop("changes", None)
+            return normalized
+        return value
 
 
 class TaskLedger(_StrictModel):
@@ -94,10 +79,6 @@ class TaskLedger(_StrictModel):
         actual = [item.sequence for item in self.revisions]
         if actual != expected:
             raise ValueError("task revision sequence must be contiguous and ordered")
-        effective: Any = copy.deepcopy(self.original)
-        for revision in self.revisions:
-            for change in revision.changes:
-                effective = _apply_change(effective, change)
         return self
 
 
@@ -136,70 +117,27 @@ class TaskLedgerService:
             provenance={"actor": actor, "source_channel": source_channel},
         )
 
-    def publish_authority(
-        self,
-        *,
-        title: str,
-        question: str,
-        answer: str,
-        origin: Literal["architect_user_clarification", "human_review_edit"],
-        actor: str,
-        source_channel: str,
-        observed_at: str | None = None,
-    ) -> ArtifactRef:
-        authority = TaskRevisionAuthority.model_validate(
-            {
-                "title": str(title).strip(),
-                "question": str(question),
-                "answer": str(answer),
-                "observed_at": observed_at or datetime.now(UTC).isoformat(),
-                "origin": origin,
-            }
-        )
-        return self.artifacts.put_json(
-            authority.model_dump(mode="json"),
-            artifact_type=TASK_REVISION_AUTHORITY_ARTIFACT,
-            provenance={
-                "actor": actor,
-                "source_channel": source_channel,
-                "origin": origin,
-                "observed_at": authority.observed_at,
-            },
-        )
-
     def append_revision(
         self,
         *,
         base_ref: ArtifactRef | Mapping[str, Any],
-        authority_ref: ArtifactRef | Mapping[str, Any],
-        revision: Mapping[str, Any],
+        authority: TaskRevisionAuthority | Mapping[str, Any],
         actor: str,
         source_channel: str,
     ) -> ArtifactRef:
         base_artifact = (
             base_ref if isinstance(base_ref, ArtifactRef) else ArtifactRef.from_mapping(base_ref)
         )
-        authority_artifact = (
-            authority_ref
-            if isinstance(authority_ref, ArtifactRef)
-            else ArtifactRef.from_mapping(authority_ref)
-        )
         _require_artifact_type(self.artifacts, base_artifact, TASK_LEDGER_ARTIFACT)
-        _require_artifact_type(
-            self.artifacts,
-            authority_artifact,
-            TASK_REVISION_AUTHORITY_ARTIFACT,
-        )
         ledger = TaskLedger.model_validate(self.artifacts.read_json(base_artifact))
-        authority = TaskRevisionAuthority.model_validate(
-            self.artifacts.read_json(authority_artifact)
+        authority_value = (
+            authority
+            if isinstance(authority, TaskRevisionAuthority)
+            else TaskRevisionAuthority.model_validate(dict(authority or {}))
         )
-        draft = TaskRevisionDraft.model_validate(dict(revision or {}))
         entry = TaskRevisionEntry(
             sequence=len(ledger.revisions) + 1,
-            authority=authority,
-            summary=draft.summary,
-            changes=draft.changes,
+            authority=authority_value,
         )
         next_ledger = TaskLedger(
             schema_version="1",
@@ -215,11 +153,9 @@ class TaskLedgerService:
                 "source_channel": source_channel,
                 "base_task_ledger": base_artifact.sha256,
                 "revision_sequence": entry.sequence,
+                "revision_origin": authority_value.origin,
             },
-            child_refs=(
-                (base_artifact.sha256, "previous_task_ledger"),
-                (authority_artifact.sha256, "revision_authority"),
-            ),
+            child_refs=((base_artifact.sha256, "previous_task_ledger"),),
         )
 
     def materialize(
@@ -315,25 +251,6 @@ def validate_task_ledger(value: Any) -> dict[str, Any]:
     return _serialize_task_ledger(ledger)
 
 
-def validate_task_revision_draft(value: Any) -> dict[str, Any]:
-    try:
-        draft = TaskRevisionDraft.model_validate(value)
-    except ValidationError as exc:
-        raise ValueError(f"invalid task revision YAML: {exc}") from exc
-    return _serialize_task_revision_draft(draft)
-
-
-def effective_task(ledger_value: Mapping[str, Any]) -> dict[str, Any]:
-    ledger = TaskLedger.model_validate(ledger_value)
-    effective: Any = copy.deepcopy(ledger.original)
-    for revision in ledger.revisions:
-        for change in revision.changes:
-            effective = _apply_change(effective, change)
-    if not isinstance(effective, dict):
-        raise ValueError("effective task must remain an object")
-    return effective
-
-
 def render_task_ledger_yaml(ledger_value: Mapping[str, Any]) -> bytes:
     ledger = validate_task_ledger(ledger_value)
     return yaml.safe_dump(
@@ -344,112 +261,8 @@ def render_task_ledger_yaml(ledger_value: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-def load_task_revision_yaml(path: Path) -> dict[str, Any]:
-    try:
-        value = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        raise ValueError(f"cannot read task revision YAML: {exc}") from exc
-    return validate_task_revision_draft(value)
-
-
-def task_revision_template_yaml() -> str:
-    return (
-        "# JSON Pointer paths start inside task.yaml.original; never prefix /original.\n"
-        "schema_version: '1'\n"
-        "summary: replace with the smallest semantic consequence of the user answer\n"
-        "changes:\n"
-        "  - op: replace\n"
-        "    path: /replace/with/exact/task/path\n"
-        "    value: replace with the corrected value\n"
-    )
-
-
 def _serialize_task_ledger(ledger: TaskLedger) -> dict[str, Any]:
-    payload = ledger.model_dump(mode="json", exclude_none=False)
-    for revision in payload["revisions"]:
-        for change in revision["changes"]:
-            if change["op"] == "remove":
-                change.pop("value", None)
-    return payload
-
-
-def _serialize_task_revision_draft(draft: TaskRevisionDraft) -> dict[str, Any]:
-    payload = draft.model_dump(mode="json", exclude_none=False)
-    for change in payload["changes"]:
-        if change["op"] == "remove":
-            change.pop("value", None)
-    return payload
-
-
-def _json_pointer_tokens(path: str) -> list[str]:
-    if not path.startswith("/"):
-        raise ValueError("JSON Pointer must start with /")
-    tokens: list[str] = []
-    for raw in path[1:].split("/"):
-        index = 0
-        while index < len(raw):
-            if raw[index] == "~":
-                if index + 1 >= len(raw) or raw[index + 1] not in {"0", "1"}:
-                    raise ValueError(f"invalid JSON Pointer escape in {path!r}")
-                index += 2
-            else:
-                index += 1
-        tokens.append(raw.replace("~1", "/").replace("~0", "~"))
-    return tokens
-
-
-def _apply_change(document: Any, change: TaskRevisionChange) -> Any:
-    result = copy.deepcopy(document)
-    tokens = _json_pointer_tokens(change.path)
-    parent: Any = result
-    for token in tokens[:-1]:
-        if isinstance(parent, dict):
-            if token not in parent:
-                raise ValueError(f"task revision path does not exist: {change.path}")
-            parent = parent[token]
-        elif isinstance(parent, list):
-            index = _list_index(token, len(parent), allow_end=False)
-            parent = parent[index]
-        else:
-            raise ValueError(f"task revision path crosses a scalar: {change.path}")
-    leaf = tokens[-1]
-    if isinstance(parent, dict):
-        exists = leaf in parent
-        if change.op == "add":
-            if exists:
-                raise ValueError(f"task revision add path already exists: {change.path}")
-            parent[leaf] = copy.deepcopy(change.value)
-        elif change.op == "replace":
-            if not exists:
-                raise ValueError(f"task revision replace path does not exist: {change.path}")
-            parent[leaf] = copy.deepcopy(change.value)
-        else:
-            if not exists:
-                raise ValueError(f"task revision remove path does not exist: {change.path}")
-            del parent[leaf]
-    elif isinstance(parent, list):
-        if change.op == "add":
-            index = len(parent) if leaf == "-" else _list_index(leaf, len(parent), allow_end=True)
-            parent.insert(index, copy.deepcopy(change.value))
-        else:
-            index = _list_index(leaf, len(parent), allow_end=False)
-            if change.op == "replace":
-                parent[index] = copy.deepcopy(change.value)
-            else:
-                del parent[index]
-    else:
-        raise ValueError(f"task revision path parent is a scalar: {change.path}")
-    return result
-
-
-def _list_index(token: str, length: int, *, allow_end: bool) -> int:
-    if not token.isdigit() or (len(token) > 1 and token.startswith("0")):
-        raise ValueError(f"invalid task revision array index: {token!r}")
-    index = int(token)
-    maximum = length if allow_end else length - 1
-    if index < 0 or index > maximum:
-        raise ValueError(f"task revision array index is out of range: {token!r}")
-    return index
+    return ledger.model_dump(mode="json", exclude_none=False)
 
 
 def _media_suffix(media_type: str) -> str:

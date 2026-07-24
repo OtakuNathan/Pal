@@ -30,6 +30,7 @@ from pal.execution.tool_facade import (
     ToolExecutionError,
     ToolGuidance,
     ToolHandlerResult,
+    ToolRejectedError,
     derive_retry_directive,
 )
 from pal.llm.contracts import CanonicalToolCall
@@ -152,6 +153,38 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(result.invocation_result, RejectedResult)
             self.assertEqual(result.status, "invalid_arguments")
             self.assertEqual(result.invocation_result.effect, EffectOutcome.NOT_STARTED)
+
+    def test_handler_precondition_rejection_is_not_an_unknown_effect_failure(self) -> None:
+        def reject_before_effect(_value: EchoInput) -> None:
+            raise ToolRejectedError(
+                "finish the local plan before submitting",
+                error_code="precondition_not_met",
+                details={"field": "plan"},
+            )
+
+        runtime = self.core.context.execution_runtime
+        runtime.register_tool(
+            tool(
+                alias="guarded_echo",
+                canonical_path="op_test_guarded_echo",
+                handler=reject_before_effect,
+                effect=EffectKind.LOCAL_WRITE,
+                retry=RetryPolicy.NEVER_AUTOMATIC,
+            )
+        )
+
+        result = runtime.execute_tool(
+            CanonicalToolCall(name="guarded_echo", args={"value": "hello"})
+        )
+
+        self.assertIsInstance(result.invocation_result, RejectedResult)
+        self.assertEqual(result.status, "precondition_not_met")
+        self.assertEqual(result.invocation_result.effect, EffectOutcome.NOT_STARTED)
+        self.assertEqual(
+            result.invocation_result.retry,
+            RetryDirective.CORRECT_INPUT,
+        )
+        self.assertEqual(result.invocation_result.details, {"field": "plan"})
 
     def test_direct_indirect_and_canonical_paths_are_isolated(self) -> None:
         register_execution_with_core(self.core.context)

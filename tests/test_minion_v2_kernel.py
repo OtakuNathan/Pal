@@ -1760,6 +1760,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 "MARK_STALE",
                 "MEMORY_CANDIDATE_PUBLISHED",
                 "REOPEN_DEPENDENCY",
+                "REOPEN_VERIFICATION",
             ),
             (AggregateType.STANDALONE_REVIEW, str(StandaloneReviewState.COMPLETED)): (),
         }

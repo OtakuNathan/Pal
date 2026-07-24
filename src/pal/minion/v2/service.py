@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
@@ -24,6 +25,7 @@ from pal.minion.v2.skeleton import (
 from pal.minion.v2.task_ledger import (
     TASK_LEDGER_ARTIFACT,
     TaskLedgerService,
+    TaskRevisionAuthority,
 )
 
 
@@ -1111,18 +1113,27 @@ class MinionV2WorkflowService:
         }
         if decision == "edit":
             instruction = str(data.get("edit_instruction") or "").strip()
-            task_revision_authority_ref: dict[str, Any] = {}
             if edit_scope == "requirements":
-                task_revision_authority_ref = self.task_ledger.publish_authority(
+                authority = TaskRevisionAuthority(
                     title="Human review task revision",
-                    question="What requirement change should supersede the reviewed task specification?",
+                    question=(
+                        "What requirement change should supersede the reviewed task "
+                        "specification?"
+                    ),
                     answer=amendment,
+                    observed_at=datetime.now(UTC).isoformat(),
                     origin="human_review_edit",
+                )
+                requirements_ref = self.task_ledger.append_revision(
+                    base_ref=dict(revision.payload.get("requirements_ref") or {}),
+                    authority=authority,
                     actor=str(data.get("actor") or "pal"),
                     source_channel=str(data.get("source_channel") or "local"),
-                ).to_dict()
+                )
+                payload["requirements_ref"] = requirements_ref.to_dict()
+                payload["task_revision"] = authority.model_dump(mode="json")
                 instruction = instruction or (
-                    "First append the pending user-authorized task revision, then revise the existing architecture against the updated task ledger."
+                    "Revise the existing architecture against the updated append-only task ledger."
                 )
             edit_ref = self.artifacts.put_json(
                 {
@@ -1135,19 +1146,10 @@ class MinionV2WorkflowService:
                     else "ArchitectureEditInstructionArtifact"
                 ),
                 provenance={"actor": data.get("actor"), "source_channel": data.get("source_channel")},
-                child_refs=(
-                    (manifest_sha, "revises"),
-                    *(
-                        ((str(task_revision_authority_ref["sha256"]), "task_revision_authority"),)
-                        if task_revision_authority_ref
-                        else ()
-                    ),
-                ),
+                child_refs=((manifest_sha, "revises"),),
             )
             payload["edit_instruction_ref"] = edit_ref.to_dict()
             payload["edit_scope"] = edit_scope
-            if task_revision_authority_ref:
-                payload["task_revision_authority_ref"] = task_revision_authority_ref
         result = self.repository.dispatch(
             ActionEnvelope(
                 action_type=action_types[decision],
@@ -1168,10 +1170,103 @@ class MinionV2WorkflowService:
             "state": result.snapshot.state,
             **({"edit_scope": edit_scope} if decision == "edit" else {}),
             **(
-                {"task_revision_authority_ref": payload["task_revision_authority_ref"]}
-                if payload.get("task_revision_authority_ref")
+                {"requirements_ref": payload["requirements_ref"]}
+                if decision == "edit" and edit_scope == "requirements"
                 else {}
             ),
+        }
+
+    def append_architect_clarification(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Append exact Manager-observed user communication to the task ledger."""
+
+        data = dict(request)
+        workflow_id = str(data.get("workflow_id") or "").strip()
+        revision_id = str(data.get("architecture_revision_id") or "").strip()
+        worker_id = str(data.get("worker_id") or "").strip()
+        clarification_id = str(data.get("clarification_id") or "").strip()
+        if not workflow_id or not revision_id or not worker_id or not clarification_id:
+            raise ValueError(
+                "architect clarification requires workflow, revision, worker, and clarification ids"
+            )
+        revision = self.repository.read_snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            revision_id,
+        )
+        if revision is None or revision.workflow_id != workflow_id:
+            raise ValueError("architect clarification target does not exist")
+        if revision.state != "ARCHITECT_RUNNING":
+            raise ValueError(
+                "architect clarification requires an active ARCHITECT_RUNNING revision"
+            )
+        if str(revision.payload.get("active_worker_id") or "") != worker_id:
+            raise ValueError("architect clarification worker is stale")
+        authority = TaskRevisionAuthority.model_validate(
+            {
+                "title": str(data.get("title") or "").strip(),
+                "question": str(data.get("question") or ""),
+                "answer": str(data.get("answer") or ""),
+                "observed_at": str(data.get("observed_at") or datetime.now(UTC).isoformat()),
+                "origin": "architect_user_clarification",
+            }
+        )
+        revision_digest = hashlib.sha256(
+            json.dumps(
+                authority.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        prior_clarification_id = str(
+            revision.payload.get("task_revision_clarification_id") or ""
+        )
+        if prior_clarification_id == clarification_id:
+            if str(revision.payload.get("last_task_revision_digest") or "") != revision_digest:
+                raise ValueError(
+                    "clarification id was already recorded with a different answer"
+                )
+            return {
+                "appended": True,
+                "sequence": int(revision.payload.get("task_revision_sequence") or 0),
+                "requirements_ref": dict(revision.payload["requirements_ref"]),
+                "duplicate": True,
+            }
+        next_ref = self.task_ledger.append_revision(
+            base_ref=dict(revision.payload.get("requirements_ref") or {}),
+            authority=authority,
+            actor="minion-manager",
+            source_channel="user_clarification",
+        )
+        task_revision_sequence = len(
+            list(
+                dict(self.artifacts.read_json(next_ref)).get("revisions")
+                or []
+            )
+        )
+        result = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="TASK_REVISION_APPENDED",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=revision_id,
+                actor="minion-manager",
+                expected_version=revision.version,
+                idempotency_key=(
+                    f"architect-clarification:{clarification_id}"
+                ),
+                payload={
+                    "requirements_ref": next_ref.to_dict(),
+                    "task_revision": authority.model_dump(mode="json"),
+                    "task_revision_digest": revision_digest,
+                    "task_revision_clarification_id": clarification_id,
+                    "task_revision_sequence": task_revision_sequence,
+                },
+            )
+        )
+        return {
+            "appended": True,
+            "sequence": int(result.snapshot.payload.get("task_revision_sequence") or 0),
+            "requirements_ref": dict(result.snapshot.payload["requirements_ref"]),
         }
 
     def _rebind_human_decision_channel(self, data: Mapping[str, Any]) -> None:

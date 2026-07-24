@@ -74,6 +74,7 @@ class SidecarEndpoint:
 class SidecarRpcClient:
     endpoint: SidecarEndpoint
     request_timeout_seconds: float = 300.0
+    unix_only: bool = False
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         timeout = max(float(self.request_timeout_seconds), 0.001)
@@ -88,7 +89,13 @@ class SidecarRpcClient:
 
     async def _request_once(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = str(uuid4())
-        reader, writer = await open_sidecar_connection(self.endpoint)
+        if self.unix_only:
+            reader, writer = await open_sidecar_connection(
+                self.endpoint,
+                unix_only=True,
+            )
+        else:
+            reader, writer = await open_sidecar_connection(self.endpoint)
         try:
             writer.write(
                 pack_sidecar_message(
@@ -134,7 +141,18 @@ def run_blocking(awaitable):
         return pool.submit(asyncio.run, awaitable).result()
 
 
-async def open_sidecar_connection(endpoint: SidecarEndpoint):
+async def open_sidecar_connection(
+    endpoint: SidecarEndpoint,
+    *,
+    unix_only: bool = False,
+):
+    if unix_only:
+        if not hasattr(asyncio, "open_unix_connection"):
+            raise SidecarRpcError(
+                "Unix sidecar transport is unavailable",
+                kind="transport",
+            )
+        return await asyncio.open_unix_connection(str(endpoint.socket_path))
     if endpoint.port_path.exists():
         port_text = endpoint.port_path.read_text(encoding="utf-8").strip()
         return await asyncio.open_connection("127.0.0.1", int(port_text))

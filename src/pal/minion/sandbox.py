@@ -8,7 +8,7 @@ import shutil
 import site
 import sys
 import sysconfig
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -16,7 +16,6 @@ from pal.foundation.log_paths import pal_log_root
 from pal.foundation.sidecar import python_subprocess_env
 from pal.minion.ipc import (
     ROLE_GATEWAY_TOKEN_ENV,
-    minion_role_port_path,
     minion_role_socket_path,
 )
 from pal.minion.workspace_tools import _normalized_reference_paths
@@ -27,35 +26,10 @@ PAL_MINION_SANDBOX_SCRATCH_ROOT_ENV = "PAL_MINION_SANDBOX_SCRATCH_ROOT"
 PAL_MINION_SANDBOX_MIN_FREE_MB_ENV = "PAL_MINION_SANDBOX_MIN_FREE_MB"
 PAL_MINION_SANDBOX_MAX_RUN_DIRS_ENV = "PAL_MINION_SANDBOX_MAX_RUN_DIRS"
 PAL_MINION_RUNTIME_ROOT_ENV = "PAL_MINION_RUNTIME_ROOT"
+PAL_MINION_TOOL_RESULT_ROOT_ENV = "PAL_MINION_TOOL_RESULT_ROOT"
 DEFAULT_MINION_SANDBOX_MIN_FREE_MB = 256
 DEFAULT_MINION_SANDBOX_MAX_RUN_DIRS = 128
 MINION_SANDBOX_REFERENCE_ROOT = PurePosixPath("/pal/references")
-
-MINION_SANDBOX_BLACKLIST_COMMANDS = (
-    "sudo",
-    "su",
-    "doas",
-    "mount",
-    "umount",
-    "unshare",
-    "nsenter",
-    "chroot",
-    "bwrap",
-    "setpriv",
-    "capsh",
-    "systemctl",
-    "service",
-    "launchctl",
-    "docker",
-    "podman",
-    "colima",
-    "ssh",
-    "scp",
-    "rsync",
-    "rm",
-    "unlink",
-    "rmdir",
-)
 
 _SECRET_ENV_MARKERS = (
     "API_KEY",
@@ -76,9 +50,6 @@ class MinionSandboxSpec:
     run_id: str
     workspace_path: Path | None = None
     scratch_dir: Path | None = None
-    blacklist_commands: tuple[str, ...] = field(
-        default_factory=lambda: MINION_SANDBOX_BLACKLIST_COMMANDS
-    )
 
     def to_metadata(self) -> dict[str, Any]:
         return {
@@ -87,8 +58,7 @@ class MinionSandboxSpec:
             "run_id": self.run_id,
             "workspace_path": str(self.workspace_path or ""),
             "scratch_dir": str(self.scratch_dir or ""),
-            "blacklist_commands": list(self.blacklist_commands),
-            "network": "open",
+            "network": "isolated",
             "secret_policy": "host_llm_broker",
         }
 
@@ -119,14 +89,6 @@ def with_minion_sandbox_metadata(runtime_root: Path, pack: MinionInvocationPack,
         run_id=run_id,
         workspace_path=workspace_path,
         scratch_dir=scratch_dir,
-        blacklist_commands=tuple(
-            str(item).strip()
-            for item in list(
-                sandbox_config.get("blacklist_commands")
-                or MINION_SANDBOX_BLACKLIST_COMMANDS
-            )
-            if str(item).strip()
-        ),
     ).to_metadata()
     existing_reference_binds = [
         dict(item or {})
@@ -333,14 +295,17 @@ def scrub_minion_sandbox_env(
     else:
         result.pop("PAL_MINION_CONTINUATION_RETRY", None)
     result["PAL_MINION_LLM_BROKER"] = "1"
+    result["PAL_MINION_WEB_BROKER"] = "1"
     result["PAL_DATABASE_READ_ONLY"] = "1"
     result[PAL_MINION_RUNTIME_ROOT_ENV] = str(Path(runtime_root).expanduser().resolve())
     if assignment_token:
         result[ROLE_GATEWAY_TOKEN_ENV] = assignment_token
-    result["HOME"] = str(scratch / "home")
-    result["TMPDIR"] = str(scratch / "tmp")
-    result["XDG_CACHE_HOME"] = str(scratch / "cache")
-    result["PYTHONPYCACHEPREFIX"] = str(scratch / "pycache")
+    # bubblewrap mounts the host-side scratch/tmp directory at /tmp. Environment
+    # paths must name the sandbox projection, not the now-hidden host path.
+    result["HOME"] = "/tmp/home"
+    result["TMPDIR"] = "/tmp"
+    result["XDG_CACHE_HOME"] = "/tmp/cache"
+    result["PYTHONPYCACHEPREFIX"] = "/tmp/pycache"
     result["PYTHONDONTWRITEBYTECODE"] = "1"
     python_user_base = _python_user_base()
     if python_user_base is not None:
@@ -353,6 +318,11 @@ def scrub_minion_sandbox_env(
         result["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(python_paths))
     if pack is not None:
         _apply_workspace_execution_env(result, pack)
+        run_dir = str((pack.workspace or {}).get("run_dir") or "").strip()
+        if run_dir:
+            result[PAL_MINION_TOOL_RESULT_ROOT_ENV] = str(
+                Path(run_dir).expanduser() / "tool-results"
+            )
     return result
 
 
@@ -399,34 +369,28 @@ def ensure_sandbox_files(
     runtime_root: Path,
     *,
     run_id: str,
-    blacklist_commands: tuple[str, ...] = MINION_SANDBOX_BLACKLIST_COMMANDS,
     scratch_dir: str | Path | None = None,
 ) -> tuple[Path, Path]:
     sandbox_root = Path(runtime_root) / "data" / "minion" / "sandbox"
     scratch = _coerce_scratch_dir(runtime_root, run_id, scratch_dir)
-    deny_dir = sandbox_root / "deny-bin"
+    shim_dir = sandbox_root / "shim-bin"
+    projected_tmp = scratch / "tmp"
     for path in (
-        scratch / "tmp",
-        scratch / "home",
-        scratch / "cache",
-        scratch / "pycache",
-        deny_dir,
+        projected_tmp,
+        projected_tmp / "home",
+        projected_tmp / "cache",
+        projected_tmp / "pycache",
+        shim_dir,
     ):
         path.mkdir(parents=True, exist_ok=True)
     _prune_sandbox_run_dirs(scratch.parent, keep_run_id=_safe_component(run_id or "run"))
-    for command in blacklist_commands:
-        if command == "git":
-            continue
-        target = deny_dir / command
-        target.write_text(_deny_wrapper_text(command), encoding="utf-8")
-        target.chmod(0o755)
-    git_wrapper = deny_dir / "git"
+    git_wrapper = shim_dir / "git"
     git_wrapper.write_text(_git_wrapper_text(), encoding="utf-8")
     git_wrapper.chmod(0o755)
-    git_internal_wrapper = deny_dir / "git-internal"
+    git_internal_wrapper = shim_dir / "git-internal"
     git_internal_wrapper.write_text(_git_internal_wrapper_text(), encoding="utf-8")
     git_internal_wrapper.chmod(0o755)
-    return scratch, deny_dir
+    return scratch, shim_dir
 
 
 def _prune_sandbox_run_dirs(root: Path, *, keep_run_id: str) -> None:
@@ -467,17 +431,9 @@ def _build_bwrap_invocation(
     if not bwrap:
         raise RuntimeError("bubblewrap is required for Linux minion sandboxing")
     run_id = str(sandbox.get("run_id") or (pack.metadata or {}).get("run_id") or "run")
-    blacklist = tuple(
-        str(item).strip()
-        for item in list(
-            sandbox.get("blacklist_commands") or MINION_SANDBOX_BLACKLIST_COMMANDS
-        )
-        if str(item).strip()
-    )
-    scratch, deny_dir = ensure_sandbox_files(
+    scratch, shim_dir = ensure_sandbox_files(
         runtime_root,
         run_id=run_id,
-        blacklist_commands=blacklist,
         scratch_dir=sandbox.get("scratch_dir"),
     )
     workspace_path = Path(str(sandbox.get("workspace_path") or _workspace_path_from_pack(pack) or "")).expanduser()
@@ -485,14 +441,15 @@ def _build_bwrap_invocation(
     args: list[str] = [
         bwrap,
         "--die-with-parent",
+        "--unshare-user",
+        "--disable-userns",
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
-        "--share-net",
+        "--unshare-net",
         "--proc",
         "/proc",
-        "--dev-bind",
-        "/dev",
+        "--dev",
         "/dev",
         "--bind",
         str(scratch / "tmp"),
@@ -517,30 +474,26 @@ def _build_bwrap_invocation(
         _append_bind_path(args, nvm_root, read_only=True)
     workspace_policy = dict(pack.workspace.get("workspace_policy") or {})
     read_only_workspace = str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo"
-    write_scopes = [dict(item or {}) for item in list(pack.workspace.get("write_path_scopes") or [])]
-    scoped_writable_workspace = bool(write_scopes)
     if workspace_path and workspace_path.exists():
         _append_bind_path(
             args,
             workspace_path,
-            read_only=read_only_workspace or scoped_writable_workspace,
+            read_only=read_only_workspace,
         )
-        if scoped_writable_workspace:
-            _append_scoped_workspace_binds(args, workspace_path, write_scopes)
-            for raw_relative in list(
-                pack.workspace.get("read_only_overlay_paths") or []
-            ):
-                relative = str(raw_relative or "").strip().replace("\\", "/")
-                target = (workspace_path.resolve() / relative).resolve()
-                if not relative or not target.is_relative_to(workspace_path.resolve()):
-                    raise RuntimeError(
-                        f"read-only overlay escapes its worktree: {relative}"
-                    )
-                if not target.is_file():
-                    raise RuntimeError(
-                        f"read-only verifier test does not exist: {relative}"
-                    )
-                _append_bind_path(args, target, read_only=True)
+        for raw_relative in list(
+            pack.workspace.get("read_only_overlay_paths") or []
+        ):
+            relative = str(raw_relative or "").strip().replace("\\", "/")
+            target = (workspace_path.resolve() / relative).resolve()
+            if not relative or not target.is_relative_to(workspace_path.resolve()):
+                raise RuntimeError(
+                    f"read-only overlay escapes its worktree: {relative}"
+                )
+            if not target.exists():
+                raise RuntimeError(
+                    f"read-only overlay does not exist: {relative}"
+                )
+            _append_bind_path(args, target, read_only=True)
         git_marker = workspace_path / ".git"
         if git_marker.exists() or git_marker.is_symlink():
             _append_bind_path(args, git_marker, read_only=True)
@@ -552,20 +505,11 @@ def _build_bwrap_invocation(
     if not reference_binds:
         _, reference_binds = _project_sandbox_references(dict(pack.workspace or {}))
     _append_reference_projection_binds(args, reference_binds)
-    for command in blacklist:
-        if command == "git":
-            continue
-        wrapper = deny_dir / command
-        if not wrapper.exists():
-            continue
-        for target in _command_targets(command):
-            if target.exists():
-                args.extend(["--ro-bind", str(wrapper), str(target)])
-    git_wrapper = deny_dir / "git"
+    git_wrapper = shim_dir / "git"
     for target in _git_entrypoint_targets():
         if target.exists():
             args.extend(["--ro-bind", str(git_wrapper), str(target)])
-    git_internal_wrapper = deny_dir / "git-internal"
+    git_internal_wrapper = shim_dir / "git-internal"
     for target in _git_internal_targets():
         args.extend(["--ro-bind", str(git_internal_wrapper), str(target)])
     args.extend(["--chdir", _sandbox_cwd(pack), "--"])
@@ -666,59 +610,28 @@ def _append_runtime_root_binds(
         path = runtime_root / file_name
         if path.exists():
             args.extend(["--ro-bind", str(path), str(path)])
-    for dir_name, read_only in (
-        ("data/lsp", True),
-        ("data/tool_results", False),
-        ("artifacts", False),
-        ("plugins", True),
-        ("SKILL", True),
-    ):
+    for dir_name in ("data/lsp", "plugins", "SKILL"):
         path = runtime_root / dir_name
         if path.exists():
             _append_dir_scaffold(args, path)
-            args.extend(["--ro-bind" if read_only else "--bind", str(path), str(path)])
+            args.extend(["--ro-bind", str(path), str(path)])
     run_dir_value = str(pack.workspace.get("run_dir") or "").strip()
     run_dir = Path(run_dir_value).expanduser() if run_dir_value else None
     if run_dir is not None and run_dir.is_dir():
+        (run_dir / "tool-results").mkdir(parents=True, exist_ok=True)
         _append_bind_path(args, run_dir, read_only=False)
-    for endpoint_path in (
-        minion_role_socket_path(runtime_root),
-        minion_role_port_path(runtime_root),
-    ):
-        if endpoint_path.exists():
-            _append_bind_path(args, endpoint_path, read_only=True)
+    endpoint_path = minion_role_socket_path(runtime_root)
+    if not endpoint_path.exists():
+        raise RuntimeError(
+            "sandboxed Minion requires the assignment-scoped Unix role gateway"
+        )
+    _append_bind_path(args, endpoint_path, read_only=True)
 
 
 def _append_bind_path(args: list[str], path: Path, *, read_only: bool) -> None:
     path = Path(path).expanduser()
     _append_dir_scaffold(args, path if path.is_dir() else path.parent)
     args.extend(["--ro-bind" if read_only else "--bind", str(path), str(path)])
-
-
-def _append_scoped_workspace_binds(
-    args: list[str],
-    workspace_path: Path,
-    scopes: list[dict[str, Any]],
-) -> None:
-    root = workspace_path.resolve()
-    for raw_scope in scopes:
-        kind = str(raw_scope.get("kind") or "").strip()
-        relative = str(raw_scope.get("path") or "").strip().replace("\\", "/")
-        if kind not in {"file", "directory"} or not relative:
-            raise RuntimeError("OS write scopes require kind=file|directory and a relative path")
-        target = (root / relative).resolve()
-        if not target.is_relative_to(root):
-            raise RuntimeError(f"OS write scope escapes its worktree: {relative}")
-        if kind == "file":
-            if target.exists() and not target.is_file():
-                raise RuntimeError(f"OS writable file scope is not a file: {relative}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.touch(exist_ok=True)
-        if kind == "directory":
-            if target.exists() and not target.is_dir():
-                raise RuntimeError(f"OS writable directory scope is not a directory: {relative}")
-            target.mkdir(parents=True, exist_ok=True)
-        _append_bind_path(args, target, read_only=False)
 
 
 def _append_dir_scaffold(args: list[str], path: Path) -> None:
@@ -815,25 +728,6 @@ def _pal_source_root() -> Path:
 
 def _falsey(value: Any) -> bool:
     return str(value or "").strip().lower() in {"0", "false", "no", "off", "disabled"}
-
-
-def _deny_wrapper_text(command: str) -> str:
-    capability_hint = (
-        "Use the dedicated tools available for your task: search for repository text search; "
-        "read_file for reading repo text files; edit_file for precise repo text edits; "
-        "write_file for creating or overwriting complete repo text files; "
-        "delete_path for deleting repo paths."
-    )
-    shell_hint = (
-        "Keep run_shell for tests, builds, scripts, process probes, package commands, process inspection, and read-only Git inspection."
-    )
-    return (
-        "#!/bin/sh\n"
-        f"echo \"blocked command '{command}'. Do not run it through shell; use its dedicated tool instead.\" >&2\n"
-        f"echo \"{capability_hint}\" >&2\n"
-        f"echo \"{shell_hint}\" >&2\n"
-        "exit 126\n"
-    )
 
 
 def _git_wrapper_text() -> str:

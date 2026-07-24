@@ -133,8 +133,9 @@ class MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput(StrictT
     amendment: str | None = Field(
         default=None,
         description=(
-            "Exact user-authorized requirement change. Architect converts it to the "
-            "smallest structured task revision before revising architecture."
+            "Exact user-authorized requirement change. For a requirements edit, the "
+            "Manager appends this text directly to the immutable task ledger before "
+            "starting the architecture revision; no role may rewrite it."
         ),
     )
 

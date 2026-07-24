@@ -634,6 +634,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             files_inspected=("src/a/api.h",),
             last_safe_point="test written",
         )
+        self.assertNotIn("tests_run", journal.to_dict())
         generation = self.repository.update_node_journal(
             node_run_id="node_journal",
             workflow_id="wf_journal",

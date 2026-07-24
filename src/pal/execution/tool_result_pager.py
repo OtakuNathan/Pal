@@ -42,6 +42,7 @@ class ToolResultPage:
 @dataclass
 class ToolResultPagerStore:
     retention_user_turns: int = DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS
+    storage_root: Path | None = None
     _handles: dict[str, ToolResultHandle] = field(default_factory=dict)
     _tool_names: dict[str, str] = field(default_factory=dict)
     _statuses: dict[str, str] = field(default_factory=dict)
@@ -240,8 +241,9 @@ class ToolResultPagerStore:
         root.mkdir(parents=True, exist_ok=True)
         self._initialized_roots.add(key)
 
-    @staticmethod
-    def _ephemeral_root(runtime_root: Path | None) -> Path | None:
+    def _ephemeral_root(self, runtime_root: Path | None) -> Path | None:
+        if self.storage_root is not None:
+            return Path(self.storage_root)
         if runtime_root is None:
             return None
         return Path(runtime_root) / "data" / "tool_results" / "ephemeral"

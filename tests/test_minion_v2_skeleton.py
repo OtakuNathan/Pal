@@ -10,7 +10,6 @@ from pathlib import Path
 
 import yaml
 
-from pal.execution.tool_facade import EmptyToolInput
 from pal.llm.contracts import CanonicalToolCall
 from pal.minion.scoped_execution import (
     MinionScopedExecutionOpMinionArtifactEditInput,
@@ -53,7 +52,7 @@ from pal.minion.v2.skeleton import (
     validate_architecture_revision_scope,
     validate_architecture_submission,
 )
-from pal.minion.v2.task_ledger import TaskLedgerService
+from pal.minion.v2.task_ledger import TaskLedgerService, TaskRevisionAuthority
 from pal.minion.v2.skeleton_builder import (
     SKELETON_BUILDER_TOOL_SPECS,
     ask_question_tool_result,
@@ -532,7 +531,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             set(compilation.unit_node_ids.values()),
         )
 
-    def test_architect_question_requires_structured_task_revision_in_place(self) -> None:
+    def test_architect_question_resumes_only_after_manager_records_revision(self) -> None:
         workspace = self._bind_builder_workspace(
             {
                 "repo_path": str(self.repo),
@@ -549,7 +548,12 @@ class MinionV2SkeletonTests(unittest.TestCase):
             return {
                 "answers": [
                     {"question_id": "architecture-question", "answer": "Preserve the public API"}
-                ]
+                ],
+                "task_revision": {
+                    "appended": True,
+                    "sequence": 1,
+                    "requirements_ref": {"sha256": "manager-owned"},
+                },
             }
 
         result = asyncio.run(
@@ -574,60 +578,34 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertTrue(result.ok, result.llm_text)
         self.assertEqual(result.structured["answer"], "Preserve the public API")
         self.assertIsNone(observed[0]["timeout"])
-        revision_path = Path(str(result.structured["task_revision_path"]))
-        self.assertTrue(revision_path.is_file())
-        self.assertIn("changes:", revision_path.read_text(encoding="utf-8"))
-        revision_path.write_text(
-            "schema_version: '1'\n"
-            "summary: Preserve the public API.\n"
-            "changes:\n"
-            "  - op: replace\n"
-            "    path: /compatibility\n"
-            "    value: Preserve the public API.\n",
-            encoding="utf-8",
+        self.assertEqual(
+            result.structured["status"],
+            "answered_revision_recorded",
         )
-        submitted = skeleton_builder_tool_result(
-            CanonicalToolCall(
-                name="op_minion_task_revision_submit",
-                args={},
-                call_id="submit-task-revision",
-            ),
-            workspace,
-            [],
+        self.assertEqual(result.structured["task_revision"]["sequence"], 1)
+        self.assertNotIn(
+            "op_minion_task_revision_submit",
+            SKELETON_BUILDER_TOOL_SPECS,
         )
-        self.assertTrue(submitted.ok, submitted.llm_text)
-        self.assertEqual(submitted.structured["generation"], 1)
-        self.assertIn("revision", submitted.structured)
-        self.assertNotIn("requirements_ref", submitted.structured)
-        self.assertNotIn("_pending_task_revision_authority_ref", workspace)
+        self.assertFalse(
+            (Path(str(workspace["artifact_stage_dir"])) / "task_revision.yaml").exists()
+        )
 
     def test_snapshot_uses_preappended_task_ledger_without_hidden_merge(self) -> None:
         workspace = self._provision_complete_workspace("clarified-task", "initial")
         ledger = TaskLedgerService(self.runtime_root, self.artifacts)
-        authority_ref = ledger.publish_authority(
+        authority = TaskRevisionAuthority(
             title="Compatibility",
             question="Which compatibility boundary is binding?",
             answer="Preserve the existing public API; adapters may be added behind it.",
             origin="architect_user_clarification",
-            actor="user",
-            source_channel="test",
+            observed_at="2026-07-20T12:00:00+00:00",
         )
         revised_ref = ledger.append_revision(
             base_ref=self.requirements_ref,
-            authority_ref=authority_ref,
-            revision={
-                "schema_version": "1",
-                "summary": "Preserve the existing public API.",
-                "changes": [
-                    {
-                        "op": "replace",
-                        "path": "/compatibility",
-                        "value": "Preserve the existing public API; adapters may be added behind it.",
-                    }
-                ],
-            },
-            actor="architect",
-            source_channel="role_gateway",
+            authority=authority,
+            actor="minion-manager",
+            source_channel="user_clarification",
         )
 
         manifest_ref = self.service.snapshot_architect_result(
@@ -1322,17 +1300,14 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 },
                 strict=True,
             )
-        self.assertIs(
-            SKELETON_BUILDER_TOOL_SPECS["op_minion_task_revision_submit"]["InputModel"],
-            EmptyToolInput,
-        )
+        self.assertNotIn("op_minion_task_revision_submit", SKELETON_BUILDER_TOOL_SPECS)
         self.assertEqual(
             MinionScopedExecutionOpMinionArtifactEditInput.__module__,
             "pal.minion.scoped_execution",
         )
         MinionScopedExecutionOpMinionArtifactEditInput.model_validate(
             {
-                "relative_path": "task_revision.yaml",
+                "relative_path": "review_notes.yaml",
                 "content": "schema_version: '1'\n",
                 "operation": "replace",
                 "create_if_missing": False,
@@ -1342,7 +1317,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MinionScopedExecutionOpMinionArtifactEditInput.model_validate(
                 {
-                    "relative_path": "task_revision.yaml",
+                    "relative_path": "review_notes.yaml",
                     "old_" + "string": "before",
                     "new_" + "string": "after",
                 },
@@ -1404,6 +1379,9 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertIn("ownership and lifecycle close", description)
         self.assertIn("provider outputs satisfy consumer dependencies", description)
         self.assertIn("success and failure observations", description)
+        self.assertIn("unresolved public semantic ambiguity", description)
+        self.assertIn("partial-success failure path", description)
+        self.assertIn("review_guarded implementation freedom", description)
         self.assertIn("hypothetical implementation behavior is not semantic proof", description)
 
     def test_architecture_submit_persists_requirement_mapping(self) -> None:
@@ -1623,6 +1601,11 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertIn("responsibility", descriptions)
         self.assertIn("lifecycle", descriptions)
         self.assertIn("Syntax and compilation are supporting checks", descriptions)
+        self.assertIn("PASS is forbidden while any public input, state, or call-sequence ambiguity remains", descriptions)
+        self.assertIn("absent/null/empty/zero-length", descriptions)
+        self.assertIn("partial output followed by failure", descriptions)
+        self.assertIn("copy/move/clone/share/reset/reuse semantics", descriptions)
+        self.assertIn("compile probe cannot establish", descriptions)
         self.assertNotIn("workflow_id", descriptions)
 
     def test_revision_submit_merges_semantic_patch_and_rejects_out_of_scope_paths(self) -> None:

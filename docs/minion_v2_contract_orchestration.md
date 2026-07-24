@@ -82,10 +82,11 @@ aggregate enters `TRIAGE_REQUIRED`.
 The immutable `TaskLedgerArtifact` is product truth. The foreground Pal compiles
 the complete initial request into the ledger's structured `original` value.
 Ordered `revisions` are append-only and each carries the exact user question and
-answer that authorized it plus the smallest JSON-Pointer delta. A newer revision
-overrides only the exact paths it changes; all unrelated earlier obligations
-remain binding. Manager validates the fixed schema and applies deltas
-mechanically but never interprets their meaning. The only role projection is one
+answer observed by Manager. Apply them in sequence: a newer revision takes
+precedence when its meaning conflicts with earlier revisions or `original`, while
+all unrelated earlier obligations remain binding. Manager validates the fixed
+schema and appends the communication mechanically; it never asks a role to
+compile, paraphrase, patch, or restate the task. The only role projection is one
 read-only `task.yaml`; there is no parallel request, amendment, or compiled-task
 document. For software engineering, the
 accepted code-skeleton commit plus the semantic Contract Dependency Graph and
@@ -100,9 +101,11 @@ each Architect invocation. Its `requirements`, `modules`, and `scenarios` fields
 are dynamic maps keyed by stable semantic names, so initial design and revision
 use ordinary file editing rather than per-node mutation tools. A revision starts
 from the complete accepted YAML and preserves it across process retries.
-Architect receives the in-place user-question IO, fixed `task_revision.yaml`
-authoring path, and no-argument task-revision and architecture submits in
-addition to ordinary workspace tools. The Draft uses schema version 4.
+Architect receives the in-place user-question IO and no-argument architecture
+submit in addition to ordinary workspace tools. `ask_question` suspends until
+Manager has appended the exact question and answer to the ledger; Architect then
+continues directly and has no task-ledger write capability. The Draft uses
+schema version 4.
 
 `requirements` is a compact mapping index. Each entry has one claim, one
 module-or-scenario owner, and an ordered public semantic `contract_path`; it does
@@ -251,12 +254,10 @@ accepted; starting execution is a separate outbox effect.
 
 Human Edit explicitly selects `architecture` or `requirements`. An architecture
 edit reuses the current immutable `TaskLedgerArtifact`. A requirements edit
-records the exact human answer as immutable revision authority and creates a
-child Architecture Revision against the unchanged ledger. The Architect appends
-only the smallest semantic delta through `task_revision_submit` before changing
-the architecture. Manager validates and appends that delta to produce the next
-immutable ledger generation; it never rewrites `original` or paraphrases the
-answer.
+records the exact human amendment as a Manager-authored revision, produces the
+next immutable ledger generation, and creates a child Architecture Revision
+against that generation. Manager never rewrites `original` or paraphrases the
+answer, and Architect cannot edit the ledger.
 
 Human waivers are immutable artifacts bound to the manifest and relevant
 fragment hashes. A changed fragment invalidates the waiver.
@@ -264,11 +265,11 @@ fragment hashes. A changed fragment invalidates the waiver.
 Architect clarification is ordinary asynchronous tool IO, not a business state.
 The Architecture Revision remains `ARCHITECT_RUNNING` while Manager routes three
 inline choices plus a custom-answer path through the active channel. The same
-invocation receives the answer. Manager persists the exact question and answer
-as revision authority, seeds `task_revision.yaml`, and leaves the Architect
-running. Architecture submission is mechanically blocked until the Architect's
-validated delta has been appended. Reviewer compares every delta with its exact
-authority; human review displays the revision diff.
+invocation receives the answer only after Manager has appended the exact
+question and answer to the current ledger generation and updated the Architecture
+Revision's pinned ledger reference. Replaying the same clarification is
+idempotent. Reviewer receives the exact ledger generation snapshotted with the
+architecture; human review displays its ordered revision history.
 
 ## Execution and Verification
 

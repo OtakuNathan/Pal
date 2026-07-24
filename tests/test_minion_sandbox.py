@@ -17,6 +17,7 @@ import msgpack
 
 from pal.execution.git_tool import classify_git_command
 from pal.llm import EndpointResolver, LLMRuntime
+from pal.lsp.ipc import LspManagerClient
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice, LLMPreflightRequest
 from pal.minion.manager import MinionManager, MinionRunState
 from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
@@ -45,8 +46,8 @@ from pal.minion.user_interaction import (
 )
 from pal.minion.v2.worker_main import _read_control_message
 from pal.minion.sandbox import (
-    MINION_SANDBOX_BLACKLIST_COMMANDS,
     PAL_MINION_RUNTIME_ROOT_ENV,
+    PAL_MINION_TOOL_RESULT_ROOT_ENV,
     build_sandboxed_runner_invocation,
     ensure_sandbox_files,
     minion_sandbox_scratch_dir,
@@ -61,6 +62,13 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     if result.returncode != 0:
         raise AssertionError(result.stderr or result.stdout or f"git {' '.join(args)} failed")
     return result
+
+
+def _prepare_role_endpoint(runtime_root: Path) -> Path:
+    path = runtime_root / "data" / "minion-role" / "role.sock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("test endpoint", encoding="utf-8")
+    return path
 
 
 class MinionSandboxTests(unittest.TestCase):
@@ -198,6 +206,16 @@ class MinionSandboxTests(unittest.TestCase):
         self.assertIsInstance(client, MinionRoleGatewayClient)
         self.assertEqual(client.access_token, "assignment-only")
 
+    def test_sandboxed_lsp_client_requires_unix_transport(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"PAL_MINION_SANDBOXED": "1"},
+            clear=False,
+        ):
+            client = LspManagerClient(Path("/tmp/pal-minion-lsp-uds"))
+
+        self.assertTrue(client._client.unix_only)
+
     def test_minion_temperature_accepts_low_deterministic_profile_value(self) -> None:
         pack = MinionInvocationPack(invocation_id="temperature", goal="g", metadata={"temperature": 0.05})
         self.assertEqual(_minion_temperature(pack, fallback=0.7), 0.05)
@@ -252,7 +270,8 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(sandbox["workspace_path"], str(repo))
             self.assertEqual(sandbox["secret_policy"], "host_llm_broker")
             self.assertEqual(sandbox["scratch_dir"], str(root / "tmp_scratch" / "run_1"))
-            self.assertIn("rm", sandbox["blacklist_commands"])
+            self.assertEqual(sandbox["network"], "isolated")
+            self.assertNotIn("blacklist_commands", sandbox)
 
     def test_sandbox_metadata_rejects_unwired_backend(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_backend_") as tmp:
@@ -281,6 +300,32 @@ class MinionSandboxTests(unittest.TestCase):
                 pack=pack,
                 argv=["python", "-c", "pass"],
             )
+
+    def test_runner_invocation_fails_closed_without_unix_role_gateway(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_missing_uds_") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            pack = MinionInvocationPack(
+                invocation_id="missing-uds",
+                goal="inspect",
+                workspace={"repo_path": str(repo)},
+                metadata={
+                    "sandbox": {
+                        "enabled": True,
+                        "backend": "bwrap",
+                        "run_id": "missing-uds",
+                    }
+                },
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "Unix role gateway"):
+                build_sandboxed_runner_invocation(
+                    runtime_root=root,
+                    pack=pack,
+                    argv=["python", "-c", "pass"],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
 
     def test_sandbox_metadata_does_not_project_external_git_internals(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_gitmeta_") as tmp:
@@ -324,9 +369,13 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertNotIn("PAL_TOKEN", env)
             self.assertEqual(env[ROLE_GATEWAY_TOKEN_ENV], "assignment-only")
             self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
+            self.assertEqual(env["PAL_MINION_WEB_BROKER"], "1")
             self.assertEqual(env["PAL_DATABASE_READ_ONLY"], "1")
             self.assertEqual(env["PAL_MINION_SANDBOXED"], "1")
-            self.assertEqual(env["TMPDIR"], str(Path(tmp) / "tmp_scratch" / "run_env" / "tmp"))
+            self.assertEqual(env["HOME"], "/tmp/home")
+            self.assertEqual(env["TMPDIR"], "/tmp")
+            self.assertEqual(env["XDG_CACHE_HOME"], "/tmp/cache")
+            self.assertEqual(env["PYTHONPYCACHEPREFIX"], "/tmp/pycache")
 
     def test_sandbox_env_marks_only_continuation_attempts_as_retries(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_retry_env_") as tmp:
@@ -389,68 +438,31 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertNotIn("PAL_TOKEN", env)
             self.assertIn("PYTHONUSERBASE", env)
 
-    def test_sandbox_scratch_and_deny_wrappers_are_created(self) -> None:
+    def test_sandbox_scratch_and_git_shims_are_created(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_wrappers_") as tmp:
             with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(Path(tmp) / "tmp_scratch")}):
-                scratch, deny_dir = ensure_sandbox_files(
+                scratch, shim_dir = ensure_sandbox_files(
                     Path(tmp),
                     run_id="run_wrap",
-                    blacklist_commands=("rm", "unlink"),
                 )
 
             self.assertTrue((scratch / "tmp").is_dir())
-            self.assertTrue((scratch / "home").is_dir())
-            self.assertTrue((scratch / "cache").is_dir())
-            self.assertTrue((scratch / "pycache").is_dir())
+            self.assertTrue((scratch / "tmp" / "home").is_dir())
+            self.assertTrue((scratch / "tmp" / "cache").is_dir())
+            self.assertTrue((scratch / "tmp" / "pycache").is_dir())
             self.assertEqual(scratch, Path(tmp) / "tmp_scratch" / "run_wrap")
-            for command in ("rm", "unlink"):
-                wrapper = deny_dir / command
-                self.assertTrue(os.access(wrapper, os.X_OK))
-                wrapper_text = wrapper.read_text(encoding="utf-8")
-                self.assertIn(
-                    f"blocked command '{command}'",
-                    wrapper_text,
-                )
-                self.assertNotIn("minion", wrapper_text.lower())
-                self.assertIn("available for your task", wrapper_text)
-            git_wrapper = deny_dir / "git"
+            self.assertEqual(shim_dir.name, "shim-bin")
+            self.assertFalse((shim_dir / "rm").exists())
+            self.assertFalse((shim_dir / "unlink").exists())
+            git_wrapper = shim_dir / "git"
             self.assertTrue(os.access(git_wrapper, os.X_OK))
             wrapper_text = git_wrapper.read_text(encoding="utf-8")
             self.assertIn("/usr/bin/python3", wrapper_text)
             self.assertIn("git_shim.py", wrapper_text)
             self.assertNotIn("pal.minion.git_shim", wrapper_text)
-            git_internal = deny_dir / "git-internal"
+            git_internal = shim_dir / "git-internal"
             self.assertTrue(os.access(git_internal, os.X_OK))
             self.assertIn("blocked internal Git entry point", git_internal.read_text(encoding="utf-8"))
-
-    def test_minion_run_shell_leaves_git_to_the_sandbox_trap(self) -> None:
-        runner = object.__new__(MinionRunner)
-        cases = {
-            "rm src/router.py": "Use delete_path",
-            "find src -type f -delete": "Use delete_path",
-            "touch src/router.py": "Use write_file",
-        }
-        for command, expected in cases.items():
-            with self.subTest(command=command):
-                message = runner._dedicated_shell_command_error(
-                    "op_exec_shell",
-                    CanonicalToolCall(
-                        name="op_exec_shell",
-                        args={"cmd": command},
-                        call_id="shell-policy",
-                    ),
-                )
-                self.assertIn(expected, message)
-
-        git_message = runner._dedicated_shell_command_error(
-            "op_exec_shell",
-            CanonicalToolCall(
-                name="op_exec_shell",
-                args={"cmd": "git status --short"},
-                call_id="shell-git-policy",
-            ),
-        )
-        self.assertEqual(git_message, "")
 
     def test_git_shim_delegates_reads_and_rejects_every_other_classification(self) -> None:
         class Client:
@@ -564,6 +576,7 @@ class MinionSandboxTests(unittest.TestCase):
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
+            _prepare_role_endpoint(root)
             pack = MinionInvocationPack(
                 invocation_id="wo",
                 goal="g",
@@ -580,41 +593,62 @@ class MinionSandboxTests(unittest.TestCase):
                 )
 
             self.assertTrue(argv[0].endswith("bwrap"))
-            self.assertIn("--share-net", argv)
+            self.assertIn("--unshare-user", argv)
+            self.assertIn("--disable-userns", argv)
+            self.assertIn("--unshare-net", argv)
+            self.assertIn("--dev", argv)
+            self.assertNotIn("--share-net", argv)
+            self.assertNotIn("--dev-bind", argv)
             self.assertIn("--chdir", argv)
             self.assertNotIn("OPENAI_API_KEY", env)
             self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
+            self.assertEqual(env["PAL_MINION_WEB_BROKER"], "1")
             self.assertIn("PYTHONPATH", env)
 
-    def test_default_deny_bin_traps_shell_rm_and_unlink(self) -> None:
+    def test_sandbox_projects_writable_temp_and_home_paths(self) -> None:
         if not shutil.which("bwrap"):
             self.skipTest("bubblewrap is not available")
-        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_deny_bin_") as tmp:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_temp_") as tmp:
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
-            sentinel = repo / "keep.txt"
-            sentinel.write_text("keep\n", encoding="utf-8")
-            for command, argument in (("rm", "keep.txt"), ("unlink", "keep.txt")):
-                with patch.dict(
-                    os.environ,
-                    {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")},
-                ):
-                    pack = with_minion_sandbox_metadata(
-                        root,
-                        MinionInvocationPack(
-                            invocation_id=f"deny-{command}",
-                            goal="verify command trap",
-                            workspace={"repo_path": str(repo)},
-                        ),
-                        run_id=f"deny-{command}",
-                    )
-                    argv, env = build_sandboxed_runner_invocation(
-                        runtime_root=root,
-                        pack=pack,
-                        argv=["/bin/sh", "-c", f"{command} {argument}"],
-                        env={"PATH": "/usr/bin:/bin"},
-                    )
+            _prepare_role_endpoint(root)
+            pack = MinionInvocationPack(
+                invocation_id="temp-paths",
+                goal="probe sandbox temp paths",
+                workspace={"repo_path": str(repo)},
+                metadata={
+                    "sandbox": {
+                        "enabled": True,
+                        "backend": "bwrap",
+                        "run_id": "temp-paths",
+                    }
+                },
+            )
+            probe = (
+                "set -eu; "
+                'pwd -P; '
+                'test \"$TMPDIR\" = /tmp; '
+                'test \"$HOME\" = /tmp/home; '
+                'test -d \"$HOME\"; '
+                'test -d \"$XDG_CACHE_HOME\"; '
+                'test -d \"$PYTHONPYCACHEPREFIX\"; '
+                'made=\"$(mktemp -d)\"; '
+                'case \"$made\" in /tmp/*) ;; *) exit 31 ;; esac; '
+                'printf ok > \"$HOME/write-probe\"; '
+                'printf \"%s\\n\" \"$made\"'
+            )
+
+            with patch.dict(
+                os.environ,
+                {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")},
+            ):
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=root,
+                    pack=pack,
+                    argv=["/bin/sh", "-lc", probe],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
                 result = subprocess.run(
                     argv,
                     env=env,
@@ -623,9 +657,168 @@ class MinionSandboxTests(unittest.TestCase):
                     text=True,
                     timeout=20,
                 )
-                self.assertEqual(result.returncode, 126, result.stderr)
-                self.assertIn(f"blocked command '{command}'", result.stderr)
-            self.assertTrue(sentinel.exists())
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output_lines = result.stdout.splitlines()
+            self.assertEqual(output_lines[0], str(repo.resolve()))
+            self.assertTrue(output_lines[1].startswith("/tmp/"))
+
+    def test_sandbox_blocks_host_network_and_nested_user_namespaces(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_network_") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            _prepare_role_endpoint(root)
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            port = listener.getsockname()[1]
+            pack = MinionInvocationPack(
+                invocation_id="isolated-network",
+                goal="probe sandbox isolation",
+                workspace={"repo_path": str(repo)},
+                metadata={
+                    "sandbox": {
+                        "enabled": True,
+                        "backend": "bwrap",
+                        "run_id": "isolated-network",
+                    }
+                },
+            )
+            probe = (
+                "import socket,subprocess; "
+                f"s=socket.socket(); s.settimeout(1); rc=0; "
+                f"\ntry: s.connect(('127.0.0.1',{port})); rc=31"
+                "\nexcept OSError: pass"
+                "\nfinally: s.close()"
+                "\nif rc: raise SystemExit(rc)"
+                "\nif subprocess.run(['unshare','-Ur','true']).returncode == 0: "
+                "raise SystemExit(32)"
+                "\nprint('isolated')"
+            )
+            try:
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=root,
+                    pack=pack,
+                    argv=["python", "-c", probe],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
+                result = subprocess.run(
+                    argv,
+                    env=env,
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+            finally:
+                listener.close()
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("isolated", result.stdout)
+
+    def test_unshared_network_keeps_assignment_unix_gateway_reachable(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_uds_") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            endpoint = root / "data" / "minion-role" / "role.sock"
+            endpoint.parent.mkdir(parents=True)
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(endpoint))
+            server.listen(1)
+
+            def serve() -> None:
+                connection, _ = server.accept()
+                with connection:
+                    self.assertEqual(connection.recv(4), b"ping")
+                    connection.sendall(b"pong")
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            pack = MinionInvocationPack(
+                invocation_id="uds-network",
+                goal="probe role gateway",
+                workspace={"repo_path": str(repo)},
+                metadata={
+                    "sandbox": {
+                        "enabled": True,
+                        "backend": "bwrap",
+                        "run_id": "uds-network",
+                    }
+                },
+            )
+            probe = (
+                "import socket; "
+                "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); "
+                f"s.connect({str(endpoint)!r}); s.sendall(b'ping'); "
+                "print(s.recv(4).decode()); s.close()"
+            )
+            try:
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=root,
+                    pack=pack,
+                    argv=["python", "-c", probe],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
+                result = subprocess.run(
+                    argv,
+                    env=env,
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+            finally:
+                server.close()
+                thread.join(timeout=2)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "pong")
+
+    def test_role_worktree_allows_ordinary_shell_deletion(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_deny_bin_") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            sentinel = repo / "keep.txt"
+            sentinel.write_text("keep\n", encoding="utf-8")
+            _prepare_role_endpoint(root)
+            with patch.dict(
+                os.environ,
+                {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")},
+            ):
+                pack = with_minion_sandbox_metadata(
+                    root,
+                    MinionInvocationPack(
+                        invocation_id="delete",
+                        goal="verify worktree deletion",
+                        workspace={"repo_path": str(repo)},
+                    ),
+                    run_id="delete",
+                )
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=root,
+                    pack=pack,
+                    argv=["/bin/sh", "-c", "rm keep.txt"],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
+            result = subprocess.run(
+                argv,
+                env=env,
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(sentinel.exists())
 
     def test_reference_projection_uses_stable_read_only_sandbox_path(self) -> None:
         if not shutil.which("bwrap"):
@@ -637,6 +830,7 @@ class MinionSandboxTests(unittest.TestCase):
             reference = root / "reference"
             repo.mkdir()
             reference.mkdir()
+            _prepare_role_endpoint(runtime_root)
             (reference / "task.yaml").write_text("framepipe\n", encoding="utf-8")
             (reference / "manifest.json").write_text('{"version":1}\n', encoding="utf-8")
             (reference / "private.txt").write_text("not projected\n", encoding="utf-8")
@@ -750,6 +944,7 @@ class MinionSandboxTests(unittest.TestCase):
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
+            _prepare_role_endpoint(root)
             pack = MinionInvocationPack(
                 invocation_id="wo_read_only",
                 goal="review",
@@ -763,7 +958,11 @@ class MinionSandboxTests(unittest.TestCase):
             argv, _env = build_sandboxed_runner_invocation(
                 runtime_root=root,
                 pack=pack,
-                argv=["python", "-c", "pass"],
+                argv=[
+                    "/bin/sh",
+                    "-c",
+                    "if printf changed > reviewer-write.txt 2>/dev/null; then exit 41; fi",
+                ],
                 env={"PATH": "/usr/bin:/bin"},
             )
 
@@ -773,6 +972,16 @@ class MinionSandboxTests(unittest.TestCase):
                     for index in range(max(0, len(argv) - 2))
                 )
             )
+            result = subprocess.run(
+                argv,
+                env=_env,
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((repo / "reviewer-write.txt").exists())
 
     def test_worker_sees_read_only_pal_db_and_only_its_minion_runtime_slice(self) -> None:
         if not shutil.which("bwrap"):
@@ -816,13 +1025,19 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertIn(["--ro-bind", str(pal_db), str(pal_db)], triples)
             self.assertIn(["--ro-bind", str(role_socket), str(role_socket)], triples)
             self.assertIn(["--bind", str(run_dir), str(run_dir)], triples)
+            self.assertEqual(
+                _env[PAL_MINION_TOOL_RESULT_ROOT_ENV],
+                str(run_dir / "tool-results"),
+            )
+            self.assertNotIn(str(root / "data" / "tool_results"), argv)
+            self.assertNotIn(str(root / "artifacts"), argv)
             self.assertNotIn(
                 ["--bind", str(root / "data" / "minion"), str(root / "data" / "minion")],
                 triples,
             )
             self.assertNotIn(str(minion_db), argv)
 
-    def test_scoped_writable_workspace_enforces_paths_for_shell_processes(self) -> None:
+    def test_semantic_write_scopes_do_not_fragment_the_role_worktree_mount(self) -> None:
         if not shutil.which("bwrap"):
             self.skipTest("bubblewrap is not available")
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_scoped_") as tmp:
@@ -837,6 +1052,7 @@ class MinionSandboxTests(unittest.TestCase):
             (repo / "src" / "sibling.py").write_text("sibling\n", encoding="utf-8")
             (repo / "src" / "private" / "seed.py").write_text("seed\n", encoding="utf-8")
             (repo / "tests" / "test_router.py").write_text("test\n", encoding="utf-8")
+            _prepare_role_endpoint(runtime_root)
             _git(repo, "init")
             _git(repo, "config", "user.email", "pal-test@example.invalid")
             _git(repo, "config", "user.name", "Pal Test")
@@ -861,11 +1077,11 @@ class MinionSandboxTests(unittest.TestCase):
 printf changed > src/router.py
 printf new > src/private/new.py
 printf changed-test > tests/test_router.py
-if rm src/private/seed.py 2>/dev/null; then exit 20; fi
-if printf bad > contracts/router.py 2>/dev/null; then exit 21; fi
-if printf bad > src/sibling.py 2>/dev/null; then exit 22; fi
+rm src/private/seed.py
+printf changed-contract > contracts/router.py
+printf changed-sibling > src/sibling.py
 if printf bad > .git/config 2>/dev/null; then exit 23; fi
-if rm contracts/router.py 2>/dev/null; then exit 24; fi
+rm contracts/router.py
 """
                 argv, env = build_sandboxed_runner_invocation(
                     runtime_root=runtime_root,
@@ -878,10 +1094,10 @@ if rm contracts/router.py 2>/dev/null; then exit 24; fi
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual((repo / "src" / "router.py").read_text(), "changed")
             self.assertEqual((repo / "src" / "private" / "new.py").read_text(), "new")
-            self.assertTrue((repo / "src" / "private" / "seed.py").exists())
+            self.assertFalse((repo / "src" / "private" / "seed.py").exists())
             self.assertEqual((repo / "tests" / "test_router.py").read_text(), "changed-test")
-            self.assertEqual((repo / "contracts" / "router.py").read_text(), "contract\n")
-            self.assertEqual((repo / "src" / "sibling.py").read_text(), "sibling\n")
+            self.assertFalse((repo / "contracts" / "router.py").exists())
+            self.assertEqual((repo / "src" / "sibling.py").read_text(), "changed-sibling")
 
     def test_scoped_workspace_materializes_future_coder_paths(self) -> None:
         if not shutil.which("bwrap"):
@@ -891,6 +1107,7 @@ if rm contracts/router.py 2>/dev/null; then exit 24; fi
             runtime_root = root / "runtime"
             repo = root / "repo"
             repo.mkdir()
+            _prepare_role_endpoint(runtime_root)
             _git(repo, "init")
             _git(repo, "config", "user.email", "pal-test@example.invalid")
             _git(repo, "config", "user.name", "Pal Test")
@@ -924,7 +1141,9 @@ if rm contracts/router.py 2>/dev/null; then exit 24; fi
                     argv=[
                         "/bin/sh",
                         "-c",
-                        "printf implementation > src/router.py && printf generated > generated/router/data.txt",
+                        "mkdir -p src generated/router && "
+                        "printf implementation > src/router.py && "
+                        "printf generated > generated/router/data.txt",
                     ],
                     env={"PATH": "/usr/bin:/bin"},
                 )
@@ -958,6 +1177,7 @@ if rm contracts/router.py 2>/dev/null; then exit 24; fi
                 "def test_router():\n    assert False\n",
                 encoding="utf-8",
             )
+            _prepare_role_endpoint(runtime_root)
             _git(repo, "init")
             _git(repo, "config", "user.email", "pal-test@example.invalid")
             _git(repo, "config", "user.name", "Pal Test")
@@ -1065,7 +1285,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             self.assertTrue(second.exists())
             self.assertTrue(third.exists())
 
-    def test_sandbox_always_mounts_git_trap_when_blacklist_omits_git(self) -> None:
+    def test_sandbox_mounts_only_the_git_shims(self) -> None:
         if not shutil.which("bwrap"):
             self.skipTest("bubblewrap is not available")
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_git_trap_") as tmp:
@@ -1073,6 +1293,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             runtime_root = root / "runtime"
             workspace = root / "workspace"
             workspace.mkdir()
+            _prepare_role_endpoint(runtime_root)
             with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")}):
                 pack = with_minion_sandbox_metadata(
                     runtime_root,
@@ -1080,15 +1301,6 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                         invocation_id="wo",
                         goal="g",
                         workspace={"repo_path": str(workspace)},
-                        metadata={
-                            "sandbox": {
-                                "blacklist_commands": [
-                                    command
-                                    for command in MINION_SANDBOX_BLACKLIST_COMMANDS
-                                    if command != "git"
-                                ]
-                            }
-                        },
                     ),
                     run_id="run_git_trap",
                 )
@@ -1099,7 +1311,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                     argv=["python", "-c", "pass"],
                     env={"PATH": "/usr/bin:/bin"},
                 )
-            wrapper = runtime_root / "data" / "minion" / "sandbox" / "deny-bin" / "git"
+            wrapper = runtime_root / "data" / "minion" / "sandbox" / "shim-bin" / "git"
             triples = [argv[index : index + 3] for index in range(max(0, len(argv) - 2))]
             self.assertIn(["--ro-bind", str(wrapper), "/usr/bin/git"], triples)
             internal_git = Path("/usr/lib/git-core/git")
@@ -1124,6 +1336,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
+            _prepare_role_endpoint(root)
             pack = MinionInvocationPack(
                 invocation_id="wo",
                 goal="g",
@@ -1150,6 +1363,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
+            _prepare_role_endpoint(root)
             pack = MinionInvocationPack(
                 invocation_id="role-token",
                 goal="g",
@@ -1233,12 +1447,12 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             pack = MinionInvocationPack(
                 invocation_id="provider_alias",
                 goal="inspect task sources",
-                allowed_capabilities=["op_search"],
+                allowed_capabilities=["op_file_read"],
             )
 
             class AliasExecution:
                 def resolve_capability_address(self, name):
-                    return {"search": "op_search"}.get(str(name), str(name))
+                    return {"read_file": "op_file_read"}.get(str(name), str(name))
 
                 async def execute_tool_async(self, call, **kwargs):
                     _ = kwargs
@@ -1246,9 +1460,9 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                     return CanonicalToolResult(
                         name=call.name,
                         ok=True,
-                        text="search ok",
-                        llm_text="search ok",
-                        structured={"matches": []},
+                        text="read ok",
+                        llm_text="read ok",
+                        structured={"content": "frame"},
                         status=RuntimeStatus.OK,
                     )
 
@@ -1271,14 +1485,14 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             result = await runner._execute_allowed_tool(
                 AliasExecution(),
                 CanonicalToolCall(
-                    name="search",
-                    args={"query": "frame", "path": "/pal/references/task"},
-                    call_id="call_search",
+                    name="read_file",
+                    args={"file_path": "/pal/references/task.yaml"},
+                    call_id="call_read",
                 ),
             )
 
             self.assertTrue(result.ok, result.text)
-            self.assertEqual(calls, ["search"])
+            self.assertEqual(calls, ["read_file"])
 
         asyncio.run(scenario())
 

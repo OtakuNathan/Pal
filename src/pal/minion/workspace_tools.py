@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import mimetypes
 from pathlib import Path
@@ -22,13 +21,7 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
             action = "staged" if artifact.get("staged") else "edited"
             text = f"Artifact {action}: {artifact['relative_path']}"
         else:
-            if call.name == "op_search":
-                payload = _workspace_search(workspace, call.args)
-                text = "\n".join(f"{item['path']}:{item['line_number']}: {item['line']}" for item in payload["matches"])
-            else:
-                raise ValueError(f"unknown repo tool: {call.name}")
-        if not text.strip():
-            text = _empty_workspace_tool_text(call.name, payload)
+            raise ValueError(f"unknown repo tool: {call.name}")
         return CanonicalToolResult(
             name=call.name,
             ok=True,
@@ -49,16 +42,6 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
             llm_text=message,
             status=RuntimeStatus.ERROR,
         )
-
-
-def _project_root(workspace: dict[str, Any]) -> Path:
-    repo_path = str((workspace or {}).get("repo_path") or "").strip()
-    if not repo_path:
-        raise ValueError("current project repo is not available")
-    root = Path(repo_path).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        raise ValueError(f"current project repo is not a directory: {root}")
-    return root
 
 
 def _normalized_reference_paths(workspace: dict[str, Any]) -> list[dict[str, Any]]:
@@ -308,90 +291,3 @@ def _append_unique_artifact(items: list[dict[str, Any]], artifact: dict[str, Any
             items[index] = dict(artifact)
             return
     items.append(dict(artifact))
-
-
-_WORKSPACE_SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv"}
-_WORKSPACE_SKIP_SUFFIXES = {
-    ".a",
-    ".bin",
-    ".class",
-    ".dll",
-    ".dylib",
-    ".exe",
-    ".o",
-    ".obj",
-    ".pdf",
-    ".png",
-    ".pyc",
-    ".pyo",
-    ".so",
-    ".zip",
-}
-
-
-def _workspace_should_skip_generated(path: Path, root: Path) -> bool:
-    with contextlib.suppress(ValueError):
-        parts = path.relative_to(root).parts
-        if any(part in _WORKSPACE_SKIP_DIRS for part in parts):
-            return True
-    return path.suffix.lower() in _WORKSPACE_SKIP_SUFFIXES
-
-
-def _empty_workspace_tool_text(name: str, payload: dict[str, Any]) -> str:
-    if name == "op_search":
-        query = str(payload.get("query") or "").strip()
-        return f"No repo matches found for query: {query}" if query else "No repo matches found."
-    return "Repo tool completed with no textual output."
-
-
-def _workspace_search(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
-    query = str(args.get("query") or "").strip()
-    if not query:
-        raise ValueError("query is required")
-    project_root = _project_root(workspace)
-    raw_path = str(args.get("path") or "").strip()
-    base = Path(raw_path).expanduser() if raw_path else project_root
-    if not base.is_absolute():
-        base = project_root / base
-    base = base.resolve()
-    if not base.exists():
-        raise ValueError(f"search path does not exist inside the sandbox: {base}")
-    root = base if base.is_dir() else base.parent
-    limit = max(1, min(_optional_positive_int(args.get("limit")) or 50, 500))
-    matches: list[dict[str, Any]] = []
-    query_lower = query.lower()
-    paths = [base] if base.is_file() else [path for path in base.rglob("*") if path.is_file()]
-    for path in paths:
-        if _workspace_should_skip_generated(path, root):
-            continue
-        try:
-            for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
-                if query_lower not in line.lower():
-                    continue
-                matches.append(
-                    {
-                        "path": str(path.relative_to(root)).replace("\\", "/"),
-                        "line_number": line_number,
-                        "line": _preview_text(line, limit=300),
-                    }
-                )
-                if len(matches) >= limit:
-                    return {"path": str(base), "query": query, "matches": matches, "count": len(matches), "truncated": True}
-        except OSError:
-            continue
-    return {"path": str(base), "query": query, "matches": matches, "count": len(matches)}
-
-
-def _preview_text(value: Any, *, limit: int = 400) -> str:
-    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 3)].rstrip() + "..."
-
-
-def _optional_positive_int(value: Any) -> int | None:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None

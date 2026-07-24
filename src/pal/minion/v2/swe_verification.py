@@ -34,6 +34,7 @@ SWE_VERIFICATION_CAPABILITIES = (
     "op_minion_verification_pass",
     "op_minion_verification_request_module_repair",
     "op_minion_verification_request_dependency_repairs",
+    "op_minion_verification_request_corpus_repair",
     "op_minion_verification_request_contract_revision",
     "op_minion_verification_request_architecture_revision",
     "op_minion_verification_request_requirements_revision",
@@ -59,10 +60,22 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_request_dependency_repairs": {
         "alias": "verification_request_dependency_repairs",
         "description": (
-            "Submit reproduced defects owned by one or more named upstream modules after recording each with add_finding. "
-            "Names must come from the bound dependency closure."
+            "Submit defects owned by one or more named upstream modules only after each violation has been localized to "
+            "the provider's public contract boundary, reproduced against that provider's actual accepted implementation, "
+            "and recorded with add_finding. Do not use this because an upstream implementation is absent from the module "
+            "workspace, a Verifier-authored test double failed, the current module mishandled a contract-legal result, or "
+            "the disputed behavior is unspecified. Names must come from the bound dependency closure."
         ),
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestDependencyRepairsInput,
+    },
+    "op_minion_verification_request_corpus_repair": {
+        "alias": "verification_request_corpus_repair",
+        "description": (
+            "Submit a Verifier-owned corpus defect after recording every incorrect probe with "
+            "finding_kind=verification_defect and an exact tests/<module>/verification location. "
+            "Manager routes the original module Verifier to correct and rerun its corpus; Coder is never invoked."
+        ),
+        "InputModel": EmptyToolInput,
     },
     "op_minion_verification_request_contract_revision": {
         "alias": "verification_request_contract_revision",
@@ -96,6 +109,7 @@ _OUTCOME_BY_CAPABILITY = {
     "op_minion_verification_pass": "pass",
     "op_minion_verification_request_module_repair": "module_repair",
     "op_minion_verification_request_dependency_repairs": "dependency_repairs",
+    "op_minion_verification_request_corpus_repair": "verification_repairs",
     "op_minion_verification_request_contract_revision": "contract_revision",
     "op_minion_verification_request_architecture_revision": "architecture_revision",
     "op_minion_verification_request_requirements_revision": "requirements_revision",
@@ -111,6 +125,7 @@ def compile_swe_verification_tool_contract(
     work_view: Mapping[str, Any],
     *,
     repair_path_owners: Mapping[str, Any] | None = None,
+    verification_path_owners: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     module_name = str(
         work_view.get("module_name") or work_view.get("verification_name") or ""
@@ -143,33 +158,69 @@ def compile_swe_verification_tool_contract(
         if repair_path_owners is not None
         else _work_view_repair_path_owners(work_view)
     )
+    compiled_verification_path_owners = _normalize_repair_path_owners(
+        verification_path_owners
+        if verification_path_owners is not None
+        else _work_view_verification_path_owners(work_view)
+    )
     guidance_overrides: dict[str, dict[str, str]] = {}
     guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
-        "Record or replace one evidence-backed verifier finding. Use module_defect for the current implementation, "
+        "Record or replace one evidence-backed verifier finding. Use verification_defect only for an incorrect "
+        "Verifier-owned probe or corpus, module_defect for the current implementation, "
         "dependency_defect for an upstream module, contract_defect for a frozen public contract, "
         "architecture_defect for ownership/topology, requirements_defect for a contradictory task ledger, and "
-        "integration_defect for cross-module product behavior. Finish the breadth-first audit first and batch "
+        "integration_defect for cross-module product behavior. Material performance defects are valid findings when "
+        "supported by a representative scaling probe or source-level complexity trace; include the triggering workload, "
+        "impact, exact hot path, and a bounded contract-preserving optimization direction, and do not report speculative "
+        "micro-optimizations. Finish the breadth-first audit first and batch "
         "independent add_finding calls in one tool round when possible."
     )}
     if scenario_mode:
         guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
-            "Record or replace one evidence-backed scenario finding. For every implementation repair, cite at least "
+            "Record or replace one evidence-backed scenario finding. Use verification_defect when the failure is "
+            "caused by an incorrect Verifier-owned module corpus or test double; cite its exact "
+            "tests/<module>/verification path and submit corpus repair so Manager returns it to the original Verifier. "
+            "For every implementation repair, cite at least "
             "one exact workspace file owned by the affected module so Manager can derive the graph route mechanically. "
             "Use contract_defect, architecture_defect, or requirements_defect when no implementation-owned path can "
-            "legally resolve the issue. Finish the breadth-first audit first and batch independent findings in one tool round."
+            "legally resolve the issue. Material end-to-end performance defects are valid findings when supported by a "
+            "representative scaling probe or source-level complexity trace; include the triggering workload, impact, exact "
+            "hot path, and bounded contract-preserving optimization direction, not speculative micro-optimization. "
+            "Finish the breadth-first audit first and batch independent findings in one tool round."
         )}
     if dependency_targets:
-        guidance_overrides["op_minion_verification_request_dependency_repairs"] = {"use_when": (
-            "Submit all reproduced upstream defects in one call. Allowed semantic module names: "
-            + ", ".join(dependency_targets)
-            + "."
-        )}
+        guidance_overrides["op_minion_verification_request_dependency_repairs"] = {
+            "use_when": (
+                "Submit all upstream defects in one call only after first excluding the current module's handling of "
+                "contract-legal dependency behavior, then reproducing each violation against the named dependency's "
+                "actual accepted implementation at its public contract boundary. Allowed semantic module names: "
+                + ", ".join(dependency_targets)
+                + "."
+            ),
+            "do_not_use_when": (
+                "Do not use merely because dependency source is absent from this module workspace, a Verifier-authored "
+                "test double failed, the current module mishandled a legal dependency result, or the contract does not "
+                "specify the disputed behavior. Route the current-module case to module repair and the unspecified case "
+                "to contract revision."
+            ),
+        }
     if scenario_mode:
         guidance_overrides["op_minion_verification_request_module_repair"] = {"use_when": (
             "Submit reproduced implementation defects after recording each with add_finding. "
             "Manager derives every affected module mechanically from the finding locations and "
             "the bound path ownership map; do not choose repair targets yourself."
         )}
+        guidance_overrides["op_minion_verification_request_corpus_repair"] = {
+            "use_when": (
+                "Submit only incorrect Verifier-owned corpus cases after recording each as verification_defect. "
+                "Manager derives the owning module from exact verification-corpus locations and reopens that "
+                "module's Verifier; this route never sends the corpus to a Coder."
+            ),
+            "do_not_use_when": (
+                "Do not use for a product, contract, architecture, integration, or requirements defect. "
+                "An isolation double is not defective merely because a full-project build incorrectly compiles it."
+            ),
+        }
     if verification_corpus:
         guidance_overrides["op_minion_verification_pass"] = {"use_when": (
             f"Submit PASS only after reading and running the existing {verification_corpus}/ corpus, "
@@ -185,6 +236,7 @@ def compile_swe_verification_tool_contract(
         "scenario_mode": scenario_mode,
         "dependency_targets": dependency_targets,
         "repair_path_owners": compiled_repair_path_owners,
+        "verification_path_owners": compiled_verification_path_owners,
         "verification_corpus": verification_corpus,
         "requirements": requirements,
         "guidance_overrides": guidance_overrides,
@@ -220,6 +272,13 @@ def swe_verification_tool_result(
             or contract.get("scenario_mode")
         )
         if scenario_mode and outcome in {"module_repair", "dependency_repairs"}:
+            if any(
+                str(item.get("finding_kind") or "") == "verification_defect"
+                for item in findings
+            ):
+                raise ValueError(
+                    "verification_defect findings must use verification_request_corpus_repair"
+                )
             target_modules = infer_repair_target_modules(
                 findings,
                 contract.get("repair_path_owners") or {},
@@ -228,6 +287,18 @@ def swe_verification_tool_result(
             # terminal capability selects repair semantics; Manager owns the
             # graph route and canonicalizes both historical repair spellings.
             outcome = "module_repair"
+        elif scenario_mode and outcome == "verification_repairs":
+            if {
+                str(item.get("finding_kind") or "")
+                for item in findings
+            } != {"verification_defect"}:
+                raise ValueError(
+                    "corpus repair requires every finding to use verification_defect"
+                )
+            target_modules = infer_repair_target_modules(
+                findings,
+                contract.get("verification_path_owners") or {},
+            )
         else:
             target_modules = _validate_target_modules(
                 workspace,
@@ -351,6 +422,32 @@ def _submission_errors(
         errors.append(f"{outcome.upper()} requires an empty finding Draft")
     if outcome == "unknown" and not reason:
         errors.append("UNKNOWN requires an environmental reason and follow-up verification plan")
+    finding_kinds = {
+        str(item.get("finding_kind") or "")
+        for item in findings
+        if str(item.get("finding_kind") or "")
+    }
+    if outcome == "verification_repairs":
+        if finding_kinds != {"verification_defect"}:
+            errors.append(
+                "corpus repair requires every finding to use verification_defect"
+            )
+        if not bool(
+            workspace.get("verification_scenario")
+            or dict(
+                dict(workspace.get("minion_v2") or {}).get(
+                    "swe_verification_tool_contract"
+                )
+                or {}
+            ).get("scenario_mode")
+        ):
+            errors.append(
+                "the active module Verifier owns its corpus; correct it and rerun instead of submitting corpus repair"
+            )
+    elif "verification_defect" in finding_kinds:
+        errors.append(
+            "verification_defect findings must use verification_request_corpus_repair"
+        )
     changed_paths = _changed_paths(workspace)
     if outcome != "unknown" and not _verification_case_files(workspace):
         errors.append(
@@ -489,10 +586,6 @@ def _work_view_repair_path_owners(
                         "kind": "directory",
                         "path": f"tests/{module_name}/developer",
                     },
-                    {
-                        "kind": "directory",
-                        "path": f"tests/{module_name}/verification",
-                    },
                 )
             )
             owners[module_name] = scopes
@@ -509,11 +602,37 @@ def _work_view_repair_path_owners(
         dict(scope or {})
         for scope in list(work_view.get("implementation_scopes") or [])
     )
-    for field in ("developer_tests", "verification_corpus"):
+    for field in ("developer_tests",):
         scope = dict(work_view.get(field) or {})
         if scope:
             scopes.append(scope)
     owners[module_name] = scopes
+    return owners
+
+
+def _work_view_verification_path_owners(
+    work_view: Mapping[str, Any],
+) -> dict[str, list[dict[str, str]]]:
+    owners: dict[str, list[dict[str, str]]] = {}
+    modules = {
+        str(name): dict(value or {})
+        for name, value in dict(work_view.get("modules") or {}).items()
+    }
+    if modules:
+        for module_name, module in modules.items():
+            paths = dict(module.get("paths") or {})
+            scope = dict(paths.get("verification_corpus") or {})
+            if not scope:
+                scope = {
+                    "kind": "directory",
+                    "path": f"tests/{module_name}/verification",
+                }
+            owners[module_name] = [scope]
+        return owners
+    module_name = str(work_view.get("module_name") or "").strip()
+    scope = dict(work_view.get("verification_corpus") or {})
+    if module_name and scope:
+        owners[module_name] = [scope]
     return owners
 
 

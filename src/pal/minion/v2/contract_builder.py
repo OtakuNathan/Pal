@@ -73,7 +73,6 @@ CONTRACT_BUILDER_CAPABILITIES = (
 ARCHITECT_BUILDER_CAPABILITIES = (
     *CONTRACT_SKETCH_BUILDER_CAPABILITIES,
     "op_minion_ask_question",
-    "op_minion_task_revision_submit",
 )
 
 

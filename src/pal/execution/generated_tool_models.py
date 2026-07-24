@@ -1405,15 +1405,6 @@ WebSearchCapabilitiesWebSearchIntrospectionProviderSetConfigInput = _strict_mode
     },
 )
 
-MinionScopedExecutionOpSearchInput = _strict_model(
-    'MinionScopedExecutionOpSearchInput',
-    {
-        'query': (str, Field(..., description='Exact text to search for.')),
-        'path': (str, Field(None, description='Optional sandbox-visible file or directory path. Defaults to the project workspace.')),
-        'limit': (int, Field(50, description='Maximum matches to return.', ge=1, le=500)),
-    },
-)
-
 MinionScopedExecutionOpMinionArtifactWriteInput = _strict_model(
     'MinionScopedExecutionOpMinionArtifactWriteInput',
     {
@@ -1421,46 +1412,6 @@ MinionScopedExecutionOpMinionArtifactWriteInput = _strict_model(
         'content': (Any, Field(...)),
         'artifact_type': (str, Field(None)),
         'role': (str, Field(None)),
-    },
-)
-
-MinionV2CandidateBuilderOpMinionDeveloperTestInput = _strict_model(
-    'MinionV2CandidateBuilderOpMinionDeveloperTestInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'command': (str, Field(..., min_length=1)),
-        'description': (str, Field(None)),
-        'expected_exit_codes': (list[int], Field(None)),
-        'timeout_seconds': (int, Field(None, ge=1)),
-    },
-)
-
-MinionV2CandidateBuilderOpMinionDeveloperCompileCheckInput = _strict_model(
-    'MinionV2CandidateBuilderOpMinionDeveloperCompileCheckInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'command': (str, Field(..., min_length=1)),
-        'description': (str, Field(None)),
-        'expected_exit_codes': (list[int], Field(None)),
-        'timeout_seconds': (int, Field(None, ge=1)),
-    },
-)
-
-MinionV2CandidateBuilderOpMinionDeveloperLspCheckInput = _strict_model(
-    'MinionV2CandidateBuilderOpMinionDeveloperLspCheckInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'file': (str, Field(..., min_length=1)),
-        'description': (str, Field(None)),
-    },
-)
-
-MinionV2CandidateBuilderOpMinionDeveloperCheckUnavailableInput = _strict_model(
-    'MinionV2CandidateBuilderOpMinionDeveloperCheckUnavailableInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'obligation': (Literal['focused_tests', 'compile', 'warning_clean', 'lsp'], Field(...)),
-        'reason': (str, Field(..., min_length=1)),
     },
 )
 

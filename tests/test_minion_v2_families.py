@@ -11,7 +11,7 @@ from pal.execution import register_with_core as register_execution_with_core
 from pal.minion.catalog import MinionCatalogService
 from pal.minion.profiles import MinionProfileRegistry, resolve_pinned_minion_pack
 from pal.minion.scoped_execution import MinionScopedExecutionRuntime
-from pal.minion.workspace_tools import _normalized_reference_paths, _workspace_tool_result
+from pal.minion.workspace_tools import _normalized_reference_paths
 from pal.execution.contracts import CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.tool_facade import EmptyToolInput, OpaqueToolOutput, Tool, ToolGuidance
@@ -115,6 +115,56 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertEqual(current.display_name, "Future Workflow Coder")
         self.assertEqual(resolved.resolved_profile["display_name"], original_name)
 
+    def test_software_family_selects_internal_role_profiles_independent_of_task_profile(self) -> None:
+        ref = MinionV2Catalog(self.root, self.store).publish_family_binding(
+            "software_engineering.v2_architect"
+        )
+        binding = self.store.read_json(ref)
+
+        self.assertEqual(
+            binding["primary_profile"]["canonical_profile_id"],
+            "software_engineering.v2_architect",
+        )
+        self.assertEqual(
+            {
+                role: value["executor_profile"]["canonical_profile_id"]
+                for role, value in binding["role_bindings"].items()
+            },
+            {
+                "architect": "software_engineering.v2_architect",
+                "reviewer": "software_engineering.v2_reviewer",
+                "implementation": "software_engineering.v2_coder",
+                "verifier": "software_engineering.v2_verifier",
+            },
+        )
+        self.assertEqual(
+            binding["role_bindings"]["implementation"]["selector"],
+            "software_engineering.v2_coder",
+        )
+
+    def test_software_task_creation_cannot_bind_architect_as_implementation(self) -> None:
+        service = MinionV2WorkflowService(self.root)
+        created = service.create_task(
+            {
+                "title": "Software task",
+                "objective": "Exercise the software family role binding",
+                "profile": "software_engineering.v2_architect",
+                "workspace": {
+                    "kind": "new_project",
+                    "project_name": "software-role-binding",
+                    "primary_language": "python",
+                },
+            }
+        )
+
+        binding = self.store.read_json(created["family_binding_ref"])
+        self.assertEqual(
+            binding["role_bindings"]["implementation"]["executor_profile"][
+                "canonical_profile_id"
+            ],
+            "software_engineering.v2_coder",
+        )
+
     def test_architect_cannot_bypass_builder_but_producer_can_write_workspace(self) -> None:
         planner = apply_v2_role_capability_policy(
             self._pack("lifestyle.architect"),
@@ -130,8 +180,15 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         self.assertIn("op_file_write", producer.allowed_capabilities)
         self.assertIn("op_minion_artifact_write", producer.allowed_capabilities)
+        self.assertIn("op_minion_candidate_update_checklist", producer.allowed_capabilities)
         self.assertIn("op_minion_candidate_submit", producer.allowed_capabilities)
-        self.assertIn("op_minion_developer_test", producer.allowed_capabilities)
+        for capability in (
+            "op_minion_developer_test",
+            "op_minion_developer_compile_check",
+            "op_minion_developer_lsp_check",
+            "op_minion_developer_check_unavailable",
+        ):
+            self.assertNotIn(capability, producer.allowed_capabilities)
         self.assertNotIn("op_web_search", producer.allowed_capabilities)
 
     def test_task_creation_requires_primary_profile_and_ignores_no_family_shortcut(self) -> None:
@@ -447,6 +504,8 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         software = self._pack("software_engineering.v2_architect")
         self.assertIn("op_minion_architecture_submit", software.allowed_capabilities)
         self.assertNotIn("op_minion_contract_submit", software.allowed_capabilities)
+        self.assertNotIn("op_minion_artifact_edit", software.allowed_capabilities)
+        self.assertNotIn("op_minion_task_revision_submit", software.allowed_capabilities)
         self.assertIn("op_file_write", software.allowed_capabilities)
         self.assertIn("op_file_edit", software.allowed_capabilities)
         self.assertEqual(software.workspace.get("workspace_policy", {}).get("mode"), "writable_git_branch")
@@ -482,31 +541,69 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertTrue(result.ok, result.text)
         self.assertIn('"bounded"', result.llm_text)
 
-    def test_search_uses_a_sandbox_visible_path_without_root_selector(self) -> None:
-        reference = self.root / "projected-reference"
-        reference.mkdir()
-        (reference / "task.yaml").write_text("framepipe contract\n", encoding="utf-8")
+    def test_scoped_file_tools_reject_verifier_corpus_before_host_mutation(self) -> None:
+        repo = self.root / "scoped-file-guard"
+        product = repo / "src" / "router.py"
+        verifier_case = repo / "tests" / "router" / "verification" / "test_router.py"
+        product.parent.mkdir(parents=True)
+        verifier_case.parent.mkdir(parents=True)
+        product.write_text("old\n", encoding="utf-8")
+        verifier_case.write_text("assert False\n", encoding="utf-8")
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        scoped = MinionScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_file_write"],
+            workspace={
+                "repo_path": str(repo),
+                "write_path_scopes": [
+                    {"kind": "directory", "path": "src"},
+                ],
+                "read_only_overlay_paths": [
+                    "tests/router/verification",
+                ],
+            },
+        )
+
+        rejected = asyncio.run(
+            scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="write_file",
+                    args={
+                        "file_path": "tests/router/verification/test_router.py",
+                        "content": "assert True\n",
+                    },
+                )
+            )
+        )
+        accepted = asyncio.run(
+            scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="write_file",
+                    args={
+                        "file_path": "src/new_router.py",
+                        "content": "new\n",
+                    },
+                )
+            )
+        )
+
+        self.assertFalse(rejected.ok)
+        self.assertEqual(rejected.structured["reason"], "path_not_writable")
+        self.assertEqual(rejected.structured["policy_reason"], "read_only_overlay")
+        self.assertEqual(verifier_case.read_text(encoding="utf-8"), "assert False\n")
+        self.assertTrue(accepted.ok, accepted.llm_text)
+        self.assertEqual((repo / "src" / "new_router.py").read_text(), "new\n")
+
+    def test_private_workspace_search_is_not_registered(self) -> None:
         scoped = MinionScopedExecutionRuntime(
             ExecutionRuntime(),
             ["op_search"],
             workspace={"repo_path": str(self.root)},
         )
-        spec = scoped.get_capability_spec("op_search")
-        assert spec is not None
-        properties = dict(spec["input_schema"]["properties"])
-        self.assertEqual({"query", "path", "limit"}, set(properties))
-
-        result = _workspace_tool_result(
-            CanonicalToolCall(
-                name="op_search",
-                args={"query": "framepipe", "path": str(reference)},
-            ),
-            {"repo_path": str(self.root)},
-        )
-
-        self.assertTrue(result.ok, result.text)
-        self.assertEqual(result.structured["path"], str(reference))
-        self.assertEqual(result.structured["matches"][0]["path"], "task.yaml")
+        self.assertIsNone(scoped.get_capability_spec("op_search"))
+        self.assertNotIn("search", scoped.registry_generation.direct_aliases)
 
     def test_workspace_tool_replaces_inherited_descriptor_once(self) -> None:
         core = PalCore()
@@ -581,13 +678,16 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             )
 
     def test_workflow_tool_guidance_override_is_compiled_into_provider_surface(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
         scoped = MinionScopedExecutionRuntime(
-            ExecutionRuntime(),
-            ["op_search"],
+            core.context.execution_runtime,
+            ["op_file_read"],
             workspace={"repo_path": str(self.root)},
             capability_guidance_overrides={
-                "op_search": {
-                    "use_when": "Use this bound search only for a named review claim.",
+                "op_file_read": {
+                    "use_when": "Use this reader only after an exact path is known.",
                     "do_not_use_when": "Do not use it for broad repository archaeology.",
                 }
             },
@@ -596,10 +696,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         provider = {
             item["function"]["name"]: item["function"]
             for item in scoped.build_llm_tool_contracts()
-        }["search"]
+        }["read_file"]
 
         self.assertIn(
-            "Use when: Use this bound search only for a named review claim.",
+            "Use when: Use this reader only after an exact path is known.",
             provider["description"],
         )
         self.assertIn(
@@ -649,6 +749,22 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertNotIn("op_lsp_doctor", coder.allowed_capabilities)
         self.assertNotIn("op_minion_developer_note", coder.allowed_capabilities)
         self.assertNotIn("op_git", coder.allowed_capabilities)
+        self.assertEqual(
+            coder.workspace.get("workspace_policy", {}).get("mode"),
+            "writable_git_branch",
+        )
+        self.assertEqual(
+            self._pack("software_engineering.v2_verifier")
+            .workspace.get("workspace_policy", {})
+            .get("mode"),
+            "writable_git_branch",
+        )
+        self.assertEqual(
+            self._pack("software_engineering.v2_reviewer")
+            .workspace.get("workspace_policy", {})
+            .get("mode"),
+            "read_only_repo",
+        )
         overrides = dict(coder.resolved_profile["capability_guidance_overrides"])
         self.assertIn(
             "Manager-prepared and recognition-probed",
@@ -665,10 +781,9 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             "software_engineering.v2_verifier",
         ):
             with self.subTest(profile=profile):
-                self.assertNotIn(
-                    "op_search",
-                    self._pack(profile).allowed_capabilities,
-                )
+                capabilities = self._pack(profile).allowed_capabilities
+                self.assertNotIn("op_search", capabilities)
+                self.assertNotIn("op_path_delete", capabilities)
 
         reviewer_overrides = dict(
             self._pack("software_engineering.v2_reviewer").resolved_profile[
@@ -842,10 +957,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("single reference:task/task.yaml ledger is immutable and authoritative", architect)
         self.assertIn("Before designing modules or writing the skeleton", architect)
         self.assertIn("perform one bounded consistency pass", architect)
-        self.assertIn("later revision overrides only the exact JSON Pointer paths", architect)
+        self.assertIn("newer revision takes precedence over conflicting earlier revisions", architect)
         self.assertIn("Mechanically verify examples", architect)
         self.assertIn("call ask_question and wait", architect)
-        self.assertIn("call task_revision_submit", architect)
+        self.assertIn("without any task-edit or task-submit action", architect)
         self.assertIn("feasibility", architect)
         self.assertIn("foundation, language/runtime bridge", architect)
         self.assertIn("one candidate-review cycle", architect)
@@ -872,12 +987,12 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertNotIn("Shared build/bootstrap or composition-root glue", architect)
         coder = str(self._pack("software_engineering.v2_coder").resolved_profile["behavior_fragment"])
         self.assertIn("contract declarations and adjacent contract comments come first", coder)
-        self.assertIn("outrank the task.yaml ledger", coder)
+        self.assertIn("outrank the read-only task.yaml ledger", coder)
         self.assertIn("evidence, not authority", coder)
         self.assertIn("Report the upstream defect instead of choosing a new contract", coder)
         self.assertIn("Audit breadth-first in one pass", architecture_review)
-        self.assertIn("Read the single task.yaml ledger", architecture_review)
-        self.assertIn("embedded exact user question and answer", architecture_review)
+        self.assertIn("Read the same immutable task.yaml ledger", architecture_review)
+        self.assertIn("exact Manager-recorded user communications", architecture_review)
         self.assertIn("investigate what its supplied path currently contains", architecture_review)
         self.assertIn("Manager provides no semantic verdict", architecture_review)
         self.assertIn("independently evaluate directional contracts", architecture_review)
@@ -912,6 +1027,13 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("plausible future implementation proves only", architecture_review)
         self.assertIn("do not demand private algorithms or function bodies", architecture_review)
         self.assertIn("check every observable claim against a concrete semantic trace", architecture_review)
+        self.assertIn("explicit ambiguity audit", architecture_review)
+        self.assertIn("absent, null, empty, zero-length", architecture_review)
+        self.assertIn("whether prior output is committed or rolled back", architecture_review)
+        self.assertIn("copy, move, clone", architecture_review)
+        self.assertIn("Never introduce a value or operation in a compile", architecture_review)
+        self.assertIn("review_guarded writable private implementation seams", architecture_review)
+        self.assertIn("Implementation may choose", architecture_review)
         self.assertIn("placeholder or stub function bodies", architecture_review)
         self.assertIn("object-address side table", architecture_review)
         self.assertIn("syntax or compilation as semantic proof", str(
@@ -948,8 +1070,47 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("update_checklist", coder)
         self.assertIn("never test evidence", coder)
         self.assertIn("self-reported checklist", verifier)
+        self.assertIn("The checklist is a work ledger, not a verification report", verifier)
+        self.assertIn("durable Coder-authored regression corpus", verifier)
+        self.assertIn("never acceptance evidence", verifier)
+        self.assertIn("Only your independent source audit and checks", verifier)
         self.assertIn("bounded completion checklist", verifier)
         self.assertIn("submit the semantic outcome immediately", verifier)
+        self.assertIn("Performance is part of semantic verification", verifier)
+        self.assertIn("never for stylistic micro-optimization", verifier)
+        self.assertIn("bounded optimization direction", verifier)
+        self.assertIn(
+            "treat every declared dependency contract as an axiom",
+            verifier,
+        )
+        self.assertIn(
+            "use the smallest contract-conforming test double needed",
+            verifier,
+        )
+        self.assertIn(
+            "first determine whether the current module mishandled",
+            verifier,
+        )
+        self.assertIn(
+            "actual accepted provider at its public contract boundary",
+            verifier,
+        )
+        self.assertIn(
+            "This dependency assumption does not apply to a Verification Scenario",
+            verifier,
+        )
+        self.assertIn(
+            "only rerun checks whose inputs that change invalidated",
+            verifier,
+        )
+        self.assertIn(
+            "do not recompile or reverify unchanged Candidate surfaces",
+            verifier,
+        )
+        self.assertIn(
+            "build and test-discovery rules before",
+            verifier,
+        )
         self.assertIn("Manager prepares the LSP context", verifier)
         self.assertIn("never invoke a language-server executable", verifier)
         self.assertIn("Use the minimum sufficient build and test path", verifier)

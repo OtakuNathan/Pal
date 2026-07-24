@@ -9,7 +9,7 @@ from pal.execution.generated_tool_models import (
 from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.shared import (
@@ -77,6 +77,7 @@ class WebSearchModuleSnapshot:
 @dataclass
 class WebSearchIntrospectionProvider:
     service: WebSearchService
+    query_delegate: Callable[[dict[str, object]], IntrospectionResult] | None = None
     module_id: str = "web_search"
     mounted: bool = True
     degraded: bool = False
@@ -237,6 +238,8 @@ class WebSearchIntrospectionProvider:
         query_text = str(call.args.get("query") or "").strip()
         if not query_text:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text="query is required", llm_text="query is required")
+        if self.query_delegate is not None:
+            return self.query_delegate(dict(call.args))
         limit = max(1, min(10, int(call.args.get("limit") or 5)))
         try:
             result = self.service.query(
@@ -410,8 +413,16 @@ def inspect_web_search(provider: WebSearchIntrospectionProvider) -> WebSearchMod
     )
 
 
-def register_with_core(context: MainContext, service: WebSearchService) -> ModuleHandle:
-    provider = WebSearchIntrospectionProvider(service=service)
+def register_with_core(
+    context: MainContext,
+    service: WebSearchService,
+    *,
+    query_delegate: Callable[[dict[str, object]], IntrospectionResult] | None = None,
+) -> ModuleHandle:
+    provider = WebSearchIntrospectionProvider(
+        service=service,
+        query_delegate=query_delegate,
+    )
     handle = ModuleHandle(
         module_id="web_search",
         tier=MODULE_TIER_DETACHABLE,

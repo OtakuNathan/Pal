@@ -39,6 +39,7 @@ from pal.execution.tool_facade import (
     ToolAffordance,
     ToolHandlerResult,
     ToolInvocationResult,
+    ToolRejectedError,
     derive_retry_directive,
     rejection,
     validate_output,
@@ -445,6 +446,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
         try:
             raw = lifecycle if lifecycle is not None else self._call_record_sync(record, call, validated, turn_id, budget, allow_tools)
             return self._normalize_invocation_result(record, call, raw, budget=budget)
+        except ToolRejectedError as exc:
+            return self._rejected_error_result(exc)
         except Exception as exc:
             return self._handler_exception_result(record, exc)
 
@@ -488,6 +491,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 record, call, validated, turn_id, budget, allow_tools
             )
             return self._normalize_invocation_result(record, call, raw, budget=budget)
+        except ToolRejectedError as exc:
+            return self._rejected_error_result(exc)
         except Exception as exc:
             return self._handler_exception_result(record, exc)
 
@@ -925,6 +930,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         budget: ToolCallBudget | None,
     ) -> ToolInvocationResult:
+        if isinstance(raw, (CompleteResult, PagedResult, RejectedResult, FailedResult)):
+            return raw
         receipt: EffectReceipt | None = None
         affordances: list[ToolAffordance] = []
         llm_text = ""
@@ -1065,6 +1072,16 @@ class ExecutionRuntime(ExecutionRuntimePort):
             effect=outcome,
             llm_text=page_text,
             affordances=affordances,
+        )
+
+    @staticmethod
+    def _rejected_error_result(exc: ToolRejectedError) -> RejectedResult:
+        return rejection(
+            exc.error_code,
+            str(exc),
+            retry=exc.retry,
+            affordances=list(exc.affordances),
+            details=dict(exc.details),
         )
 
     @staticmethod
