@@ -110,7 +110,7 @@ class LspManager:
         if method == "health":
             return self.health()
         if method == "status":
-            return self.status()
+            return self.status(dict(params or {}))
         if method == "rescan":
             return await self.rescan()
         if method == "doctor":
@@ -151,10 +151,54 @@ class LspManager:
             **dict(self.endpoint_info),
         }
 
-    def status(self) -> dict[str, Any]:
-        return {
+    def status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = {
             **self.health(),
             "servers": [self._server_summary(state) for state in sorted(self.states.values(), key=lambda item: item.server_id)],
+        }
+        raw_workspace = str(dict(params or {}).get("workspace_root") or "").strip()
+        if not raw_workspace:
+            return payload
+        workspace_root = Path(raw_workspace).expanduser().resolve()
+        prepared = self._workspace_environment(workspace_root)
+        readiness = dict(prepared.get("readiness") or {})
+        if not prepared:
+            readiness = {
+                "status": "unavailable",
+                "reason": "workspace_not_prepared",
+                "primary_server": "",
+                "primary_probe_ready": False,
+                "servers": [],
+                "optional_server_failures": [],
+            }
+        elif not readiness:
+            readiness = {
+                "status": "unavailable",
+                "reason": "workspace_readiness_not_recorded",
+                "primary_server": "",
+                "primary_probe_ready": False,
+                "servers": [],
+                "optional_server_failures": [],
+            }
+        workspace_status = {
+            "workspace_root": str(workspace_root),
+            "prepared": bool(prepared),
+            "status": str(readiness.get("status") or "unavailable"),
+            "reason": str(readiness.get("reason") or ""),
+            "environment_fingerprint": str(prepared.get("fingerprint") or ""),
+            "primary_language": str(prepared.get("primary_language") or ""),
+            "primary_server": str(readiness.get("primary_server") or ""),
+            "primary_probe_ready": readiness.get("primary_probe_ready"),
+            "servers": list(readiness.get("servers") or []),
+            "optional_server_failures": list(
+                readiness.get("optional_server_failures") or []
+            ),
+            "prepared_at": str(prepared.get("prepared_at") or ""),
+        }
+        return {
+            **payload,
+            "status": workspace_status["status"],
+            "workspace": workspace_status,
         }
 
     async def rescan(self) -> dict[str, Any]:
@@ -221,7 +265,19 @@ class LspManager:
                 }
             )
         if not state.file_config.enabled or not binary or not workspace_root.exists():
-            return {"status": "unavailable", "server": self._server_summary(state), "checks": checks}
+            reason = (
+                "disabled"
+                if not state.file_config.enabled
+                else "missing_binary"
+                if not binary
+                else "missing_workspace_root"
+            )
+            return {
+                "status": "unavailable",
+                "reason": reason,
+                "server": self._server_summary(state),
+                "checks": checks,
+            }
         context_reason = _project_context_unavailable_reason(state, params, workspace_root)
         if context_reason:
             return {
@@ -379,17 +435,64 @@ class LspManager:
                         )
                 prewarm_results.append(server_result)
 
+        prewarm = bool(params.get("prewarm", True))
         ready_count = len(
             [result for result in prewarm_results if result.get("status") == "ok"]
         )
-        if not bool(params.get("prewarm", True)):
+        primary_server = str(setup.get("primary_server") or "")
+        primary_result = next(
+            (
+                result
+                for result in prewarm_results
+                if str(result.get("server_id") or "") == primary_server
+            ),
+            None,
+        )
+        primary_probe_ready = bool(
+            primary_result is not None and primary_result.get("status") == "ok"
+        )
+        optional_server_failures = [
+            result
+            for result in prewarm_results
+            if str(result.get("server_id") or "") != primary_server
+            and result.get("status") != "ok"
+        ]
+        if not prewarm:
             status = "ok" if str(setup.get("status") or "") == "ready" else "unavailable"
-        elif prewarm_results and ready_count == len(prewarm_results):
+        elif primary_probe_ready:
+            # A workspace is usable once its primary language server has
+            # passed the recognition probe. Incidental secondary languages
+            # (for example task.yaml in a C++ worktree) remain visible below,
+            # but must not downgrade the primary workspace to "partial".
             status = "ok"
+        elif primary_result is not None:
+            status = "unavailable"
         elif ready_count:
             status = "partial"
         else:
             status = "unavailable"
+        readiness = {
+            "status": status,
+            "primary_server": primary_server,
+            "primary_probe_ready": primary_probe_ready if prewarm else None,
+            "servers": prewarm_results,
+            "optional_server_failures": optional_server_failures,
+        }
+        if status == "unavailable":
+            readiness["reason"] = (
+                str((primary_result or {}).get("reason") or "")
+                or "primary_server_not_ready"
+            )
+        async with self._environment_lock:
+            current = self._workspace_environment(workspace_root)
+            if str(current.get("fingerprint") or "") == fingerprint:
+                current["readiness"] = readiness
+                self.workspace_environments[key] = current
+                _write_workspace_environment(
+                    self.runtime_root,
+                    workspace_root,
+                    current,
+                )
         return {
             "status": status,
             "workspace_root": str(workspace_root),
@@ -399,7 +502,10 @@ class LspManager:
             "environment_fingerprint": fingerprint,
             "environment_changed": changed,
             "prepared_at": record["prepared_at"],
+            "primary_server": primary_server,
+            "primary_probe_ready": primary_probe_ready if prewarm else None,
             "servers": prewarm_results,
+            "optional_server_failures": optional_server_failures,
             "unavailable": unavailable,
         }
 
@@ -480,12 +586,52 @@ class LspManager:
                 ),
                 "diagnostic": blocker,
             }
+        symbol_result = await self.run_lsp_operation(
+            "document_symbols",
+            {
+                "server_id": state.server_id,
+                "workspace_root": str(workspace_root),
+                "file": str(probe_file),
+            },
+        )
+        if str(symbol_result.get("status") or "") != "ok":
+            return {
+                "status": "unavailable",
+                "operation": "diagnostics+document_symbols",
+                "file": str(probe_file),
+                "reason": (
+                    "semantic_probe_failed:"
+                    + str(
+                        symbol_result.get("reason")
+                        or symbol_result.get("error")
+                        or "operation_unavailable"
+                    )
+                ),
+            }
+        symbols = symbol_result.get("result")
+        # LSP permits `null` when the document contains no symbols. A
+        # successful request still proves the server can open and understand
+        # the prepared document; any other payload shape is a broken probe.
+        if symbols is None:
+            symbols = []
+        if not isinstance(symbols, list):
+            return {
+                "status": "unavailable",
+                "operation": "diagnostics+document_symbols",
+                "file": str(probe_file),
+                "reason": "semantic_probe_failed:invalid_document_symbols_result",
+            }
+        semantic_probe = {
+            "operation": "document_symbols",
+            "symbol_count": len(symbols),
+        }
         return {
             "status": "ok",
-            "operation": "diagnostics",
+            "operation": "diagnostics+document_symbols",
             "file": str(probe_file),
             "recognized": True,
             "diagnostic_count": len(diagnostics),
+            "semantic_probe": semantic_probe,
         }
 
     async def run_lsp_operation(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:

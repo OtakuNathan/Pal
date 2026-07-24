@@ -35,6 +35,8 @@ from pal.llm.capabilities import (
     LLMModelSnapshot,
     LLMThinkLevelSnapshot,
     inspect_llm,
+    llm_status_payload,
+    render_llm_status,
     register_with_core,
 )
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
@@ -53,6 +55,7 @@ from pal.llm.runtime import (
     ZaiAnthropicMessagesEndpointInvoker,
     build_default_endpoint_invoker,
 )
+from pal.llm.usage import LLMUsage, LLMUsageLedger
 from pal.stream_events import NormalizedLLMStreamEvent
 
 __all__ = [
@@ -100,6 +103,8 @@ __all__ = [
     "LLMRuntimePort",
     "NormalizedLLMStreamEvent",
     "LLMThinkLevelSnapshot",
+    "LLMUsage",
+    "LLMUsageLedger",
     "PalRuntimeSettingModel",
     "RuntimeSettingRepository",
     "SecretRef",
@@ -109,6 +114,8 @@ __all__ = [
     "build_default_endpoint_invoker",
     "build_runtime_provider_registry",
     "inspect_llm",
+    "llm_status_payload",
+    "render_llm_status",
     "is_chatgpt_auth_tokens_refresh_request",
     "redact_codex_auth_message",
     "register_with_core",

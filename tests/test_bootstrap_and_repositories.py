@@ -3449,8 +3449,11 @@ class PalV2BootstrapTests(unittest.TestCase):
                 }
 
         class FakeOpenAICompletions:
+            calls = []
+
             @staticmethod
             def create(**kwargs):
+                FakeOpenAICompletions.calls.append(dict(kwargs))
                 if kwargs.get("stream"):
                     return [
                         FakeChunk(
@@ -3503,6 +3506,10 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         self.assertEqual("".join(event.reasoning_text for event in events), "thinkingstill thinking")
         self.assertEqual(events[-1].finish_reason, "length")
+        self.assertEqual(
+            FakeOpenAICompletions.calls[0]["stream_options"],
+            {"include_usage": True},
+        )
 
     def test_openai_chat_response_parser_preserves_reasoning_text(self) -> None:
         invoker = OpenAIChatEndpointInvoker(
@@ -3512,6 +3519,11 @@ class PalV2BootstrapTests(unittest.TestCase):
         class FakeResponse:
             def to_dict(self):
                 return {
+                    "usage": {
+                        "prompt_tokens": 17,
+                        "completion_tokens": 5,
+                        "cost": 0.0125,
+                    },
                     "choices": [
                         {
                             "finish_reason": "stop",
@@ -3529,12 +3541,20 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(outcome.text, "pong")
         self.assertEqual(outcome.reasoning_text, "thinking")
         self.assertEqual(outcome.provider_specific_fields["reasoning_content"], "thinking")
+        self.assertEqual(outcome.input_tokens, 17)
+        self.assertEqual(outcome.output_tokens, 5)
+        self.assertEqual(outcome.cost, 0.0125)
 
     def test_anthropic_parser_and_renderer_preserve_thinking_blocks_for_tool_continuation(self) -> None:
         class FakeResponse:
             def to_dict(self):
                 return {
                     "stop_reason": "tool_use",
+                    "usage": {
+                        "input_tokens": 23,
+                        "output_tokens": 11,
+                        "total_cost": 0.031,
+                    },
                     "content": [
                         {"type": "thinking", "thinking": "hidden reasoning", "signature": "sig-1"},
                         {"type": "redacted_thinking", "data": "opaque"},
@@ -3553,6 +3573,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(outcome.provider_specific_fields["reasoning_content"], "hidden reasoning")
         self.assertEqual(outcome.provider_specific_fields["anthropic_thinking_blocks"][0]["signature"], "sig-1")
         self.assertEqual(outcome.provider_specific_fields["anthropic_thinking_blocks"][1]["type"], "redacted_thinking")
+        self.assertEqual(outcome.input_tokens, 23)
+        self.assertEqual(outcome.output_tokens, 11)
+        self.assertEqual(outcome.cost, 0.031)
 
         _, messages = chat_messages_to_anthropic_messages(
             [

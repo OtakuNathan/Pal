@@ -15,6 +15,15 @@ class NormalizedLLMStreamEvent:
     provider_specific_fields: dict[str, Any] = field(default_factory=dict)
     tool_call: CanonicalToolCall | None = None
     finish_reason: str | None = None
+    input_tokens: int = 0
+    uncached_input_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cost: float = 0.0
+    usage_reported: bool = False
+    provider_response_count: int = 0
     response_mode: str | None = None
     error_text: str = ""
     target_input_budget: int = 0

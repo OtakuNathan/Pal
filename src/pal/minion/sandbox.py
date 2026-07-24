@@ -327,12 +327,27 @@ def scrub_minion_sandbox_env(
 
 
 def _apply_workspace_execution_env(env: dict[str, str], pack: MinionInvocationPack) -> None:
-    execution_env = dict((pack.workspace or {}).get("execution_env") or {})
+    workspace = dict(pack.workspace or {})
+    manager_bound_names = {
+        "PAL_WORKSPACE_ROOT",
+        "PAL_BUILD_SCRATCH",
+        "PAL_REVIEW_SCRATCH",
+    }
+    workspace_root = _workspace_path_from_pack(pack)
+    if workspace_root is not None:
+        env["PAL_WORKSPACE_ROOT"] = str(workspace_root)
+    build_scratch = str(workspace.get("build_scratch_dir") or "").strip()
+    if build_scratch:
+        env["PAL_BUILD_SCRATCH"] = build_scratch
+    review_scratch = str(workspace.get("review_scratch_dir") or "").strip()
+    if review_scratch:
+        env["PAL_REVIEW_SCRATCH"] = review_scratch
+    execution_env = dict(workspace.get("execution_env") or {})
     vars_payload = execution_env.get("vars")
     if isinstance(vars_payload, dict):
         for name, value in dict(vars_payload).items():
             key = str(name or "").strip()
-            if not _safe_workspace_env_var_name(key):
+            if key in manager_bound_names or not _safe_workspace_env_var_name(key):
                 continue
             text = str(value or "").strip()
             if text:
@@ -342,7 +357,7 @@ def _apply_workspace_execution_env(env: dict[str, str], pack: MinionInvocationPa
         return
     for name, paths in dict(path_prepend).items():
         key = str(name or "").strip()
-        if not key:
+        if not key or key in manager_bound_names:
             continue
         if isinstance(paths, str):
             raw_paths = [paths]

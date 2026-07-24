@@ -93,7 +93,7 @@ class PathDeleteReadSafetyTests(_TempPathMixin, unittest.TestCase):
     def test_partial_file_read_fails_without_deleting(self) -> None:
         path = self._path("partial.txt")
         path.write_text("one\ntwo\n", encoding="utf-8")
-        self.cache.mark_read(path, "one\ntwo\n", full_view=False, view=(1, 1))
+        self.cache.mark_read(path, "one\ntwo\n", full_view=False)
 
         result = self.tool.invoke({"file_path": str(path)})
 

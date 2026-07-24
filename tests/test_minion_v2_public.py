@@ -47,10 +47,13 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     _semantic_role_input_refs,
     _skeleton_architecture_review_view,
     _skeleton_architect_instruction,
+    _recorded_role_metrics,
+    _worker_event_timing,
     apply_v2_revision_scope_capability_policy,
     apply_v2_role_capability_policy,
 )
 from pal.minion.v2.role_protocol import RoleAssignmentRequest, RoleAssignmentState
+from pal.minion.v2.role_protocol import stable_hash
 from pal.minion.v2.skeleton import ArchitectureWorkspace
 from pal.minion.v2 import ActionEnvelope, AggregateType
 from pal.minion.v2.contracts import (
@@ -147,6 +150,72 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
 
         self.assertEqual(recorded, [])
 
+    def test_fresh_durable_receipt_preserves_billable_role_turn(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="pal-v2-fresh-receipt-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        worker = SemanticOrchestrator(MinionV2WorkflowService(root))
+        submitted = {"status": "candidate_ready", "summary": "done"}
+        ref = worker.service.artifacts.put_json(
+            submitted,
+            artifact_type="RoleSubmissionArtifact",
+        )
+
+        terminal = worker._terminal_from_assignment_receipt(
+            {
+                "submission_artifact_ref": ref.to_dict(),
+                "submission_payload_hash": stable_hash(submitted),
+            },
+            primary_artifact_name="coder_report.json",
+            summary="done",
+            original_terminal={
+                "payload": {
+                    "session_turn_index": 3,
+                    "v2_timing": {"input_tokens": 7},
+                }
+            },
+        )
+
+        self.assertFalse(terminal["payload"]["durable_receipt_replay"])
+        self.assertEqual(terminal["payload"]["session_turn_index"], 3)
+        replay = worker._terminal_from_assignment_receipt(
+            {
+                "submission_artifact_ref": ref.to_dict(),
+                "submission_payload_hash": stable_hash(submitted),
+            },
+            primary_artifact_name="coder_report.json",
+            summary="recovered",
+        )
+        self.assertTrue(replay["payload"]["durable_receipt_replay"])
+
+    def test_worker_metrics_include_provider_usage(self) -> None:
+        timing = _worker_event_timing(
+            [
+                {
+                    "event_kind": "progress",
+                    "created_at": "2026-07-24T10:00:00+00:00",
+                    "payload": {"phase": "llm_round_started", "round": 1},
+                },
+                {
+                    "event_kind": "progress",
+                    "created_at": "2026-07-24T10:00:02+00:00",
+                    "payload": {
+                        "phase": "llm_round_completed",
+                        "round": 1,
+                        "input_tokens": 101,
+                        "output_tokens": 29,
+                        "cost": 0.04,
+                    },
+                },
+            ]
+        )
+
+        metrics = _recorded_role_metrics({"payload": {"v2_timing": timing}})
+
+        self.assertEqual(metrics["input_tokens"], 101)
+        self.assertEqual(metrics["output_tokens"], 29)
+        self.assertEqual(metrics["cost"], 0.04)
+        self.assertEqual(metrics["latency_ms"], 2000)
+
     def test_writers_use_bound_durable_workspace_while_reviewers_remain_isolated(self) -> None:
         writable = {"repo_path": "/tmp/node-worktree"}
         read_only = {
@@ -198,6 +267,11 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
         )
         role_root = Path(workspace["repo_path"]).resolve()
         self.assertEqual(Path(report["workspace_root"]), role_root)
+        self.assertEqual(
+            Path(report["build_scratch_root"]),
+            Path(workspace["build_scratch_dir"]),
+        )
+        self.assertTrue(Path(report["build_scratch_root"]).is_dir())
         self.assertEqual(prepared["primary_language"], "cpp")
         self.assertNotIn("lsp_setup", prepared)
         self.assertNotIn("lsp_setup", report)

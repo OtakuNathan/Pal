@@ -553,14 +553,226 @@ language_ids = ["foo"]
             prepared["servers"][0]["probe"],
             {
                 "status": "ok",
-                "operation": "diagnostics",
+                "operation": "diagnostics+document_symbols",
                 "file": str((workspace / "module.cpp").resolve()),
                 "recognized": True,
                 "diagnostic_count": 0,
+                "semantic_probe": {
+                    "operation": "document_symbols",
+                    "symbol_count": 0,
+                },
             },
         )
+        self.assertEqual(prepared["primary_server"], "clangd")
+        self.assertTrue(prepared["primary_probe_ready"])
+        self.assertEqual(prepared["optional_server_failures"], [])
+        status = self.manager.status({"workspace_root": str(workspace)})
+        self.assertEqual(status["status"], "ok")
+        self.assertTrue(status["workspace"]["prepared"])
+        self.assertEqual(status["workspace"]["primary_server"], "clangd")
+        self.assertTrue(status["workspace"]["primary_probe_ready"])
+        restarted = LspManager(runtime_root=self.root)
+        restarted_status = restarted.status({"workspace_root": str(workspace)})
+        self.assertEqual(restarted_status["status"], "ok")
+        self.assertTrue(restarted_status["workspace"]["primary_probe_ready"])
         self.assertEqual(result["status"], "ok")
         self.assertEqual(observed_args, [(f"--compile-commands-dir={context}",)])
+
+    async def test_workspace_status_does_not_fall_back_to_another_worktree(self) -> None:
+        prepared = self.root / "prepared"
+        other = self.root / "other"
+        prepared.mkdir()
+        other.mkdir()
+        self.manager.workspace_environments[str(prepared.resolve())] = {
+            "workspace_root": str(prepared.resolve()),
+            "primary_language": "cpp",
+            "fingerprint": "prepared-fingerprint",
+            "prepared_at": "2026-07-24T10:00:00+00:00",
+            "readiness": {
+                "status": "ok",
+                "primary_server": "clangd",
+                "primary_probe_ready": True,
+                "servers": [{"server_id": "clangd", "status": "ok"}],
+                "optional_server_failures": [],
+            },
+        }
+
+        status = await self.manager._call_method(
+            "status",
+            {"workspace_root": str(other)},
+        )
+
+        self.assertEqual(status["status"], "unavailable")
+        self.assertFalse(status["workspace"]["prepared"])
+        self.assertEqual(status["workspace"]["reason"], "workspace_not_prepared")
+
+    async def test_primary_probe_stays_ready_when_optional_server_is_unavailable(self) -> None:
+        workspace = self.root / "prepared_cpp_with_task_yaml"
+        workspace.mkdir()
+        (workspace / "module.cpp").write_text(
+            "int value() { return 1; }\n",
+            encoding="utf-8",
+        )
+        (workspace / "task.yaml").write_text("goal: test\n", encoding="utf-8")
+
+        class FakeConnector:
+            def __init__(
+                self,
+                config: LspServerConfig,
+                *,
+                workspace_root: Path,
+                extra_args: tuple[str, ...] = (),
+            ) -> None:
+                _ = config, extra_args
+                self.workspace_root = workspace_root
+                self.server_info = {}
+
+            async def initialize(self) -> None:
+                return None
+
+            async def request(self, method: str, params: dict) -> dict:
+                _ = method, params
+                return {"value": []}
+
+            async def ensure_document_open(
+                self,
+                file_path: Path,
+                *,
+                language_id: str,
+            ) -> dict:
+                _ = language_id
+                return {
+                    "uri": file_path.resolve().as_uri(),
+                    "file_sha256": "probe-file",
+                }
+
+            async def diagnostics(self, file_path: Path, *, language_id: str) -> dict:
+                _ = file_path, language_id
+                return {
+                    "status": "ok",
+                    "diagnostics": [],
+                    "diagnostics_state": "fresh",
+                }
+
+            async def close(self) -> None:
+                return None
+
+        state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="clangd",
+                    command=(sys.executable,),
+                    extensions=(".cpp",),
+                    language_ids=("cpp",),
+                ),
+                source="test",
+                config_path=str(self.root / "clangd.toml"),
+            ),
+            config_path=self.root / "clangd.toml",
+        )
+        self.manager.states = {state.server_id: state}
+
+        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+            prepared = await self.manager.prepare_workspace(
+                {
+                    "workspace_root": str(workspace),
+                    "primary_language": "cpp",
+                }
+            )
+
+        self.assertEqual(prepared["status"], "ok")
+        self.assertTrue(prepared["primary_probe_ready"])
+        self.assertEqual(
+            prepared["optional_server_failures"],
+            [
+                {
+                    "server_id": "yaml",
+                    "status": "unavailable",
+                    "reason": "server_not_configured",
+                }
+            ],
+        )
+
+    async def test_clangd_preparation_rejects_failed_semantic_probe(self) -> None:
+        workspace = self.root / "prepared_cpp_without_symbol_support"
+        workspace.mkdir()
+        (workspace / "module.cpp").write_text(
+            "int value() { return 1; }\n",
+            encoding="utf-8",
+        )
+
+        class FakeConnector:
+            def __init__(
+                self,
+                config: LspServerConfig,
+                *,
+                workspace_root: Path,
+                extra_args: tuple[str, ...] = (),
+            ) -> None:
+                _ = config, extra_args
+                self.workspace_root = workspace_root
+                self.server_info = {}
+
+            async def initialize(self) -> None:
+                return None
+
+            async def request(self, method: str, params: dict) -> dict:
+                _ = method, params
+                raise LspProtocolError("semantic probe unavailable")
+
+            async def ensure_document_open(
+                self,
+                file_path: Path,
+                *,
+                language_id: str,
+            ) -> dict:
+                _ = language_id
+                return {
+                    "uri": file_path.resolve().as_uri(),
+                    "file_sha256": "probe-file",
+                }
+
+            async def diagnostics(self, file_path: Path, *, language_id: str) -> dict:
+                _ = file_path, language_id
+                return {
+                    "status": "ok",
+                    "diagnostics": [],
+                    "diagnostics_state": "fresh",
+                }
+
+            async def close(self) -> None:
+                return None
+
+        state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="clangd",
+                    command=(sys.executable,),
+                    extensions=(".cpp",),
+                    language_ids=("cpp",),
+                ),
+                source="test",
+                config_path=str(self.root / "clangd.toml"),
+            ),
+            config_path=self.root / "clangd.toml",
+        )
+        self.manager.states = {state.server_id: state}
+
+        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+            prepared = await self.manager.prepare_workspace(
+                {
+                    "workspace_root": str(workspace),
+                    "primary_language": "cpp",
+                }
+            )
+
+        self.assertEqual(prepared["status"], "unavailable")
+        self.assertFalse(prepared["primary_probe_ready"])
+        self.assertIn(
+            "semantic_probe_failed:request_failed_after_restart:"
+            "LspProtocolError: semantic probe unavailable",
+            prepared["servers"][0]["probe"]["reason"],
+        )
 
     async def test_workspace_preparation_is_idempotent_and_restarts_changed_session(self) -> None:
         workspace = self.root / "prepared_repeatedly"

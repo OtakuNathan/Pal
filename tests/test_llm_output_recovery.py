@@ -93,8 +93,27 @@ class LLMOutputRecoveryTests(unittest.TestCase):
                     text="discard me",
                     tool_calls=[CanonicalToolCall(name="unsafe_partial", args={})],
                     finish_reason="length",
+                    input_tokens=100,
+                    uncached_input_tokens=40,
+                    cached_input_tokens=50,
+                    cache_write_input_tokens=10,
+                    output_tokens=20,
+                    reasoning_tokens=15,
+                    cost=0.1,
+                    usage_reported=True,
                 ),
-                CanonicalLLMOutcome(text="complete", finish_reason=LLMFinishReason.STOP),
+                CanonicalLLMOutcome(
+                    text="complete",
+                    finish_reason=LLMFinishReason.STOP,
+                    input_tokens=110,
+                    uncached_input_tokens=20,
+                    cached_input_tokens=80,
+                    cache_write_input_tokens=10,
+                    output_tokens=7,
+                    reasoning_tokens=5,
+                    cost=0.2,
+                    usage_reported=True,
+                ),
             ]
         )
 
@@ -109,6 +128,15 @@ class LLMOutputRecoveryTests(unittest.TestCase):
         self.assertEqual([request.max_output_tokens for request in invoker.requests], [32_000, 64_000])
         self.assertEqual(outcome.text, "complete")
         self.assertEqual(outcome.tool_calls, [])
+        self.assertEqual(outcome.input_tokens, 210)
+        self.assertEqual(outcome.uncached_input_tokens, 60)
+        self.assertEqual(outcome.cached_input_tokens, 130)
+        self.assertEqual(outcome.cache_write_input_tokens, 20)
+        self.assertEqual(outcome.output_tokens, 27)
+        self.assertEqual(outcome.reasoning_tokens, 20)
+        self.assertAlmostEqual(outcome.cost, 0.3)
+        self.assertTrue(outcome.usage_reported)
+        self.assertEqual(outcome.provider_response_count, 2)
 
     def test_continues_in_pieces_and_only_exposes_final_tool_call(self) -> None:
         invoker = _ScriptedInvoker(
@@ -200,7 +228,18 @@ class LLMOutputRecoveryTests(unittest.TestCase):
                         event_kind=LLMStreamEventKind.TOOL_CALL,
                         tool_call=CanonicalToolCall(name="must_not_run", args={}),
                     ),
-                    NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason="length"),
+                    NormalizedLLMStreamEvent(
+                        event_kind=LLMStreamEventKind.DONE,
+                        finish_reason="length",
+                        input_tokens=50,
+                        uncached_input_tokens=10,
+                        cached_input_tokens=35,
+                        cache_write_input_tokens=5,
+                        output_tokens=12,
+                        reasoning_tokens=9,
+                        cost=0.05,
+                        usage_reported=True,
+                    ),
                 ],
                 [
                     NormalizedLLMStreamEvent(
@@ -210,6 +249,14 @@ class LLMOutputRecoveryTests(unittest.TestCase):
                     NormalizedLLMStreamEvent(
                         event_kind=LLMStreamEventKind.DONE,
                         finish_reason=LLMFinishReason.TOOL_CALLS,
+                        input_tokens=61,
+                        uncached_input_tokens=11,
+                        cached_input_tokens=40,
+                        cache_write_input_tokens=10,
+                        output_tokens=4,
+                        reasoning_tokens=2,
+                        cost=0.07,
+                        usage_reported=True,
                     ),
                 ],
             ]
@@ -223,6 +270,15 @@ class LLMOutputRecoveryTests(unittest.TestCase):
         self.assertEqual(calls, ["complete_tool"])
         self.assertEqual("".join(event.text for event in events), "piece ")
         self.assertEqual(events[-1].finish_reason, LLMFinishReason.TOOL_CALLS)
+        self.assertEqual(events[-1].input_tokens, 111)
+        self.assertEqual(events[-1].uncached_input_tokens, 21)
+        self.assertEqual(events[-1].cached_input_tokens, 75)
+        self.assertEqual(events[-1].cache_write_input_tokens, 15)
+        self.assertEqual(events[-1].output_tokens, 16)
+        self.assertEqual(events[-1].reasoning_tokens, 11)
+        self.assertAlmostEqual(events[-1].cost, 0.12)
+        self.assertTrue(events[-1].usage_reported)
+        self.assertEqual(events[-1].provider_response_count, 2)
 
     def test_explicit_anthropic_thinking_budget_is_clamped_below_output_limit(self) -> None:
         thinking = think_level_to_anthropic_thinking(

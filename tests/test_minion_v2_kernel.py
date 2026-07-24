@@ -2041,6 +2041,9 @@ class MinionV2PersistenceTests(unittest.TestCase):
             llm_request_ref=prompt.to_dict(),
             llm_response_ref=response.to_dict(),
             tool_summary_ref=summary.to_dict(),
+            input_tokens=321,
+            output_tokens=87,
+            cost=0.42,
             latency_ms=120,
             tool_latency_ms=35,
             wall_latency_ms=180,
@@ -2051,6 +2054,9 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertEqual(metrics["tool_time_ms"], 35)
         self.assertEqual(metrics["worker_time_ms"], 180)
         self.assertEqual(metrics["review_time_ms"], 120)
+        self.assertEqual(metrics["input_tokens"], 321)
+        self.assertEqual(metrics["output_tokens"], 87)
+        self.assertEqual(metrics["cost"], 0.42)
 
     def test_worker_progress_events_advance_durable_round_ledger(self) -> None:
         prompt = self.artifacts.put_json({"prompt": "test"}, artifact_type="RolePromptPackArtifact")

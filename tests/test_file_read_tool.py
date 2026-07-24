@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from pal.execution.file_capabilities import FileCapabilityMixin
 from pal.execution.file_edit import FileEditTool
 from pal.execution.file_read import (
     ERR_FILE_NOT_FOUND,
@@ -15,10 +17,11 @@ from pal.execution.file_read import (
     ERR_UNSUPPORTED_TEXT_ENCODING,
     FILE_UNCHANGED_STUB,
     FileReadTool,
+    FileVisibilityCache,
 )
 from pal.execution.file_state import FileStateCache
 from pal.execution.generated_tool_models import ExecutionFileCapabilitiesFileCapabilityMixinReadInput
-from pal.shared import RuntimeStatus
+from pal.shared import IntrospectionCall, RuntimeStatus
 
 
 class _TempFileMixin:
@@ -69,6 +72,16 @@ class BasicReadTests(_TempFileMixin, unittest.TestCase):
         self.assertIn("     1\taaa", result.text)
         self.assertIn("     3\tccc", result.text)
 
+    def test_empty_file_returns_nonempty_full_view_marker(self) -> None:
+        path = self._write_tmp("empty.txt", "")
+
+        result = self.tool.invoke({"file_path": str(path)})
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(result.text, "(empty file)")
+        self.assertTrue(result.structured["full_view"])
+        self.assertEqual(self.cache.get_valid_full(path), "")
+
     def test_repeated_unchanged_range_returns_compact_stub(self) -> None:
         path = self._write_tmp("repeat.txt", "one\ntwo\n")
         first = self.tool.invoke({"file_path": str(path)})
@@ -77,6 +90,79 @@ class BasicReadTests(_TempFileMixin, unittest.TestCase):
         self.assertEqual(first.status, RuntimeStatus.OK)
         self.assertEqual(second.text, FILE_UNCHANGED_STUB)
         self.assertTrue(second.structured["unchanged"])
+
+    def test_repeated_partial_range_returns_compact_stub(self) -> None:
+        path = self._write_tmp("repeat-partial.txt", "one\ntwo\nthree\nfour\n")
+
+        first = self.tool.invoke({"file_path": str(path), "offset": 2, "limit": 2})
+        second = self.tool.invoke({"file_path": str(path), "offset": 2, "limit": 2})
+
+        self.assertIn("two", first.text)
+        self.assertEqual(second.text, FILE_UNCHANGED_STUB)
+        self.assertTrue(second.structured["unchanged"])
+        self.assertFalse(second.structured["full_view"])
+
+    def test_previously_covered_subrange_returns_compact_stub(self) -> None:
+        path = self._write_tmp(
+            "covered.txt",
+            "\n".join(f"line {number}" for number in range(1, 9)),
+        )
+
+        self.tool.invoke({"file_path": str(path), "offset": 2, "limit": 4})
+        covered = self.tool.invoke({"file_path": str(path), "offset": 3, "limit": 2})
+        uncovered = self.tool.invoke({"file_path": str(path), "offset": 5, "limit": 2})
+        now_covered = self.tool.invoke({"file_path": str(path), "offset": 2, "limit": 5})
+
+        self.assertEqual(covered.text, FILE_UNCHANGED_STUB)
+        self.assertFalse(uncovered.structured["unchanged"])
+        self.assertIn("line 6", uncovered.text)
+        self.assertEqual(now_covered.text, FILE_UNCHANGED_STUB)
+
+    def test_full_read_does_not_report_partial_reread_as_full_view(self) -> None:
+        path = self._write_tmp("full-then-partial.txt", "one\ntwo\nthree\n")
+
+        self.tool.invoke({"file_path": str(path)})
+        repeated = self.tool.invoke({"file_path": str(path), "offset": 2, "limit": 1})
+
+        self.assertEqual(repeated.text, FILE_UNCHANGED_STUB)
+        self.assertFalse(repeated.structured["full_view"])
+
+    def test_changed_content_is_returned_even_when_mtime_is_restored(self) -> None:
+        path = self._write_tmp("same-mtime.txt", "one\ntwo\n")
+        original_stat = path.stat()
+        self.tool.invoke({"file_path": str(path)})
+
+        path.write_text("ONE\nTWO\n", encoding="utf-8")
+        os.utime(
+            path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
+        changed = self.tool.invoke({"file_path": str(path)})
+
+        self.assertFalse(changed.structured["unchanged"])
+        self.assertIn("ONE", changed.text)
+
+    def test_visibility_is_isolated_between_llm_scopes(self) -> None:
+        path = self._write_tmp("scoped.txt", "scope content\n")
+        visibility = FileVisibilityCache()
+        first_scope = FileReadTool(
+            cache=self.cache,
+            visibility_cache=visibility,
+            visibility_scope="role-a",
+        )
+        second_scope = FileReadTool(
+            cache=self.cache,
+            visibility_cache=visibility,
+            visibility_scope="role-b",
+        )
+
+        first_scope.invoke({"file_path": str(path)})
+        other_role_first_read = second_scope.invoke({"file_path": str(path)})
+        first_role_reread = first_scope.invoke({"file_path": str(path)})
+
+        self.assertFalse(other_role_first_read.structured["unchanged"])
+        self.assertIn("scope content", other_role_first_read.text)
+        self.assertEqual(first_role_reread.text, FILE_UNCHANGED_STUB)
 
 
 class OffsetLimitTests(_TempFileMixin, unittest.TestCase):
@@ -231,6 +317,58 @@ class ProtocolTests(unittest.TestCase):
     def test_input_model_has_required_file_path(self) -> None:
         schema = ExecutionFileCapabilitiesFileCapabilityMixinReadInput.model_json_schema(mode="validation")
         self.assertIn("file_path", schema.get("required", []))
+
+    def test_capability_visibility_uses_turn_id_as_context_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "capability-scope.txt"
+            path.write_text("visible once per context\n", encoding="utf-8")
+            capability = FileCapabilityMixin()
+            first = capability.file_read(
+                IntrospectionCall(
+                    name="op_file_read",
+                    args={"file_path": str(path)},
+                    meta={"turn_id": "read-context-a"},
+                )
+            )
+            repeated = capability.file_read(
+                IntrospectionCall(
+                    name="op_file_read",
+                    args={"file_path": str(path)},
+                    meta={"turn_id": "read-context-a"},
+                )
+            )
+            other_context = capability.file_read(
+                IntrospectionCall(
+                    name="op_file_read",
+                    args={"file_path": str(path)},
+                    meta={"turn_id": "read-context-b"},
+                )
+            )
+
+        self.assertIn("visible once", first.text)
+        self.assertEqual(repeated.text, FILE_UNCHANGED_STUB)
+        self.assertIn("visible once", other_context.text)
+
+    def test_unscoped_capability_calls_never_share_visibility(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "unscoped.txt"
+            path.write_text("always returned without a context id\n", encoding="utf-8")
+            capability = FileCapabilityMixin()
+            first = capability.file_read(
+                IntrospectionCall(
+                    name="op_file_read",
+                    args={"file_path": str(path)},
+                )
+            )
+            second = capability.file_read(
+                IntrospectionCall(
+                    name="op_file_read",
+                    args={"file_path": str(path)},
+                )
+            )
+
+        self.assertIn("always returned", first.text)
+        self.assertIn("always returned", second.text)
 
 
 if __name__ == "__main__":

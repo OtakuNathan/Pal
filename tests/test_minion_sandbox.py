@@ -414,6 +414,8 @@ class MinionSandboxTests(unittest.TestCase):
                 goal="g",
                 workspace={
                     "repo_path": str(repo),
+                    "build_scratch_dir": str(root / "build-scratch"),
+                    "review_scratch_dir": str(root / "review-scratch"),
                     "execution_env": {
                         "vars": {
                             "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
@@ -435,6 +437,9 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(src))
             self.assertIn("/existing", env["PYTHONPATH"].split(os.pathsep))
             self.assertEqual(env["CMAKE_EXPORT_COMPILE_COMMANDS"], "ON")
+            self.assertEqual(env["PAL_WORKSPACE_ROOT"], str(repo))
+            self.assertEqual(env["PAL_BUILD_SCRATCH"], str(root / "build-scratch"))
+            self.assertEqual(env["PAL_REVIEW_SCRATCH"], str(root / "review-scratch"))
             self.assertNotIn("PAL_TOKEN", env)
             self.assertIn("PYTHONUSERBASE", env)
 
@@ -1527,8 +1532,23 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                 },
             )
         )
+        status = runner._tool_call_with_minion_defaults(
+            CanonicalToolCall(name="op_lsp_status", args={})
+        )
+        shell = runner._tool_call_with_minion_defaults(
+            CanonicalToolCall(name="op_exec_shell", args={"cmd": "pwd"})
+        )
+        explicit_shell = runner._tool_call_with_minion_defaults(
+            CanonicalToolCall(
+                name="op_exec_shell",
+                args={"cmd": "pwd", "cwd": str(workspace / "src")},
+            )
+        )
 
         self.assertEqual(direct.args["workspace_root"], str(workspace))
+        self.assertEqual(status.args["workspace_root"], str(workspace))
+        self.assertEqual(shell.args["cwd"], str(workspace))
+        self.assertEqual(explicit_shell.args["cwd"], str(workspace / "src"))
         self.assertNotIn("primary_language", direct.args)
         self.assertNotIn("lsp_setup", direct.args)
         nested_args = dict(nested.args["args"])
@@ -1565,6 +1585,15 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
             reasoning_text="hidden",
             tool_calls=[CanonicalToolCall(name="op_exec_shell", args={"cmd": "pwd"}, call_id="call_1")],
             finish_reason="tool_calls",
+            input_tokens=41,
+            uncached_input_tokens=11,
+            cached_input_tokens=25,
+            cache_write_input_tokens=5,
+            output_tokens=13,
+            reasoning_tokens=8,
+            cost=0.21,
+            usage_reported=True,
+            provider_response_count=2,
             provider_specific_fields={"reasoning_content": "hidden"},
         )
 
@@ -1573,6 +1602,15 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
         self.assertEqual(restored.text, "ok")
         self.assertEqual(restored.reasoning_text, "hidden")
         self.assertEqual(restored.finish_reason, "tool_calls")
+        self.assertEqual(restored.input_tokens, 41)
+        self.assertEqual(restored.uncached_input_tokens, 11)
+        self.assertEqual(restored.cached_input_tokens, 25)
+        self.assertEqual(restored.cache_write_input_tokens, 5)
+        self.assertEqual(restored.output_tokens, 13)
+        self.assertEqual(restored.reasoning_tokens, 8)
+        self.assertEqual(restored.cost, 0.21)
+        self.assertTrue(restored.usage_reported)
+        self.assertEqual(restored.provider_response_count, 2)
         self.assertEqual(restored.tool_calls[0].name, "op_exec_shell")
         self.assertEqual(restored.tool_calls[0].args, {"cmd": "pwd"})
         self.assertEqual(restored.provider_specific_fields["reasoning_content"], "hidden")

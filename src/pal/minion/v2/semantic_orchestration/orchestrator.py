@@ -5887,6 +5887,33 @@ class SemanticOrchestrator:
             fencing_token=fencing_token,
             prepare_workspace=prepare_workspace,
         )
+        if not bool(workspace.get("v2_role_workspace")):
+            invocation_dir = invocation_root(self.service.runtime_root) / invocation_id
+            attempt_dir = invocation_dir / "attempts" / f"fence-{fencing_token}"
+            workspace.update(
+                {
+                    "run_dir": str(invocation_dir),
+                    "artifact_dir": str(attempt_dir / "artifacts"),
+                    "artifact_stage_dir": str(attempt_dir / "artifact-stage"),
+                    "log_dir": str(attempt_dir / "logs"),
+                    "build_scratch_dir": str(
+                        workspace.get("build_scratch_dir")
+                        or attempt_dir / "build-scratch"
+                    ),
+                    "review_scratch_dir": str(
+                        workspace.get("review_scratch_dir")
+                        or attempt_dir / "review-scratch"
+                    ),
+                }
+            )
+            for key in (
+                "artifact_dir",
+                "artifact_stage_dir",
+                "log_dir",
+                "build_scratch_dir",
+                "review_scratch_dir",
+            ):
+                Path(str(workspace[key])).mkdir(parents=True, exist_ok=True)
         skeleton_mode = bool(workspace.get("architecture_skeleton_mode"))
         builder_stage = (
             "architect_planning"
@@ -6251,13 +6278,23 @@ class SemanticOrchestrator:
                     "artifact_dir": str(attempt_dir / "artifacts"),
                     "artifact_stage_dir": str(attempt_dir / "artifact-stage"),
                     "log_dir": str(attempt_dir / "logs"),
+                    "build_scratch_dir": str(
+                        bound_workspace.get("build_scratch_dir")
+                        or attempt_dir / "build-scratch"
+                    ),
                     "review_scratch_dir": str(
                         bound_workspace.get("review_scratch_dir")
                         or attempt_dir / "review-scratch"
                     ),
                 }
             )
-            for key in ("artifact_dir", "artifact_stage_dir", "log_dir", "review_scratch_dir"):
+            for key in (
+                "artifact_dir",
+                "artifact_stage_dir",
+                "log_dir",
+                "build_scratch_dir",
+                "review_scratch_dir",
+            ):
                 Path(str(bound_workspace[key])).mkdir(parents=True, exist_ok=True)
             pack = MinionInvocationPack.from_dict({**pack.to_dict(), "workspace": bound_workspace})
         if skeleton_mode and activation.role == OrchestrationRole.ARCHITECT:
@@ -6967,7 +7004,10 @@ class SemanticOrchestrator:
                 "artifacts": [primary],
                 "primary_artifact": primary,
                 "submission_receipt": artifact_ref,
-                "durable_receipt_replay": True,
+                # Only receipt-only reconciliation is a replay. A fresh role
+                # process also settles through the durable receipt, but its
+                # original terminal carries the billable worker turn.
+                "durable_receipt_replay": original_terminal is None,
                 "session_turn_index": int(
                     original_payload.get("session_turn_index") or 0
                 ),
@@ -7848,11 +7888,14 @@ def _meaningful_stderr_tail(stderr: str, *, limit: int = 4000) -> str:
     return "\n".join(filtered)[-limit:]
 
 
-def _worker_event_timing(events: list[Mapping[str, Any]]) -> dict[str, int]:
+def _worker_event_timing(events: list[Mapping[str, Any]]) -> dict[str, int | float]:
     llm_started: dict[str, datetime] = {}
     tool_started: dict[str, datetime] = {}
     llm_seconds = 0.0
     tool_seconds = 0.0
+    input_tokens = 0
+    output_tokens = 0
+    cost = 0.0
     timestamps: list[datetime] = []
     for event in events:
         created_at = _event_datetime(event.get("created_at"))
@@ -7869,6 +7912,9 @@ def _worker_event_timing(events: list[Mapping[str, Any]]) -> dict[str, int]:
             started = llm_started.pop(str(payload.get("round") or ""), None)
             if started is not None:
                 llm_seconds += max(0.0, (created_at - started).total_seconds())
+            input_tokens += max(0, int(payload.get("input_tokens") or 0))
+            output_tokens += max(0, int(payload.get("output_tokens") or 0))
+            cost += max(0.0, float(payload.get("cost") or 0.0))
         elif phase == "tool_call_started":
             key = f"{payload.get('round')}:{payload.get('tool_call_index')}"
             tool_started[key] = created_at
@@ -7882,12 +7928,18 @@ def _worker_event_timing(events: list[Mapping[str, Any]]) -> dict[str, int]:
         "llm_time_ms": int(llm_seconds * 1000),
         "tool_time_ms": int(tool_seconds * 1000),
         "worker_time_ms": int(wall_seconds * 1000),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost": cost,
     }
 
 
-def _recorded_role_metrics(terminal: Mapping[str, Any]) -> dict[str, int]:
+def _recorded_role_metrics(terminal: Mapping[str, Any]) -> dict[str, int | float]:
     timing = dict(dict(terminal.get("payload") or {}).get("v2_timing") or {})
     return {
+        "input_tokens": max(0, int(timing.get("input_tokens") or 0)),
+        "output_tokens": max(0, int(timing.get("output_tokens") or 0)),
+        "cost": max(0.0, float(timing.get("cost") or 0.0)),
         "latency_ms": max(0, int(timing.get("llm_time_ms") or 0)),
         "tool_latency_ms": max(0, int(timing.get("tool_time_ms") or 0)),
         "wall_latency_ms": max(0, int(timing.get("worker_time_ms") or 0)),

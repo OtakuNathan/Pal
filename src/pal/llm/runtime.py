@@ -43,6 +43,7 @@ from pal.llm.contracts import (
 )
 from pal.llm.models import LLMEndpointModel
 from pal.llm.repository import DEFAULT_THINK_LEVEL, LLMEndpointRepository, RuntimeSettingRepository
+from pal.llm.usage import LLMUsage, LLMUsageLedger
 from pal.memory.compact import (
     COMPACT_PAL_STRUCTURED_SYSTEM,
     COMPACTION_SCHEMA_PAL_V2,
@@ -498,19 +499,12 @@ class OpenAIChatEndpointInvoker:
         request_shape, kwargs, tool_name_aliases = self._build_openai_request_kwargs(endpoint, request)
         if request_shape == OPENAI_RESPONSES_SHAPE:
             outcome = self._invoke_openai_chat(endpoint, request)
-            events: list[NormalizedLLMStreamEvent] = []
-            for tool_call in outcome.tool_calls:
-                events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call))
-            if outcome.tool_calls:
-                events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.TOOL_CALLS))
-                return events
-            if outcome.text:
-                events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=outcome.text))
-            events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=outcome.finish_reason))
-            return events
+            return list(_stream_events_from_outcome(outcome))
         try:
             client_kwargs, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
             request_kwargs["stream"] = True
+            if _include_openai_stream_usage(endpoint):
+                request_kwargs["stream_options"] = {"include_usage": True}
             client = openai.OpenAI(**client_kwargs)
             return _run_llm_with_wall_timeout(
                 lambda: list(
@@ -621,12 +615,14 @@ class OpenAIChatEndpointInvoker:
         message = first.get("message") or {}
         text = _message_text(message)
         reasoning_text = _message_reasoning_text(message)
+        usage = _response_usage(payload)
         outcome = CanonicalLLMOutcome(
             text=text,
             reasoning_text=reasoning_text,
             provider_specific_fields=_message_provider_specific_fields(message),
             tool_calls=_parse_tool_calls(message, tool_name_aliases=tool_name_aliases),
             finish_reason=str(first.get("finish_reason") or LLMFinishReason.STOP),
+            **_usage_fields(usage),
             response_mode=_coerce_response_mode(((payload or {}).get("metadata") or {}).get("response_mode")),
         )
         _ensure_llm_invocation_result_has_payload(outcome)
@@ -676,11 +672,13 @@ class OpenAIChatEndpointInvoker:
                         text = str(summary.get("text") or "")
                         if text:
                             reasoning_parts.append(text)
+        usage = _response_usage(payload)
         outcome = CanonicalLLMOutcome(
             text="".join(text_parts),
             reasoning_text="\n".join(reasoning_parts),
             tool_calls=tool_calls,
             finish_reason=LLMFinishReason.TOOL_CALLS if tool_calls else LLMFinishReason.STOP,
+            **_usage_fields(usage),
             response_mode=_coerce_response_mode(((payload or {}).get("metadata") or {}).get("response_mode")) if isinstance(payload, dict) else None,
         )
         _ensure_llm_invocation_result_has_payload(outcome)
@@ -695,6 +693,150 @@ def _ensure_llm_invocation_result_has_payload(result: Any) -> None:
     if isinstance(result, list) and all(isinstance(item, NormalizedLLMStreamEvent) for item in result):
         if _is_empty_successful_stream_result(result):
             raise LLMEndpointInvocationError("llm stream ended without assistant content or tool calls")
+
+
+def _response_usage(payload: Any) -> LLMUsage:
+    """Normalize OpenAI-compatible and Anthropic usage into one contract."""
+
+    if not isinstance(payload, dict):
+        return LLMUsage()
+    raw_usage = payload.get("usage")
+    usage = dict(raw_usage) if isinstance(raw_usage, dict) else {}
+    reported = isinstance(raw_usage, dict)
+    provider_input = _nonnegative_int(
+        usage.get("input_tokens", usage.get("prompt_tokens", 0))
+    )
+    output_tokens = _nonnegative_int(
+        usage.get("output_tokens", usage.get("completion_tokens", 0))
+    )
+    input_details = _first_mapping(
+        usage,
+        "prompt_tokens_details",
+        "input_tokens_details",
+        "input_token_details",
+    )
+    output_details = _first_mapping(
+        usage,
+        "completion_tokens_details",
+        "output_tokens_details",
+        "output_token_details",
+    )
+    anthropic_cached = _optional_nonnegative_int(usage.get("cache_read_input_tokens"))
+    detail_cached = _first_optional_nonnegative_int(
+        input_details,
+        "cached_tokens",
+        "cache_read_tokens",
+        "cache_read_input_tokens",
+    )
+    cached_input_tokens = anthropic_cached if anthropic_cached is not None else detail_cached or 0
+
+    anthropic_write = _optional_nonnegative_int(usage.get("cache_creation_input_tokens"))
+    if anthropic_write is None:
+        cache_creation = usage.get("cache_creation")
+        if isinstance(cache_creation, dict):
+            anthropic_write = sum(_nonnegative_int(value) for value in cache_creation.values())
+    detail_write = _first_optional_nonnegative_int(
+        input_details,
+        "cache_write_tokens",
+        "cache_creation_tokens",
+        "cache_creation_input_tokens",
+    )
+    cache_write_input_tokens = anthropic_write if anthropic_write is not None else detail_write or 0
+
+    # Anthropic reports uncached, cache-read, and cache-write input as separate
+    # top-level categories. OpenAI-compatible APIs report one total with cache
+    # categories nested inside token details.
+    split_input_categories = anthropic_cached is not None or anthropic_write is not None
+    if split_input_categories:
+        uncached_input_tokens = provider_input
+        input_tokens = provider_input + cached_input_tokens + cache_write_input_tokens
+    else:
+        input_tokens = max(provider_input, cached_input_tokens + cache_write_input_tokens)
+        uncached_input_tokens = max(
+            0,
+            input_tokens - cached_input_tokens - cache_write_input_tokens,
+        )
+
+    reasoning_tokens = _first_optional_nonnegative_int(
+        output_details,
+        "reasoning_tokens",
+        "reasoning_output_tokens",
+    ) or 0
+    raw_cost = usage.get("cost")
+    if raw_cost is None:
+        raw_cost = usage.get("total_cost")
+    if raw_cost is None:
+        raw_cost = payload.get("cost")
+    if raw_cost is None:
+        raw_cost = payload.get("total_cost")
+    return LLMUsage(
+        input_tokens=input_tokens,
+        uncached_input_tokens=uncached_input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        cache_write_input_tokens=cache_write_input_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
+        cost=_nonnegative_float(raw_cost),
+        reported=reported,
+    )
+
+
+def _usage_fields(usage: LLMUsage) -> dict[str, Any]:
+    return {
+        "input_tokens": usage.input_tokens,
+        "uncached_input_tokens": usage.uncached_input_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "cache_write_input_tokens": usage.cache_write_input_tokens,
+        "output_tokens": usage.output_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "cost": usage.cost,
+        "usage_reported": usage.reported,
+    }
+
+
+def _first_mapping(source: dict[str, Any], *keys: str) -> dict[str, Any]:
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, dict):
+            return dict(value)
+    return {}
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return _nonnegative_int(value)
+
+
+def _first_optional_nonnegative_int(source: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        if key in source and source.get(key) is not None:
+            return _nonnegative_int(source.get(key))
+    return None
+
+
+def _include_openai_stream_usage(endpoint: Any) -> bool:
+    """Request the terminal usage chunk unless an adapter explicitly opts out."""
+
+    capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
+    for key in ("stream_usage", "include_stream_usage", "supports_stream_usage"):
+        if key in capabilities:
+            return bool(capabilities.get(key))
+    return True
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _nonnegative_float(value: Any) -> float:
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _endpoint_max_output_tokens_upper_limit(endpoint: LLMEndpointModel) -> int | None:
@@ -841,7 +983,12 @@ def _strip_truncated_tool_calls(result: Any) -> Any:
 
 
 def _merge_output_recovery_results(partials: list[Any], final_result: Any) -> Any:
+    partial_usage = sum(
+        (_invocation_usage(item) for item in partials),
+        start=LLMUsage(),
+    )
     if isinstance(final_result, CanonicalLLMOutcome):
+        merged_usage = partial_usage + _invocation_usage(final_result)
         return replace(
             final_result,
             text="".join(_invocation_text(item) for item in partials) + str(final_result.text or ""),
@@ -850,6 +997,7 @@ def _merge_output_recovery_results(partials: list[Any], final_result: Any) -> An
                 for part in [*(_invocation_reasoning_text(item) for item in partials), str(final_result.reasoning_text or "")]
                 if part
             ),
+            **_usage_fields(merged_usage),
         )
     if isinstance(final_result, list):
         prefix: list[NormalizedLLMStreamEvent] = []
@@ -872,7 +1020,13 @@ def _merge_output_recovery_results(partials: list[Any], final_result: Any) -> An
                 for event in partial
                 if event.event_kind in {LLMStreamEventKind.TEXT_DELTA, LLMStreamEventKind.REASONING_DELTA}
             )
-        return [*prefix, *final_result]
+        return [
+            *prefix,
+            *_add_usage_to_invocation_result(
+                final_result,
+                partial_usage,
+            ),
+        ]
     return final_result
 
 
@@ -881,6 +1035,130 @@ def _merge_exhausted_output_recovery_results(partials: list[Any]) -> Any:
         return CanonicalLLMOutcome(text="", finish_reason="length")
     final_result = _strip_truncated_tool_calls(partials[-1])
     return _merge_output_recovery_results(partials[:-1], final_result)
+
+
+def _invocation_usage(result: Any) -> LLMUsage:
+    if isinstance(result, CanonicalLLMOutcome):
+        input_tokens = max(0, int(result.input_tokens or 0))
+        uncached_input_tokens = max(0, int(result.uncached_input_tokens or 0))
+        cached_input_tokens = max(0, int(result.cached_input_tokens or 0))
+        cache_write_input_tokens = max(0, int(result.cache_write_input_tokens or 0))
+        if input_tokens and not (
+            uncached_input_tokens or cached_input_tokens or cache_write_input_tokens
+        ):
+            uncached_input_tokens = input_tokens
+        return LLMUsage(
+            input_tokens=input_tokens,
+            uncached_input_tokens=uncached_input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_input_tokens=cache_write_input_tokens,
+            output_tokens=max(0, int(result.output_tokens or 0)),
+            reasoning_tokens=max(0, int(result.reasoning_tokens or 0)),
+            cost=max(0.0, float(result.cost or 0.0)),
+            reported=bool(result.usage_reported),
+        )
+    if isinstance(result, list):
+        return sum(
+            (
+                _stream_event_usage(event)
+                for event in result
+            ),
+            start=LLMUsage(),
+        )
+    return LLMUsage()
+
+
+def _stream_event_usage(event: Any) -> LLMUsage:
+    input_tokens = max(0, int(getattr(event, "input_tokens", 0) or 0))
+    uncached_input_tokens = max(
+        0,
+        int(getattr(event, "uncached_input_tokens", 0) or 0),
+    )
+    cached_input_tokens = max(
+        0,
+        int(getattr(event, "cached_input_tokens", 0) or 0),
+    )
+    cache_write_input_tokens = max(
+        0,
+        int(getattr(event, "cache_write_input_tokens", 0) or 0),
+    )
+    if input_tokens and not (
+        uncached_input_tokens or cached_input_tokens or cache_write_input_tokens
+    ):
+        uncached_input_tokens = input_tokens
+    return LLMUsage(
+        input_tokens=input_tokens,
+        uncached_input_tokens=uncached_input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        cache_write_input_tokens=cache_write_input_tokens,
+        output_tokens=max(0, int(getattr(event, "output_tokens", 0) or 0)),
+        reasoning_tokens=max(
+            0,
+            int(getattr(event, "reasoning_tokens", 0) or 0),
+        ),
+        cost=max(0.0, float(getattr(event, "cost", 0.0) or 0.0)),
+        reported=bool(getattr(event, "usage_reported", False)),
+    )
+
+
+def _invocation_provider_response_count(result: Any) -> int:
+    if isinstance(result, CanonicalLLMOutcome):
+        return max(0, int(result.provider_response_count or 0))
+    if isinstance(result, list):
+        return sum(
+            max(0, int(getattr(event, "provider_response_count", 0) or 0))
+            for event in result
+        )
+    return 0
+
+
+def _add_usage_to_invocation_result(
+    result: Any,
+    extra: LLMUsage,
+) -> Any:
+    if extra == LLMUsage():
+        return result
+    if isinstance(result, CanonicalLLMOutcome):
+        merged = _invocation_usage(result) + extra
+        return replace(
+            result,
+            **_usage_fields(merged),
+        )
+    if isinstance(result, list):
+        events = list(result)
+        for index in range(len(events) - 1, -1, -1):
+            event = events[index]
+            if event.event_kind != LLMStreamEventKind.DONE:
+                continue
+            merged = _invocation_usage([event]) + extra
+            events[index] = replace(
+                event,
+                **_usage_fields(merged),
+            )
+            return events
+        events.append(
+            NormalizedLLMStreamEvent(
+                event_kind=LLMStreamEventKind.DONE,
+                **_usage_fields(extra),
+            )
+        )
+        return events
+    return result
+
+
+def _with_provider_response_count(result: Any, count: int) -> Any:
+    normalized_count = max(0, int(count or 0))
+    if isinstance(result, CanonicalLLMOutcome):
+        return replace(result, provider_response_count=normalized_count)
+    if isinstance(result, list):
+        events = list(result)
+        for index in range(len(events) - 1, -1, -1):
+            event = events[index]
+            if event.event_kind != LLMStreamEventKind.DONE:
+                continue
+            events[index] = replace(event, provider_response_count=normalized_count)
+            return events
+    return result
 
 
 def _is_empty_successful_llm_outcome(outcome: CanonicalLLMOutcome) -> bool:
@@ -1099,9 +1377,19 @@ def _stream_events_from_outcome(outcome: CanonicalLLMOutcome) -> Iterable[Normal
     for tool_call in outcome.tool_calls:
         yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call)
     if outcome.tool_calls:
-        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.TOOL_CALLS)
+        yield NormalizedLLMStreamEvent(
+            event_kind=LLMStreamEventKind.DONE,
+            finish_reason=LLMFinishReason.TOOL_CALLS,
+            **_usage_fields(_invocation_usage(outcome)),
+            provider_response_count=outcome.provider_response_count,
+        )
         return
-    yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=outcome.finish_reason)
+    yield NormalizedLLMStreamEvent(
+        event_kind=LLMStreamEventKind.DONE,
+        finish_reason=outcome.finish_reason,
+        **_usage_fields(_invocation_usage(outcome)),
+        provider_response_count=outcome.provider_response_count,
+    )
 
 
 def _split_openai_responses_sdk_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1201,12 +1489,14 @@ def _parse_anthropic_messages_response(
                 )
     stop_reason = str((payload or {}).get("stop_reason") or "") if isinstance(payload, dict) else ""
     finish_reason = LLMFinishReason.TOOL_CALLS if tool_calls else _anthropic_finish_reason(stop_reason)
+    usage = _response_usage(payload)
     outcome = CanonicalLLMOutcome(
         text="".join(text_parts),
         reasoning_text="\n".join(reasoning_parts),
         provider_specific_fields=_anthropic_provider_specific_fields(thinking_blocks, reasoning_parts),
         tool_calls=tool_calls,
         finish_reason=finish_reason,
+        **_usage_fields(usage),
     )
     _ensure_llm_invocation_result_has_payload(outcome)
     return outcome
@@ -1528,6 +1818,7 @@ class LLMRuntime(LLMRuntimePort):
     think_level: str = DEFAULT_THINK_LEVEL
     active_endpoint_id: str | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
+    usage_ledger: LLMUsageLedger = field(default_factory=LLMUsageLedger, repr=False)
 
     def __post_init__(self) -> None:
         if self.endpoint_invoker is None:
@@ -1596,6 +1887,10 @@ class LLMRuntime(LLMRuntimePort):
         configured_active = self.settings_repository.get_active_llm_endpoint_id()
         endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
         self.active_endpoint_id = configured_active if configured_active in endpoint_ids else None
+
+    def usage_snapshot(self) -> dict[str, Any]:
+        """Return process-lifetime provider usage without exposing prompts."""
+        return self.usage_ledger.snapshot()
 
     def _enabled_endpoints_for_preference(
         self,
@@ -1773,6 +2068,7 @@ class LLMRuntime(LLMRuntimePort):
             self.last_request = effective_request
             self.last_endpoint_id = None
             self.last_model_id = None
+            self.usage_ledger.record_failed_request()
             return _EndpointInvocationResult(kind="no_endpoints")
 
         last_error: Exception | None = None
@@ -1780,6 +2076,7 @@ class LLMRuntime(LLMRuntimePort):
         last_error_type = ""
         had_stale_connection = False
         failed_connection_domains: set[tuple[str, str]] = set()
+        last_attempted_endpoint_id = ""
         for endpoint_index, endpoint in enumerate(enabled):
             endpoint_domain = _endpoint_connection_failure_domain(endpoint)
             if endpoint_domain is not None and endpoint_domain in failed_connection_domains:
@@ -1828,6 +2125,7 @@ class LLMRuntime(LLMRuntimePort):
 
             attempt_count = max(1, self.endpoint_retry_attempts)
             for attempt in range(attempt_count):
+                last_attempted_endpoint_id = endpoint.endpoint_id
                 try:
                     timeout_seconds = self._timeout_seconds_for_metadata(dict(effective_request.metadata))
                     recovered = self._invoke_with_output_recovery(
@@ -1854,6 +2152,13 @@ class LLMRuntime(LLMRuntimePort):
                             endpoint_index=endpoint_index,
                             endpoint_count=len(enabled),
                         )
+                    self.usage_ledger.record_success(
+                        endpoint_id=endpoint.endpoint_id,
+                        model_id=endpoint.model_id,
+                        provider=endpoint.provider,
+                        usage=_invocation_usage(result),
+                        provider_response_count=_invocation_provider_response_count(result),
+                    )
                     return _EndpointInvocationResult(
                         kind="success",
                         value=result,
@@ -1861,6 +2166,11 @@ class LLMRuntime(LLMRuntimePort):
                         effective_request=effective_request,
                     )
                 except Exception as exc:
+                    self.usage_ledger.record_failed_attempt(
+                        endpoint_id=endpoint.endpoint_id,
+                        model_id=endpoint.model_id,
+                        provider=endpoint.provider,
+                    )
                     last_error = exc
                     error_kind = _classify_retry_error(exc)
                     last_error_kind = error_kind
@@ -1968,6 +2278,9 @@ class LLMRuntime(LLMRuntimePort):
         self.last_model_id = None
         if last_error is not None and not last_error_type:
             last_error_type = type(last_error).__name__
+        self.usage_ledger.record_failed_request(
+            endpoint_id=last_attempted_endpoint_id,
+        )
         return _EndpointInvocationResult(
             kind="error",
             error_kind=last_error_kind,
@@ -1981,9 +2294,20 @@ class LLMRuntime(LLMRuntimePort):
         invoke_once: Callable[[CanonicalLLMRequest], Any],
     ) -> _OutputRecoveryResult:
         current_request = request
-        result = invoke_once(current_request)
+        provider_response_count = 0
+
+        def invoke_and_count(candidate: CanonicalLLMRequest) -> Any:
+            nonlocal provider_response_count
+            value = invoke_once(candidate)
+            provider_response_count += 1
+            return value
+
+        result = invoke_and_count(current_request)
         if not _is_output_limited_result(result):
-            return _OutputRecoveryResult(value=result, request=current_request)
+            return _OutputRecoveryResult(
+                value=_with_provider_response_count(result, provider_response_count),
+                request=current_request,
+            )
 
         settings = _max_output_recovery_settings(
             endpoint,
@@ -1991,9 +2315,16 @@ class LLMRuntime(LLMRuntimePort):
             default_attempts=self._max_output_recovery_attempts,
         )
         if not settings["enabled"]:
-            return _OutputRecoveryResult(value=_strip_truncated_tool_calls(result), request=current_request)
+            return _OutputRecoveryResult(
+                value=_with_provider_response_count(
+                    _strip_truncated_tool_calls(result),
+                    provider_response_count,
+                ),
+                request=current_request,
+            )
 
         upper_limit = int(settings["upper_limit"])
+        discarded_usage = LLMUsage()
         if current_request.max_output_tokens < upper_limit:
             escalated_request = _with_output_recovery_metadata(
                 replace(current_request, max_output_tokens=upper_limit),
@@ -2010,8 +2341,9 @@ class LLMRuntime(LLMRuntimePort):
                     previous_max_output_tokens=current_request.max_output_tokens,
                     max_output_tokens=upper_limit,
                 )
+                discarded_usage = _invocation_usage(result)
                 current_request = escalated_request
-                result = invoke_once(current_request)
+                result = invoke_and_count(current_request)
                 if not _is_output_limited_result(result):
                     self._emit_llm_progress(
                         "llm_output_limit_recovery_succeeded",
@@ -2020,7 +2352,13 @@ class LLMRuntime(LLMRuntimePort):
                         attempt=0,
                         max_output_tokens=upper_limit,
                     )
-                    return _OutputRecoveryResult(value=result, request=current_request)
+                    return _OutputRecoveryResult(
+                        value=_with_provider_response_count(
+                            _add_usage_to_invocation_result(result, discarded_usage),
+                            provider_response_count,
+                        ),
+                        request=current_request,
+                    )
 
         partial_results: list[Any] = [result]
         max_continuations = int(settings["max_continuations"])
@@ -2043,7 +2381,7 @@ class LLMRuntime(LLMRuntimePort):
                 max_output_tokens=upper_limit,
             )
             current_request = continuation_request
-            result = invoke_once(current_request)
+            result = invoke_and_count(current_request)
             if not _is_output_limited_result(result):
                 merged = _merge_output_recovery_results(partial_results, result)
                 self._emit_llm_progress(
@@ -2053,7 +2391,13 @@ class LLMRuntime(LLMRuntimePort):
                     attempt=continuation_attempt,
                     max_output_tokens=upper_limit,
                 )
-                return _OutputRecoveryResult(value=merged, request=current_request)
+                return _OutputRecoveryResult(
+                    value=_with_provider_response_count(
+                        _add_usage_to_invocation_result(merged, discarded_usage),
+                        provider_response_count,
+                    ),
+                    request=current_request,
+                )
             partial_results.append(result)
 
         exhausted = _merge_exhausted_output_recovery_results(partial_results)
@@ -2065,7 +2409,13 @@ class LLMRuntime(LLMRuntimePort):
             max_attempts=max_continuations,
             max_output_tokens=upper_limit,
         )
-        return _OutputRecoveryResult(value=exhausted, request=current_request)
+        return _OutputRecoveryResult(
+            value=_with_provider_response_count(
+                _add_usage_to_invocation_result(exhausted, discarded_usage),
+                provider_response_count,
+            ),
+            request=current_request,
+        )
 
     def _recovery_request_fits(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> bool:
         advice = self._build_preflight_advice(
@@ -2870,8 +3220,16 @@ def _parse_openai_chat_stream_chunk(
     tool_name_aliases: dict[str, str] | None = None,
 ) -> list[NormalizedLLMStreamEvent]:
     payload = raw_chunk.model_dump() if hasattr(raw_chunk, "model_dump") else raw_chunk.to_dict() if hasattr(raw_chunk, "to_dict") else raw_chunk
+    usage = _response_usage(payload)
     choices = list((payload or {}).get("choices") or [])
     if not choices:
+        if usage.reported or usage.cost:
+            return [
+                NormalizedLLMStreamEvent(
+                    event_kind=LLMStreamEventKind.DONE,
+                    **_usage_fields(usage),
+                )
+            ]
         return []
     first = choices[0] or {}
     delta = first.get("delta") or {}
@@ -2902,6 +3260,7 @@ def _parse_openai_chat_stream_chunk(
             NormalizedLLMStreamEvent(
                 event_kind=LLMStreamEventKind.DONE,
                 finish_reason=str(finish_reason),
+                **_usage_fields(usage),
             )
         )
     return events

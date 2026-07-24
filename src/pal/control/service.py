@@ -422,6 +422,18 @@ class ControlPlane(ControlPlanePort):
         )
         self.register_command(
             ControlCommandSpec(
+                name="status",
+                handler=self._handle_status,
+                description="Show active LLM, prompt-cache, token, request, and cost statistics.",
+                usage="/status",
+                show_in_panel=True,
+                panel_group="builtin",
+                panel_button=True,
+                panel_label="LLM Status",
+            )
+        )
+        self.register_command(
+            ControlCommandSpec(
                 name="interrupt",
                 handler=self._handle_interrupt,
                 description="Interrupt the current active turn in this scope.",
@@ -514,6 +526,13 @@ class ControlPlane(ControlPlanePort):
         return ControlAction(
             action_kind="show_panel",
             target_scope="control",
+            route=invocation.route,
+        )
+
+    def _handle_status(self, invocation: ControlCommandInvocation) -> ControlAction:
+        return ControlAction(
+            action_kind="show_llm_status",
+            target_scope="llm",
             route=invocation.route,
         )
 

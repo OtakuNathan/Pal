@@ -63,8 +63,8 @@ class LspManagerClient:
     def rescan_sync(self) -> dict[str, Any]:
         return self.request_sync("rescan")
 
-    def status_sync(self) -> dict[str, Any]:
-        return self.request_sync("status")
+    def status_sync(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.request_sync("status", params)
 
     def doctor_sync(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.request_sync("doctor", params)

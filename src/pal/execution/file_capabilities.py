@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from pal.execution.generated_tool_models import (
     ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput,
     ExecutionFileCapabilitiesFileCapabilityMixinDeleteOutput,
@@ -19,7 +21,7 @@ from pal.execution.file_tool_contracts import (
     FILE_WRITE_DESCRIPTION,
 )
 from pal.execution.file_edit import FileEditTool
-from pal.execution.file_read import FileReadTool
+from pal.execution.file_read import FileReadTool, FileVisibilityCache
 from pal.execution.file_state import FileStateCache, FileStateTool
 from pal.execution.file_write import FileWriteTool
 from pal.execution.path_delete import PathDeleteTool
@@ -33,6 +35,7 @@ from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResu
 
 
 _FILE_STATE_CACHE = FileStateCache()
+_FILE_VISIBILITY_CACHE = FileVisibilityCache()
 
 
 def get_file_state_cache() -> FileStateCache:
@@ -41,6 +44,16 @@ def get_file_state_cache() -> FileStateCache:
 
 def _tool_capability_result(tool: object, args: dict[str, object]) -> IntrospectionResult:
     return tool.invoke(dict(args))
+
+
+def _file_visibility_scope(call: IntrospectionCall) -> str:
+    """Return a stable LLM-context identity without exposing it in tool args."""
+    turn_id = str(call.meta.get("turn_id") or "").strip()
+    if turn_id:
+        return turn_id
+    # Calls outside the normal turn runtime have no trustworthy shared context.
+    # Isolate them instead of claiming content from another caller is visible.
+    return f"unscoped:{uuid4().hex}"
 
 
 class FileCapabilityMixin:
@@ -57,7 +70,14 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_read"},
     )
     def file_read(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(FileReadTool(cache=_FILE_STATE_CACHE), call.args)
+        return _tool_capability_result(
+            FileReadTool(
+                cache=_FILE_STATE_CACHE,
+                visibility_cache=_FILE_VISIBILITY_CACHE,
+                visibility_scope=_file_visibility_scope(call),
+            ),
+            call.args,
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,

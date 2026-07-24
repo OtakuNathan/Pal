@@ -577,6 +577,13 @@ LspPluginLspManagerPluginProviderPrepareWorkspaceInput = _strict_model(
     },
 )
 
+LspPluginLspManagerPluginProviderStatusInput = _strict_model(
+    'LspPluginLspManagerPluginProviderStatusInput',
+    {
+        'workspace_root': (str, Field(None, description='Bound project/worktree root whose persisted LSP readiness should be reported.')),
+    },
+)
+
 LspPluginLspManagerPluginProviderDoctorInput = _strict_model(
     'LspPluginLspManagerPluginProviderDoctorInput',
     {

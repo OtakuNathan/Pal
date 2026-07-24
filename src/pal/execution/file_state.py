@@ -60,7 +60,6 @@ class FileState:
     content: str
     mtime_ns: int
     full_view: bool = True
-    last_view: tuple[int, int] | None = None
 
 
 class FileStateCache:
@@ -88,7 +87,6 @@ class FileStateCache:
         content: str,
         *,
         full_view: bool = True,
-        view: tuple[int, int] | None = None,
     ) -> None:
         """Record that *file_path* has been read with the given *content*.
 
@@ -108,7 +106,6 @@ class FileStateCache:
             content=content,
             mtime_ns=mtime_ns,
             full_view=full_view,
-            last_view=view,
         )
         self._cache[key] = entry
         self._cache.move_to_end(key)

@@ -1263,6 +1263,26 @@ class MinionRunner:
             "llm_round_completed",
             round=state.llm_round_count,
             finish_reason=finish_reason,
+            input_tokens=max(0, int(getattr(outcome, "input_tokens", 0) or 0)),
+            uncached_input_tokens=max(
+                0,
+                int(getattr(outcome, "uncached_input_tokens", 0) or 0),
+            ),
+            cached_input_tokens=max(
+                0,
+                int(getattr(outcome, "cached_input_tokens", 0) or 0),
+            ),
+            cache_write_input_tokens=max(
+                0,
+                int(getattr(outcome, "cache_write_input_tokens", 0) or 0),
+            ),
+            output_tokens=max(0, int(getattr(outcome, "output_tokens", 0) or 0)),
+            reasoning_tokens=max(
+                0,
+                int(getattr(outcome, "reasoning_tokens", 0) or 0),
+            ),
+            cost=max(0.0, float(getattr(outcome, "cost", 0.0) or 0.0)),
+            usage_reported=bool(getattr(outcome, "usage_reported", False)),
             tool_call_count=state.tool_call_count,
             tool_calls=[_tool_call_summary(item) for item in list(getattr(outcome, "tool_calls", []) or [])],
             text_preview=_preview_text(str(getattr(outcome, "text", "") or "")),
@@ -1429,7 +1449,27 @@ class MinionRunner:
         target_name = _effective_capability_name(tool_call)
         if str(target_name).startswith("op_lsp_"):
             return self._tool_call_with_lsp_workspace(tool_call)
+        if str(target_name) == "op_exec_shell":
+            return self._tool_call_with_shell_workspace(tool_call)
         return tool_call
+
+    def _tool_call_with_shell_workspace(self, tool_call: CanonicalToolCall) -> CanonicalToolCall:
+        effective_args = _effective_tool_args(tool_call)
+        workspace = dict(self.pack.workspace or {})
+        repo_path = str(
+            workspace.get("repo_path")
+            or workspace.get("workspace_path")
+            or workspace.get("task_repo_path")
+            or workspace.get("target_repo_path")
+            or ""
+        ).strip()
+        if repo_path and not str(effective_args.get("cwd") or "").strip():
+            effective_args["cwd"] = repo_path
+        if tool_call.name == "op_tool_call":
+            args = dict(tool_call.args or {})
+            args["args"] = effective_args
+            return CanonicalToolCall(name=tool_call.name, args=args, call_id=tool_call.call_id)
+        return CanonicalToolCall(name=tool_call.name, args=effective_args, call_id=tool_call.call_id)
 
     def _tool_call_with_lsp_workspace(self, tool_call: CanonicalToolCall) -> CanonicalToolCall:
         effective_args = _effective_tool_args(tool_call)

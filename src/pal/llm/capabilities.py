@@ -6,7 +6,7 @@ from pal.execution.generated_tool_models import (
 )
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.llm.models import LLMEndpointModel
@@ -201,6 +201,35 @@ class LLMIntrospectionProvider:
         )
 
     @capability_action(
+        namespace=INTROSPECTION_NAMESPACE,
+        scope="module",
+        action_name="usage",
+        description=(
+            "Show resident-process LLM request, token, prompt-cache, reasoning-token, "
+            "and provider-reported cost statistics."
+        ),
+        aliases=("llm_usage",),
+    )
+    def usage(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        payload = llm_status_payload(self)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="llm usage status",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("LLM usage status", payload),
+        )
+
+    def handle_status_control_action(self, action: Any) -> dict[str, Any]:
+        _ = action
+        payload = llm_status_payload(self)
+        return {
+            "message": render_llm_status(payload),
+            "usage": payload["usage"],
+            "active_model": payload["active_model"],
+        }
+
+    @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="management",
@@ -297,6 +326,95 @@ def inspect_llm(provider: LLMIntrospectionProvider) -> LLMActiveModelSnapshot:
     )
 
 
+def llm_status_payload(provider: LLMIntrospectionProvider) -> dict[str, Any]:
+    active = inspect_llm(provider).__dict__
+    snapshot = getattr(provider.runtime, "usage_snapshot", None)
+    usage = snapshot() if callable(snapshot) else {
+        "scope": "resident_process",
+        "request_count": 0,
+        "successful_request_count": 0,
+        "failed_request_count": 0,
+        "provider_request_count": 0,
+        "provider_response_count": 0,
+        "failed_attempt_count": 0,
+        "usage_reported_request_count": 0,
+        "usage_reporting_rate": 0.0,
+        "input_tokens": 0,
+        "uncached_input_tokens": 0,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost": 0.0,
+        "reported": False,
+        "cache_hit_rate": 0.0,
+        "by_endpoint": [],
+    }
+    return {"active_model": active, "usage": dict(usage)}
+
+
+def render_llm_status(payload: dict[str, Any]) -> str:
+    active = dict(payload.get("active_model") or {})
+    usage = dict(payload.get("usage") or {})
+    endpoint_id = str(active.get("endpoint_id") or active.get("active_endpoint_id") or "-")
+    model_id = str(active.get("model_id") or "-")
+    cache_hit_rate = max(0.0, float(usage.get("cache_hit_rate") or 0.0))
+    reporting_rate = max(0.0, float(usage.get("usage_reporting_rate") or 0.0))
+    lines = [
+        "LLM status",
+        f"Active: {endpoint_id} ({model_id})",
+        f"Statistics scope: resident process since {usage.get('started_at') or '-'}",
+        (
+            "Logical requests: "
+            f"{int(usage.get('successful_request_count') or 0)} successful, "
+            f"{int(usage.get('failed_request_count') or 0)} failed"
+        ),
+        (
+            "Provider attempts: "
+            f"{int(usage.get('provider_request_count') or 0)} total, "
+            f"{int(usage.get('provider_response_count') or 0)} completed, "
+            f"{int(usage.get('failed_attempt_count') or 0)} failed"
+        ),
+        (
+            "Input tokens: "
+            f"{int(usage.get('input_tokens') or 0)} total; "
+            f"{int(usage.get('uncached_input_tokens') or 0)} uncached, "
+            f"{int(usage.get('cached_input_tokens') or 0)} cache reads, "
+            f"{int(usage.get('cache_write_input_tokens') or 0)} cache writes"
+        ),
+        f"Prompt cache hit rate: {cache_hit_rate:.1%}",
+        (
+            "Output tokens: "
+            f"{int(usage.get('output_tokens') or 0)} total; "
+            f"{int(usage.get('reasoning_tokens') or 0)} reasoning"
+        ),
+        f"Provider-reported cost: {float(usage.get('cost') or 0.0):.6f}",
+        f"Usage reporting coverage: {reporting_rate:.1%}",
+    ]
+    endpoint_rows = [
+        dict(item)
+        for item in list(usage.get("by_endpoint") or [])
+        if isinstance(item, dict)
+    ]
+    if endpoint_rows:
+        lines.append("By endpoint:")
+        for item in endpoint_rows:
+            endpoint_cache_rate = max(
+                0.0,
+                float(item.get("cache_hit_rate") or 0.0),
+            )
+            lines.append(
+                "  "
+                f"{item.get('endpoint_id') or 'unknown'} "
+                f"({item.get('model_id') or '-'}): "
+                f"{int(item.get('successful_request_count') or 0)} successful, "
+                f"{int(item.get('failed_request_count') or 0)} failed; "
+                f"{int(item.get('input_tokens') or 0)} input, "
+                f"{endpoint_cache_rate:.1%} cache hit"
+            )
+    return "\n".join(lines)
+
+
 def register_with_core(context: MainContext, runtime: LLMRuntime) -> ModuleHandle:
     provider = LLMIntrospectionProvider(runtime=runtime)
     handle = ModuleHandle(
@@ -304,6 +422,9 @@ def register_with_core(context: MainContext, runtime: LLMRuntime) -> ModuleHandl
         tier=MODULE_TIER_CORE_FOUNDATION,
         detachable=False,
         introspection_provider=provider,
+        control_action_handlers={
+            "show_llm_status": provider.handle_status_control_action,
+        },
         ports={"llm": runtime},
     )
     context.register_module(handle)

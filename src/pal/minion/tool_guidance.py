@@ -22,7 +22,9 @@ MINION_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
                     "Use bounded workspace discovery and repository search with standard read-only commands such as "
                     "rg --files, rg, find, grep, and ls when structure or matching locations are needed. Also use shell "
                     "for tests, builds, scripts, package commands, process inspection, and runtime probes required by "
-                    "your assigned task. Ordinary file creation and deletion inside the assigned worktree are allowed. "
+                    "your assigned task. The assigned worktree is already the default working directory, so do not guess "
+                    "or reconstruct a role-workspace path. Put generated build output in $PAL_BUILD_SCRATCH when the "
+                    "worktree is read-only. Ordinary file creation and deletion inside a writable assigned worktree are allowed. "
                     "Piping command output through head or tail to shorten stdout or stderr is allowed."
                 ),
                 "do_not_use_when": (

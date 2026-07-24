@@ -109,7 +109,18 @@ class MinionScopedExecutionShellInput(
         description=(
             "Task-scoped shell command for bounded discovery, tests, builds, "
             "scripts, process probes, and ordinary file operations inside the "
-            "assigned worktree."
+            "assigned worktree. The assigned worktree is the default working "
+            "directory; use $PAL_BUILD_SCRATCH for generated build output when "
+            "the worktree is read-only."
+        ),
+    )
+    timeout_ms: int | None = Field(
+        180_000,
+        ge=1,
+        description=(
+            "Timeout in milliseconds. Defaults to 180000 for builds and tests "
+            "on slower task workers; set a different positive value only when "
+            "the command has a known tighter or longer bound."
         ),
     )
 
@@ -803,6 +814,11 @@ def _scope_descriptor(
     guidance_overrides: dict[str, dict[str, str]],
 ) -> Any:
     canonical = str(descriptor.canonical_path or descriptor.name)
+    input_model = (
+        MinionScopedExecutionShellInput
+        if canonical == "op_exec_shell"
+        else descriptor.InputModel
+    )
     guidance = descriptor.guidance
     if guidance is not None:
         guidance = minion_tool_guidance(
@@ -814,6 +830,7 @@ def _scope_descriptor(
     return replace(
         descriptor,
         description=purpose,
+        InputModel=input_model,
         guidance=guidance,
     )
 

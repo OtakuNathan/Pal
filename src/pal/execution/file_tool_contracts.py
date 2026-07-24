@@ -12,7 +12,9 @@ DEFAULT_FILE_READ_LIMIT = 2000
 FILE_READ_DESCRIPTION = (
     "Read a UTF-8 text file and return line-numbered content. "
     "Use offset and limit for large files. Read the complete file before editing, "
-    "overwriting, or deleting it so stale changes can be detected."
+    "overwriting, or deleting it so stale changes can be detected. Re-reading an "
+    "unchanged line range already present in the current context returns a compact "
+    "unchanged marker instead of duplicating its content."
 )
 
 FILE_EDIT_DESCRIPTION = (

@@ -57,15 +57,15 @@ class FileStateCacheBasicTests(unittest.TestCase):
 
     def test_partial_view_does_not_authorize_full_mutation(self) -> None:
         cache = FileStateCache()
-        cache.mark_read(__file__, "partial", full_view=False, view=(1, 1))
+        cache.mark_read(__file__, "partial", full_view=False)
 
         self.assertEqual(cache.get_valid(__file__), "partial")
         self.assertIsNone(cache.get_valid_full(__file__))
 
     def test_full_view_is_not_downgraded_by_later_partial_read(self) -> None:
         cache = FileStateCache()
-        cache.mark_read(__file__, "same", full_view=True, view=(1, 10))
-        cache.mark_read(__file__, "same", full_view=False, view=(2, 3))
+        cache.mark_read(__file__, "same", full_view=True)
+        cache.mark_read(__file__, "same", full_view=False)
 
         self.assertEqual(cache.get_valid_full(__file__), "same")
 

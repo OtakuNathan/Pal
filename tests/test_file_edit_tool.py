@@ -183,7 +183,7 @@ class MultipleMatchesErrorTests(_TempFileMixin, unittest.TestCase):
 class PartialReadErrorTests(_TempFileMixin, unittest.TestCase):
     def test_partial_read_cannot_authorize_edit(self) -> None:
         path = self._write_tmp("partial.txt", "alpha\nbeta\n")
-        self.cache.mark_read(path, "alpha\nbeta\n", full_view=False, view=(1, 1))
+        self.cache.mark_read(path, "alpha\nbeta\n", full_view=False)
 
         result = self.tool.invoke(
             {

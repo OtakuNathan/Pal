@@ -10,7 +10,10 @@ from pal.core import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.minion.catalog import MinionCatalogService
 from pal.minion.profiles import MinionProfileRegistry, resolve_pinned_minion_pack
-from pal.minion.scoped_execution import MinionScopedExecutionRuntime
+from pal.minion.scoped_execution import (
+    MinionScopedExecutionRuntime,
+    MinionScopedExecutionShellInput,
+)
 from pal.minion.workspace_tools import _normalized_reference_paths
 from pal.execution.contracts import CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
@@ -653,6 +656,13 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         assert spec is not None
         properties = dict(spec["input_schema"]["properties"])
         self.assertIn("cwd", properties)
+        self.assertEqual(properties["timeout_ms"]["default"], 180_000)
+        self.assertEqual(
+            MinionScopedExecutionShellInput.model_validate(
+                {"cmd": "python -m pytest tests/"}
+            ).timeout_ms,
+            180_000,
+        )
         provider = {
             item["function"]["name"]: item["function"]
             for item in scoped.build_llm_tool_contracts()
@@ -667,6 +677,17 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertNotIn("Minion", description)
         self.assertIn("If a command is trapped, do not retry it", description)
         self.assertNotIn("Role-local", description)
+        result = asyncio.run(
+            scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="run_shell",
+                    args={"cmd": "true"},
+                    call_id="shell-default-timeout",
+                )
+            )
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.structured["timeout_ms"], 180_000)
 
         with self.assertRaisesRegex(ValueError, "unknown fields"):
             MinionScopedExecutionRuntime(

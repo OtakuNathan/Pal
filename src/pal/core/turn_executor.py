@@ -272,7 +272,8 @@ class TurnExecutor:
             if outcome.finish_reason != LLMFinishReason.COMPACT_REQUIRED:
                 continuation.finalization_attempted = True
             if outcome.finish_reason != LLMFinishReason.COMPACT_REQUIRED and (outcome.tool_calls or not outcome.text.strip()):
-                outcome = CanonicalLLMOutcome(
+                outcome = replace(
+                    outcome,
                     text=self.fallback_final_reply(continuation),
                     tool_calls=[],
                     finish_reason=LLMFinishReason.FALLBACK,
@@ -300,13 +301,14 @@ class TurnExecutor:
                 origin="llm_request",
                 conversation_context={"turn_id": continuation.turn_id},
             )
-            outcome = CanonicalLLMOutcome(
+            outcome = replace(
+                outcome,
                 text=self._render_failure_feedback_text(failure_result.user_feedback),
                 reasoning_text="",
                 tool_calls=[],
                 finish_reason=LLMFinishReason.FALLBACK,
                 response_mode=LLMResponseMode.CHAT,
-        )
+            )
         return EffectResult(status=RuntimeStatus.OK, payload=outcome)
 
     def _resolve_llm_tools(self, continuation, tools_override: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -488,6 +490,15 @@ class TurnExecutor:
             "finish_reason": LLMFinishReason.STOP,
             "response_mode": None,
             "provider_specific_fields": {},
+            "input_tokens": 0,
+            "uncached_input_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost": 0.0,
+            "usage_reported": False,
+            "provider_response_count": 0,
         }
 
         events = await self._call_port_async(llm_runtime, "agenerate_stream", "generate_stream", request)
@@ -524,6 +535,18 @@ class TurnExecutor:
             provider_specific_fields=provider_specific_fields,
             tool_calls=tool_calls,
             finish_reason=state["finish_reason"],
+            input_tokens=max(0, int(state.get("input_tokens") or 0)),
+            uncached_input_tokens=max(0, int(state.get("uncached_input_tokens") or 0)),
+            cached_input_tokens=max(0, int(state.get("cached_input_tokens") or 0)),
+            cache_write_input_tokens=max(
+                0,
+                int(state.get("cache_write_input_tokens") or 0),
+            ),
+            output_tokens=max(0, int(state.get("output_tokens") or 0)),
+            reasoning_tokens=max(0, int(state.get("reasoning_tokens") or 0)),
+            cost=max(0.0, float(state.get("cost") or 0.0)),
+            usage_reported=bool(state.get("usage_reported")),
+            provider_response_count=max(0, int(state.get("provider_response_count") or 0)),
             response_mode=state["response_mode"],
         )
 
@@ -555,6 +578,33 @@ class TurnExecutor:
     def _accumulate_done(event, _text, _reasoning, _tools, state):
         state["finish_reason"] = event.finish_reason or state["finish_reason"]
         state["response_mode"] = event.response_mode or state["response_mode"]
+        state["input_tokens"] = int(state.get("input_tokens") or 0) + max(
+            0, int(getattr(event, "input_tokens", 0) or 0)
+        )
+        state["uncached_input_tokens"] = int(
+            state.get("uncached_input_tokens") or 0
+        ) + max(0, int(getattr(event, "uncached_input_tokens", 0) or 0))
+        state["cached_input_tokens"] = int(
+            state.get("cached_input_tokens") or 0
+        ) + max(0, int(getattr(event, "cached_input_tokens", 0) or 0))
+        state["cache_write_input_tokens"] = int(
+            state.get("cache_write_input_tokens") or 0
+        ) + max(0, int(getattr(event, "cache_write_input_tokens", 0) or 0))
+        state["output_tokens"] = int(state.get("output_tokens") or 0) + max(
+            0, int(getattr(event, "output_tokens", 0) or 0)
+        )
+        state["reasoning_tokens"] = int(state.get("reasoning_tokens") or 0) + max(
+            0, int(getattr(event, "reasoning_tokens", 0) or 0)
+        )
+        state["cost"] = float(state.get("cost") or 0.0) + max(
+            0.0, float(getattr(event, "cost", 0.0) or 0.0)
+        )
+        state["usage_reported"] = bool(state.get("usage_reported")) or bool(
+            getattr(event, "usage_reported", False)
+        )
+        state["provider_response_count"] = int(
+            state.get("provider_response_count") or 0
+        ) + max(0, int(getattr(event, "provider_response_count", 0) or 0))
 
     @staticmethod
     def _merge_stream_provider_specific_fields(state: dict[str, Any], fields: dict[str, Any]) -> None:

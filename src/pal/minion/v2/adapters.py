@@ -68,6 +68,15 @@ def prepare_v2_workspace_environment(
     report["environment_fingerprint"] = hashlib.sha256(
         json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    # Execution coordinates help the role use its bound workspace without
+    # guessing paths, but do not describe the source/toolchain environment.
+    report.update(
+        {
+            "default_shell_cwd": str(root or ""),
+            "build_scratch_root": str(prepared.get("build_scratch_dir") or ""),
+            "review_scratch_root": str(prepared.get("review_scratch_dir") or ""),
+        }
+    )
     prepared["prepared_environment_fingerprint"] = report["environment_fingerprint"]
     return prepared, report
 
@@ -124,6 +133,7 @@ def prepare_v2_role_workspace(
         "artifact_dir": attempt_dir / "artifacts",
         "artifact_stage_dir": attempt_dir / "artifact-stage",
         "log_dir": attempt_dir / "logs",
+        "build_scratch_dir": attempt_dir / "build-scratch",
         "review_scratch_dir": attempt_dir / "review-scratch",
     }
     for path in writable_dirs.values():

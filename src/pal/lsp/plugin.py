@@ -12,6 +12,7 @@ from pal.execution.generated_tool_models import (
     LspPluginLspManagerPluginProviderPrepareCallHierarchyInput,
     LspPluginLspManagerPluginProviderPrepareWorkspaceInput,
     LspPluginLspManagerPluginProviderReferencesInput,
+    LspPluginLspManagerPluginProviderStatusInput,
     LspPluginLspManagerPluginProviderWorkspaceSymbolsInput,
 )
 
@@ -244,10 +245,23 @@ class LspManagerPluginProvider:
         payload = self._status_payload()
         return IntrospectionResult(status=RuntimeStatus.OK, text="lsp status", structured=payload, llm_text=render_titled_structured_for_llm("LSP status", payload))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="status", description="List configured LSP servers and provider health", aliases=("lsp_status",))
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="lsp",
+        family="lsp",
+        action_name="status",
+        description=(
+            "Report the bound worktree's persisted LSP readiness and recognition-probe result, "
+            "plus configured server health."
+        ),
+        InputModel=LspPluginLspManagerPluginProviderStatusInput,
+        aliases=("lsp_status",),
+    )
     def status(self, call: CapabilityCall) -> CapabilityResult:
-        _ = call
-        return _capability_from_rpc("LSP status", self._request_or_error("status"))
+        return _capability_from_rpc(
+            "LSP status",
+            self._request_or_error("status", dict(call.args or {})),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,

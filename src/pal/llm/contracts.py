@@ -71,6 +71,15 @@ class CanonicalLLMOutcome:
     reasoning_text: str = ""
     tool_calls: list[CanonicalToolCall] = field(default_factory=list)
     finish_reason: str = "stop"
+    input_tokens: int = 0
+    uncached_input_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cost: float = 0.0
+    usage_reported: bool = False
+    provider_response_count: int = 0
     response_mode: str | None = None
     target_input_budget: int = 0
     reserved_output_tokens: int = 0
