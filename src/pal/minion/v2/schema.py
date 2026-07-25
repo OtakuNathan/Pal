@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 18
+MINION_V2_SCHEMA_VERSION = 19
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -458,6 +459,8 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
         _migrate_superseded_architecture_revisions_v16(connection)
     if previous_version < 18:
         _migrate_role_protocol_v18(connection)
+    if previous_version < 19:
+        _quiesce_pre_scope_workflows_v19(connection)
     connection.execute(
         """
         INSERT INTO minion_v2_schema_meta(schema_key, schema_value)
@@ -506,6 +509,140 @@ def _rename_role_protocol_tables_v18(connection: sqlite3.Connection) -> None:
         "minion_v2_worker_attempts_assignment",
     ):
         connection.execute(f"DROP INDEX IF EXISTS {index_name}")
+
+
+def _quiesce_pre_scope_workflows_v19(connection: sqlite3.Connection) -> None:
+    """Require an explicit restart for workflows compiled under the old topology.
+
+    Immutable history, artifacts, task ledgers, and completed workflows remain
+    readable.  Non-terminal role work is fenced off instead of being guessed
+    into the architecture-cycle/module/system session model.
+    """
+
+    terminal = {"COMPLETED", "REJECTED", "CANCELLED"}
+    workflow_rows = connection.execute(
+        """
+        SELECT aggregate_id, payload_json
+        FROM minion_v2_aggregate_snapshots
+        WHERE aggregate_type = 'workflow'
+          AND state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')
+        """
+    ).fetchall()
+    workflow_ids = [str(row[0]) for row in workflow_rows]
+    if not workflow_ids:
+        return
+    blocker = {
+        "kind": "orchestration_contract_changed",
+        "reason": (
+            "workflow was active before role sessions became architecture-cycle, "
+            "module, and workflow-scoped; restart it explicitly"
+        ),
+        "required_action": "restart_workflow",
+        "orchestration_contract_version": "3",
+    }
+    for workflow_id, payload_json in workflow_rows:
+        payload = json.loads(str(payload_json or "{}"))
+        payload["blocker"] = blocker
+        payload["orchestration_contract_version"] = "3"
+        connection.execute(
+            """
+            UPDATE minion_v2_aggregate_snapshots
+            SET state = 'TRIAGE_REQUIRED', version = version + 1,
+                payload_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE aggregate_type = 'workflow' AND aggregate_id = ?
+            """,
+            (
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                str(workflow_id),
+            ),
+        )
+    placeholders = ", ".join("?" for _ in workflow_ids)
+    child_types = (
+        "architecture_revision",
+        "execution_epoch",
+        "dag_node_run",
+        "standalone_review",
+    )
+    type_placeholders = ", ".join("?" for _ in child_types)
+    connection.execute(
+        f"""
+        UPDATE minion_v2_aggregate_snapshots
+        SET state = 'TRIAGE_REQUIRED', version = version + 1,
+            payload_json = json_set(
+                payload_json,
+                '$.blocker',
+                json(?),
+                '$.orchestration_contract_version',
+                '3'
+            ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE workflow_id IN ({placeholders})
+          AND aggregate_type IN ({type_placeholders})
+          AND state NOT IN ('ACCEPTED', 'REJECTED', 'SUPERSEDED', 'COMPLETED', 'CANCELLED')
+        """,
+        (
+            json.dumps(blocker, ensure_ascii=False, sort_keys=True),
+            *workflow_ids,
+            *child_types,
+        ),
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_outbox
+        SET status = 'failed', locked_by = '', locked_until = '',
+            last_error = 'orchestration_contract_changed',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE workflow_id IN ({placeholders})
+          AND status IN ('pending', 'processing', 'retry')
+        """,
+        tuple(workflow_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_role_assignments
+        SET state = 'cancelled', active_attempt_id = '',
+            last_error = 'orchestration_contract_changed',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE workflow_id IN ({placeholders})
+          AND state NOT IN ('settled', 'cancelled')
+        """,
+        tuple(workflow_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_role_attempts
+        SET status = 'cancelled',
+            error_kind = 'orchestration_contract_changed',
+            error_text = 'restart required after orchestration cutover',
+            finished_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE assignment_id IN (
+            SELECT assignment_id FROM minion_v2_role_assignments
+            WHERE workflow_id IN ({placeholders})
+        )
+          AND status NOT IN ('completed', 'failed', 'lost', 'cancelled')
+        """,
+        tuple(workflow_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_role_sessions
+        SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+        WHERE workflow_id IN ({placeholders})
+          AND status NOT IN ('completed', 'cancelled')
+        """,
+        tuple(workflow_ids),
+    )
+    connection.execute(
+        f"""
+        DELETE FROM minion_v2_leases
+        WHERE owner_id IN (
+            SELECT session_id FROM minion_v2_role_sessions
+            WHERE workflow_id IN ({placeholders})
+        )
+        """,
+        tuple(workflow_ids),
+    )
 
 
 def _migrate_role_protocol_v18(connection: sqlite3.Connection) -> None:

@@ -3,21 +3,33 @@
 These specifications model the domain-independent orchestration contract before
 the Python worker spine implements it.
 
-- `ModuleLifecycle.tla` models one durable Node with a module-run Coder and a
-  fresh Verifier session for each immutable Candidate. A role may yield only
-  after Manager records and settles its result receipt.
+- `ModuleLifecycle.tla` models one durable module with Coder and Verifier
+  sessions that survive immutable Candidates, repairs, and replans until the
+  workflow reaches a terminal state. A role may yield only after Manager
+  records and settles its result receipt.
 - `DagLifecycle.tla` models dependency readiness, graph-wide pause/cancel, and
   architecture-defect freeze/replan propagation.
-- `ArchitectureLifecycle.tla` models Architect/Reviewer ownership, human
-  decisions, revision supersession, control requests, and restart recovery.
+- `ArchitectureLifecycle.tla` models Architect/Reviewer sessions that survive
+  immutable correction revisions and close only on the human terminal
+  decision, plus control requests and restart recovery.
 - `StandaloneReviewLifecycle.tla` models review-only execution, report
   publication, pause/cancel, and triage recovery.
-- `OrchestrationLifecycle.tla` composes Workflow, Execution Epoch, and a
-  four-node fork/join DAG. It checks hierarchical control ownership, replan
-  freeze, stale propagation, and completion safety.
+- `OrchestrationLifecycle.tla` composes Workflow, Execution Epoch, parallel
+  module nodes, and one workflow-level System Verifier join. It checks
+  hierarchical control ownership, replan freeze, stale propagation, and
+  completion safety.
+- `SystemVerificationLifecycle.tla` proves that one workflow-level verifier
+  session and durable harness corpus survive module repairs, while PASS remains
+  impossible without real delivery-surface evidence for the complete Candidate
+  Union.
 - `DurableEffects.tla` models Action deduplication, atomic event/outbox writes,
   at-least-once effects, receipts, leases, fencing, worker settlement, and
   manager crashes.
+- `RoleAssignmentRecovery.tla` models logical-effect assignment reuse across
+  regenerated attempt inputs, expired active-attempt recovery, recovery-scan
+  ownership, and settlement by the terminal's immutable receipt identity. It
+  also injects the duplicate-row shape produced by the retired recovery bug to
+  prove that a periodic scan cannot steal an active worker's effect binding.
 - `ImplementationTopology.tla` is generated from the executable Python
   `MachineSpec` graph. It explores the same concrete source/action/target
   relation used by `TransitionEngine` and checks exhaustive classification,

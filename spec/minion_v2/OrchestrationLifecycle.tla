@@ -1,21 +1,21 @@
 --------------------- MODULE OrchestrationLifecycle ---------------------
 EXTENDS Naturals, TLC
 
-CONSTANT Foundation, Drawing, Input, Scenario, MaxGeneration
+CONSTANT Foundation, Drawing, Input, System, MaxGeneration
 
-Nodes == {Foundation, Drawing, Input, Scenario}
+Nodes == {Foundation, Drawing, Input, System}
 
 Deps == [n \in Nodes |->
     CASE n = Foundation -> {}
       [] n = Drawing -> {Foundation}
       [] n = Input -> {Foundation}
-      [] n = Scenario -> {Drawing, Input}]
+      [] n = System -> {Foundation, Drawing, Input}]
 
 Affected == [n \in Nodes |->
     CASE n = Foundation -> Nodes
-      [] n = Drawing -> {Drawing, Scenario}
-      [] n = Input -> {Input, Scenario}
-      [] n = Scenario -> {Scenario}]
+      [] n = Drawing -> {Drawing, System}
+      [] n = Input -> {Input, System}
+      [] n = System -> {System}]
 
 WorkflowStates == {
     "Active", "PauseRequested", "Paused", "CancelRequested",
@@ -377,6 +377,10 @@ DependencySafety ==
 CompletionSafety ==
     /\ epochState = "Completed" => \A n \in Nodes : nodeState[n] = "Accepted"
     /\ workflowState = "Completed" => epochState = "Completed"
+
+SystemStartsAfterAllModules ==
+    nodeState[System] \in {"Active", "Accepted"} =>
+        \A n \in Nodes \ {System} : nodeState[n] = "Accepted"
 
 PauseControlAlignment ==
     workflowState = "Paused" => epochState = "Paused" /\ desiredControl = "Pause"

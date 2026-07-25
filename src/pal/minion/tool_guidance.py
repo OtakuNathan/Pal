@@ -25,7 +25,7 @@ MINION_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
                     "your assigned task. The assigned worktree is already the default working directory, so do not guess "
                     "or reconstruct a role-workspace path. Put generated build output in $PAL_BUILD_SCRATCH when the "
                     "worktree is read-only. Ordinary file creation and deletion inside a writable assigned worktree are allowed. "
-                    "Piping command output through head or tail to shorten stdout or stderr is allowed."
+                    "Run long-lived tests and builds directly so their complete stdout and stderr remain available."
                 ),
                 "do_not_use_when": (
                     "Stay focused on your assigned task; do not inspect or manipulate runtime, orchestration, capability, "
@@ -35,7 +35,9 @@ MINION_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
                     "status, diff, log, show, blame, grep, ls-files, rev-parse, show-ref, and non-mutating branch queries. "
                     "Git mutations and unknown Git subcommands are trapped; leave repository checkpoint mutations to the "
                     "Manager. Do not use shell networking or package-download commands; use search_web/read_web for web "
-                    "research and report missing dependencies as an environment blocker."
+                    "research and report missing dependencies as an environment blocker. Do not pipe long-running tests "
+                    "or builds through head, tail, or grep merely to shorten output; result budgeting handles large output, "
+                    "while those pipelines hide the command that is stalled."
                 ),
                 "failure_next_steps": (
                     "If a command is trapped, do not retry it through another shell spelling or wrapper. For a trapped "

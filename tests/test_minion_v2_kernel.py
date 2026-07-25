@@ -33,11 +33,13 @@ from pal.minion.v2.contracts import (
 )
 from pal.minion.v2.recovery import MinionV2Recovery
 from pal.minion.v2.sessions import (
+    architecture_reviewer_session_id,
     architect_session_id,
     architect_session_id_for_revision,
     coder_session_id,
+    module_verifier_session_id,
     node_role_generation,
-    verifier_session_id,
+    system_verifier_session_id,
 )
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
@@ -459,31 +461,51 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 {"finding_artifact_ref": {"sha256": "finding-a"}},
             ),
         )
-        self.assertNotEqual(
-            architect_session_id_for_revision(
+        self.assertEqual(
+            architecture_reviewer_session_id(
                 "wf-1",
                 "arch-1",
-                {"finding_artifact_ref": {"sha256": "finding-a"}},
+                {"architecture_cycle_id": "cycle-1"},
             ),
-            architect_session_id_for_revision(
+            architecture_reviewer_session_id(
                 "wf-1",
-                "arch-1",
-                {"finding_artifact_ref": {"sha256": "finding-b"}},
+                "arch-2",
+                {"architecture_cycle_id": "cycle-1"},
             ),
         )
-        self.assertNotEqual(
+        self.assertEqual(
             architect_session_id_for_revision(
                 "wf-1",
                 "arch-1",
                 {
+                    "architecture_cycle_id": "cycle-1",
+                    "finding_artifact_ref": {"sha256": "finding-a"},
+                },
+            ),
+            architect_session_id_for_revision(
+                "wf-1",
+                "arch-2",
+                {
+                    "architecture_cycle_id": "cycle-1",
+                    "finding_artifact_ref": {"sha256": "finding-b"},
+                },
+            ),
+        )
+        self.assertEqual(
+            architect_session_id_for_revision(
+                "wf-1",
+                "arch-1",
+                {
+                    "architecture_cycle_id": "cycle-1",
                     "finding_artifact_ref": {"sha256": "finding-a"},
                     "architecture_repair_baseline_ref": {"sha256": "candidate-a"},
                 },
             ),
             architect_session_id_for_revision(
                 "wf-1",
-                "arch-1",
+                "arch-2",
                 {
+                    "architecture_cycle_id": "cycle-1",
                     "finding_artifact_ref": {"sha256": "finding-a"},
                     "architecture_repair_baseline_ref": {"sha256": "candidate-b"},
                 },
@@ -507,19 +529,33 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 },
             ),
         )
-        self.assertEqual(coder_session_id("node-1"), coder_session_id("node-1"))
-        self.assertNotEqual(coder_session_id("node-1"), coder_session_id("node-2"))
         self.assertEqual(
-            verifier_session_id("node-1", "candidate:a"),
-            verifier_session_id("node-1", "candidate:a"),
+            coder_session_id("wf-1", "router"),
+            coder_session_id("wf-1", "router"),
         )
         self.assertNotEqual(
-            verifier_session_id("node-1", "candidate:a"),
-            verifier_session_id("node-1", "candidate:b"),
+            coder_session_id("wf-1", "router"),
+            coder_session_id("wf-1", "codec"),
+        )
+        self.assertEqual(
+            module_verifier_session_id("wf-1", "router"),
+            module_verifier_session_id("wf-1", "router"),
+        )
+        self.assertEqual(
+            system_verifier_session_id("wf-1"),
+            system_verifier_session_id("wf-1"),
         )
         self.assertNotEqual(
-            verifier_session_id("node-1", "candidate:a"),
-            verifier_session_id("node-1", "candidate:a", 1),
+            module_verifier_session_id("wf-1", "router"),
+            module_verifier_session_id("wf-1", "router", 1),
+        )
+        self.assertNotEqual(
+            architect_session_id("wf-1", "cycle-1"),
+            architecture_reviewer_session_id(
+                "wf-1",
+                "arch-1",
+                {"architecture_cycle_id": "cycle-1"},
+            ),
         )
         self.assertEqual(node_role_generation({}), 0)
         self.assertEqual(node_role_generation({"role_session_generation": 2}), 2)
@@ -915,10 +951,10 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ),
         ).snapshot
         self.assertEqual(reopened.state, DagNodeRunState.REPAIR_QUEUED)
-        self.assertEqual(reopened.payload["role_session_generation"], 3)
-        self.assertNotEqual(
-            coder_session_id(accepted.aggregate_id, 2),
-            coder_session_id(reopened.aggregate_id, 3),
+        self.assertEqual(reopened.payload["role_session_generation"], 2)
+        self.assertEqual(
+            coder_session_id(accepted.workflow_id, "router", 2),
+            coder_session_id(reopened.workflow_id, "router", 2),
         )
 
     def test_direct_stale_transition_durably_suspends_queued_assignments(self) -> None:
@@ -957,7 +993,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             DagNodeRunState.SNAPSHOTTING: "REBIND_SNAPSHOTTER",
             DagNodeRunState.REVIEWING: "REBIND_REVIEWER",
             DagNodeRunState.REPAIRING: "REBIND_REPAIRER",
-            DagNodeRunState.VERIFYING: "REBIND_SCENARIO_VERIFIER",
+            DagNodeRunState.VERIFYING: "REBIND_SYSTEM_VERIFIER",
         }
         for state, action_type in node_cases.items():
             with self.subTest(state=state):
@@ -1161,7 +1197,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 DagNodeRunState.ACCEPTED,
                 {
                     "verification_artifact_ref": "artifact:verification",
-                    "scenario_fingerprint": "scenario",
+                    "system_fingerprint": "system",
                 },
             ),
             (
@@ -1189,7 +1225,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     state=source_state,
                     version=6,
                     payload={
-                        "node_kind": "verification"
+                        "node_kind": "system_verification"
                         if source_state == DagNodeRunState.VERIFY_SNAPSHOTTING
                         else "unit",
                         "active_worker_id": "finished-worker",
@@ -1864,6 +1900,8 @@ class MinionV2PersistenceTests(unittest.TestCase):
             mode="author",
             executor_profile_id="software_engineering.v2_architect",
             family_binding_sha="binding",
+            scope_kind="architecture_cycle",
+            subject_key="arch_worker",
         )
         self.repository.create_role_assignment(
             RoleAssignmentRequest(
@@ -2175,6 +2213,21 @@ class MinionV2PersistenceTests(unittest.TestCase):
             {"instruction": "recover process"},
             artifact_type="RolePromptPackArtifact",
         )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="workflow-process-recovery",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-process-recovery",
+                actor="test",
+                expected_version=0,
+                payload={
+                    "epoch_id": "epoch-process-recovery",
+                    "module_name": "process_recovery",
+                    "unit_contract_ref": {"sha256": "contract"},
+                },
+            )
+        )
         self.repository.ensure_role_session(
             session_id="session-process-recovery",
             workflow_id="workflow-process-recovery",
@@ -2184,6 +2237,8 @@ class MinionV2PersistenceTests(unittest.TestCase):
             mode="produce",
             executor_profile_id="software_engineering.v2_coder",
             family_binding_sha="binding",
+            scope_kind=AggregateType.DAG_NODE_RUN.value,
+            subject_key="node-process-recovery",
         )
         assignment = self.repository.create_role_assignment(
             RoleAssignmentRequest(

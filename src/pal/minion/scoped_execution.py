@@ -117,10 +117,11 @@ class MinionScopedExecutionShellInput(
     timeout_ms: int | None = Field(
         180_000,
         ge=1,
+        le=600_000,
         description=(
             "Timeout in milliseconds. Defaults to 180000 for builds and tests "
-            "on slower task workers; set a different positive value only when "
-            "the command has a known tighter or longer bound."
+            "on slower task workers and cannot exceed 600000; set a different "
+            "value only when the command has a known tighter or longer bound."
         ),
     )
 

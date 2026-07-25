@@ -4,519 +4,226 @@ EXTENDS Naturals, TLC
 CONSTANT MaxCandidate
 
 NodeStates == {
-    "Ready", "Executing", "Quiescing", "Snapshotting", "VerifyReady",
-    "Verifying", "VerifyQuiescing", "VerifySnapshotting",
-    "RevisionReady", "Accepted", "Paused", "Frozen",
-    "Cancelled", "Triage"
+    "CoderReady", "Coding", "VerifierReady", "Verifying",
+    "RepairReady", "Accepted", "Cancelled", "Triage"
 }
-
-RoleStates == {
-    "Dormant", "Ready", "Running", "AwaitingSettlement", "Suspended",
-    "Frozen", "Done"
-}
-
+SessionStates == {"Active", "Suspended", "Completed", "Cancelled"}
+WorkflowStates == {"Running", "Completed", "Cancelled"}
 ActiveRoles == {"None", "Coder", "Verifier"}
-ReceiptStates == {"None", "Recorded", "Settled"}
-FailureKinds == {
-    "WorkerFailure", "EffectFailure", "OrphanedWorker",
-    "QuiesceFailure", "SnapshotFailure"
-}
-ResultKinds == {"None", "Candidate", "Pass", "Fail"} \cup FailureKinds
-ControlStates == {"Run", "Pause", "Freeze", "Cancel"}
-ResumeStates == {
-    "Ready", "Quiescing", "Snapshotting", "VerifyReady", "Verifying",
-    "VerifyQuiescing", "VerifySnapshotting", "RevisionReady", "Triage"
-}
-ExecutionModes == {"Initial", "Revision"}
 
 VARIABLES
     nodeState,
-    coderState,
-    verifierState,
+    coderSession,
+    verifierSession,
     activeRole,
-    writerLease,
     candidateVersion,
     verifiedVersion,
     corpusVersion,
-    candidateCorpusVersion,
     coderCorpusVersion,
-    receiptState,
-    resultKind,
-    desiredControl,
-    pauseResume,
-    triageResume,
-    executionMode,
+    workflowState,
     managerUp
 
 vars == <<
-    nodeState, coderState, verifierState, activeRole, writerLease,
-    candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion,
-    coderCorpusVersion, receiptState, resultKind,
-    desiredControl, pauseResume, triageResume, executionMode, managerUp
+    nodeState, coderSession, verifierSession, activeRole,
+    candidateVersion, verifiedVersion, corpusVersion, coderCorpusVersion,
+    workflowState, managerUp
 >>
 
-TerminalStates == {"Accepted", "Cancelled"}
-
-RetryTarget(state, mode) ==
-    CASE state = "Executing" -> IF mode = "Revision" THEN "RevisionReady" ELSE "Ready"
-      [] state = "Verifying" -> "VerifyReady"
-      [] state = "VerifyQuiescing" -> "VerifyQuiescing"
-      [] state = "VerifySnapshotting" -> "VerifySnapshotting"
-      [] state = "Quiescing" -> "Ready"
-      [] state = "Snapshotting" -> "Ready"
-      [] state = "VerifyReady" -> "VerifyReady"
-      [] state = "RevisionReady" -> "RevisionReady"
-      [] state = "Triage" -> "Triage"
-      [] OTHER -> "Ready"
-
 Init ==
-    /\ nodeState = "Ready"
-    /\ coderState = "Ready"
-    /\ verifierState = "Dormant"
+    /\ nodeState = "CoderReady"
+    /\ coderSession = "Suspended"
+    /\ verifierSession = "Suspended"
     /\ activeRole = "None"
-    /\ writerLease = FALSE
     /\ candidateVersion = 0
     /\ verifiedVersion = 0
     /\ corpusVersion = 0
-    /\ candidateCorpusVersion = 0
     /\ coderCorpusVersion = 0
-    /\ receiptState = "None"
-    /\ resultKind = "None"
-    /\ desiredControl = "Run"
-    /\ pauseResume = "Ready"
-    /\ triageResume = "Ready"
-    /\ executionMode = "Initial"
+    /\ workflowState = "Running"
     /\ managerUp = TRUE
 
 StartCoder ==
     /\ managerUp
-    /\ desiredControl = "Run"
-    /\ nodeState \in {"Ready", "RevisionReady"}
+    /\ workflowState = "Running"
+    /\ nodeState \in {"CoderReady", "RepairReady"}
     /\ activeRole = "None"
-    /\ receiptState \in {"None", "Settled"}
-    /\ (nodeState = "RevisionReady" => coderCorpusVersion = corpusVersion)
-    /\ nodeState' = "Executing"
-    /\ coderState' = "Running"
-    /\ verifierState' = verifierState
+    /\ (nodeState = "RepairReady" => coderCorpusVersion = corpusVersion)
+    /\ nodeState' = "Coding"
+    /\ coderSession' = "Active"
     /\ activeRole' = "Coder"
-    /\ writerLease' = TRUE
-    /\ executionMode' = IF nodeState = "RevisionReady" THEN "Revision" ELSE "Initial"
-    /\ receiptState' = "None"
-    /\ resultKind' = "None"
-    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, managerUp>>
+    /\ UNCHANGED <<verifierSession, candidateVersion, verifiedVersion,
+        corpusVersion, coderCorpusVersion, workflowState, managerUp>>
 
-RecordCandidateReceipt ==
+SubmitCandidate ==
     /\ managerUp
-    /\ desiredControl = "Run"
-    /\ nodeState = "Executing"
+    /\ nodeState = "Coding"
     /\ activeRole = "Coder"
-    /\ coderState = "Running"
-    /\ writerLease
-    /\ receiptState = "None"
     /\ candidateVersion < MaxCandidate
-    /\ coderState' = "AwaitingSettlement"
+    /\ nodeState' = "VerifierReady"
+    /\ coderSession' = "Suspended"
+    /\ verifierSession' = "Suspended"
     /\ activeRole' = "None"
-    /\ writerLease' = FALSE
-    /\ receiptState' = "Recorded"
-    /\ resultKind' = "Candidate"
-    /\ UNCHANGED <<nodeState, verifierState, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
-
-SettleCandidateReceipt ==
-    /\ managerUp
-    /\ desiredControl \in {"Run", "Pause"}
-    /\ nodeState = "Executing"
-    /\ coderState = "AwaitingSettlement"
-    /\ receiptState = "Recorded"
-    /\ resultKind = "Candidate"
-    /\ nodeState' = "Quiescing"
-    /\ receiptState' = "Settled"
-    /\ UNCHANGED <<coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
-
-QuiesceCandidate ==
-    /\ managerUp
-    /\ desiredControl = "Run"
-    /\ nodeState = "Quiescing"
-    /\ receiptState = "Settled"
-    /\ ~writerLease
-    /\ nodeState' = "Snapshotting"
-    /\ UNCHANGED <<coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
-
-SnapshotCandidate ==
-    /\ managerUp
-    /\ desiredControl = "Run"
-    /\ nodeState = "Snapshotting"
-    /\ receiptState = "Settled"
-    /\ candidateVersion < MaxCandidate
-    /\ nodeState' = "VerifyReady"
-    /\ coderState' = "Suspended"
-    /\ verifierState' = "Ready"
     /\ candidateVersion' = candidateVersion + 1
-    /\ candidateCorpusVersion' = coderCorpusVersion
-    /\ receiptState' = "None"
-    /\ resultKind' = "None"
-    /\ UNCHANGED <<activeRole, writerLease, verifiedVersion, corpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<verifiedVersion, corpusVersion, coderCorpusVersion,
+        workflowState, managerUp>>
 
 StartVerifier ==
     /\ managerUp
-    /\ desiredControl = "Run"
-    /\ nodeState = "VerifyReady"
-    /\ verifierState = "Ready"
+    /\ workflowState = "Running"
+    /\ nodeState = "VerifierReady"
     /\ activeRole = "None"
-    /\ receiptState = "None"
     /\ nodeState' = "Verifying"
-    /\ verifierState' = "Running"
+    /\ verifierSession' = "Active"
     /\ activeRole' = "Verifier"
-    /\ UNCHANGED <<coderState, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<coderSession, candidateVersion, verifiedVersion,
+        corpusVersion, coderCorpusVersion, workflowState, managerUp>>
 
-RecordVerifierResult(kind) ==
-    /\ kind \in {"Pass", "Fail"}
+VerifierPass ==
     /\ managerUp
-    /\ desiredControl = "Run"
     /\ nodeState = "Verifying"
-    /\ verifierState = "Running"
     /\ activeRole = "Verifier"
-    /\ receiptState = "None"
     /\ corpusVersion < MaxCandidate
-    /\ nodeState' = "VerifyQuiescing"
-    /\ verifierState' = "AwaitingSettlement"
-    /\ activeRole' = "None"
-    /\ receiptState' = "Settled"
-    /\ resultKind' = kind
-    /\ corpusVersion' = corpusVersion + 1
-    /\ UNCHANGED <<coderState, writerLease, candidateVersion, verifiedVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
-
-QuiesceVerifier ==
-    /\ managerUp
-    /\ desiredControl = "Run"
-    /\ nodeState = "VerifyQuiescing"
-    /\ verifierState = "AwaitingSettlement"
-    /\ receiptState = "Settled"
-    /\ resultKind \in {"Pass", "Fail"}
-    /\ nodeState' = "VerifySnapshotting"
-    /\ UNCHANGED <<coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
-
-SettleVerifierPass ==
-    /\ managerUp
-    /\ desiredControl \in {"Run", "Pause"}
-    /\ nodeState = "VerifySnapshotting"
-    /\ verifierState = "AwaitingSettlement"
-    /\ receiptState = "Settled"
-    /\ resultKind = "Pass"
-    /\ candidateVersion > 0
     /\ nodeState' = "Accepted"
-    /\ coderState' = "Done"
-    /\ verifierState' = "Done"
+    /\ verifierSession' = "Suspended"
+    /\ activeRole' = "None"
     /\ verifiedVersion' = candidateVersion
-    /\ candidateCorpusVersion' = corpusVersion
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, corpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ corpusVersion' = corpusVersion + 1
+    /\ UNCHANGED <<coderSession, candidateVersion, coderCorpusVersion,
+        workflowState, managerUp>>
 
-SettleVerifierFail ==
+VerifierFail ==
     /\ managerUp
-    /\ desiredControl \in {"Run", "Pause"}
-    /\ nodeState = "VerifySnapshotting"
-    /\ verifierState = "AwaitingSettlement"
-    /\ receiptState = "Settled"
-    /\ resultKind = "Fail"
-    /\ nodeState' = "RevisionReady"
-    /\ coderState' = "Ready"
-    /\ verifierState' = "Done"
-    /\ coderCorpusVersion' = corpusVersion
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ nodeState = "Verifying"
+    /\ activeRole = "Verifier"
+    /\ candidateVersion < MaxCandidate
+    /\ corpusVersion < MaxCandidate
+    /\ nodeState' = "RepairReady"
+    /\ verifierSession' = "Suspended"
+    /\ activeRole' = "None"
+    /\ corpusVersion' = corpusVersion + 1
+    /\ coderCorpusVersion' = corpusVersion + 1
+    /\ UNCHANGED <<coderSession, candidateVersion, verifiedVersion,
+        workflowState, managerUp>>
 
-ReopenVerification ==
+ReopenAccepted ==
     /\ managerUp
-    /\ desiredControl = "Run"
+    /\ workflowState = "Running"
     /\ nodeState = "Accepted"
-    /\ candidateVersion > 0
-    /\ activeRole = "None"
-    /\ ~writerLease
-    /\ nodeState' = "VerifyReady"
-    /\ verifierState' = "Ready"
+    /\ nodeState' = "VerifierReady"
     /\ verifiedVersion' = candidateVersion - 1
-    /\ receiptState' = "None"
-    /\ resultKind' = "None"
-    /\ UNCHANGED <<coderState, activeRole, writerLease, candidateVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<coderSession, verifierSession, activeRole,
+        candidateVersion, corpusVersion, coderCorpusVersion,
+        workflowState, managerUp>>
 
-RecordFailure(kind) ==
-    /\ kind \in FailureKinds
-    /\ managerUp
-    /\ desiredControl = "Run"
-    /\ nodeState \notin TerminalStates \cup {"Paused", "Frozen", "Triage"}
-    /\ receiptState \in {"None", "Settled"}
-    /\ (receiptState = "Settled" =>
-        nodeState \in {"VerifyQuiescing", "VerifySnapshotting"})
-    /\ (kind = "WorkerFailure" =>
-        /\ nodeState \in {"Executing", "Verifying"}
-        /\ activeRole \in {"Coder", "Verifier"})
-    /\ (kind = "QuiesceFailure" => nodeState \in {"Quiescing", "VerifyQuiescing"})
-    /\ (kind = "SnapshotFailure" => nodeState \in {"Snapshotting", "VerifySnapshotting"})
-    /\ receiptState' = "Recorded"
-    /\ resultKind' = kind
-    /\ triageResume' = RetryTarget(nodeState, executionMode)
-    /\ coderState' = IF activeRole = "Coder" THEN "AwaitingSettlement" ELSE coderState
-    /\ verifierState' = IF activeRole = "Verifier" THEN "AwaitingSettlement" ELSE verifierState
-    /\ activeRole' = "None"
-    /\ writerLease' = FALSE
-    /\ UNCHANGED <<nodeState, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, executionMode, managerUp>>
-
-SettleFailure ==
-    /\ managerUp
-    /\ desiredControl \in {"Run", "Pause"}
-    /\ receiptState = "Recorded"
-    /\ resultKind \in FailureKinds
-    /\ nodeState \notin TerminalStates \cup {"Paused", "Frozen", "Triage"}
+EnterTriage ==
+    /\ nodeState \notin {"Cancelled", "Triage"}
+    /\ workflowState = "Running"
     /\ nodeState' = "Triage"
-    /\ receiptState' = "Settled"
-    /\ coderState' = IF coderState = "AwaitingSettlement" THEN "Suspended" ELSE coderState
-    /\ verifierState' = IF verifierState = "AwaitingSettlement" THEN "Suspended" ELSE verifierState
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ coderSession' =
+        IF coderSession = "Active" THEN "Suspended" ELSE coderSession
+    /\ verifierSession' =
+        IF verifierSession = "Active" THEN "Suspended" ELSE verifierSession
+    /\ activeRole' = "None"
+    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion,
+        coderCorpusVersion, workflowState, managerUp>>
 
-ResolveTriage ==
+ResumeTriage ==
     /\ managerUp
-    /\ desiredControl = "Run"
     /\ nodeState = "Triage"
-    /\ receiptState = "Settled"
-    /\ resultKind \in FailureKinds
-    /\ nodeState' = triageResume
-    /\ coderState' = IF triageResume \in {"Ready", "RevisionReady"} THEN "Ready" ELSE coderState
-    /\ verifierState' = IF triageResume = "VerifyReady" THEN "Ready" ELSE verifierState
-    /\ receiptState' = "None"
-    /\ resultKind' = "None"
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ nodeState' = IF candidateVersion = 0 THEN "CoderReady" ELSE "VerifierReady"
+    /\ UNCHANGED <<coderSession, verifierSession, activeRole,
+        candidateVersion, verifiedVersion, corpusVersion,
+        coderCorpusVersion, workflowState, managerUp>>
 
-RequestPause ==
-    /\ desiredControl = "Run"
-    /\ nodeState \notin TerminalStates \cup {"Paused", "Frozen"}
-    /\ desiredControl' = "Pause"
-    /\ pauseResume' = RetryTarget(nodeState, executionMode)
-    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, triageResume, executionMode, managerUp>>
-
-PauseNode ==
+CompleteWorkflow ==
     /\ managerUp
-    /\ desiredControl = "Pause"
-    /\ nodeState \notin TerminalStates \cup {"Paused", "Frozen"}
-    /\ receiptState # "Recorded"
-    /\ nodeState' = "Paused"
-    /\ coderState' = IF coderState \in {"Done", "Dormant"} THEN coderState ELSE "Suspended"
-    /\ verifierState' = IF verifierState \in {"Done", "Dormant"} THEN verifierState ELSE "Suspended"
-    /\ activeRole' = "None"
-    /\ writerLease' = FALSE
-    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ workflowState = "Running"
+    /\ nodeState = "Accepted"
+    /\ workflowState' = "Completed"
+    /\ coderSession' = "Completed"
+    /\ verifierSession' = "Completed"
+    /\ UNCHANGED <<nodeState, activeRole, candidateVersion,
+        verifiedVersion, corpusVersion, coderCorpusVersion, managerUp>>
 
-ResumeNode ==
-    /\ managerUp
-    /\ desiredControl = "Pause"
-    /\ nodeState = "Paused"
-    /\ nodeState' = pauseResume
-    /\ desiredControl' = "Run"
-    /\ coderState' = IF pauseResume \in {"Ready", "RevisionReady"} THEN "Ready" ELSE coderState
-    /\ verifierState' = IF pauseResume = "VerifyReady" THEN "Ready" ELSE verifierState
-    /\ UNCHANGED <<activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, pauseResume, triageResume, executionMode, managerUp>>
-
-RequestFreeze ==
-    /\ desiredControl \in {"Run", "Pause"}
-    /\ nodeState \notin TerminalStates \cup {"Frozen"}
-    /\ desiredControl' = "Freeze"
-    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, pauseResume, triageResume, executionMode, managerUp>>
-
-FreezeNode ==
-    /\ managerUp
-    /\ desiredControl = "Freeze"
-    /\ nodeState \notin TerminalStates \cup {"Frozen"}
-    /\ nodeState' = "Frozen"
-    /\ coderState' = IF coderState = "Done" THEN "Done" ELSE "Frozen"
-    /\ verifierState' = IF verifierState = "Done" THEN "Done" ELSE "Frozen"
-    /\ activeRole' = "None"
-    /\ writerLease' = FALSE
-    /\ receiptState' = IF receiptState = "Recorded" THEN "Settled" ELSE receiptState
-    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
-
-ApplyReplan ==
-    /\ managerUp
-    /\ desiredControl = "Freeze"
-    /\ nodeState = "Frozen"
-    /\ nodeState' = "Ready"
-    /\ coderState' = "Ready"
-    /\ verifierState' = "Dormant"
-    /\ candidateVersion' = 0
-    /\ verifiedVersion' = 0
-    /\ corpusVersion' = 0
-    /\ candidateCorpusVersion' = 0
-    /\ coderCorpusVersion' = 0
-    /\ receiptState' = "None"
-    /\ resultKind' = "None"
-    /\ desiredControl' = "Run"
-    /\ executionMode' = "Initial"
-    /\ UNCHANGED <<activeRole, writerLease, pauseResume, triageResume, managerUp>>
-
-RequestCancel ==
-    /\ desiredControl # "Cancel"
-    /\ nodeState \notin TerminalStates
-    /\ desiredControl' = "Cancel"
-    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, pauseResume, triageResume, executionMode, managerUp>>
-
-CancelNode ==
-    /\ managerUp
-    /\ desiredControl = "Cancel"
-    /\ nodeState \notin TerminalStates
+CancelWorkflow ==
+    /\ workflowState = "Running"
+    /\ workflowState' = "Cancelled"
     /\ nodeState' = "Cancelled"
-    /\ coderState' = "Done"
-    /\ verifierState' = "Done"
+    /\ coderSession' = "Cancelled"
+    /\ verifierSession' = "Cancelled"
     /\ activeRole' = "None"
-    /\ writerLease' = FALSE
-    /\ receiptState' = IF receiptState = "Recorded" THEN "Settled" ELSE receiptState
-    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, resultKind, desiredControl, pauseResume, triageResume, executionMode, managerUp>>
+    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion,
+        coderCorpusVersion, managerUp>>
 
 CrashManager ==
     /\ managerUp
     /\ managerUp' = FALSE
-    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode>>
+    /\ coderSession' =
+        IF coderSession = "Active" THEN "Suspended" ELSE coderSession
+    /\ verifierSession' =
+        IF verifierSession = "Active" THEN "Suspended" ELSE verifierSession
+    /\ activeRole' = "None"
+    /\ UNCHANGED <<nodeState, candidateVersion, verifiedVersion,
+        corpusVersion, coderCorpusVersion, workflowState>>
 
 RestartManager ==
     /\ ~managerUp
     /\ managerUp' = TRUE
-    /\ UNCHANGED <<nodeState, coderState, verifierState, activeRole, writerLease, candidateVersion, verifiedVersion, corpusVersion, candidateCorpusVersion, coderCorpusVersion, receiptState, resultKind, desiredControl, pauseResume, triageResume, executionMode>>
-
-SettleRecordedResult ==
-    \/ SettleCandidateReceipt
-    \/ SettleVerifierPass
-    \/ SettleVerifierFail
-    \/ ReopenVerification
-    \/ SettleFailure
+    /\ UNCHANGED <<nodeState, coderSession, verifierSession, activeRole,
+        candidateVersion, verifiedVersion, corpusVersion,
+        coderCorpusVersion, workflowState>>
 
 Next ==
     \/ StartCoder
-    \/ RecordCandidateReceipt
-    \/ SettleCandidateReceipt
-    \/ QuiesceCandidate
-    \/ SnapshotCandidate
+    \/ SubmitCandidate
     \/ StartVerifier
-    \/ RecordVerifierResult("Pass")
-    \/ RecordVerifierResult("Fail")
-    \/ QuiesceVerifier
-    \/ SettleVerifierPass
-    \/ SettleVerifierFail
-    \/ RecordFailure("WorkerFailure")
-    \/ RecordFailure("EffectFailure")
-    \/ RecordFailure("OrphanedWorker")
-    \/ RecordFailure("QuiesceFailure")
-    \/ RecordFailure("SnapshotFailure")
-    \/ SettleFailure
-    \/ ResolveTriage
-    \/ RequestPause
-    \/ PauseNode
-    \/ ResumeNode
-    \/ RequestFreeze
-    \/ FreezeNode
-    \/ ApplyReplan
-    \/ RequestCancel
-    \/ CancelNode
+    \/ VerifierPass
+    \/ VerifierFail
+    \/ ReopenAccepted
+    \/ EnterTriage
+    \/ ResumeTriage
+    \/ CompleteWorkflow
+    \/ CancelWorkflow
     \/ CrashManager
     \/ RestartManager
 
-Spec ==
-    /\ Init
-    /\ [][Next]_vars
-    /\ WF_vars(RestartManager)
-    /\ SF_vars(SettleRecordedResult)
-    /\ SF_vars(FreezeNode)
-    /\ SF_vars(CancelNode)
+Spec == Init /\ [][Next]_vars /\ WF_vars(RestartManager)
 
 TypeOK ==
     /\ nodeState \in NodeStates
-    /\ coderState \in RoleStates
-    /\ verifierState \in RoleStates
+    /\ coderSession \in SessionStates
+    /\ verifierSession \in SessionStates
     /\ activeRole \in ActiveRoles
-    /\ writerLease \in BOOLEAN
     /\ candidateVersion \in 0..MaxCandidate
     /\ verifiedVersion \in 0..MaxCandidate
     /\ corpusVersion \in 0..MaxCandidate
-    /\ candidateCorpusVersion \in 0..MaxCandidate
     /\ coderCorpusVersion \in 0..MaxCandidate
-    /\ receiptState \in ReceiptStates
-    /\ resultKind \in ResultKinds
-    /\ desiredControl \in ControlStates
-    /\ pauseResume \in ResumeStates
-    /\ triageResume \in ResumeStates
-    /\ executionMode \in ExecutionModes
+    /\ workflowState \in WorkflowStates
     /\ managerUp \in BOOLEAN
 
 SingleRunnableRole ==
-    /\ (activeRole = "Coder") => (coderState = "Running" /\ verifierState # "Running")
-    /\ (activeRole = "Verifier") => (verifierState = "Running" /\ coderState # "Running")
-    /\ (activeRole = "None") => ~(coderState = "Running" \/ verifierState = "Running")
+    /\ activeRole = "Coder" => coderSession = "Active" /\ verifierSession # "Active"
+    /\ activeRole = "Verifier" => verifierSession = "Active" /\ coderSession # "Active"
 
-WriterLeaseSafety ==
-    writerLease =>
-        /\ nodeState = "Executing"
-        /\ activeRole = "Coder"
-        /\ coderState = "Running"
-
-RecordedResultStopsRole ==
-    receiptState = "Recorded" =>
-        /\ activeRole = "None"
-        /\ ~writerLease
-        /\ (resultKind \in FailureKinds \/
-            coderState = "AwaitingSettlement" \/ verifierState = "AwaitingSettlement")
-
-AcceptedWasVerified ==
-    nodeState = "Accepted" =>
-        /\ candidateVersion > 0
+AcceptedSuspendsButDoesNotComplete ==
+    nodeState = "Accepted" /\ workflowState = "Running" =>
+        /\ coderSession = "Suspended"
+        /\ verifierSession = "Suspended"
         /\ verifiedVersion = candidateVersion
-        /\ candidateCorpusVersion = corpusVersion
-        /\ receiptState = "Settled"
-        /\ resultKind = "Pass"
 
-CorpusVersionsOrdered ==
-    /\ candidateCorpusVersion <= corpusVersion
-    /\ coderCorpusVersion <= corpusVersion
-
-VerifierStartsFromCandidateCorpus ==
-    nodeState \in {"VerifyReady", "Verifying"} =>
-        candidateCorpusVersion = corpusVersion
-
-VerifierResultProducesCorpusDelta ==
-    nodeState \in {"VerifyQuiescing", "VerifySnapshotting"} /\
-        resultKind \in {"Pass", "Fail"} =>
-            corpusVersion = candidateCorpusVersion + 1
-
-FailedCorpusReachesRevisionCoder ==
-    nodeState = "RevisionReady" /\ resultKind = "Fail" =>
+RepairReusesSessions ==
+    nodeState = "RepairReady" =>
+        /\ coderSession \notin {"Completed", "Cancelled"}
+        /\ verifierSession \notin {"Completed", "Cancelled"}
         /\ coderCorpusVersion = corpusVersion
-        /\ candidateCorpusVersion < corpusVersion
 
-RevisionCoderReadsLatestCorpus ==
-    nodeState = "Executing" /\ executionMode = "Revision" =>
-        coderCorpusVersion = corpusVersion
+OnlyWorkflowTerminalClosesSessions ==
+    workflowState = "Running" =>
+        /\ coderSession \notin {"Completed", "Cancelled"}
+        /\ verifierSession \notin {"Completed", "Cancelled"}
 
-CandidateOwnsFreshVerifier ==
-    nodeState = "VerifyReady" =>
-        /\ verifierState = "Ready"
-        /\ candidateVersion > verifiedVersion
-
-VerifierCompletesAfterVerdictSettlement ==
-    nodeState \in {"Accepted", "RevisionReady"} /\ resultKind \in {"Pass", "Fail"} =>
-        /\ verifierState = "Done"
-        /\ receiptState = "Settled"
-
-TerminalClosesSessions ==
-    nodeState \in TerminalStates =>
-        /\ coderState = "Done"
-        /\ verifierState = "Done"
-        /\ activeRole = "None"
-        /\ ~writerLease
-
-TriageHasSettledFailure ==
-    nodeState = "Triage" =>
-        /\ receiptState = "Settled"
-        /\ resultKind \in FailureKinds
-        /\ activeRole = "None"
-        /\ ~writerLease
-
-RecordedResultEventuallySettles ==
-    receiptState = "Recorded" ~> receiptState = "Settled"
-
-CancelEventuallyCloses ==
-    desiredControl = "Cancel" ~> nodeState = "Cancelled"
+WorkflowTerminalClosesSessions ==
+    workflowState \in {"Completed", "Cancelled"} =>
+        /\ coderSession \in {"Completed", "Cancelled"}
+        /\ verifierSession \in {"Completed", "Cancelled"}
 
 =============================================================================

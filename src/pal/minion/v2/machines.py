@@ -209,17 +209,6 @@ def _worker_finished_reducer(payload: Mapping[str, Any], action: ActionEnvelope)
     return updated
 
 
-def _new_node_role_generation_reducer(
-    payload: Mapping[str, Any],
-    action: ActionEnvelope,
-) -> Mapping[str, Any]:
-    updated = dict(_worker_finished_reducer(payload, action))
-    updated["role_session_generation"] = int(
-        payload.get("role_session_generation") or 0
-    ) + 1
-    return updated
-
-
 def _replan_finding_reducer(
     payload: Mapping[str, Any],
     action: ActionEnvelope,
@@ -1214,8 +1203,8 @@ def _node_transitions() -> list[TransitionSpec]:
             S.BLOCKED_BY_DEPS,
             "VERIFICATION_DEPENDENCIES_ACCEPTED",
             S.VERIFY_PREPARING,
-            guard=_all(_node_kind("verification"), _ready_dependencies),
-            effects=_effect("prepare_verification_scenario"),
+            guard=_all(_node_kind("system_verification"), _ready_dependencies),
+            effects=_effect("prepare_system_verification"),
         ),
         _spec(
             kind,
@@ -1279,12 +1268,12 @@ def _node_transitions() -> list[TransitionSpec]:
             "VERIFICATION_PREPARED",
             S.QUEUED,
             guard=_required(
-                "scenario_fingerprint",
-                "scenario_candidate_union_ref",
-                "scenario_commit_sha",
+                "system_fingerprint",
+                "system_candidate_union_ref",
+                "system_commit_sha",
                 "verification_workspace_fingerprint",
             ),
-            effects=_effect("admit_verifier_role", role_mode="scenario"),
+            effects=_effect("admit_verifier_role", role_mode="system"),
         ),
         _spec(kind, S.VERIFY_PREPARING, "REBIND_VERIFICATION_PREPARER", S.VERIFY_PREPARING),
         _spec(
@@ -1292,25 +1281,25 @@ def _node_transitions() -> list[TransitionSpec]:
             S.VERIFY_PREPARING,
             "RETRY_VERIFICATION_PREPARATION",
             S.VERIFY_PREPARING,
-            effects=_effect("prepare_verification_scenario"),
+            effects=_effect("prepare_system_verification"),
         ),
         _spec(
             kind,
             S.QUEUED,
-            "START_SCENARIO_VERIFICATION",
+            "START_SYSTEM_VERIFICATION",
             S.VERIFYING,
-            guard=_all(_node_kind("verification"), _lease_guard),
-            effects=_effect("run_verifier_role", role_mode="scenario"),
+            guard=_all(_node_kind("system_verification"), _lease_guard),
+            effects=_effect("run_verifier_role", role_mode="system"),
             reducer=_worker_started_reducer,
         ),
-        _spec(kind, S.VERIFYING, "REBIND_SCENARIO_VERIFIER", S.VERIFYING, guard=_lease_guard, reducer=_worker_started_reducer),
+        _spec(kind, S.VERIFYING, "REBIND_SYSTEM_VERIFIER", S.VERIFYING, guard=_lease_guard, reducer=_worker_started_reducer),
         _spec(
             kind,
             S.VERIFYING,
             "SUBMIT_SEMANTIC_VERIFICATION",
             S.VERIFY_QUIESCING,
             guard=_required("pending_verification_ref"),
-            effects=_effect("quiesce_verifier_role", role_mode="scenario"),
+            effects=_effect("quiesce_verifier_role", role_mode="system"),
         ),
         _spec(
             kind,
@@ -1318,7 +1307,7 @@ def _node_transitions() -> list[TransitionSpec]:
             "VERIFIER_QUIESCED",
             S.VERIFY_SNAPSHOTTING,
             guard=_quiesce_guard,
-            effects=_effect("snapshot_verifier_result", role_mode="scenario"),
+            effects=_effect("snapshot_verifier_result", role_mode="system"),
         ),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "REVIEW_PASSED", S.ACCEPTED, guard=_required("verification_artifact_ref"), effects=_effects("notify_node_accepted", "publish_accepted_memory_candidate"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "REVIEW_UNKNOWN_ALLOWED", S.ACCEPTED, guard=_all(_required("verification_artifact_ref"), _allowed_unknown_guard), effects=_effects("notify_node_accepted", "publish_accepted_memory_candidate"), reducer=_worker_finished_reducer),
@@ -1326,8 +1315,8 @@ def _node_transitions() -> list[TransitionSpec]:
         _spec(kind, S.REVIEW_SNAPSHOTTING, "DEPENDENCY_DEFECT", S.STALE, guard=_required("repair_bill_ref", "repair_target_node_id"), effects=_effect("reopen_dependency_and_stale_descendants"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "CONTRACT_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "ARCHITECTURE_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
-        _spec(kind, S.VERIFY_SNAPSHOTTING, "VERIFICATION_PASSED", S.ACCEPTED, guard=_required("verification_artifact_ref", "scenario_fingerprint"), effects=_effect("notify_node_accepted"), reducer=_worker_finished_reducer),
-        _spec(kind, S.VERIFY_SNAPSHOTTING, "VERIFICATION_UNKNOWN_ALLOWED", S.ACCEPTED, guard=_all(_required("verification_artifact_ref", "scenario_fingerprint"), _allowed_unknown_guard), effects=_effect("notify_node_accepted"), reducer=_worker_finished_reducer),
+        _spec(kind, S.VERIFY_SNAPSHOTTING, "VERIFICATION_PASSED", S.ACCEPTED, guard=_required("verification_artifact_ref", "system_fingerprint"), effects=_effect("notify_node_accepted"), reducer=_worker_finished_reducer),
+        _spec(kind, S.VERIFY_SNAPSHOTTING, "VERIFICATION_UNKNOWN_ALLOWED", S.ACCEPTED, guard=_all(_required("verification_artifact_ref", "system_fingerprint"), _allowed_unknown_guard), effects=_effect("notify_node_accepted"), reducer=_worker_finished_reducer),
         _spec(kind, S.VERIFY_SNAPSHOTTING, "MODULE_DEFECT", S.STALE, guard=_required("repair_bill_ref", "repair_target_node_id"), effects=_effect("reopen_dependency_and_stale_descendants"), reducer=_worker_finished_reducer),
         _spec(kind, S.VERIFY_SNAPSHOTTING, "DEPENDENCY_DEFECT", S.STALE, guard=_required("repair_bill_ref", "repair_target_node_id"), effects=_effect("reopen_dependency_and_stale_descendants"), reducer=_worker_finished_reducer),
         _spec(kind, S.VERIFY_SNAPSHOTTING, "VERIFICATION_DEFECT", S.STALE, guard=_required("repair_bill_ref", "repair_target_node_id"), effects=_effect("reopen_verifier_and_stale_descendants"), reducer=_worker_finished_reducer),
@@ -1351,8 +1340,8 @@ def _node_transitions() -> list[TransitionSpec]:
             S.STALE,
             "REQUEUE_VERIFICATION_STALE",
             S.VERIFY_PREPARING,
-            guard=_all(_node_kind("verification"), _required("unit_contract_ref", "dependency_fingerprint"), _ready_dependencies),
-            effects=_effect("prepare_verification_scenario"),
+            guard=_all(_node_kind("system_verification"), _required("unit_contract_ref", "dependency_fingerprint"), _ready_dependencies),
+            effects=_effect("prepare_system_verification"),
         ),
         _spec(kind, S.PAUSE_REQUESTED, "PAUSE_CONFIRMED", S.PAUSED),
         _spec(
@@ -1368,7 +1357,7 @@ def _node_transitions() -> list[TransitionSpec]:
             S.REPAIR_QUEUED,
             guard=_required("repair_bill_ref"),
             effects=_effect("admit_implementation_role", role_mode="repair"),
-            reducer=_new_node_role_generation_reducer,
+            reducer=_merge_payload,
         ),
         _spec(
             kind,
@@ -1377,7 +1366,7 @@ def _node_transitions() -> list[TransitionSpec]:
             S.REVIEW_QUEUED,
             guard=_required("repair_bill_ref"),
             effects=_effect("admit_verifier_role", role_mode="module"),
-            reducer=_new_node_role_generation_reducer,
+            reducer=_merge_payload,
         ),
         _spec(kind, S.ACCEPTED, "MEMORY_CANDIDATE_PUBLISHED", S.ACCEPTED, guard=_required("memory_candidate_ref")),
     ]
@@ -1450,11 +1439,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 S.STALE,
                 guard=_required("stale_reason_ref"),
                 effects=_effect("suspend_stale_node_assignments"),
-                reducer=(
-                    _new_node_role_generation_reducer
-                    if state in {S.ACCEPTED, S.CANCELLED}
-                    else _merge_payload
-                ),
+                reducer=_merge_payload,
             )
         )
     for state in {S.PRODUCING, S.QUIESCING, S.SNAPSHOTTING, S.REVIEWING, S.REVIEW_QUIESCING, S.REVIEW_SNAPSHOTTING, S.REPAIRING, S.VERIFY_PREPARING, S.VERIFYING, S.VERIFY_QUIESCING, S.VERIFY_SNAPSHOTTING, S.PAUSE_REQUESTED, S.PAUSED}:
@@ -1828,12 +1813,12 @@ def all_machine_specs() -> tuple[MachineSpec, ...]:
         _activation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR)
     }
     verifier_module = {_activation(OrchestrationRole.VERIFIER, RoleMode.MODULE)}
-    verifier_scenario = {_activation(OrchestrationRole.VERIFIER, RoleMode.SCENARIO)}
+    verifier_system = {_activation(OrchestrationRole.VERIFIER, RoleMode.SYSTEM)}
     all_node_activations = (
         implementation_produce
         | implementation_repair
         | verifier_module
-        | verifier_scenario
+        | verifier_system
     )
     node_runtime = _runtime_state_map(
         (
@@ -1878,17 +1863,17 @@ def all_machine_specs() -> tuple[MachineSpec, ...]:
         ),
         (
             {DagNodeRunState.VERIFY_PREPARING},
-            verifier_scenario,
+            verifier_system,
             ReconciliationKind.ADMIT_ROLE,
         ),
         (
             {DagNodeRunState.VERIFYING},
-            verifier_scenario,
+            verifier_system,
             ReconciliationKind.RESUME_ROLE,
         ),
         (
             {DagNodeRunState.VERIFY_QUIESCING, DagNodeRunState.VERIFY_SNAPSHOTTING},
-            verifier_scenario,
+            verifier_system,
             ReconciliationKind.RECONCILE_STATE,
         ),
         (

@@ -429,7 +429,7 @@ ExecutionShellExecShellExecCapabilityMixinShellInput = _strict_model(
     {
         'cmd': (str, Field(..., description='Shell command to execute. Use only for command execution, tests, builds, scripts, process probes, and package commands. Use bounded `tree -a -L 3 --filelimit 200 --noreport` listings (or `find -maxdepth 3 -print | head -n 500` when tree is unavailable). If visible, prefer search for text search, read_file for file reads, edit_file for edits, write_file for writes, delete_path for deletion, and git for git status/diff/log/show. Avoid cat/head/tail/grep/rg/sed/awk/tee/echo/printf redirection/rm/unlink/rmdir/git rm/find -delete for repo file operations when the matching capability is visible. For Pal runtime/module/minion/capability state or actions, use built-in Pal tools before shell. In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing; use the dedicated checkpoint commit capability instead.')),
         'cwd': (str, Field(None, description='Optional working directory.')),
-        'timeout_ms': (int, Field(None, description='Optional timeout in milliseconds.', ge=1)),
+        'timeout_ms': (int, Field(None, description='Optional timeout in milliseconds. Defaults to 120000 and cannot exceed 600000.', ge=1, le=600000)),
     },
 )
 
@@ -445,6 +445,10 @@ ExecutionShellExecShellExecCapabilityMixinShellOutput = _strict_model(
         'stderr_truncated': (bool, Field(None)),
         'timeout_ms': (int, Field(None)),
         'display_text': (str, Field(None)),
+        'timed_out': (bool, Field(None)),
+        'cancelled': (bool, Field(None)),
+        'termination_signal': (str, Field(None)),
+        'descendants_terminated': (bool, Field(None)),
     },
 )
 
@@ -1631,13 +1635,6 @@ MinionV2SkeletonBuilderOpMinionArchitectureReviewFailInput = _strict_model(
 MinionV2SweVerificationOpMinionVerificationRequestModuleRepairInput = _strict_model(
     'MinionV2SweVerificationOpMinionVerificationRequestModuleRepairInput',
     {
-    },
-)
-
-MinionV2SweVerificationOpMinionVerificationRequestDependencyRepairsInput = _strict_model(
-    'MinionV2SweVerificationOpMinionVerificationRequestDependencyRepairsInput',
-    {
-        'modules': (list[str], Field(..., description='Semantic module names from the bound contract dependency or scenario closure.', min_length=1)),
     },
 )
 

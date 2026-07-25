@@ -584,7 +584,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             manifest_ref=manifest,
         )
         node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["a"])
-        view_ref = UnitWorkViewBuilder(self.architecture).build(node, dependency_outputs={})
+        view_ref = UnitWorkViewBuilder(self.architecture).build(node)
         view = self.store.read_json(view_ref)
         self.assertNotIn("evidence", view)
         self.assertNotIn("requirements", view)

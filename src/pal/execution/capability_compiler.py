@@ -118,11 +118,21 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                     detachable=detachable,
                 )
                 handler = getattr(provider, action_blueprint.handler_name)
+                async_handler = (
+                    getattr(provider, action_blueprint.async_handler_name)
+                    if action_blueprint.async_handler_name is not None
+                    else None
+                )
                 bound_action = BoundCapabilityAction(
                     canonical_path=canonical_path,
                     target_id=target.target_id,
                     descriptor=descriptor,
                     callable=_bind_callable(handler, target, descriptor.execution),
+                    async_callable=(
+                        _bind_callable(async_handler, target, descriptor.execution)
+                        if async_handler is not None
+                        else None
+                    ),
                 )
                 subtree.descriptors.append(descriptor)
                 subtree.bound_actions.append(bound_action)

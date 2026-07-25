@@ -4,21 +4,34 @@ import hashlib
 from typing import Any, Mapping
 
 
-ARCHITECT_SESSION_CONTRACT_VERSION = "2"
+ROLE_SESSION_CONTRACT_VERSION = "3"
+
+
+def architecture_cycle_id(
+    architecture_revision_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Return the immutable root identity of one human architecture cycle."""
+
+    return str(
+        payload.get("architecture_cycle_id")
+        or payload.get("root_architecture_revision_id")
+        or architecture_revision_id
+    ).strip()
 
 
 def architect_session_id(
     workflow_id: str,
-    architecture_revision_id: str,
-    cycle_key: str = "",
+    architecture_cycle_id_value: str,
+    generation: int = 0,
 ) -> str:
-    owner = (
-        f"contract-{ARCHITECT_SESSION_CONTRACT_VERSION}:"
-        f"{workflow_id}:{architecture_revision_id}"
+    return _scoped_role_session_id(
+        "architect",
+        workflow_id,
+        "architecture_cycle",
+        architecture_cycle_id_value,
+        generation,
     )
-    if str(cycle_key or "").strip():
-        owner += f":{str(cycle_key).strip()}"
-    return _session_id("architect", owner)
 
 
 def architect_session_id_for_revision(
@@ -26,71 +39,98 @@ def architect_session_id_for_revision(
     architecture_revision_id: str,
     payload: Mapping[str, Any],
 ) -> str:
-    """Bind one durable LLM session to one immutable correction cycle."""
-
-    repair_baseline = _artifact_sha(payload.get("architecture_repair_baseline_ref"))
-    finding = _artifact_sha(
-        payload.get("finding_artifact_ref")
-        or payload.get("replan_finding_batch_ref")
-        or payload.get("replan_finding_ref")
+    return architect_session_id(
+        workflow_id,
+        architecture_cycle_id(architecture_revision_id, payload),
+        max(0, int(payload.get("architect_session_generation") or 0)),
     )
-    manifest = _artifact_sha(payload.get("architecture_manifest_ref"))
-    if repair_baseline:
-        cycle_key = f"repair:{repair_baseline}"
-    elif finding:
-        cycle_key = f"finding:{finding}:manifest:{manifest}"
-    else:
-        cycle_key = ""
-    generation = int(payload.get("architect_session_generation") or 0)
-    if generation:
-        cycle_key = f"{cycle_key}:generation:{generation}"
-    return architect_session_id(workflow_id, architecture_revision_id, cycle_key)
 
 
-def coder_session_id(node_run_id: str, generation: int = 0) -> str:
-    return _node_role_session_id("coder", node_run_id, generation)
+def architecture_reviewer_session_id(
+    workflow_id: str,
+    architecture_revision_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    return _scoped_role_session_id(
+        "architecture-reviewer",
+        workflow_id,
+        "architecture_cycle",
+        architecture_cycle_id(architecture_revision_id, payload),
+        max(0, int(payload.get("reviewer_session_generation") or 0)),
+    )
 
 
-def verifier_session_id(
-    node_run_id: str,
-    subject_key: str,
+def module_name_from_payload(payload: Mapping[str, Any]) -> str:
+    module_name = str(payload.get("module_name") or "").strip()
+    if not module_name:
+        raise ValueError("module role session requires module_name")
+    return module_name
+
+
+def coder_session_id(
+    workflow_id: str,
+    module_name: str,
     generation: int = 0,
 ) -> str:
-    subject = str(subject_key or "").strip()
-    if not subject:
-        raise ValueError("verifier session requires an immutable candidate or scenario subject")
-    return _node_role_session_id(
-        "verifier",
-        f"{str(node_run_id).strip()}:{subject}",
+    return _scoped_role_session_id(
+        "coder",
+        workflow_id,
+        "module",
+        module_name,
         generation,
     )
 
 
-def verifier_session_subject(payload: Mapping[str, Any]) -> str:
-    if str(payload.get("node_kind") or "unit") == "verification":
-        fingerprint = str(payload.get("scenario_fingerprint") or "").strip()
-        if not fingerprint:
-            raise ValueError("verification scenario session requires scenario_fingerprint")
-        return f"scenario:{fingerprint}"
-    digest = str(payload.get("candidate_digest") or "").strip()
-    if not digest:
-        raise ValueError("candidate verifier session requires candidate_digest")
-    return f"candidate:{digest}"
+def module_verifier_session_id(
+    workflow_id: str,
+    module_name: str,
+    generation: int = 0,
+) -> str:
+    return _scoped_role_session_id(
+        "module-verifier",
+        workflow_id,
+        "module",
+        module_name,
+        generation,
+    )
+
+
+def system_verifier_session_id(
+    workflow_id: str,
+    generation: int = 0,
+) -> str:
+    return _scoped_role_session_id(
+        "system-verifier",
+        workflow_id,
+        "system_delivery",
+        workflow_id,
+        generation,
+    )
 
 
 def node_role_generation(payload: Mapping[str, Any]) -> int:
+    """Explicit operator reset generation, never a Candidate/retry counter."""
+
     return max(0, int(payload.get("role_session_generation") or 0))
 
 
-def _node_role_session_id(role: str, node_run_id: str, generation: int) -> str:
-    owner = str(node_run_id)
+def _scoped_role_session_id(
+    role: str,
+    workflow_id: str,
+    scope_kind: str,
+    subject_key: str,
+    generation: int,
+) -> str:
+    subject = str(subject_key or "").strip()
+    if not subject:
+        raise ValueError(f"{role} session requires a stable subject")
+    owner = (
+        f"contract-{ROLE_SESSION_CONTRACT_VERSION}:"
+        f"{str(workflow_id).strip()}:{scope_kind}:{subject}"
+    )
     if int(generation) > 0:
-        owner = f"{owner}:generation:{int(generation)}"
+        owner += f":generation:{int(generation)}"
     return _session_id(role, owner)
-
-
-def _artifact_sha(value: Any) -> str:
-    return str(dict(value or {}).get("sha256") or "").strip() if isinstance(value, Mapping) else ""
 
 
 def _session_id(role: str, owner_id: str) -> str:

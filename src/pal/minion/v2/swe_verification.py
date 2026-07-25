@@ -3,7 +3,6 @@ from __future__ import annotations
 from pal.execution.generated_tool_models import (
     MinionV2SweVerificationOpMinionVerificationRequestArchitectureRevisionInput,
     MinionV2SweVerificationOpMinionVerificationRequestContractRevisionInput,
-    MinionV2SweVerificationOpMinionVerificationRequestDependencyRepairsInput,
     MinionV2SweVerificationOpMinionVerificationRequestModuleRepairInput,
     MinionV2SweVerificationOpMinionVerificationRequestRequirementsRevisionInput,
     MinionV2SweVerificationOpMinionVerificationUnknownInput,
@@ -33,7 +32,6 @@ SWE_VERIFICATION_CAPABILITIES = (
     ADD_FINDING_CAPABILITY,
     "op_minion_verification_pass",
     "op_minion_verification_request_module_repair",
-    "op_minion_verification_request_dependency_repairs",
     "op_minion_verification_request_corpus_repair",
     "op_minion_verification_request_contract_revision",
     "op_minion_verification_request_architecture_revision",
@@ -56,17 +54,6 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "alias": "verification_request_module_repair",
         "description": "Submit module repair after every reproduced defect has been recorded with add_finding. Takes no arguments.",
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestModuleRepairInput,
-    },
-    "op_minion_verification_request_dependency_repairs": {
-        "alias": "verification_request_dependency_repairs",
-        "description": (
-            "Submit defects owned by one or more named upstream modules only after each violation has been localized to "
-            "the provider's public contract boundary, reproduced against that provider's actual accepted implementation, "
-            "and recorded with add_finding. Do not use this because an upstream implementation is absent from the module "
-            "workspace, a Verifier-authored test double failed, the current module mishandled a contract-legal result, or "
-            "the disputed behavior is unspecified. Names must come from the bound dependency closure."
-        ),
-        "InputModel": MinionV2SweVerificationOpMinionVerificationRequestDependencyRepairsInput,
     },
     "op_minion_verification_request_corpus_repair": {
         "alias": "verification_request_corpus_repair",
@@ -108,7 +95,6 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
 _OUTCOME_BY_CAPABILITY = {
     "op_minion_verification_pass": "pass",
     "op_minion_verification_request_module_repair": "module_repair",
-    "op_minion_verification_request_dependency_repairs": "dependency_repairs",
     "op_minion_verification_request_corpus_repair": "verification_repairs",
     "op_minion_verification_request_contract_revision": "contract_revision",
     "op_minion_verification_request_architecture_revision": "architecture_revision",
@@ -130,22 +116,7 @@ def compile_swe_verification_tool_contract(
     module_name = str(
         work_view.get("module_name") or work_view.get("verification_name") or ""
     ).strip()
-    scenario_mode = bool(
-        str(work_view.get("verification_name") or "").strip()
-        or work_view.get("scenario")
-    )
-    dependencies = sorted(str(item) for item in dict(work_view.get("dependencies") or {}))
-    accepted_modules = sorted(
-        {
-            str(dict(item or {}).get("module_name") or "").strip()
-            for item in list(work_view.get("accepted_modules") or [])
-            if str(dict(item or {}).get("module_name") or "").strip()
-        }
-    )
-    scenario_modules = sorted(str(item) for item in dict(work_view.get("modules") or {}))
-    dependency_targets = sorted(
-        set(dependencies + accepted_modules + scenario_modules) - {module_name}
-    )
+    system_mode = str(work_view.get("kind") or "") == "system_and_delivery"
     verification_corpus = str(
         dict(work_view.get("verification_corpus") or {}).get("path") or ""
     ).strip()
@@ -175,7 +146,7 @@ def compile_swe_verification_tool_contract(
         "micro-optimizations. Finish the breadth-first audit first and batch "
         "independent add_finding calls in one tool round when possible."
     )}
-    if scenario_mode:
+    if system_mode:
         guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
             "Record or replace one evidence-backed scenario finding. Use verification_defect when the failure is "
             "caused by an incorrect Verifier-owned module corpus or test double; cite its exact "
@@ -188,23 +159,7 @@ def compile_swe_verification_tool_contract(
             "hot path, and bounded contract-preserving optimization direction, not speculative micro-optimization. "
             "Finish the breadth-first audit first and batch independent findings in one tool round."
         )}
-    if dependency_targets:
-        guidance_overrides["op_minion_verification_request_dependency_repairs"] = {
-            "use_when": (
-                "Submit all upstream defects in one call only after first excluding the current module's handling of "
-                "contract-legal dependency behavior, then reproducing each violation against the named dependency's "
-                "actual accepted implementation at its public contract boundary. Allowed semantic module names: "
-                + ", ".join(dependency_targets)
-                + "."
-            ),
-            "do_not_use_when": (
-                "Do not use merely because dependency source is absent from this module workspace, a Verifier-authored "
-                "test double failed, the current module mishandled a legal dependency result, or the contract does not "
-                "specify the disputed behavior. Route the current-module case to module repair and the unspecified case "
-                "to contract revision."
-            ),
-        }
-    if scenario_mode:
+    if system_mode:
         guidance_overrides["op_minion_verification_request_module_repair"] = {"use_when": (
             "Submit reproduced implementation defects after recording each with add_finding. "
             "Manager derives every affected module mechanically from the finding locations and "
@@ -233,8 +188,7 @@ def compile_swe_verification_tool_contract(
         )}
     return {
         "module_name": module_name,
-        "scenario_mode": scenario_mode,
-        "dependency_targets": dependency_targets,
+        "system_mode": system_mode,
         "repair_path_owners": compiled_repair_path_owners,
         "verification_path_owners": compiled_verification_path_owners,
         "verification_corpus": verification_corpus,
@@ -267,11 +221,11 @@ def swe_verification_tool_result(
             )
             or {}
         )
-        scenario_mode = bool(
-            workspace.get("verification_scenario")
-            or contract.get("scenario_mode")
+        system_mode = bool(
+            workspace.get("system_verification")
+            or contract.get("system_mode")
         )
-        if scenario_mode and outcome in {"module_repair", "dependency_repairs"}:
+        if system_mode and outcome == "module_repair":
             if any(
                 str(item.get("finding_kind") or "") == "verification_defect"
                 for item in findings
@@ -283,11 +237,10 @@ def swe_verification_tool_result(
                 findings,
                 contract.get("repair_path_owners") or {},
             )
-            # Scenario modules are all accepted Candidate dependencies.  The
-            # terminal capability selects repair semantics; Manager owns the
-            # graph route and canonicalizes both historical repair spellings.
+            # Manager owns the graph route and resolves source locations to
+            # the module whose public boundary was violated.
             outcome = "module_repair"
-        elif scenario_mode and outcome == "verification_repairs":
+        elif system_mode and outcome == "verification_repairs":
             if {
                 str(item.get("finding_kind") or "")
                 for item in findings
@@ -300,10 +253,7 @@ def swe_verification_tool_result(
                 contract.get("verification_path_owners") or {},
             )
         else:
-            target_modules = _validate_target_modules(
-                workspace,
-                args.get("modules") or [],
-            )
+            target_modules = []
         errors = _submission_errors(
             outcome=outcome,
             findings=findings,
@@ -433,13 +383,13 @@ def _submission_errors(
                 "corpus repair requires every finding to use verification_defect"
             )
         if not bool(
-            workspace.get("verification_scenario")
+            workspace.get("system_verification")
             or dict(
                 dict(workspace.get("minion_v2") or {}).get(
                     "swe_verification_tool_contract"
                 )
                 or {}
-            ).get("scenario_mode")
+            ).get("system_mode")
         ):
             errors.append(
                 "the active module Verifier owns its corpus; correct it and rerun instead of submitting corpus repair"
@@ -458,7 +408,7 @@ def _submission_errors(
         dict(item or {}) for item in list(workspace.get("write_path_scopes") or [])
     ]
     scratch_only = bool(
-        workspace.get("verification_scenario")
+        workspace.get("system_verification")
         or workspace.get("verification_scratch_only")
     )
     outside = [] if scratch_only else [
@@ -502,23 +452,6 @@ def _path_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
     if kind == "directory":
         return normalized == target or normalized.startswith(target + "/")
     return False
-
-
-def _validate_target_modules(workspace: Mapping[str, Any], values: Any) -> list[str]:
-    requested = list(dict.fromkeys(str(item).strip() for item in list(values or []) if str(item).strip()))
-    if not requested:
-        return []
-    contract = dict(dict(workspace.get("minion_v2") or {}).get("swe_verification_tool_contract") or {})
-    allowed = {str(item) for item in list(contract.get("dependency_targets") or [])}
-    unknown = sorted(set(requested) - allowed)
-    if unknown:
-        raise ValueError(
-            "dependency repair names are outside the bound dependency closure: "
-            + ", ".join(unknown)
-            + "; allowed: "
-            + (", ".join(sorted(allowed)) or "<none>")
-        )
-    return requested
 
 
 def infer_repair_target_modules(
@@ -661,7 +594,7 @@ def _normalize_repair_path_owners(
 
 def _changed_paths(workspace: Mapping[str, Any]) -> list[str]:
     if bool(
-        workspace.get("verification_scenario")
+        workspace.get("system_verification")
         or workspace.get("verification_scratch_only")
     ):
         root = Path(str(workspace.get("review_scratch_dir") or ""))
@@ -704,7 +637,7 @@ def _changed_paths(workspace: Mapping[str, Any]) -> list[str]:
 
 def _verification_case_files(workspace: Mapping[str, Any]) -> list[str]:
     if bool(
-        workspace.get("verification_scenario")
+        workspace.get("system_verification")
         or workspace.get("verification_scratch_only")
     ):
         root = Path(str(workspace.get("review_scratch_dir") or ""))

@@ -17,7 +17,9 @@ models=(
     ArchitectureLifecycle
     StandaloneReviewLifecycle
     OrchestrationLifecycle
+    SystemVerificationLifecycle
     DurableEffects
+    RoleAssignmentRecovery
     ImplementationTopology
 )
 

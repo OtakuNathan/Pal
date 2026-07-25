@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 import subprocess
 
-from pal.minion.v2.contracts import AggregateType
+from pal.minion.v2.contracts import ActionEnvelope, AggregateType
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.minion.v2.role_gateway import (
@@ -41,6 +41,31 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
             },
             artifact_type="RolePromptPackArtifact",
         )
+        self.service.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="workflow-router",
+                actor="test",
+                expected_version=0,
+            )
+        )
+        self.service.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-router",
+                actor="test",
+                expected_version=0,
+                payload={
+                    "epoch_id": "epoch-router",
+                    "module_name": "router",
+                    "unit_contract_ref": {"sha256": "contract-router"},
+                },
+            )
+        )
         self.service.repository.ensure_role_session(
             session_id="session-router",
             workflow_id="workflow-router",
@@ -50,6 +75,8 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
             mode="produce",
             executor_profile_id="software_engineering.v2_coder",
             family_binding_sha="binding",
+            scope_kind="module",
+            subject_key="router",
         )
         assignment = self.service.repository.create_role_assignment(
             RoleAssignmentRequest(

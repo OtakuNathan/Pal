@@ -507,11 +507,11 @@ class MinionV2SkeletonTests(unittest.TestCase):
             AggregateType.DAG_NODE_RUN,
             compilation.unit_node_ids["consumer"],
         )
-        scenario = self.repository.read_snapshot(
+        system = self.repository.read_snapshot(
             AggregateType.DAG_NODE_RUN,
-            compilation.verification_node_ids["router_end_to_end"],
+            compilation.system_verification_node_id,
         )
-        assert consumer is not None and scenario is not None
+        assert consumer is not None and system is not None
         self.assertEqual(consumer.payload["dependency_node_ids"], [])
         self.assertEqual(
             consumer.payload["contract_dependency_node_ids"],
@@ -525,11 +525,35 @@ class MinionV2SkeletonTests(unittest.TestCase):
             consumer.payload["path_policy"]["developer_tests"],
             {"kind": "directory", "path": "tests/consumer/developer"},
         )
-        self.assertEqual(scenario.state, "BLOCKED_BY_DEPS")
+        self.assertEqual(system.state, "BLOCKED_BY_DEPS")
         self.assertEqual(
-            set(scenario.payload["dependency_node_ids"]),
+            set(system.payload["dependency_node_ids"]),
             set(compilation.unit_node_ids.values()),
         )
+        consumer_view = self.artifacts.read_json(
+            UnitWorkViewBuilder(
+                ArchitectureArtifactService(self.artifacts, self.repository)
+            ).build(consumer)
+        )
+        self.assertEqual(set(consumer_view["dependency_contracts"]), {"router"})
+        router_axiom = consumer_view["dependency_contracts"]["router"]
+        self.assertEqual(
+            set(router_axiom["consumed_outputs"]),
+            {"route_result"},
+        )
+        self.assertEqual(
+            router_axiom["consumed_outputs"]["route_result"]["interface"],
+            "router::route",
+        )
+        encoded_view = json.dumps(consumer_view, sort_keys=True)
+        for forbidden in (
+            "dependency_outputs",
+            "candidate_digest",
+            "candidate_ref",
+            "dependency status",
+            "task.yaml",
+        ):
+            self.assertNotIn(forbidden, encoded_view)
 
     def test_architect_question_resumes_only_after_manager_records_revision(self) -> None:
         workspace = self._bind_builder_workspace(
@@ -682,7 +706,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             manifest_ref=manifest_ref,
         )
         self.assertEqual(set(compilation.unit_node_ids), {"router"})
-        self.assertEqual(set(compilation.verification_node_ids), {"router_end_to_end"})
+        self.assertTrue(compilation.system_verification_node_id.endswith(":system-verification"))
 
         workflows = MinionV2WorkflowService(self.runtime_root)
         workflows.create_task(
@@ -1096,29 +1120,27 @@ class MinionV2SkeletonTests(unittest.TestCase):
             {"deterministic_routing"},
         )
         self.assertEqual(module_contract["module"]["responsibility"], self._submission()["modules"]["router"]["responsibility"])
-        scenario_node = self.repository.read_snapshot(
+        system_node = self.repository.read_snapshot(
             AggregateType.DAG_NODE_RUN,
-            compilation.verification_node_ids["router_end_to_end"],
+            compilation.system_verification_node_id,
         )
-        assert scenario_node is not None
-        scenario_contract = self.artifacts.read_json(
-            scenario_node.payload["unit_contract_ref"]
+        assert system_node is not None
+        scenario_catalog = self.artifacts.read_json(
+            system_node.payload["scenario_catalog_ref"]
         )
         self.assertEqual(
-            set(scenario_contract["requirements"]),
-            {"deterministic_routing"},
+            set(scenario_catalog["scenarios"]),
+            {"router_end_to_end"},
         )
-        work_view_ref = UnitWorkViewBuilder(architecture).build(router, dependency_outputs={})
+        work_view_ref = UnitWorkViewBuilder(architecture).build(router)
         work_view = self.artifacts.read_json(work_view_ref)
         encoded = json.dumps(work_view, sort_keys=True)
         self.assertEqual(work_view["module_name"], "router")
-        self.assertIn("requirements", work_view)
+        self.assertNotIn("requirements", work_view)
+        self.assertNotIn("scenarios", work_view)
+        self.assertEqual(work_view["schema_version"], "3")
         self.assertNotIn("coverage_claims", work_view)
         self.assertNotIn("contract_consumption", work_view)
-        self.assertEqual(
-            set(work_view["requirements"]),
-            {"deterministic_routing"},
-        )
         self.assertEqual(work_view["module"]["responsibility"], self._submission()["modules"]["router"]["responsibility"])
         self.assertEqual(
             work_view["developer_tests"],
@@ -1137,7 +1159,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         for forbidden_value in ("hidden-workflow", "hidden-node", "hidden-candidate", "hidden-fingerprint"):
             self.assertNotIn(forbidden_value, encoded)
 
-    def test_scenario_verification_artifact_closes_final_candidate_union(self) -> None:
+    def test_system_verification_artifact_closes_final_candidate_union(self) -> None:
         workspace = self._provision_complete_workspace("module-union", "initial")
         skeleton_ref = self.service.snapshot_architect_result(
             workflow_name="module-union",
@@ -1201,12 +1223,12 @@ class MinionV2SkeletonTests(unittest.TestCase):
             {"status": "PASS", "scenario": "router_end_to_end"},
             artifact_type="VerificationArtifact",
         )
-        scenario_id = compilation.verification_node_ids["router_end_to_end"]
-        self._accept_verification_scenario(
-            scenario_id,
+        system_id = compilation.system_verification_node_id
+        self._accept_system_verification(
+            system_id,
             dependency_node_ids=[router_id],
             verification_ref=scenario_ref.to_dict(),
-            scenario_fingerprint="router-end-to-end-fingerprint",
+            system_fingerprint="system-delivery-fingerprint",
         )
         epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, "module-union-epoch")
         assert epoch is not None
@@ -1239,8 +1261,8 @@ class MinionV2SkeletonTests(unittest.TestCase):
         published = self.artifacts.read_json(publish_result["result_artifact_ref"])
         self.assertEqual(published["verification_refs"], [scenario_ref.to_dict()])
         self.assertEqual(
-            published["scenario_fingerprints"],
-            {"router_end_to_end": "router-end-to-end-fingerprint"},
+            published["system_fingerprint"],
+            "system-delivery-fingerprint",
         )
         self.assertEqual(
             (Path(router.payload["common_git_dir"]).parent / "worktrees" / router.payload["workflow_key"] / "publish" / "src" / "router.cpp").read_text(encoding="utf-8"),
@@ -2625,13 +2647,13 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 )
             )
 
-    def _accept_verification_scenario(
+    def _accept_system_verification(
         self,
         node_id: str,
         *,
         dependency_node_ids: list[str],
         verification_ref: dict[str, object],
-        scenario_fingerprint: str,
+        system_fingerprint: str,
     ) -> None:
         sequence = [
             (
@@ -2644,13 +2666,13 @@ class MinionV2SkeletonTests(unittest.TestCase):
             (
                 "VERIFICATION_PREPARED",
                 {
-                    "scenario_fingerprint": scenario_fingerprint,
-                    "scenario_candidate_union_ref": {"sha256": "scenario-union"},
-                    "scenario_commit_sha": "scenario-commit",
-                    "verification_workspace_fingerprint": "scenario-tree",
+                    "system_fingerprint": system_fingerprint,
+                    "system_candidate_union_ref": {"sha256": "system-union"},
+                    "system_commit_sha": "system-commit",
+                    "verification_workspace_fingerprint": "system-tree",
                 },
             ),
-            ("START_SCENARIO_VERIFICATION", {"fencing_token": 3}),
+            ("START_SYSTEM_VERIFICATION", {"fencing_token": 3}),
             (
                 "SUBMIT_SEMANTIC_VERIFICATION",
                 {"pending_verification_ref": {"sha256": "pending-scenario-verification"}},
@@ -2668,7 +2690,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "VERIFICATION_PASSED",
                 {
                     "verification_artifact_ref": verification_ref,
-                    "scenario_fingerprint": scenario_fingerprint,
+                    "system_fingerprint": system_fingerprint,
                 },
             ),
         ]

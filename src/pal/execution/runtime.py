@@ -101,6 +101,19 @@ class ExecutionRuntime(ExecutionRuntimePort):
             )
 
     def shutdown(self) -> None:
+        with self._interrupt_state_lock:
+            handles = {
+                handle
+                for bucket in self._interrupt_handles.values()
+                for handle in bucket
+            }
+            self._interrupt_handles.clear()
+            self._interrupt_tasks.clear()
+        for handle in handles:
+            terminate = getattr(handle, "terminate", None)
+            if callable(terminate):
+                with contextlib.suppress(Exception):
+                    terminate()
         if self.sync_executor is not None:
             self.sync_executor.shutdown(wait=False, cancel_futures=True)
             self.sync_executor = None
@@ -1205,8 +1218,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
         )
         return self._canonical_result_from_invocation(call.name, getattr(call, "call_id", None), invocation)
 
-    @staticmethod
     def _invocation_meta(
+        self,
         call: CanonicalToolCall,
         *,
         turn_id: str | None,
@@ -1218,6 +1231,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             "tool_call": call,
             "budget": budget,
             "allow_tools": bool(allow_tools),
+            "execution_runtime": self,
         }
 
     def _resolve_char_limit(self, budget: ToolCallBudget) -> int | None:

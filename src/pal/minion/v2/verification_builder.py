@@ -296,14 +296,13 @@ def effective_verification_policy(
     """Compile family defaults into obligations owned by this exact review node."""
 
     source = dict(verification_policy or {})
-    scenario = bool(work_view.get("verification_name")) and not standalone
-    mode = "standalone" if standalone else "scenario" if scenario else "module"
-    kind = str(work_view.get("kind") or "").strip()
+    system = str(work_view.get("kind") or "") == "system_and_delivery"
+    mode = "standalone" if standalone else "system" if system else "module"
     entrypoints = [dict(item) for item in list(work_view.get("entrypoints") or []) if isinstance(item, Mapping)]
     entrypoint_kinds = {str(item.get("kind") or "").strip() for item in entrypoints}
-    require_consumer_probe = scenario and kind == "consumer_probe"
-    require_dogfood = scenario and kind == "dogfood"
-    require_platform_probe = scenario and "platform_probe" in entrypoint_kinds
+    require_consumer_probe = False
+    require_dogfood = system
+    require_platform_probe = system and "platform_probe" in entrypoint_kinds
     if standalone:
         require_dogfood = bool(source.get("require_public_surface_dogfood", False))
         require_platform_probe = False
@@ -447,18 +446,18 @@ def compile_verification_invocation_tool_contract(
         sort_keys=True,
     )
     overrides: dict[str, dict[str, str]] = {}
-    if policy["mode"] in {"scenario", "standalone"}:
+    if policy["mode"] in {"system", "standalone"}:
         overrides["op_minion_verification_scratch_write"] = {
             "use_when": (
                 "Create or replace a complete executable verifier probe in the bound durable review scratch. "
                 "Use the returned scratch_path directly in a dedicated verification run command and set that run "
                 "tool's probe_path to the same relative path. To correct the probe, call verification_scratch_write "
                 "again with the same relative path and complete replacement content; do not use read_file, "
-                "edit_file, or write_file on scenario scratch."
+                "edit_file, or write_file on system-verification scratch."
             ),
             "do_not_use_when": (
                 "Do not use this for product source, module developer/verification corpora, or any path outside "
-                "the bound scenario or standalone-review scratch."
+                "the bound system-verification or standalone-review scratch."
             ),
         }
     for capability in (*_RUN_TO_KIND_TAG, "op_minion_verification_run_lsp_check", "op_minion_verification_check_unavailable"):
@@ -1191,7 +1190,7 @@ def _assert_tool_contract_allows(
     if obligation and allowed_obligations and obligation not in allowed_obligations:
         raise ValueError(
             f"verification obligation {obligation!r} is outside the bound node contract; "
-            "use only the declared module or scenario entrypoints"
+            "use only the declared module or system-delivery entrypoints"
         )
 
 

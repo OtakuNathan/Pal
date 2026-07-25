@@ -46,7 +46,7 @@ class ExecutionCompilation:
     epoch_id: str
     node_run_ids: tuple[str, ...]
     unit_node_ids: Mapping[str, str]
-    verification_node_ids: Mapping[str, str] = field(default_factory=dict)
+    system_verification_node_id: str = ""
     integration_node_id: str = ""
 
 
@@ -387,7 +387,6 @@ class ExecutionCompiler:
             epoch_id=epoch_id,
             node_run_ids=node_ids,
             unit_node_ids=unit_node_ids,
-            verification_node_ids={},
             integration_node_id=integration_node_id,
         )
 
@@ -485,29 +484,42 @@ class ExecutionCompiler:
                 artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
             )
-        scenario_refs: dict[str, ArtifactRef] = {}
-        for name, scenario in scenarios.items():
-            scenario_requirement_names = [
-                str(item) for item in list(scenario.get("requirement_refs") or [])
-            ]
-            scenario_refs[name] = self.architecture.artifacts.put_json(
-                {
-                    "verification_name": name,
-                    "kind": "end_to_end",
-                    "modules": [str(item) for item in list(scenario.get("modules") or [])],
-                    "entrypoints": [str(scenario.get("entrypoint") or "")],
-                    "contract_flow": list(scenario.get("contract_flow") or []),
-                    "observable_behavior": str(scenario.get("observable_behavior") or ""),
-                    "failure_behavior": str(scenario.get("failure_behavior") or ""),
-                    "environment": {"description": str(scenario.get("environment") or "")},
-                    "requirements": {
-                        requirement_name: requirements[requirement_name]
-                        for requirement_name in scenario_requirement_names
-                    },
+        scenario_catalog_ref = self.architecture.artifacts.put_json(
+            {
+                "schema_version": "1",
+                "kind": "system_delivery",
+                "scenarios": {
+                    name: {
+                        "modules": [
+                            str(item) for item in list(scenario.get("modules") or [])
+                        ],
+                        "entrypoints": [str(scenario.get("entrypoint") or "")],
+                        "contract_flow": list(scenario.get("contract_flow") or []),
+                        "observable_behavior": str(
+                            scenario.get("observable_behavior") or ""
+                        ),
+                        "failure_behavior": str(
+                            scenario.get("failure_behavior") or ""
+                        ),
+                        "environment": {
+                            "description": str(scenario.get("environment") or "")
+                        },
+                        "requirements": {
+                            requirement_name: requirements[requirement_name]
+                            for requirement_name in [
+                                str(item)
+                                for item in list(
+                                    scenario.get("requirement_refs") or []
+                                )
+                            ]
+                        },
+                    }
+                    for name, scenario in sorted(scenarios.items())
                 },
-                artifact_type="VerificationScenarioContractArtifact",
-                child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
-            )
+            },
+            artifact_type="ScenarioCatalogArtifact",
+            child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
+        )
         self.repository.dispatch(
             _action(
                 "CREATE_EXECUTION_EPOCH",
@@ -533,14 +545,15 @@ class ExecutionCompiler:
             if workflow is not None and workflow.payload.get("request_ref")
             else {}
         )
+        system_unit_id = "system_delivery"
         workspaces = provision_skeleton_epoch_worktrees(
             self.repository.runtime_root,
             artifacts=self.architecture.artifacts,
             workflow_id=workflow_id,
             workflow_name=str(request.get("workflow_name") or request.get("goal") or workflow_id),
             epoch_id=epoch_id,
-            unit_ids=sorted([*implementation_modules, *scenarios]),
-            verification_unit_ids=set(scenarios),
+            unit_ids=sorted([*implementation_modules, system_unit_id]),
+            verification_unit_ids={system_unit_id},
             workspace=dict(request.get("workspace") or {}),
             architecture_artifact=artifact,
         )
@@ -560,9 +573,7 @@ class ExecutionCompiler:
             }
         )
         unit_node_ids = {name: f"{epoch_id}:node:{name}" for name in implementation_modules}
-        verification_node_ids = {
-            name: f"{epoch_id}:verification:{name}" for name in scenarios
-        }
+        system_verification_node_id = f"{epoch_id}:system-verification"
         for name in sorted(implementation_modules):
             paths = dict(modules[name].get("paths") or {})
             self.repository.dispatch(
@@ -616,41 +627,41 @@ class ExecutionCompiler:
                     },
                 )
             )
-        for name in sorted(scenarios):
-            scenario = scenarios[name]
-            dependency_ids = [unit_node_ids[str(item)] for item in list(scenario.get("modules") or [])]
-            self.repository.dispatch(
-                _action(
-                    "CREATE_NODE_RUN",
-                    workflow_id,
-                    AggregateType.DAG_NODE_RUN,
-                    verification_node_ids[name],
-                    actor,
-                    0,
-                    {
-                        "epoch_id": epoch_id,
-                        "unit_id": name,
-                        "module_name": name,
-                        "node_kind": "verification",
-                        "unit_contract_ref": scenario_refs[name].to_dict(),
-                        "architecture_manifest_ref": manifest_ref.to_dict(),
-                        "dependency_node_ids": dependency_ids,
-                        "accepted_dependency_node_ids": [],
-                        "epoch_frozen": False,
-                        "environment_fingerprint": environment_fingerprint,
-                        "global_constraint_hash": global_constraint_hash,
-                        "path_policy": {
-                            "contract_mode": "review_guarded",
-                            "contract_paths": [],
-                            "implementation_scopes": [],
-                            "developer_tests": None,
-                            "verification_corpus": None,
-                            "reference_only": [],
-                        },
-                        **dict(workspaces[name]),
+        self.repository.dispatch(
+            _action(
+                "CREATE_NODE_RUN",
+                workflow_id,
+                AggregateType.DAG_NODE_RUN,
+                system_verification_node_id,
+                actor,
+                0,
+                {
+                    "epoch_id": epoch_id,
+                    "unit_id": system_unit_id,
+                    "module_name": system_unit_id,
+                    "node_kind": "system_verification",
+                    "unit_contract_ref": scenario_catalog_ref.to_dict(),
+                    "scenario_catalog_ref": scenario_catalog_ref.to_dict(),
+                    "architecture_manifest_ref": manifest_ref.to_dict(),
+                    "dependency_node_ids": [
+                        unit_node_ids[name] for name in sorted(unit_node_ids)
+                    ],
+                    "accepted_dependency_node_ids": [],
+                    "epoch_frozen": False,
+                    "environment_fingerprint": environment_fingerprint,
+                    "global_constraint_hash": global_constraint_hash,
+                    "path_policy": {
+                        "contract_mode": "read_only",
+                        "contract_paths": [],
+                        "implementation_scopes": [],
+                        "developer_tests": None,
+                        "verification_corpus": None,
+                        "reference_only": [],
                     },
-                )
+                    **dict(workspaces[system_unit_id]),
+                },
             )
+        )
         if reuse_from_epoch_id:
             reuse_accepted_candidates(
                 repository=self.repository,
@@ -663,7 +674,7 @@ class ExecutionCompiler:
             )
         node_ids = tuple(
             [unit_node_ids[name] for name in sorted(unit_node_ids)]
-            + [verification_node_ids[name] for name in sorted(verification_node_ids)]
+            + [system_verification_node_id]
         )
         self.repository.dispatch(
             _action(
@@ -676,7 +687,7 @@ class ExecutionCompiler:
                 {
                     "node_ids": list(node_ids),
                     "implementation_node_ids": list(unit_node_ids.values()),
-                    "verification_node_ids": list(verification_node_ids.values()),
+                    "system_verification_node_id": system_verification_node_id,
                 },
             )
         )
@@ -684,7 +695,7 @@ class ExecutionCompiler:
             epoch_id=epoch_id,
             node_run_ids=node_ids,
             unit_node_ids=unit_node_ids,
-            verification_node_ids=verification_node_ids,
+            system_verification_node_id=system_verification_node_id,
         )
 
 
@@ -1328,7 +1339,7 @@ class DagScheduler:
             baseline = prepare_node_dependency_baseline(
                 node,
                 node_by_id,
-                apply_candidates=node_kind != "verification",
+                apply_candidates=node_kind != "system_verification",
             )
             payload = {
                 "accepted_dependency_node_ids": sorted(
@@ -1337,7 +1348,7 @@ class DagScheduler:
                 "epoch_frozen": False,
                 **baseline,
             }
-            verification = node_kind == "verification"
+            verification = node_kind == "system_verification"
             legacy_integration = node_kind == "integration"
             if node.state == "BLOCKED_BY_DEPS":
                 if verification:
@@ -1403,11 +1414,11 @@ def _semantic_contract_value(value: Any) -> Any:
 class UnitWorkViewBuilder:
     architecture: ArchitectureArtifactService
 
-    def build(self, node: AggregateSnapshot, *, dependency_outputs: Mapping[str, Any]) -> ArtifactRef:
+    def build(self, node: AggregateSnapshot) -> ArtifactRef:
         manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
         record = self.architecture.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
         if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
-            return self._build_skeleton_view(node, dependency_outputs=dependency_outputs)
+            return self._build_skeleton_view(node)
         manifest = validate_architecture_manifest(self.architecture.artifacts.read_json(manifest_ref))
         fragments = self.architecture.load_manifest_fragments(manifest)
         unit_contract = self.architecture.artifacts.read_json(dict(node.payload["unit_contract_ref"]))
@@ -1418,12 +1429,11 @@ class UnitWorkViewBuilder:
             if unit_id in {str(item.get("provider") or ""), str(item.get("consumer") or "")}
         ]
         payload = {
-            "schema_version": "1",
+            "schema_version": "2",
             "unit_contract": _semantic_contract_value(unit_contract),
             "cross_unit_contracts": _semantic_contract_value(cross_contracts),
             "global_constraints": _semantic_contract_value(fragments.get("global_constraints")),
             "assumptions": _semantic_contract_value(fragments.get("assumption_ledger")),
-            "dependency_outputs": dict(dependency_outputs),
             "historical_repair_bills": list(node.payload.get("historical_repair_bill_refs") or []),
             "node_run_journal": dict(
                 (self.architecture.repository.read_node_journal(node.aggregate_id) or {}).get("journal") or {}
@@ -1440,63 +1450,29 @@ class UnitWorkViewBuilder:
     def _build_skeleton_view(
         self,
         node: AggregateSnapshot,
-        *,
-        dependency_outputs: Mapping[str, Any],
     ) -> ArtifactRef:
         manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
         artifact = dict(self.architecture.artifacts.read_json(manifest_ref))
         contract_ref = dict(node.payload.get("unit_contract_ref") or {})
         contract = dict(self.architecture.artifacts.read_json(contract_ref))
-        requirements_ref = dict(artifact.get("requirements_ref") or {})
         submission = dict(artifact.get("submission") or {})
         all_modules = {
             str(name): dict(value or {})
             for name, value in dict(submission.get("modules") or {}).items()
         }
-        if str(node.payload.get("node_kind") or "") == "verification":
-            payload = {
-                "schema_version": "2",
-                "verification_name": str(contract.get("verification_name") or ""),
-                "scenario": {
-                    "modules": list(contract.get("modules") or []),
-                    "entrypoints": list(contract.get("entrypoints") or []),
-                    "contract_flow": list(contract.get("contract_flow") or []),
-                    "observable_behavior": str(contract.get("observable_behavior") or ""),
-                    "failure_behavior": str(contract.get("failure_behavior") or ""),
-                    "environment": dict(contract.get("environment") or {}),
-                },
-                "modules": {
-                    name: value
-                    for name, value in all_modules.items()
-                    if name in set(str(item) for item in list(contract.get("modules") or []))
-                },
-                "requirements": {
-                    str(name): dict(value or {})
-                    for name, value in dict(contract.get("requirements") or {}).items()
-                },
-                "dependency_outputs": dict(dependency_outputs),
-                "node_run_journal": dict(
-                    (self.architecture.repository.read_node_journal(node.aggregate_id) or {}).get("journal") or {}
-                ),
-            }
-            return self.architecture.artifacts.put_json(
-                payload,
-                artifact_type="ScenarioWorkViewArtifact",
-                child_refs=(
-                    (str(manifest_ref["sha256"]), "architecture_skeleton"),
-                    (str(contract_ref["sha256"]), "scenario_contract"),
-                    (str(requirements_ref["sha256"]), "requirements"),
-                ),
+        if str(node.payload.get("node_kind") or "") == "system_verification":
+            raise ValueError(
+                "SystemVerificationWorkView is prepared only after all module Candidates are accepted"
             )
         path_policy = dict(node.payload.get("path_policy") or contract.get("paths") or {})
         module_name = str(contract.get("module_name") or node.payload.get("module_name") or "")
         semantic_module = dict(contract.get("module") or {})
-        semantic_dependency_outputs: dict[str, Any] = {}
         dependency_edges = {
             str(name): dict(value or {})
             for name, value in dict(semantic_module.get("dependencies") or {}).items()
         }
         dependency_names = set(dependency_edges)
+        dependency_contract_slices: dict[str, Any] = {}
         for dependency_id in list(node.payload.get("contract_dependency_node_ids") or []):
             dependency = self.architecture.repository.read_snapshot(
                 AggregateType.DAG_NODE_RUN, str(dependency_id)
@@ -1513,18 +1489,28 @@ class UnitWorkViewBuilder:
                     dict(dependency.payload.get("unit_contract_ref") or {})
                 )
             )
-            semantic_dependency_outputs[dependency_name] = {
-                "status": "accepted" if dependency.state == "ACCEPTED" else dependency.state.lower(),
+            provider_module = dict(dependency_contract.get("module") or {})
+            provider_contract = dict(provider_module.get("contract") or {})
+            edge = dependency_edges[dependency_name]
+            consumed = [
+                str(item) for item in list(edge.get("consumes") or [])
+            ]
+            dependency_contract_slices[dependency_name] = {
+                "edge": edge,
                 "contract_paths": list(
                     dict(dependency_contract.get("paths") or {}).get("contract_paths") or []
                 ),
-                "declared_contract_outputs": dict(
-                    dict(dict(dependency_contract.get("module") or {}).get("contract") or {}).get("outputs") or {}
-                ),
-                "declared_outputs": sorted(
-                    str(key) for key in dict(dependency.payload.get("output_hashes") or {})
-                ),
-                "available_in_worktree": dependency.state == "ACCEPTED",
+                "consumed_outputs": {
+                    name: dict(
+                        dict(provider_contract.get("outputs") or {}).get(name) or {}
+                    )
+                    for name in consumed
+                },
+                "errors": list(provider_contract.get("errors") or []),
+                "invariants": list(provider_contract.get("invariants") or []),
+                "ownership": list(provider_module.get("ownership") or []),
+                "lifecycle": dict(provider_module.get("lifecycle") or {}),
+                "state_machine": provider_module.get("state_machine"),
             }
         historical_refs = [
             dict(item)
@@ -1532,7 +1518,7 @@ class UnitWorkViewBuilder:
             if isinstance(item, Mapping) and item.get("sha256")
         ]
         payload = {
-            "schema_version": "2",
+            "schema_version": "3",
             "module_name": module_name,
             "module": semantic_module,
             "contract_mode": str(path_policy.get("contract_mode") or "review_guarded"),
@@ -1541,31 +1527,12 @@ class UnitWorkViewBuilder:
             "developer_tests": dict(path_policy.get("developer_tests") or {}),
             "verification_corpus": dict(path_policy.get("verification_corpus") or {}),
             "reference_only": list(path_policy.get("reference_only") or []),
-            "dependencies": {
-                name: {
-                    "edge": edge,
-                    "module": {
-                        key: value
-                        for key, value in dict(all_modules.get(name) or {}).items()
-                        if key != "paths"
-                    },
-                }
-                for name, edge in dependency_edges.items()
-            },
-            "consumers": {
+            "dependency_contracts": dependency_contract_slices,
+            "consumer_obligations": {
                 name: dict(dict(value.get("dependencies") or {}).get(module_name) or {})
                 for name, value in all_modules.items()
                 if module_name in dict(value.get("dependencies") or {})
             },
-            "requirements": {
-                str(name): dict(value or {})
-                for name, value in dict(contract.get("requirements") or {}).items()
-            },
-            "scenarios": {
-                str(name): dict(value or {})
-                for name, value in dict(contract.get("scenarios") or {}).items()
-            },
-            "dependency_outputs": semantic_dependency_outputs,
             "historical_repair_bills": [
                 repair_bill_semantic_view(self.architecture.artifacts, item) for item in historical_refs
             ],
@@ -1579,7 +1546,6 @@ class UnitWorkViewBuilder:
             child_refs=(
                 (str(manifest_ref["sha256"]), "architecture_skeleton"),
                 (str(contract_ref["sha256"]), "module_contract"),
-                (str(requirements_ref["sha256"]), "requirements"),
                 *((str(item["sha256"]), "historical_repair_bill") for item in historical_refs),
             ),
         )

@@ -111,15 +111,10 @@ class MinionManagerProvider:
     async def handle_control_action_async(self, action: ControlAction) -> str:
         if action.action_kind == "minion_v2_human_decision":
             decision = str(action.args.get("decision") or "").strip().lower()
-            edit_scope = str(action.args.get("edit_scope") or "architecture").strip().lower()
-            if decision == "edit" and edit_scope == "architecture" and not str(
+            if decision == "edit" and not str(
                 action.args.get("edit_instruction") or ""
             ).strip():
                 return "Reply with the exact architecture edit instruction, then submit it with minion_submit_human_decision."
-            if decision == "edit" and edit_scope == "requirements" and not str(
-                action.args.get("amendment") or ""
-            ).strip():
-                return "Reply with the exact task requirement change, then submit it with minion_submit_human_decision."
             try:
                 result = await asyncio.to_thread(
                     MinionV2WorkflowService(self.runtime_root).submit_human_decision,
@@ -128,11 +123,9 @@ class MinionManagerProvider:
                         "decision": decision,
                         **(
                             {
-                                "edit_scope": edit_scope,
                                 "edit_instruction": str(
                                     action.args.get("edit_instruction") or ""
                                 ),
-                                "amendment": str(action.args.get("amendment") or ""),
                             }
                             if decision == "edit"
                             else {}

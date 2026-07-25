@@ -46,6 +46,41 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             {"status": "candidate_ready"},
             artifact_type="CandidateRoleSubmissionArtifact",
         )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="workflow-router",
+                actor="test",
+                expected_version=0,
+            )
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="workflow-router",
+                actor="test",
+                expected_version=1,
+            )
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-router",
+                actor="test",
+                expected_version=0,
+                payload={
+                    "epoch_id": "epoch-router",
+                    "module_name": "router",
+                    "unit_contract_ref": {"sha256": "contract-router"},
+                },
+            )
+        )
         self.repository.ensure_role_session(
             session_id="session-router",
             workflow_id="workflow-router",
@@ -55,6 +90,8 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             mode="produce",
             executor_profile_id="software_engineering.v2_coder",
             family_binding_sha="binding",
+            scope_kind="module",
+            subject_key="router",
         )
 
     def request(self, *, key: str = "router-cycle-1") -> RoleAssignmentRequest:
@@ -213,7 +250,7 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
                 RoleSessionAction.ACTIVATE,
             )
 
-    def test_verifier_session_completes_only_after_settled_verdict_receipt(self) -> None:
+    def test_module_verifier_session_lives_until_workflow_terminal(self) -> None:
         session_id = "session-router-candidate-a"
         self.repository.ensure_role_session(
             session_id=session_id,
@@ -224,8 +261,8 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             mode="module",
             executor_profile_id="software_engineering.v2_verifier",
             family_binding_sha="binding",
-            scope_kind="candidate",
-            subject_key="candidate:a",
+            scope_kind="module",
+            subject_key="router",
         )
         request = RoleAssignmentRequest(
             assignment_key="router-review-candidate-a",
@@ -255,12 +292,28 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             settlement_action={"action_type": "REVIEW_FAILED", "payload": {}},
         )
 
-        with self.assertRaisesRegex(ValueError, "settled verdict receipt"):
+        with self.assertRaisesRegex(ValueError, "non-terminal assignment"):
             self.repository.complete_role_session(session_id)
 
         self.repository.settle_role_assignment(
             assignment_id=assignment["assignment_id"],
             submission_payload_hash=payload_hash,
+        )
+        with self.assertRaisesRegex(ValueError, "lives for the workflow"):
+            self.repository.complete_role_session(session_id)
+        workflow = self.repository.read_snapshot(
+            AggregateType.WORKFLOW,
+            "workflow-router",
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="REJECT_WORKFLOW",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="workflow-router",
+                actor="test",
+                expected_version=workflow.version,
+            )
         )
         self.assertTrue(self.repository.complete_role_session(session_id))
         self.assertEqual(
@@ -268,7 +321,7 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             RoleSessionState.COMPLETED.value,
         )
 
-    def test_role_session_scope_is_backfilled_once_and_then_immutable(self) -> None:
+    def test_role_session_scope_is_immutable(self) -> None:
         session = self.repository.ensure_role_session(
             session_id="session-router",
             workflow_id="workflow-router",
@@ -278,12 +331,12 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             mode="repair",
             executor_profile_id="software_engineering.v2_coder",
             family_binding_sha="binding",
-            scope_kind="module_run",
-            subject_key="node-router",
+            scope_kind="module",
+            subject_key="router",
         )
-        self.assertEqual(session["scope_kind"], "module_run")
-        self.assertEqual(session["subject_key"], "node-router")
-        with self.assertRaisesRegex(ValueError, "scope is immutable"):
+        self.assertEqual(session["scope_kind"], "module")
+        self.assertEqual(session["subject_key"], "router")
+        with self.assertRaisesRegex(ValueError, "identity is immutable"):
             self.repository.ensure_role_session(
                 session_id="session-router",
                 workflow_id="workflow-router",
@@ -293,11 +346,11 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
                 mode="produce",
                 executor_profile_id="software_engineering.v2_coder",
                 family_binding_sha="binding",
-                scope_kind="module_run",
-                subject_key="other-node",
+                scope_kind="module",
+                subject_key="other_module",
             )
 
-    def test_v18_migrates_legacy_roles_and_obsolete_assignment_states(self) -> None:
+    def test_v19_migrates_legacy_roles_and_quiesces_active_session(self) -> None:
         assignment = self.repository.create_role_assignment(self.request())
         with sqlite3.connect(str(self.repository.db_path)) as connection:
             connection.execute(
@@ -320,7 +373,7 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
         migrated = self.repository.read_role_assignment(assignment["assignment_id"])
         self.assertEqual(session["role"], "implementation")
         self.assertEqual(session["mode"], "produce")
-        self.assertEqual(session["status"], "suspended")
+        self.assertEqual(session["status"], "cancelled")
         self.assertEqual(migrated["state"], "cancelled")
         self.repository.ensure_role_session(
             session_id="session-router",
@@ -331,7 +384,69 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             mode="repair",
             executor_profile_id="software_engineering.v2_coder",
             family_binding_sha="binding",
+            scope_kind="module",
+            subject_key="router",
         )
+
+    def test_v19_cutover_triages_only_active_work_and_preserves_completed_history(self) -> None:
+        completed_ref = self.artifacts.put_json(
+            {"status": "complete"},
+            artifact_type="PublishedBranchArtifact",
+        )
+        for action in (
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id="workflow-completed",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="workflow-completed",
+                actor="test",
+                expected_version=0,
+                payload={"history_marker": "keep"},
+            ),
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id="workflow-completed",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="workflow-completed",
+                actor="test",
+                expected_version=1,
+            ),
+            ActionEnvelope(
+                action_type="MARK_COMPLETED",
+                workflow_id="workflow-completed",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="workflow-completed",
+                actor="test",
+                expected_version=2,
+                payload={"result_artifact_ref": completed_ref.to_dict()},
+            ),
+        ):
+            self.repository.dispatch(action)
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_schema_meta SET schema_value = '18' "
+                "WHERE schema_key = 'schema_version'"
+            )
+
+        self.repository.ensure_schema()
+
+        active = self.repository.read_snapshot(AggregateType.WORKFLOW, "workflow-router")
+        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, "node-router")
+        completed = self.repository.read_snapshot(
+            AggregateType.WORKFLOW,
+            "workflow-completed",
+        )
+        assert active is not None and node is not None and completed is not None
+        self.assertEqual(active.state, "TRIAGE_REQUIRED")
+        self.assertEqual(active.payload["blocker"]["kind"], "orchestration_contract_changed")
+        self.assertEqual(node.state, "TRIAGE_REQUIRED")
+        self.assertEqual(
+            self.repository.read_role_session("session-router")["status"],
+            "cancelled",
+        )
+        self.assertEqual(completed.state, "COMPLETED")
+        self.assertEqual(completed.payload["history_marker"], "keep")
+        self.assertNotIn("blocker", completed.payload)
 
     def test_v18_renames_legacy_protocol_tables_without_a_compatibility_view(self) -> None:
         with sqlite3.connect(str(self.repository.db_path)) as connection:
@@ -517,21 +632,6 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
     def test_failure_result_and_parent_triage_settle_atomically(self) -> None:
         self.repository.dispatch(
             ActionEnvelope(
-                action_type="CREATE_NODE_RUN",
-                workflow_id="workflow-router",
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id="node-router",
-                actor="test",
-                expected_version=0,
-                payload={
-                    "unit_contract_ref": self.input_ref.to_dict(),
-                    "epoch_id": "epoch-router",
-                    "dependency_node_ids": [],
-                },
-            )
-        )
-        self.repository.dispatch(
-            ActionEnvelope(
                 action_type="DEPENDENCIES_ACCEPTED",
                 workflow_id="workflow-router",
                 aggregate_type=AggregateType.DAG_NODE_RUN,
@@ -613,7 +713,7 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             self.repository.read_role_attempt(attempt["attempt_id"])["status"],
             "failed",
         )
-        with self.assertRaisesRegex(ValueError, "terminal outcome"):
+        with self.assertRaisesRegex(ValueError, "lives for the workflow"):
             self.repository.complete_role_session("session-router")
 
         self.repository.dispatch(
@@ -636,6 +736,16 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
                 expected_version=5,
             )
         )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="REJECT_WORKFLOW",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="workflow-router",
+                actor="test",
+                expected_version=2,
+            )
+        )
         self.assertTrue(
             self.repository.complete_role_session(
                 "session-router",
@@ -649,19 +759,6 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
 
     def test_settled_submission_reconciliation_failure_can_triage_parent(self) -> None:
         for action in (
-            ActionEnvelope(
-                action_type="CREATE_NODE_RUN",
-                workflow_id="workflow-router",
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id="node-router",
-                actor="test",
-                expected_version=0,
-                payload={
-                    "unit_contract_ref": self.input_ref.to_dict(),
-                    "epoch_id": "epoch-router",
-                    "dependency_node_ids": [],
-                },
-            ),
             ActionEnvelope(
                 action_type="DEPENDENCIES_ACCEPTED",
                 workflow_id="workflow-router",
@@ -752,6 +849,8 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
                 mode="produce",
                 executor_profile_id="software_engineering.v2_coder",
                 family_binding_sha="binding",
+                scope_kind="architecture_cycle",
+                subject_key="revision-after-finding",
             )
         request = RoleAssignmentRequest(
             **{
@@ -759,7 +858,7 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
                 "aggregate_id": "node-router-repair",
             }
         )
-        with self.assertRaisesRegex(ValueError, "session identity"):
+        with self.assertRaisesRegex(ValueError, "outside its workflow"):
             self.repository.create_role_assignment(request)
 
     def test_produce_and_repair_are_modes_of_one_implementation_session(self) -> None:
@@ -775,6 +874,8 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             mode="repair",
             executor_profile_id="software_engineering.v2_coder",
             family_binding_sha="binding",
+            scope_kind="module",
+            subject_key="router",
         )
         repair = self.repository.create_role_assignment(
             RoleAssignmentRequest(
@@ -791,21 +892,6 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
         )
 
     def test_stale_node_preserves_its_role_session_for_requeue(self) -> None:
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_NODE_RUN",
-                workflow_id="workflow-router",
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id="node-router",
-                actor="test",
-                expected_version=0,
-                payload={
-                    "unit_contract_ref": self.input_ref.to_dict(),
-                    "epoch_id": "epoch-router",
-                    "dependency_node_ids": [],
-                },
-            )
-        )
         self.repository.dispatch(
             ActionEnvelope(
                 action_type="DEPENDENCIES_ACCEPTED",
@@ -851,7 +937,7 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             self.repository.read_role_session("session-router")["status"],
             "suspended",
         )
-        with self.assertRaisesRegex(ValueError, "terminal outcome"):
+        with self.assertRaisesRegex(ValueError, "lives for the workflow"):
             self.repository.complete_role_session("session-router")
 
         self.repository.dispatch(
@@ -980,6 +1066,16 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
         )
 
     def test_business_action_and_submission_settlement_commit_atomically(self) -> None:
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id="workflow-settlement",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="workflow-settlement",
+                actor="test",
+                expected_version=0,
+            )
+        )
         self.repository.ensure_role_session(
             session_id="session-settlement",
             workflow_id="workflow-settlement",
@@ -989,6 +1085,8 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             mode="produce",
             executor_profile_id="software_engineering.v2_coder",
             family_binding_sha="binding",
+            scope_kind=AggregateType.WORKFLOW.value,
+            subject_key="workflow-settlement",
         )
         assignment = self.repository.create_role_assignment(
             RoleAssignmentRequest(
@@ -1032,13 +1130,13 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             settlement_action={"action_type": "SETTLE_WORKER_SUBMISSION"},
         )
         action = ActionEnvelope(
-            action_type="CREATE_WORKFLOW",
+            action_type="START_WORKFLOW",
             workflow_id="workflow-settlement",
             aggregate_type=AggregateType.WORKFLOW,
             aggregate_id="workflow-settlement",
             actor="worker-supervisor",
-            expected_version=0,
-            idempotency_key="create-from-worker",
+            expected_version=1,
+            idempotency_key="start-from-worker",
         )
 
         self.repository.dispatch(action)

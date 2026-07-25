@@ -70,29 +70,29 @@ class CandidateUnionService:
         commit_sha: str,
         branch_name: str,
         verification_refs: Sequence[Mapping[str, Any]],
-        scenario_fingerprints: Mapping[str, str],
+        system_fingerprint: str,
     ) -> ArtifactRef:
         if not branch_name.strip() or branch_name.startswith("-"):
             raise ValueError("invalid final branch name")
-        if not verification_refs or set(scenario_fingerprints) == set():
-            raise ValueError("final publish requires accepted scenario verification evidence")
+        if not verification_refs or not system_fingerprint.strip():
+            raise ValueError("final publish requires accepted system verification evidence")
         _git(repository, "update-ref", f"refs/heads/{branch_name}", commit_sha)
         if _git(repository, "rev-parse", branch_name).strip() != commit_sha:
             raise RuntimeError("published branch does not resolve to the deterministic candidate union")
         children = [(union_ref.sha256, "candidate_union")]
         children.extend(
-            (str(ref["sha256"]), "scenario_verification")
+            (str(ref["sha256"]), "system_verification")
             for ref in verification_refs
             if ref.get("sha256")
         )
         return self.artifacts.put_json(
             {
-                "schema_version": "2",
+                "schema_version": "3",
                 "branch_name": branch_name,
                 "commit_sha": commit_sha,
                 "candidate_union_ref": union_ref.to_dict(),
                 "verification_refs": [dict(item) for item in verification_refs],
-                "scenario_fingerprints": dict(scenario_fingerprints),
+                "system_fingerprint": system_fingerprint,
             },
             artifact_type="PublishedBranchArtifact",
             child_refs=tuple(children),

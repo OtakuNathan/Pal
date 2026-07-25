@@ -23,14 +23,14 @@ class RoleMode(StrEnum):
     PRODUCE = "produce"
     REPAIR = "repair"
     MODULE = "module"
-    SCENARIO = "scenario"
+    SYSTEM = "system"
 
 
 ROLE_MODES: Mapping[OrchestrationRole, frozenset[RoleMode]] = {
     OrchestrationRole.ARCHITECT: frozenset({RoleMode.AUTHOR, RoleMode.REVISION}),
     OrchestrationRole.REVIEWER: frozenset({RoleMode.ARCHITECTURE, RoleMode.STANDALONE}),
     OrchestrationRole.IMPLEMENTATION: frozenset({RoleMode.PRODUCE, RoleMode.REPAIR}),
-    OrchestrationRole.VERIFIER: frozenset({RoleMode.MODULE, RoleMode.SCENARIO}),
+    OrchestrationRole.VERIFIER: frozenset({RoleMode.MODULE, RoleMode.SYSTEM}),
 }
 
 

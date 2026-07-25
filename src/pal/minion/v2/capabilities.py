@@ -116,26 +116,12 @@ class MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput(StrictT
 
     task: str | None = None
     decision: Literal["accept", "edit", "reject"]
-    edit_scope: Literal["architecture", "requirements"] | None = Field(
-        default=None,
-        description=(
-            "For decision=edit, choose whether the task ledger changes or only the "
-            "architecture changes. Omit it for accept or reject."
-        ),
-    )
     edit_instruction: str | None = Field(
         default=None,
         description=(
-            "Required for architecture edits. This changes the architecture, not the "
-            "immutable task ledger."
-        ),
-    )
-    amendment: str | None = Field(
-        default=None,
-        description=(
-            "Exact user-authorized requirement change. For a requirements edit, the "
-            "Manager appends this text directly to the immutable task ledger before "
-            "starting the architecture revision; no role may rewrite it."
+            "Required for decision=edit. Correct only architecture drift from the "
+            "already pinned task; new requirements or preferences must use normal Pal "
+            "communication and a new workflow revision."
         ),
     )
 

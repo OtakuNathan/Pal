@@ -1501,6 +1501,8 @@ class MinionV2Repository:
                 "mode",
                 "executor_profile_id",
                 "family_binding_sha",
+                "scope_kind",
+                "subject_key",
             )
             if not values[name]
         ]
@@ -1518,20 +1520,20 @@ class MinionV2Repository:
             ).fetchone()
             identity = (
                 values["workflow_id"],
-                aggregate_type.value,
-                values["aggregate_id"],
                 values["role"],
                 values["executor_profile_id"],
                 values["family_binding_sha"],
+                values["scope_kind"],
+                values["subject_key"],
             )
             if existing is not None:
                 actual = (
                     str(existing["workflow_id"]),
-                    str(existing["aggregate_type"]),
-                    str(existing["aggregate_id"]),
                     str(existing["role"]),
                     str(existing["executor_profile_id"]),
                     str(existing["family_binding_sha"]),
+                    str(existing["scope_kind"] or ""),
+                    str(existing["subject_key"] or ""),
                 )
                 if actual != identity:
                     raise ValueError("role session identity is immutable")
@@ -1543,26 +1545,6 @@ class MinionV2Repository:
                         WHERE session_id = ?
                         """,
                         (values["mode"], now, values["session_id"]),
-                    )
-                    existing = connection.execute(
-                        "SELECT * FROM minion_v2_role_sessions WHERE session_id = ?",
-                        (values["session_id"],),
-                    ).fetchone()
-                existing_scope = (
-                    str(existing["scope_kind"] or ""),
-                    str(existing["subject_key"] or ""),
-                )
-                requested_scope = (values["scope_kind"], values["subject_key"])
-                if any(existing_scope) and existing_scope != requested_scope:
-                    raise ValueError("role session scope is immutable")
-                if not any(existing_scope) and any(requested_scope):
-                    connection.execute(
-                        """
-                        UPDATE minion_v2_role_sessions
-                        SET scope_kind = ?, subject_key = ?, updated_at = ?
-                        WHERE session_id = ?
-                        """,
-                        (*requested_scope, now, values["session_id"]),
                     )
                     existing = connection.execute(
                         "SELECT * FROM minion_v2_role_sessions WHERE session_id = ?",
@@ -1608,6 +1590,35 @@ class MinionV2Repository:
             ).fetchone()
         return _decode_role_session(row) if row is not None else None
 
+    def complete_workflow_role_sessions(
+        self,
+        workflow_id: str,
+        *,
+        status: str = "completed",
+    ) -> tuple[str, ...]:
+        """Close logical role sessions only after the workflow itself is terminal."""
+
+        self.ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id FROM minion_v2_role_sessions
+                WHERE workflow_id = ? AND status IN (?, ?)
+                ORDER BY created_at, session_id
+                """,
+                (
+                    str(workflow_id),
+                    RoleSessionState.ACTIVE.value,
+                    RoleSessionState.SUSPENDED.value,
+                ),
+            ).fetchall()
+        completed: list[str] = []
+        for row in rows:
+            session_id = str(row["session_id"])
+            if self.complete_role_session(session_id, status=status):
+                completed.append(session_id)
+        return tuple(completed)
+
     def list_role_sessions(
         self,
         *,
@@ -1652,24 +1663,23 @@ class MinionV2Repository:
                 raise ValueError("role assignment cannot use a terminal role session")
             session_identity = (
                 str(session["workflow_id"]),
-                str(session["aggregate_type"]),
-                str(session["aggregate_id"]),
                 str(session["role"]),
-                str(session["mode"]),
                 str(session["executor_profile_id"]),
                 str(session["family_binding_sha"]),
             )
             request_identity = (
                 request.workflow_id,
-                request.aggregate_type,
-                request.aggregate_id,
                 request.role,
-                request.mode,
                 request.executor_profile_id,
                 request.family_binding_sha,
             )
             if session_identity != request_identity:
                 raise ValueError("role assignment does not match its session identity")
+            self._assert_assignment_in_role_session_scope_locked(
+                connection,
+                session,
+                request,
+            )
             self._assert_artifact_refs_durable(connection, request.input_refs)
             existing = connection.execute(
                 "SELECT * FROM minion_v2_role_assignments WHERE assignment_key = ?",
@@ -1716,6 +1726,49 @@ class MinionV2Repository:
                 (request.assignment_id,),
             ).fetchone()
             return _decode_role_assignment(row)
+
+    def _assert_assignment_in_role_session_scope_locked(
+        self,
+        connection: sqlite3.Connection,
+        session: sqlite3.Row,
+        request: RoleAssignmentRequest,
+    ) -> None:
+        scope_kind = str(session["scope_kind"] or "")
+        subject_key = str(session["subject_key"] or "")
+        snapshot = self._read_snapshot_locked(
+            connection,
+            AggregateType(str(request.aggregate_type)),
+            request.aggregate_id,
+        )
+        if snapshot is None or snapshot.workflow_id != request.workflow_id:
+            raise ValueError("role assignment aggregate is outside its workflow")
+        if scope_kind == "architecture_cycle":
+            if snapshot.aggregate_type != AggregateType.ARCHITECTURE_REVISION:
+                raise ValueError("architecture-cycle session may only review architecture revisions")
+            cycle_id = str(
+                snapshot.payload.get("architecture_cycle_id")
+                or snapshot.payload.get("root_architecture_revision_id")
+                or snapshot.aggregate_id
+            )
+            if cycle_id != subject_key:
+                raise ValueError("role assignment is outside its architecture cycle")
+            return
+        if scope_kind == "module":
+            if snapshot.aggregate_type != AggregateType.DAG_NODE_RUN:
+                raise ValueError("module session may only activate on DAG node runs")
+            if str(snapshot.payload.get("module_name") or "") != subject_key:
+                raise ValueError("role assignment is outside its module")
+            return
+        if scope_kind == "system_delivery":
+            if snapshot.aggregate_type != AggregateType.DAG_NODE_RUN:
+                raise ValueError("system session may only activate on a DAG node run")
+            if subject_key != request.workflow_id or str(
+                snapshot.payload.get("node_kind") or ""
+            ) != "system_verification":
+                raise ValueError("role assignment is outside system verification")
+            return
+        if scope_kind != request.aggregate_type or subject_key != request.aggregate_id:
+            raise ValueError("role assignment is outside its aggregate-bound session")
 
     def claim_role_assignment(self, assignment_id: str) -> dict[str, Any]:
         self.ensure_schema()
@@ -2716,38 +2769,35 @@ class MinionV2Repository:
             ):
                 return True
             owner = session if session is not None else invocation
-            session_role = str(owner["role"] or "")
-            if normalized == RoleSessionState.COMPLETED.value and session_role == "verifier":
-                assignments = connection.execute(
-                    "SELECT state FROM minion_v2_role_assignments WHERE session_id = ?",
-                    (str(session_id),),
-                ).fetchall()
-                states = {str(row["state"]) for row in assignments}
-                if not assignments or RoleAssignmentState.SETTLED.value not in states:
-                    raise ValueError("verifier session cannot complete before a settled verdict receipt")
-                if states - {
-                    RoleAssignmentState.SETTLED.value,
-                    RoleAssignmentState.CANCELLED.value,
-                }:
-                    raise ValueError("verifier session cannot complete with an active assignment")
+            assignments = connection.execute(
+                "SELECT state FROM minion_v2_role_assignments WHERE session_id = ?",
+                (str(session_id),),
+            ).fetchall()
+            states = {str(row["state"]) for row in assignments}
+            if states - {
+                RoleAssignmentState.SETTLED.value,
+                RoleAssignmentState.CANCELLED.value,
+            }:
+                raise ValueError("role session cannot complete with a non-terminal assignment")
+            if session is not None:
+                self._assert_role_session_scope_terminal_locked(
+                    connection,
+                    session,
+                    cancelled=normalized == RoleSessionState.CANCELLED.value,
+                )
             else:
                 snapshot = self._read_snapshot_locked(
                     connection,
                     AggregateType(str(owner["aggregate_type"])),
                     str(owner["aggregate_id"]),
                 )
-                allowed_terminal = {
-                    AggregateType.ARCHITECTURE_REVISION: {
-                        "ACCEPTED",
-                        "REJECTED",
-                        "SUPERSEDED",
-                        "CANCELLED",
-                    },
-                    AggregateType.DAG_NODE_RUN: {"ACCEPTED", "CANCELLED"},
-                }
-                if snapshot is None or snapshot.state not in allowed_terminal.get(snapshot.aggregate_type, set()):
+                if snapshot is None or snapshot.state not in {
+                    "ACCEPTED",
+                    "REJECTED",
+                    "CANCELLED",
+                }:
                     raise ValueError(
-                        "role session cannot complete before its owned aggregate reaches a terminal outcome"
+                        "legacy role invocation cannot complete before its aggregate is terminal"
                     )
             now = utc_now()
             if invocation is not None:
@@ -2768,6 +2818,69 @@ class MinionV2Repository:
                 )
             self._rebuild_workflow_projection_locked(connection, str(owner["workflow_id"]), "")
             return True
+
+    def _assert_role_session_scope_terminal_locked(
+        self,
+        connection: sqlite3.Connection,
+        session: sqlite3.Row,
+        *,
+        cancelled: bool,
+    ) -> None:
+        workflow_id = str(session["workflow_id"])
+        workflow = self._read_snapshot_locked(
+            connection,
+            AggregateType.WORKFLOW,
+            workflow_id,
+        )
+        workflow_terminal = workflow is not None and workflow.state in {
+            "COMPLETED",
+            "REJECTED",
+            "CANCELLED",
+        }
+        scope_kind = str(session["scope_kind"] or "")
+        subject_key = str(session["subject_key"] or "")
+        if scope_kind in {"module", "system_delivery"}:
+            if not workflow_terminal:
+                raise ValueError(
+                    f"{scope_kind} role session lives for the workflow and cannot complete early"
+                )
+            return
+        if scope_kind == "architecture_cycle":
+            rows = connection.execute(
+                """
+                SELECT * FROM minion_v2_aggregate_snapshots
+                WHERE workflow_id = ? AND aggregate_type = ?
+                ORDER BY created_at, aggregate_id
+                """,
+                (workflow_id, AggregateType.ARCHITECTURE_REVISION.value),
+            ).fetchall()
+            snapshots = [_snapshot_from_row(row) for row in rows]
+            revisions = [
+                revision
+                for revision in snapshots
+                if str(
+                    revision.payload.get("architecture_cycle_id")
+                    or revision.payload.get("root_architecture_revision_id")
+                    or revision.aggregate_id
+                )
+                == subject_key
+            ]
+            terminal_states = {"ACCEPTED", "REJECTED", "CANCELLED"}
+            if not revisions or revisions[-1].state not in terminal_states:
+                raise ValueError(
+                    "architecture role session cannot complete while its correction cycle is open"
+                )
+            return
+        snapshot = self._read_snapshot_locked(
+            connection,
+            AggregateType(str(session["aggregate_type"])),
+            str(session["aggregate_id"]),
+        )
+        allowed = {"ACCEPTED", "REJECTED", "CANCELLED"}
+        if snapshot is None or snapshot.state not in allowed:
+            raise ValueError(
+                "aggregate-bound role session cannot complete before its aggregate is terminal"
+            )
 
     @staticmethod
     def _transition_role_session_locked(

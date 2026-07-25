@@ -76,11 +76,14 @@ from pal.minion.v2.execution import (
 )
 from pal.minion.v2.service import MinionV2WorkflowService, workflow_request_from_snapshot
 from pal.minion.v2.sessions import (
+    architecture_cycle_id,
+    architecture_reviewer_session_id,
     architect_session_id_for_revision,
     coder_session_id,
+    module_name_from_payload,
+    module_verifier_session_id,
     node_role_generation,
-    verifier_session_id,
-    verifier_session_subject,
+    system_verifier_session_id,
 )
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_REPAIR_BASELINE_ARTIFACT,
@@ -268,6 +271,8 @@ def _verifier_reference_refs(
     if isinstance(producer_report_value, Mapping) and producer_report_value.get("sha256"):
         references["coder_report"] = _ref_from_mapping(producer_report_value)
     architecture_ref_value = node_payload.get("architecture_manifest_ref")
+    if str(node_payload.get("node_kind") or "") != "system_verification":
+        return references
     if not isinstance(architecture_ref_value, Mapping) or not architecture_ref_value.get("sha256"):
         return references
     architecture_manifest = artifacts.read_json(_ref_from_mapping(architecture_ref_value))
@@ -392,12 +397,64 @@ def _role_session_scope(
     snapshot: AggregateSnapshot,
     activation: RoleActivation,
 ) -> tuple[str, str]:
+    if snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION and activation.role in {
+        OrchestrationRole.ARCHITECT,
+        OrchestrationRole.REVIEWER,
+    }:
+        return (
+            "architecture_cycle",
+            architecture_cycle_id(snapshot.aggregate_id, snapshot.payload),
+        )
     if activation.role == OrchestrationRole.IMPLEMENTATION:
-        return "module_run", str(snapshot.aggregate_id)
+        return "module", module_name_from_payload(snapshot.payload)
     if activation.role == OrchestrationRole.VERIFIER:
-        subject = verifier_session_subject(snapshot.payload)
-        return ("scenario" if subject.startswith("scenario:") else "candidate"), subject
+        if str(snapshot.payload.get("node_kind") or "unit") == "system_verification":
+            return "system_delivery", snapshot.workflow_id
+        return "module", module_name_from_payload(snapshot.payload)
     return snapshot.aggregate_type.value, str(snapshot.aggregate_id)
+
+
+def _node_role_session_id(
+    node: AggregateSnapshot,
+    activation: RoleActivation,
+) -> str:
+    generation = node_role_generation(node.payload)
+    if activation.role == OrchestrationRole.IMPLEMENTATION:
+        return coder_session_id(
+            node.workflow_id,
+            module_name_from_payload(node.payload),
+            generation,
+        )
+    if str(node.payload.get("node_kind") or "unit") == "system_verification":
+        return system_verifier_session_id(node.workflow_id, generation)
+    return module_verifier_session_id(
+        node.workflow_id,
+        module_name_from_payload(node.payload),
+        generation,
+    )
+
+
+def _role_mode_profile_payload(
+    profile_payload: Mapping[str, Any],
+    *,
+    mode: str,
+) -> dict[str, Any]:
+    """Compile one role-mode profile before it enters the immutable prompt pack."""
+
+    compiled = dict(profile_payload)
+    mode_fragments = dict(
+        dict(compiled.get("metadata") or {}).get("mode_fragments") or {}
+    )
+    fragment = dict(mode_fragments.get(str(mode)) or {})
+    for name in (
+        "identity_fragment",
+        "behavior_fragment",
+        "output_contract_fragment",
+    ):
+        value = str(fragment.get(name) or "").strip()
+        if value:
+            compiled[name] = value
+    return compiled
 
 
 def _role_uses_bound_durable_workspace(
@@ -648,17 +705,17 @@ class SemanticOrchestrator:
                 action_type="START_REVIEW",
                 activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
             )
-        if mode == RoleMode.SCENARIO:
+        if mode == RoleMode.SYSTEM:
             return self._admit_node_worker(
                 effect,
-                action_type="START_SCENARIO_VERIFICATION",
-                activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.SCENARIO),
+                action_type="START_SYSTEM_VERIFICATION",
+                activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.SYSTEM),
             )
         raise ValueError(f"unsupported verifier mode: {mode.value}")
 
     async def _run_verification_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         mode = RoleMode(self._effect_role_mode(effect))
-        return await self._run_verification(effect, scenario_mode=mode == RoleMode.SCENARIO)
+        return await self._run_verification(effect, system_mode=mode == RoleMode.SYSTEM)
 
     def _admit_reviewer_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         if RoleMode(self._effect_role_mode(effect)) != RoleMode.STANDALONE:
@@ -983,6 +1040,8 @@ class SemanticOrchestrator:
             )
         if str(assignment.get("state") or "") not in {
             RoleAssignmentState.QUEUED.value,
+            RoleAssignmentState.CLAIMED.value,
+            RoleAssignmentState.RUNNING.value,
             RoleAssignmentState.RETRY_QUEUED.value,
             RoleAssignmentState.RESULT_RECORDED.value,
             RoleAssignmentState.SETTLED.value,
@@ -1067,7 +1126,11 @@ class SemanticOrchestrator:
         evaluation_generation: int = 0,
         exclude_assignment_id: str = "",
     ) -> dict[str, Any] | None:
-        semantic_inputs = _semantic_role_input_refs(input_refs, role=role, mode=mode)
+        semantic_inputs = self._semantic_role_input_identity(
+            input_refs,
+            role=role,
+            mode=mode,
+        )
         expected_artifact_type = role_submission_artifact_type(submission_kind)
         if not expected_artifact_type:
             return None
@@ -1101,7 +1164,7 @@ class SemanticOrchestrator:
             if str(artifact_ref.get("artifact_type") or "") != expected_artifact_type:
                 continue
             if (
-                _semantic_role_input_refs(
+                self._semantic_role_input_identity(
                     dict(candidate.get("input_refs") or {}),
                     role=role,
                     mode=mode,
@@ -1111,17 +1174,61 @@ class SemanticOrchestrator:
                 return dict(candidate)
         return None
 
+    def _semantic_role_input_identity(
+        self,
+        input_refs: Mapping[str, Mapping[str, Any]],
+        *,
+        role: str,
+        mode: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Compile stable business input identities for receipt reconciliation.
+
+        ``ModuleWorkViewArtifact.node_run_journal`` is Manager-owned progress
+        projection. It changes after a Coder submits even though the contract,
+        requirements, dependencies, scopes, and workspace candidate are
+        unchanged. Comparing the content-addressed artifact ref directly would
+        make a successfully recorded candidate look like a new semantic job
+        after triage or restart.
+
+        Other artifacts remain exact ref matches. Verifier environment
+        preparation is also intentionally semantic and is retained by
+        ``_semantic_role_input_refs``.
+        """
+
+        semantic = _semantic_role_input_refs(input_refs, role=role, mode=mode)
+        identities: dict[str, dict[str, Any]] = {}
+        for name, ref_value in semantic.items():
+            ref = dict(ref_value)
+            if str(ref.get("artifact_type") or "") != "ModuleWorkViewArtifact":
+                identities[name] = ref
+                continue
+            payload = self.service.artifacts.read_json(ref)
+            if not isinstance(payload, Mapping):
+                raise SubmissionInvariantError(
+                    "ModuleWorkViewArtifact must contain a JSON object"
+                )
+            stable_payload = dict(payload)
+            stable_payload.pop("node_run_journal", None)
+            identities[name] = {
+                "artifact_type": "ModuleWorkViewArtifact",
+                "semantic_payload_hash": stable_hash(stable_payload),
+            }
+        return identities
+
     def _role_submission_settlement(
         self,
         effect: Mapping[str, Any],
         *,
+        assignment_id: str = "",
         required: bool = True,
     ) -> dict[str, str]:
         effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
-        assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
-        if not assignment_id:
+        resolved_assignment_id = str(assignment_id).strip()
+        if not resolved_assignment_id:
+            resolved_assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
+        if not resolved_assignment_id:
             return {}
-        assignment = self.repository.read_role_assignment(assignment_id)
+        assignment = self.repository.read_role_assignment(resolved_assignment_id)
         if assignment is None:
             raise SubmissionInvariantError("role assignment disappeared before settlement")
         if assignment["state"] not in {
@@ -1139,9 +1246,20 @@ class SemanticOrchestrator:
                 "role assignment submission receipt has no payload hash"
             )
         return {
-            "role_assignment_id": assignment_id,
+            "role_assignment_id": resolved_assignment_id,
             "role_submission_payload_hash": payload_hash,
         }
+
+    @staticmethod
+    def _terminal_role_assignment_id(terminal: Mapping[str, Any]) -> str:
+        assignment_id = str(
+            dict(terminal.get("payload") or {}).get("role_assignment_id") or ""
+        ).strip()
+        if not assignment_id:
+            raise SubmissionInvariantError(
+                "role terminal has no durable assignment identity"
+            )
+        return assignment_id
 
     def _release_background_business_lease(self, effect: Mapping[str, Any]) -> None:
         try:
@@ -1319,6 +1437,13 @@ class SemanticOrchestrator:
             runner = self._runner_for_recovered_effect(effect)
             if runner is None:
                 continue
+            existing_worker = self._background_workers.get(effect_key)
+            if existing_worker is not None and not existing_worker.done():
+                # The live worker owns both the logical effect and its
+                # assignment projection. A periodic recovery scan may observe
+                # older durable rows for the same effect, but it must never
+                # rebind the projection underneath that worker.
+                continue
             if self._role_assignment_attempt_is_live(assignment):
                 # Another supervisor still owns the process attempt. This is
                 # especially important for reconcile effects, which may run a
@@ -1338,8 +1463,6 @@ class SemanticOrchestrator:
             self._assignment_ids_by_effect[effect_key] = str(assignment["assignment_id"])
             ready = self._assignment_ready_events.setdefault(effect_key, asyncio.Event())
             ready.set()
-            if effect_key in self._background_workers and not self._background_workers[effect_key].done():
-                continue
             task = asyncio.create_task(
                 self._background_worker_loop(effect, runner),
                 name=f"minion-v2-recovered-{str(assignment['assignment_id'])[-12:]}",
@@ -1423,22 +1546,13 @@ class SemanticOrchestrator:
             "START_PRODUCING": "PRODUCING",
             "START_REVIEW": "REVIEWING",
             "START_REPAIR": "REPAIRING",
-            "START_SCENARIO_VERIFICATION": "VERIFYING",
+            "START_SYSTEM_VERIFICATION": "VERIFYING",
         }[action_type]
         if node.state == target_state and node.payload.get("active_worker_id"):
             return {"provider_request_id": str(node.payload.get("active_worker_id"))}
         implementation = activation.role == OrchestrationRole.IMPLEMENTATION
         cycle = int(node.payload.get("candidate_cycle") or 0) + (1 if implementation else 0)
-        generation = node_role_generation(node.payload)
-        invocation_id = (
-            coder_session_id(node.aggregate_id, generation)
-            if implementation
-            else verifier_session_id(
-                node.aggregate_id,
-                verifier_session_subject(node.payload),
-                generation,
-            )
-        )
+        invocation_id = _node_role_session_id(node, activation)
         lease_resource = f"node:{node.aggregate_id}:{'writer' if implementation else 'review'}"
         lease = self.repository.claim_lease(
             lease_resource,
@@ -1897,16 +2011,7 @@ class SemanticOrchestrator:
         lease_resource = str(node.payload.get("lease_resource_key") or "")
         fencing_token = int(node.payload.get("fencing_token") or 0)
         writer_role = activation.role == OrchestrationRole.IMPLEMENTATION
-        generation = node_role_generation(node.payload)
-        expected_invocation_id = (
-            coder_session_id(node.aggregate_id, generation)
-            if writer_role
-            else verifier_session_id(
-                node.aggregate_id,
-                verifier_session_subject(node.payload),
-                generation,
-            )
-        )
+        expected_invocation_id = _node_role_session_id(node, activation)
         if invocation_id and invocation_id != expected_invocation_id:
             previous = self.repository.read_lease(lease_resource)
             if previous is not None and _lease_is_live(previous):
@@ -2058,19 +2163,8 @@ class SemanticOrchestrator:
                 "last_safe_point": "worker_started",
             },
         )
-        dependency_outputs = {
-            str(key): value for key, value in dict(node.payload.get("dependency_outputs") or {}).items()
-        }
-        view_ref = UnitWorkViewBuilder(self.service.architecture).build(
-            node,
-            dependency_outputs=dependency_outputs,
-        )
+        view_ref = UnitWorkViewBuilder(self.service.architecture).build(node)
         references = {"unit_work_view": view_ref}
-        architecture_ref = _ref_from_mapping(node.payload.get("architecture_manifest_ref"))
-        architecture_payload = dict(self.service.artifacts.read_json(architecture_ref))
-        task_ledger_value = architecture_payload.get("requirements_ref")
-        if isinstance(task_ledger_value, Mapping) and task_ledger_value.get("sha256"):
-            references["task"] = _ref_from_mapping(task_ledger_value)
         repair_ref = node.payload.get("repair_bill_ref")
         if isinstance(repair_ref, Mapping) and repair_ref.get("sha256"):
             semantic_repair_view = repair_bill_semantic_view(
@@ -2106,7 +2200,7 @@ class SemanticOrchestrator:
             instruction = (
                 "Repair only the bound RepairBill against the accepted code skeleton; run its preinstalled read-only corpus reproducer first and change only the module's compiled product write paths. Keep file_frozen contracts unchanged and preserve accepted semantics in review_guarded contracts."
                 if repair
-                else "Implement the bound ModuleWorkView from the accepted code skeleton. Satisfy the complete module protocol and its relevant scenario/requirement mappings. Keep file_frozen contracts unchanged, preserve accepted semantics in review_guarded contracts, write your own durable TDD/regression cases only under tests/<module_name>/developer, treat tests/<module_name>/verification as read-only Verifier evidence, and change only the compiled scopes. Do not over-abstract: once the protocol and local evidence are sufficient, implement and run focused checks instead of repeatedly re-investigating settled contracts."
+                else "Implement only the bound Module Protocol from the accepted code skeleton. Treat every bound dependency public contract as an axiom and never inspect dependency private implementation. Keep file_frozen contracts unchanged, preserve accepted semantics in review_guarded contracts, write durable TDD/regression cases only under tests/<module_name>/developer, treat tests/<module_name>/verification as read-only Verifier evidence, and change only compiled module scopes. Do not search for the global task or unrelated scenarios. Once the local protocol and evidence are sufficient, implement and run focused checks instead of repeatedly re-investigating settled contracts."
             )
         path_policy = dict(node.payload.get("path_policy") or {})
         developer_test_path = str(
@@ -2231,7 +2325,10 @@ class SemanticOrchestrator:
                     ),
                     payload={"finding_artifact_ref": report_ref.to_dict()},
                 ),
-                **self._role_submission_settlement(effect),
+                **self._role_submission_settlement(
+                    effect,
+                    assignment_id=self._terminal_role_assignment_id(terminal),
+                ),
             )
             self.repository.release_lease(lease_resource, invocation_id, fencing_token)
             return {"provider_request_id": invocation_id, "result_artifact_ref": report_ref.to_dict()}
@@ -2257,7 +2354,10 @@ class SemanticOrchestrator:
                     "unit_work_view_ref": view_ref.to_dict(),
                 },
             ),
-            **self._role_submission_settlement(effect),
+            **self._role_submission_settlement(
+                effect,
+                assignment_id=self._terminal_role_assignment_id(terminal),
+            ),
         )
         return {"provider_request_id": invocation_id, "result_artifact_ref": report_ref.to_dict()}
 
@@ -2440,32 +2540,37 @@ class SemanticOrchestrator:
         self,
         effect: Mapping[str, Any],
         *,
-        scenario_mode: bool = False,
+        system_mode: bool = False,
     ) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
-        scenario_mode = scenario_mode or str(node.payload.get("node_kind") or "") == "verification"
+        system_mode = (
+            system_mode
+            or str(node.payload.get("node_kind") or "") == "system_verification"
+        )
         node = await self._ensure_node_effect_lease(
             node,
-            action_type="REBIND_SCENARIO_VERIFIER" if scenario_mode else "REBIND_REVIEWER",
+            action_type="REBIND_SYSTEM_VERIFIER" if system_mode else "REBIND_REVIEWER",
             activation=RoleActivation(
                 OrchestrationRole.VERIFIER,
-                RoleMode.SCENARIO if scenario_mode else RoleMode.MODULE,
+                RoleMode.SYSTEM if system_mode else RoleMode.MODULE,
             ),
         )
         invocation_id = str(node.payload.get("active_worker_id") or "")
         lease_resource = str(node.payload.get("lease_resource_key") or "")
         fencing_token = int(node.payload.get("fencing_token") or 0)
         candidate_ref = _ref_from_mapping(
-            node.payload.get("unit_contract_ref") if scenario_mode else node.payload.get("candidate_ref")
+            node.payload.get("unit_contract_ref") if system_mode else node.payload.get("candidate_ref")
         )
         candidate_digest = str(
-            node.payload.get("scenario_fingerprint") if scenario_mode else node.payload.get("candidate_digest") or ""
+            node.payload.get("system_fingerprint")
+            if system_mode
+            else node.payload.get("candidate_digest") or ""
         )
         adapter = self._execution_adapter(node)
-        if scenario_mode and adapter == SOFTWARE_GIT_ADAPTER:
+        if system_mode and adapter == SOFTWARE_GIT_ADAPTER:
             review_workspace = Path(str(node.payload.get("workspace_path") or ""))
             if not review_workspace.is_dir():
-                raise ValueError("verification scenario workspace is unavailable")
+                raise ValueError("system verification workspace is unavailable")
             review_scratch = verification_scratch_root(self.service.runtime_root) / _safe_component(
                 node.aggregate_id
             )
@@ -2490,8 +2595,8 @@ class SemanticOrchestrator:
             invocation_root(self.service.runtime_root) / invocation_id / "attempts",
             review_scratch,
         )
-        if scenario_mode:
-            view_ref = _ref_from_mapping(node.payload.get("scenario_work_view_ref"))
+        if system_mode:
+            view_ref = _ref_from_mapping(node.payload.get("system_work_view_ref"))
         elif str(node.payload.get("node_kind") or "") == "integration":
             integration_contract = self.service.artifacts.read_json(
                 dict(node.payload["unit_contract_ref"])
@@ -2523,16 +2628,13 @@ class SemanticOrchestrator:
                 raise ValueError("verifier requires the exact UnitWorkView used by coder")
             view_ref = _ref_from_mapping(view_value)
             if self._is_skeleton_manifest(node.payload.get("architecture_manifest_ref")):
-                view_ref = UnitWorkViewBuilder(self.service.architecture).build(
-                    node,
-                    dependency_outputs=dict(node.payload.get("dependency_outputs") or {}),
-                )
+                view_ref = UnitWorkViewBuilder(self.service.architecture).build(node)
         candidate = dict(self.service.artifacts.read_json(candidate_ref))
         skeleton_manifest = self._is_skeleton_manifest(
             node.payload.get("architecture_manifest_ref")
         )
         candidate_view_ref: ArtifactRef | None = None
-        if scenario_mode or adapter != SOFTWARE_GIT_ADAPTER or not skeleton_manifest:
+        if system_mode or adapter != SOFTWARE_GIT_ADAPTER or not skeleton_manifest:
             candidate_view_ref = self.service.artifacts.put_json(
                 {
                     "module_name": str(node.payload.get("module_name") or node.payload.get("unit_id") or ""),
@@ -2541,11 +2643,11 @@ class SemanticOrchestrator:
                     "candidate_cycle": int(node.payload.get("candidate_cycle") or 0),
                     "instruction": (
                         "Verify the exact accepted-module scenario assembled in the bound read-only worktree."
-                        if scenario_mode
+                        if system_mode
                         else "Inspect the immutable candidate in the bound review workspace."
                     ),
                 },
-                artifact_type="VerificationScenarioSemanticViewArtifact" if scenario_mode else "CandidateSemanticViewArtifact",
+                artifact_type="SystemCandidateSemanticViewArtifact" if system_mode else "CandidateSemanticViewArtifact",
                 provenance={"owner": "manager", "audience": "verifier"},
                 child_refs=((candidate_ref.sha256, "candidate"),),
             )
@@ -2557,7 +2659,7 @@ class SemanticOrchestrator:
         # prevents an upstream summary from narrowing user intent.
         candidate_diff_ref = candidate_view_ref
         git_diff_refs: dict[str, ArtifactRef] = {}
-        if not scenario_mode and adapter == SOFTWARE_GIT_ADAPTER and skeleton_manifest:
+        if not system_mode and adapter == SOFTWARE_GIT_ADAPTER and skeleton_manifest:
             git_diff_refs = _module_verifier_git_diff_refs(
                 artifacts=self.service.artifacts,
                 node_payload=node.payload,
@@ -2568,7 +2670,7 @@ class SemanticOrchestrator:
             )
             candidate_diff_ref = git_diff_refs.pop("candidate_diff")
         if candidate_diff_ref is None:
-            raise ValueError("verifier requires a bound candidate diff or semantic scenario view")
+            raise ValueError("verifier requires a bound Candidate diff or System work view")
         verifier_references = _verifier_reference_refs(
             artifacts=self.service.artifacts,
             node_payload=node.payload,
@@ -2583,7 +2685,7 @@ class SemanticOrchestrator:
         verification_corpus_path = str(
             dict(path_policy.get("verification_corpus") or {}).get("path") or ""
         ).strip()
-        if not scenario_mode:
+        if not system_mode:
             for corpus_path in (
                 developer_test_path,
                 verification_corpus_path,
@@ -2608,12 +2710,12 @@ class SemanticOrchestrator:
             profile=self._profile_for_role(node.workflow_id, "verifier"),
             activation=RoleActivation(
                 OrchestrationRole.VERIFIER,
-                RoleMode.SCENARIO if scenario_mode else RoleMode.MODULE,
+                RoleMode.SYSTEM if system_mode else RoleMode.MODULE,
             ),
             instruction=(
-                "Generate and run adversarial verification for the bound real usage scenario. Consult the read-only task.yaml ledger only when the accepted scenario contracts are insufficient: original is the baseline, exact Manager-recorded revisions apply in sequence, newer revisions take precedence over conflicting earlier text, and unrelated earlier obligations remain binding. Preserve its exact qualifications and examples, never edit or reinterpret it, and prove only the requirements exercised by this exact module combination, contract flow, entrypoint, and environment. Write executable probes only in the bound scenario review scratch, then submit one semantic outcome."
-                if scenario_mode
-                else "Generate and run adversarial verification for the bound candidate. Read the Manager-bound Candidate diff and any Contract/Repair diff before judging the code. Treat the module source contracts and comments as primary truth, then consult the read-only task.yaml ledger only as upstream provenance for intent and scope: original is the baseline, exact Manager-recorded revisions apply in sequence, newer revisions take precedence over conflicting earlier text, and unrelated earlier obligations remain binding. Never edit or reinterpret it. Use the bound Coder checklist only to identify claimed or potentially omitted work while reconciling the task, contract, and actual diff; it is never acceptance evidence. For review_guarded contracts, compare the Accepted Skeleton shape with the Candidate and reject semantic contract drift. Read and run both durable corpora first; tests/<module_name>/developer is a read-only Coder-authored regression input, never acceptance evidence, while you add or strengthen only missing adversarial coverage under tests/<module_name>/verification. Reuse existing cases for regression and do not regenerate equivalent probes, then submit one semantic outcome."
+                "Act as the single System Verifier for the complete Candidate Union. Execute every bound scenario as a system test and delivery test. Launch each task-mandated public surface through the real user boundary: use a PTY/tmux/expect-style driver for an interactive TTY, invoke the real executable for a CLI, start the real server and use its client for a service, or compile and run a real consumer for a library. Unit tests, source inspection, LSP, and compile-only probes are supporting evidence and never substitute for delivery evidence. Keep all harness code in the bound durable verification scratch; the product workspace is read-only. Reuse the accumulated scenario corpus after repairs, record all material findings in one pass, and route each failure to the first public contract boundary that is violated. Assume each module only through its declared public contract while localizing the failure."
+                if system_mode
+                else "Verify only this module against its own source contract, comments, Candidate diff, and durable developer/verification corpora. Treat every dependency public contract as an axiom; inspect only the exact dependency contract edges this module consumes and never inspect dependency private implementation. If this module violates its own contract, file a module finding. If the consumed contract is contradictory, incomplete, or impossible to implement, file a contract finding. Do not use the global task or unrelated scenarios to widen scope. Reuse existing cases before adding missing adversarial cases, then submit one semantic outcome."
             ),
             reference_refs=verifier_references,
             workspace_override={
@@ -2624,17 +2726,17 @@ class SemanticOrchestrator:
                 "workspace_policy": {
                     "mode": (
                         "read_only_repo"
-                        if scenario_mode
+                        if system_mode
                         else "writable_git_branch"
                     )
                 },
-                "verification_scenario": scenario_mode,
+                "system_verification": system_mode,
                 "verification_scratch_only": (
-                    scenario_mode or adapter != SOFTWARE_GIT_ADAPTER
+                    system_mode or adapter != SOFTWARE_GIT_ADAPTER
                 ),
                 "write_path_scopes": (
                     []
-                    if scenario_mode
+                    if system_mode
                     else [
                         dict(
                             dict(node.payload.get("path_policy") or {}).get(
@@ -2645,7 +2747,7 @@ class SemanticOrchestrator:
                     ]
                 ),
                 "read_only_overlay_paths": (
-                    [] if scenario_mode else verifier_read_only_overlays
+                    [] if system_mode else verifier_read_only_overlays
                 ),
             },
             prepare_workspace=True,
@@ -2659,7 +2761,7 @@ class SemanticOrchestrator:
             return self._complete_semantic_verifier(
                 effect=effect,
                 node=node,
-                scenario_mode=scenario_mode,
+                system_mode=system_mode,
                 invocation_id=invocation_id,
                 lease_resource=lease_resource,
                 fencing_token=fencing_token,
@@ -2684,7 +2786,7 @@ class SemanticOrchestrator:
         *,
         effect: Mapping[str, Any],
         node: AggregateSnapshot,
-        scenario_mode: bool,
+        system_mode: bool,
         invocation_id: str,
         lease_resource: str,
         fencing_token: int,
@@ -2704,7 +2806,6 @@ class SemanticOrchestrator:
         allowed_outcomes = {
             "pass",
             "module_repair",
-            "dependency_repairs",
             "verification_repairs",
             "contract_revision",
             "architecture_revision",
@@ -2726,7 +2827,7 @@ class SemanticOrchestrator:
             errors.append(f"{outcome.upper()} requires an empty finding list")
         if outcome == "unknown" and not reason:
             errors.append("UNKNOWN requires an environmental reason")
-        scratch_only = scenario_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
+        scratch_only = system_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
         changed_paths = (
             _verification_scratch_paths(review_scratch)
             if scratch_only
@@ -2789,7 +2890,7 @@ class SemanticOrchestrator:
         if outcome == "pass" and not any(bool(item.get("ok")) for item in final_checks):
             errors.append("PASS requires a successful final command or LSP receipt")
         normalized_submission = dict(submission)
-        if scenario_mode and outcome in {"module_repair", "dependency_repairs"}:
+        if system_mode and outcome == "module_repair":
             try:
                 target_modules = infer_repair_target_modules(
                     findings,
@@ -2800,7 +2901,7 @@ class SemanticOrchestrator:
             else:
                 normalized_submission["outcome"] = "module_repair"
                 normalized_submission["target_modules"] = target_modules
-        elif scenario_mode and outcome == "verification_repairs":
+        elif system_mode and outcome == "verification_repairs":
             if {
                 str(item.get("finding_kind") or "")
                 for item in findings
@@ -2824,7 +2925,10 @@ class SemanticOrchestrator:
                 + "\n- ".join(errors)
             )
 
-        settlement = self._role_submission_settlement(effect)
+        settlement = self._role_submission_settlement(
+            effect,
+            assignment_id=self._terminal_role_assignment_id(terminal),
+        )
         assignment = self.repository.read_role_assignment(
             settlement["role_assignment_id"]
         )
@@ -2834,14 +2938,14 @@ class SemanticOrchestrator:
         pending_ref = self.service.artifacts.put_json(
             {
                 "schema_version": "1",
-                "scenario_mode": scenario_mode,
+                "system_mode": system_mode,
                 "submission": normalized_submission,
                 "candidate_ref": candidate_ref.to_dict(),
                 "implementation_candidate_ref": candidate_ref.to_dict(),
                 "candidate_digest": candidate_digest,
                 "candidate_git_base": str(
-                    node.payload.get("scenario_commit_sha")
-                    if scenario_mode
+                    node.payload.get("system_commit_sha")
+                    if system_mode
                     else candidate_digest
                     if execution_adapter == SOFTWARE_GIT_ADAPTER
                     else ""
@@ -3026,7 +3130,7 @@ class SemanticOrchestrator:
         candidate_digest = str(pending.get("candidate_digest") or "")
         candidate = dict(self.service.artifacts.read_json(candidate_ref))
         submission = dict(pending.get("submission") or {})
-        scenario_mode = bool(pending.get("scenario_mode"))
+        system_mode = bool(pending.get("system_mode"))
         lock_key = f"verification:{node.aggregate_id}"
         expected_fingerprint = str(node.payload.get("workspace_fingerprint") or "")
         if not self._worktree_locks.is_held(lock_key):
@@ -3050,7 +3154,7 @@ class SemanticOrchestrator:
                 review_workspace=review_workspace,
                 review_scratch=review_scratch,
                 execution_adapter=str(pending.get("execution_adapter") or ""),
-                scenario_mode=scenario_mode,
+                system_mode=system_mode,
             )
         finally:
             self._worktree_locks.release(lock_key)
@@ -3067,7 +3171,7 @@ class SemanticOrchestrator:
         review_workspace: Path,
         review_scratch: Path,
         execution_adapter: str,
-        scenario_mode: bool,
+        system_mode: bool,
     ) -> Mapping[str, Any]:
         invocation_id = str(
             node.payload.get("active_worker_id")
@@ -3087,12 +3191,12 @@ class SemanticOrchestrator:
         outcome = str(submission.get("outcome") or "").strip()
         findings = structured_findings(submission)
         reason = str(submission.get("reason") or "").strip()
-        scratch_only = scenario_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
+        scratch_only = system_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
         candidate_git_base = str(
             pending.get("candidate_git_base")
             or (
-                node.payload.get("scenario_commit_sha")
-                if scenario_mode
+                node.payload.get("system_commit_sha")
+                if system_mode
                 else candidate_digest
             )
             or ""
@@ -3192,8 +3296,8 @@ class SemanticOrchestrator:
                 "test_delta_ref": test_workspace_ref.to_dict(),
                 "tool_receipts_ref": receipts_ref.to_dict(),
                 **(
-                    {"scenario_fingerprint": str(node.payload.get("scenario_fingerprint") or "")}
-                    if scenario_mode
+                    {"system_fingerprint": str(node.payload.get("system_fingerprint") or "")}
+                    if system_mode
                     else {}
                 ),
             },
@@ -3207,7 +3311,6 @@ class SemanticOrchestrator:
             ),
         )
         defect_kind = {
-            "dependency_repairs": DefectKind.DEPENDENCY,
             "verification_repairs": DefectKind.VERIFICATION,
             "contract_revision": DefectKind.CONTRACT,
             "architecture_revision": DefectKind.ARCHITECTURE,
@@ -3232,14 +3335,13 @@ class SemanticOrchestrator:
             for module_name in target_modules
         ]
         module_node_id = ""
-        if scenario_mode and outcome in {
+        if system_mode and outcome in {
             "module_repair",
-            "dependency_repairs",
             "verification_repairs",
         }:
             if not repair_node_ids:
                 raise SubmissionInvariantError(
-                    "scenario repair requires Manager-resolved module targets"
+                    "system repair requires Manager-resolved module targets"
                 )
             module_node_id = repair_node_ids[0]
             if outcome != "verification_repairs":
@@ -3326,7 +3428,7 @@ class SemanticOrchestrator:
             ),
             module_node_id=module_node_id,
             module_node_ids=(repair_node_ids if module_node_id else ()),
-            scenario_fingerprint=str(node.payload.get("scenario_fingerprint") or ""),
+            system_fingerprint=str(node.payload.get("system_fingerprint") or ""),
             accepted_candidate_ref=(
                 accepted_candidate_ref if outcome == "pass" and not scratch_only else None
             ),
@@ -3334,7 +3436,6 @@ class SemanticOrchestrator:
                 accepted_candidate_digest if outcome == "pass" and not scratch_only else ""
             ),
         )
-        self.repository.complete_role_session(invocation_id)
         self.repository.release_lease(lease_resource, invocation_id, fencing_token)
         return {
             "provider_request_id": invocation_id,
@@ -3509,18 +3610,6 @@ class SemanticOrchestrator:
                 self.repository.release_lease(lease_resource, invocation_id, fencing_token)
             except Exception:
                 pass
-        if terminal_cancel:
-            for session in self.repository.list_role_sessions(
-                workflow_id=node.workflow_id,
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=node.aggregate_id,
-            ):
-                if str(session.get("status") or "") in {"completed", "cancelled"}:
-                    continue
-                self.repository.complete_role_session(
-                    str(session["session_id"]),
-                    status="cancelled",
-                )
         return {}
 
     async def _stop_aggregate_worker(
@@ -3573,12 +3662,25 @@ class SemanticOrchestrator:
             except Exception:
                 pass
         if cancel and snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
-            self.repository.complete_role_session(
+            for session_id in (
                 architect_session_id_for_revision(
                     snapshot.workflow_id,
                     snapshot.aggregate_id,
                     snapshot.payload,
                 ),
+                architecture_reviewer_session_id(
+                    snapshot.workflow_id,
+                    snapshot.aggregate_id,
+                    snapshot.payload,
+                ),
+            ):
+                self.repository.complete_role_session(
+                    session_id,
+                    status="cancelled",
+                )
+        elif cancel and snapshot.aggregate_type == AggregateType.WORKFLOW:
+            self.repository.complete_workflow_role_sessions(
+                snapshot.workflow_id,
                 status="cancelled",
             )
         return {}
@@ -3646,13 +3748,13 @@ class SemanticOrchestrator:
     async def _resume_node(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
         if node.state == "QUEUED":
-            if str(node.payload.get("node_kind") or "") == "verification":
+            if str(node.payload.get("node_kind") or "") == "system_verification":
                 return self._admit_node_worker(
                     effect,
-                    action_type="START_SCENARIO_VERIFICATION",
+                    action_type="START_SYSTEM_VERIFICATION",
                     activation=RoleActivation(
                         OrchestrationRole.VERIFIER,
-                        RoleMode.SCENARIO,
+                        RoleMode.SYSTEM,
                     ),
                 )
             return self._admit_node_worker(
@@ -3777,25 +3879,26 @@ class SemanticOrchestrator:
         nodes: list[AggregateSnapshot],
     ) -> Mapping[str, Any]:
         implementation = [item for item in nodes if str(item.payload.get("node_kind") or "unit") == "unit"]
-        scenarios = [item for item in nodes if str(item.payload.get("node_kind") or "") == "verification"]
-        if not implementation or not scenarios or any(item.state != "ACCEPTED" for item in nodes):
+        system_nodes = [
+            item
+            for item in nodes
+            if str(item.payload.get("node_kind") or "") == "system_verification"
+        ]
+        if (
+            not implementation
+            or len(system_nodes) != 1
+            or any(item.state != "ACCEPTED" for item in nodes)
+        ):
             raise ValueError(
-                "final candidate union requires every implementation module and end-to-end scenario ACCEPTED"
+                "final candidate union requires every module and the single System Verifier ACCEPTED"
             )
-        verification_refs: list[dict[str, Any]] = []
-        scenario_fingerprints: dict[str, str] = {}
-        for node in scenarios:
-            ref = dict(node.payload.get("verification_artifact_ref") or {})
-            if not ref.get("sha256"):
-                raise ValueError(
-                    f"accepted scenario {node.payload.get('module_name')} has no VerificationArtifact"
-                )
-            verification_refs.append(ref)
-            scenario_name = str(node.payload.get("module_name") or node.aggregate_id)
-            scenario_fingerprint = str(node.payload.get("scenario_fingerprint") or "")
-            if not scenario_fingerprint:
-                raise ValueError(f"accepted scenario {scenario_name} has no scenario fingerprint")
-            scenario_fingerprints[scenario_name] = scenario_fingerprint
+        system_node = system_nodes[0]
+        verification_ref = dict(system_node.payload.get("verification_artifact_ref") or {})
+        if not verification_ref.get("sha256"):
+            raise ValueError("accepted System Verifier has no VerificationArtifact")
+        system_fingerprint = str(system_node.payload.get("system_fingerprint") or "")
+        if not system_fingerprint:
+            raise ValueError("accepted System Verifier has no system fingerprint")
         ordered = _topological_implementation_nodes(implementation)
         common_git_dir = Path(str(ordered[0].payload.get("common_git_dir") or ""))
         skeleton_sha = str(epoch.payload.get("skeleton_commit_sha") or "")
@@ -3876,8 +3979,8 @@ class SemanticOrchestrator:
             union_ref=union_ref,
             commit_sha=commit_sha,
             branch_name=workflow_branch,
-            verification_refs=verification_refs,
-            scenario_fingerprints=scenario_fingerprints,
+            verification_refs=[verification_ref],
+            system_fingerprint=system_fingerprint,
         )
         current = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
         self.repository.dispatch(
@@ -4039,7 +4142,10 @@ class SemanticOrchestrator:
                 idempotency_key=f"standalone-report:{report_ref.sha256}",
                 payload={"verification_artifact_ref": report_ref.to_dict()},
             ),
-            **self._role_submission_settlement(effect),
+            **self._role_submission_settlement(
+                effect,
+                assignment_id=self._terminal_role_assignment_id(terminal),
+            ),
         )
         if skeleton_review_workspace is not None:
             skeleton_review_workspace.cleanup()
@@ -4369,7 +4475,10 @@ class SemanticOrchestrator:
                         ),
                     },
                 ),
-                **self._role_submission_settlement(effect),
+                **self._role_submission_settlement(
+                    effect,
+                    assignment_id=self._terminal_role_assignment_id(terminal),
+                ),
             )
             self._record_role_turn(
                 terminal=terminal,
@@ -4653,7 +4762,10 @@ class SemanticOrchestrator:
                         ),
                     },
                 ),
-                **self._role_submission_settlement(effect),
+                **self._role_submission_settlement(
+                    effect,
+                    assignment_id=self._terminal_role_assignment_id(terminal),
+                ),
             )
             # ARCHITECT_SUBMITTED transfers the live writer lease to the
             # quiesce/snapshot effects. Releasing it here makes a normal
@@ -5008,7 +5120,11 @@ class SemanticOrchestrator:
         manifest_payload = self.service.artifacts.read_json(manifest_ref)
         if dict(manifest_payload.get("requirements_ref") or {}) != dict(revision.payload.get("requirements_ref") or {}):
             raise ValueError("architecture reviewer requirements ref differs from the architect input")
-        invocation_id = f"inv_{str(effect['effect_id']).removeprefix('eff_')}"
+        invocation_id = architecture_reviewer_session_id(
+            revision.workflow_id,
+            revision.aggregate_id,
+            revision.payload,
+        )
         lease_resource = f"architecture:{revision.aggregate_id}:review"
         if revision.state == "REVIEWING":
             active_lease = self.repository.read_lease(lease_resource)
@@ -5097,6 +5213,18 @@ class SemanticOrchestrator:
                 "task": requirements_ref,
                 "architecture_contract": semantic_contract_ref,
             }
+            has_edit_instruction = _bind_architecture_edit_instruction_for_review(
+                review_refs,
+                revision,
+            )
+            if has_edit_instruction:
+                prompt += (
+                    " Treat edit_instruction as the binding Manager-recorded architecture "
+                    "repair bill for this revision. Audit every requested correction against "
+                    "the resulting contract and do not PASS while any item is missing, only "
+                    "asserted, or contradicted by another module, lifecycle, state machine, "
+                    "dependency edge, or scenario."
+                )
             revision_base_value = revision.payload.get("revision_base_manifest_ref")
             if revision_base_value:
                 finding_value = architecture_revision_finding_value(revision.payload)
@@ -5145,6 +5273,7 @@ class SemanticOrchestrator:
                 semantic,
                 review_ref,
                 effect=effect,
+                assignment_id=self._terminal_role_assignment_id(terminal),
             )
             self._record_role_turn(
                 terminal=terminal,
@@ -5172,7 +5301,11 @@ class SemanticOrchestrator:
         artifact = self.service.artifacts.read_json(manifest_ref)
         if dict(artifact.get("requirements_ref") or {}) != dict(revision.payload.get("requirements_ref") or {}):
             raise ValueError("architecture reviewer requirements differ from the Architect input")
-        invocation_id = f"inv_{str(effect['effect_id']).removeprefix('eff_')}"
+        invocation_id = architecture_reviewer_session_id(
+            revision.workflow_id,
+            revision.aggregate_id,
+            revision.payload,
+        )
         lease_resource = f"architecture:{revision.aggregate_id}:review"
         if revision.state == "REVIEWING":
             active = self.repository.read_lease(lease_resource)
@@ -5265,6 +5398,10 @@ class SemanticOrchestrator:
                 "architecture_index": review_view_ref,
                 "architecture_diff": diff_ref,
             }
+            has_edit_instruction = _bind_architecture_edit_instruction_for_review(
+                references,
+                revision,
+            )
             finding_value = architecture_revision_finding_value(revision.payload)
             if finding_value:
                 references["prior_finding"] = self._publish_architecture_finding_view(
@@ -5277,6 +5414,16 @@ class SemanticOrchestrator:
                     root_batch_value,
                     audience="reviewer",
                 )
+            edit_instruction_guidance = (
+                "Treat edit_instruction as the binding Manager-recorded architecture "
+                "repair bill for this revision. Audit every requested correction against "
+                "architecture_index, architecture_diff, declaration comments, dependency "
+                "edges, lifecycles/state machines, and scenario paths. Do not PASS while "
+                "any item is missing, merely asserted, internally contradicted, or no longer "
+                "true after a later repair. Re-audit the complete bill on every review retry. "
+                if has_edit_instruction
+                else ""
+            )
             terminal, prompt_ref, terminal_ref = await self._run_profile(
                 effect=effect,
                 snapshot=revision,
@@ -5299,7 +5446,8 @@ class SemanticOrchestrator:
                     "The Manager performs no semantic coverage or contract validation; independently review every hard Requirement and module in the bound scope. "
                     "Record only material defects as findings; do not write positive audit rows. "
                     "For a replan, explicitly audit every item in replan_finding_batch and do not PASS while any item remains unresolved. "
-                    "Report all material architecture defects in one pass without designing implementation details."
+                    + edit_instruction_guidance
+                    + "Report all material architecture defects in one pass without designing implementation details."
                 ),
                 reference_refs=references,
                 workspace_override={
@@ -5330,6 +5478,7 @@ class SemanticOrchestrator:
                 semantic,
                 review_ref,
                 effect=effect,
+                assignment_id=self._terminal_role_assignment_id(terminal),
             )
             self._record_role_turn(
                 terminal=terminal,
@@ -5869,6 +6018,7 @@ class SemanticOrchestrator:
         mode = activation.mode.value
         continuation_capable = activation.role in {
             OrchestrationRole.ARCHITECT,
+            OrchestrationRole.REVIEWER,
             OrchestrationRole.IMPLEMENTATION,
             OrchestrationRole.VERIFIER,
         }
@@ -6148,6 +6298,7 @@ class SemanticOrchestrator:
             raise ValueError(
                 f"FamilyBindingArtifact has no pinned executor profile for role {role}"
             )
+        pinned_profile = _role_mode_profile_payload(pinned_profile, mode=mode)
         pack = resolve_pinned_minion_pack(
             pack,
             profile_payload=pinned_profile,
@@ -6423,6 +6574,21 @@ class SemanticOrchestrator:
                 )
             )
         elif assignment["state"] in {
+            RoleAssignmentState.CLAIMED.value,
+            RoleAssignmentState.RUNNING.value,
+        }:
+            if self._role_assignment_attempt_is_live(assignment):
+                raise DeferredEffectError("role assignment already has a live process attempt")
+            assignment = self._queue_active_assignment_retry(
+                assignment,
+                error_kind="attempt_lease_expired",
+                error_text="role attempt lease expired before submission settlement",
+            )
+            if assignment["state"] != RoleAssignmentState.RETRY_QUEUED.value:
+                raise SubmissionInvariantError(
+                    "expired active role assignment could not be made retryable"
+                )
+        if assignment["state"] in {
             RoleAssignmentState.QUEUED.value,
             RoleAssignmentState.RETRY_QUEUED.value,
         }:
@@ -6433,25 +6599,6 @@ class SemanticOrchestrator:
                 )
                 durable_prompt_reused = True
         self._signal_assignment_ready(effect, str(assignment["assignment_id"]))
-        if assignment["state"] in {
-            RoleAssignmentState.CLAIMED.value,
-            RoleAssignmentState.RUNNING.value,
-        }:
-            active_attempt = self.repository.read_role_attempt(
-                str(assignment.get("active_attempt_id") or "")
-            )
-            active_lease = self.repository.read_lease(
-                str(dict(active_attempt or {}).get("lease_resource_key") or "")
-            )
-            if active_lease is not None and _lease_is_live(active_lease):
-                raise DeferredEffectError("role assignment already has a live process attempt")
-            if active_attempt is not None:
-                assignment = self.repository.queue_role_attempt_retry(
-                    assignment_id=str(assignment["assignment_id"]),
-                    attempt_id_value=str(active_attempt["attempt_id"]),
-                    error_kind="attempt_lease_expired",
-                    error_text="role attempt lease expired before submission settlement",
-                )
 
         if assignment["state"] in {
             RoleAssignmentState.RESULT_RECORDED.value,
@@ -6994,6 +7141,12 @@ class SemanticOrchestrator:
             "mime_type": "application/json",
         }
         original_payload = dict(dict(original_terminal or {}).get("payload") or {})
+        assignment_id = str(assignment.get("assignment_id") or "")
+        payload_hash = str(assignment.get("submission_payload_hash") or "")
+        if not assignment_id or not payload_hash:
+            raise SubmissionInvariantError(
+                "role assignment receipt has no durable assignment identity"
+            )
         return {
             "event_kind": "terminal",
             "phase": "completed",
@@ -7004,6 +7157,8 @@ class SemanticOrchestrator:
                 "artifacts": [primary],
                 "primary_artifact": primary,
                 "submission_receipt": artifact_ref,
+                "role_assignment_id": assignment_id,
+                "role_submission_payload_hash": payload_hash,
                 # Only receipt-only reconciliation is a replay. A fresh role
                 # process also settles through the durable receipt, but its
                 # original terminal carries the billable worker turn.
@@ -7291,6 +7446,7 @@ class SemanticOrchestrator:
         review_ref: ArtifactRef,
         *,
         effect: Mapping[str, Any] | None = None,
+        assignment_id: str = "",
     ) -> None:
         current = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
         if current is None:
@@ -7324,7 +7480,10 @@ class SemanticOrchestrator:
                 ),
                 payload=payload,
             ),
-            **self._role_submission_settlement(effect or {}),
+            **self._role_submission_settlement(
+                effect or {},
+                assignment_id=assignment_id,
+            ),
         )
 
     def _effect_snapshot(self, effect: Mapping[str, Any]) -> AggregateSnapshot:
@@ -8015,7 +8174,7 @@ def apply_v2_role_capability_policy(
                     *SWE_VERIFICATION_CAPABILITIES,
                     *(
                         {"op_minion_verification_scratch_write"}
-                        if activation.mode == RoleMode.SCENARIO
+                        if activation.mode == RoleMode.SYSTEM
                         else set()
                     ),
                 }
@@ -8025,16 +8184,6 @@ def apply_v2_role_capability_policy(
             OrchestrationRole.REVIEWER: set(STANDALONE_REVIEW_BUILDER_CAPABILITIES),
             OrchestrationRole.IMPLEMENTATION: set(CANDIDATE_BUILDER_CAPABILITIES),
         }.get(activation.role)
-        if (
-            activation == RoleActivation(
-                OrchestrationRole.VERIFIER,
-                RoleMode.SCENARIO,
-            )
-            and allowed_authoring is not None
-        ):
-            allowed_authoring.discard(
-                "op_minion_verification_request_dependency_repairs"
-            )
         if (
             activation == RoleActivation(
                 OrchestrationRole.VERIFIER,
@@ -8195,6 +8344,19 @@ def _ref_from_mapping(value: Any) -> ArtifactRef:
     if not isinstance(value, Mapping):
         raise ValueError("artifact ref is required")
     return ArtifactRef.from_mapping(value)
+
+
+def _bind_architecture_edit_instruction_for_review(
+    references: dict[str, ArtifactRef],
+    revision: AggregateSnapshot,
+) -> bool:
+    """Bind a human architecture-edit repair bill to every Reviewer attempt."""
+
+    value = revision.payload.get("edit_instruction_ref")
+    if not value:
+        return False
+    references["edit_instruction"] = _ref_from_mapping(value)
+    return True
 
 
 def _path_pseudo_ref(path: str, name: str) -> ArtifactRef:
@@ -8585,7 +8747,7 @@ def _resolve_verification_defect_targets(
     plan: Mapping[str, Any],
     status: VerificationStatus,
     defect_kind: DefectKind,
-    scenario_mode: bool,
+    system_mode: bool,
 ) -> tuple[str, str]:
     """Resolve only the node target required by the selected FAIL route."""
 
@@ -8600,7 +8762,7 @@ def _resolve_verification_defect_targets(
             ),
             "",
         )
-    if scenario_mode and defect_kind == DefectKind.MODULE:
+    if system_mode and defect_kind == DefectKind.MODULE:
         return (
             "",
             _resolve_dependency_node_id(
@@ -8641,7 +8803,7 @@ def _verification_repair_path_owners(
     for dependency in _verification_related_module_nodes(
         repository,
         node,
-        include_current=str(node.payload.get("node_kind") or "") != "verification",
+        include_current=str(node.payload.get("node_kind") or "") != "system_verification",
     ):
         module_name = str(
             dependency.payload.get("module_name")
@@ -8704,7 +8866,7 @@ def _verification_corpus_path_owners(
     for dependency in _verification_related_module_nodes(
         repository,
         node,
-        include_current=str(node.payload.get("node_kind") or "") != "verification",
+        include_current=str(node.payload.get("node_kind") or "") != "system_verification",
     ):
         module_name = str(
             dependency.payload.get("module_name")

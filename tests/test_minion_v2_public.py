@@ -31,11 +31,16 @@ from pal.minion.v2.execution import WorkspaceProcessHolder
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor, reconcile_control_requests
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
-from pal.minion.v2.sessions import architect_session_id, coder_session_id, verifier_session_id
+from pal.minion.v2.sessions import (
+    architect_session_id,
+    coder_session_id,
+    module_verifier_session_id,
+)
 from pal.minion.v2.semantic_orchestration.orchestrator import (
     SemanticOrchestrator,
     _assignment_role_input_refs,
     _architecture_submit_idempotency_key,
+    _bind_architecture_edit_instruction_for_review,
     _bind_role_attempt_sandbox,
     _candidate_tree_fingerprint,
     _durable_workspace_preparation,
@@ -162,6 +167,7 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
 
         terminal = worker._terminal_from_assignment_receipt(
             {
+                "assignment_id": "assignment-fresh-receipt",
                 "submission_artifact_ref": ref.to_dict(),
                 "submission_payload_hash": stable_hash(submitted),
             },
@@ -179,6 +185,7 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
         self.assertEqual(terminal["payload"]["session_turn_index"], 3)
         replay = worker._terminal_from_assignment_receipt(
             {
+                "assignment_id": "assignment-fresh-receipt",
                 "submission_artifact_ref": ref.to_dict(),
                 "submission_payload_hash": stable_hash(submitted),
             },
@@ -543,6 +550,49 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    def _create_role_scope(
+        self,
+        service: MinionV2WorkflowService,
+        *,
+        workflow_id: str,
+        aggregate_type: AggregateType,
+        aggregate_id: str,
+        module_name: str = "router",
+    ) -> None:
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="test",
+                expected_version=0,
+            )
+        )
+        service.repository.dispatch(
+            ActionEnvelope(
+                action_type=(
+                    "CREATE_NODE_RUN"
+                    if aggregate_type == AggregateType.DAG_NODE_RUN
+                    else "CREATE_ARCHITECTURE_REVISION"
+                ),
+                workflow_id=workflow_id,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                actor="test",
+                expected_version=0,
+                payload=(
+                    {
+                        "epoch_id": f"epoch-{aggregate_id}",
+                        "module_name": module_name,
+                        "unit_contract_ref": {"sha256": f"contract-{aggregate_id}"},
+                    }
+                    if aggregate_type == AggregateType.DAG_NODE_RUN
+                    else {"architecture_cycle_id": aggregate_id}
+                ),
+            )
+        )
+
     def test_retry_reuses_durable_prompt_reference_binds(self) -> None:
         repo = self.runtime_root / "repo"
         task = self.runtime_root / "task"
@@ -660,6 +710,124 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         self.assertIsNotNone(reusable)
         self.assertEqual(reusable["assignment_id"], "accepted-review-assignment")
+
+    def test_candidate_receipt_reuse_ignores_manager_progress_journal_drift(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        worker = SemanticOrchestrator(service)
+        submitted_view = service.artifacts.put_json(
+            {
+                "schema_version": "2",
+                "module_name": "router",
+                "module": {"responsibility": "Route requests deterministically."},
+                "requirements": {"routing": {"owner": "router"}},
+                "node_run_journal": {
+                    "current_micro_plan": ["implement contract"],
+                    "last_safe_point": "worker_started",
+                },
+            },
+            artifact_type="ModuleWorkViewArtifact",
+        )
+        resumed_view = service.artifacts.put_json(
+            {
+                "schema_version": "2",
+                "module_name": "router",
+                "module": {"responsibility": "Route requests deterministically."},
+                "requirements": {"routing": {"owner": "router"}},
+                "node_run_journal": {
+                    "current_micro_plan": [],
+                    "completed_checklist": ["implement contract"],
+                    "files_changed": ["src/router.py"],
+                    "last_safe_point": "candidate_submitted",
+                },
+            },
+            artifact_type="ModuleWorkViewArtifact",
+        )
+        worker.repository.list_role_assignments = lambda **_kwargs: (
+            {
+                "assignment_id": "submitted-candidate-assignment",
+                "workflow_id": "workflow-router",
+                "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                "aggregate_id": "node-router",
+                "role": "implementation",
+                "mode": "produce",
+                "submission_kind": "candidate",
+                "state": RoleAssignmentState.SETTLED.value,
+                "submission_artifact_ref": {
+                    "artifact_type": "CandidateRoleSubmissionArtifact",
+                    "sha256": "candidate-submission",
+                },
+                "input_refs": {"unit_work_view": submitted_view.to_dict()},
+                "execution_spec": {"evaluation_generation": 0},
+            },
+        )
+
+        reusable = worker._reusable_role_assignment(
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN.value,
+            aggregate_id="node-router",
+            role="implementation",
+            mode="produce",
+            submission_kind="candidate",
+            input_refs={"unit_work_view": resumed_view.to_dict()},
+        )
+
+        self.assertIsNotNone(reusable)
+        self.assertEqual(
+            reusable["assignment_id"],
+            "submitted-candidate-assignment",
+        )
+
+    def test_candidate_receipt_reuse_rejects_semantic_work_view_drift(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        worker = SemanticOrchestrator(service)
+        submitted_view = service.artifacts.put_json(
+            {
+                "schema_version": "2",
+                "module_name": "router",
+                "module": {"responsibility": "Route requests deterministically."},
+                "node_run_journal": {"last_safe_point": "candidate_submitted"},
+            },
+            artifact_type="ModuleWorkViewArtifact",
+        )
+        changed_view = service.artifacts.put_json(
+            {
+                "schema_version": "2",
+                "module_name": "router",
+                "module": {"responsibility": "Route requests with retry semantics."},
+                "node_run_journal": {"last_safe_point": "worker_started"},
+            },
+            artifact_type="ModuleWorkViewArtifact",
+        )
+        worker.repository.list_role_assignments = lambda **_kwargs: (
+            {
+                "assignment_id": "stale-candidate-assignment",
+                "workflow_id": "workflow-router",
+                "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                "aggregate_id": "node-router",
+                "role": "implementation",
+                "mode": "produce",
+                "submission_kind": "candidate",
+                "state": RoleAssignmentState.SETTLED.value,
+                "submission_artifact_ref": {
+                    "artifact_type": "CandidateRoleSubmissionArtifact",
+                    "sha256": "candidate-submission",
+                },
+                "input_refs": {"unit_work_view": submitted_view.to_dict()},
+                "execution_spec": {"evaluation_generation": 0},
+            },
+        )
+
+        reusable = worker._reusable_role_assignment(
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN.value,
+            aggregate_id="node-router",
+            role="implementation",
+            mode="produce",
+            submission_kind="candidate",
+            input_refs={"unit_work_view": changed_view.to_dict()},
+        )
+
+        self.assertIsNone(reusable)
 
     def test_durable_submission_reuses_the_attempt_prompt_workspace_binding(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
@@ -1040,6 +1208,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_recovery_restarts_a_durable_queued_assignment(self) -> None:
         async def scenario() -> None:
             service = MinionV2WorkflowService(self.runtime_root)
+            self._create_role_scope(
+                service,
+                workflow_id="workflow-recovery",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-recovery",
+            )
             service.repository.ensure_role_session(
                 session_id="session-recovery",
                 workflow_id="workflow-recovery",
@@ -1049,6 +1223,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 mode="produce",
                 executor_profile_id="software_engineering.v2_coder",
                 family_binding_sha="binding",
+                scope_kind="module",
+                subject_key="router",
             )
             assignment = service.repository.create_role_assignment(
                 RoleAssignmentRequest(
@@ -1101,9 +1277,299 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_recovery_tick_preserves_assignment_owned_by_active_worker(self) -> None:
+        async def scenario() -> None:
+            service = MinionV2WorkflowService(self.runtime_root)
+            self._create_role_scope(
+                service,
+                workflow_id="workflow-recovery-owner",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-recovery-owner",
+            )
+            service.repository.ensure_role_session(
+                session_id="session-recovery-owner",
+                workflow_id="workflow-recovery-owner",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-recovery-owner",
+                role="implementation",
+                mode="produce",
+                executor_profile_id="software_engineering.v2_coder",
+                family_binding_sha="binding",
+                scope_kind="module",
+                subject_key="router",
+            )
+
+            def create_assignment(key: str, fingerprint: str) -> dict:
+                return service.repository.create_role_assignment(
+                    RoleAssignmentRequest(
+                        assignment_key=key,
+                        session_id="session-recovery-owner",
+                        workflow_id="workflow-recovery-owner",
+                        aggregate_type=AggregateType.DAG_NODE_RUN.value,
+                        aggregate_id="node-recovery-owner",
+                        role="implementation",
+                        mode="produce",
+                        executor_profile_id="software_engineering.v2_coder",
+                        family_binding_sha="binding",
+                        input_fingerprint=fingerprint,
+                        required_inputs=(),
+                        input_refs={},
+                        execution_spec={
+                            "effect_type": "run_implementation_role",
+                            "effect_key": "effect-key-recovery-owner",
+                            "workflow_id": "workflow-recovery-owner",
+                            "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                            "aggregate_id": "node-recovery-owner",
+                            "payload": {"role_mode": "produce"},
+                        },
+                        submission_kind="candidate",
+                    )
+                )
+
+            stale = create_assignment("stale-recovery-owner", "old-input")
+            current = create_assignment("current-recovery-owner", "new-input")
+            worker = SemanticOrchestrator(service)
+            worker._assignment_ids_by_effect["effect-key-recovery-owner"] = str(
+                current["assignment_id"]
+            )
+            release = asyncio.Event()
+
+            async def active_worker() -> dict[str, str]:
+                await release.wait()
+                return {"status": "completed"}
+
+            task = asyncio.create_task(active_worker())
+            worker._background_workers["effect-key-recovery-owner"] = task
+            worker._runner_for_recovered_effect = lambda _effect: active_worker
+
+            count = await worker.recover_background_assignments()
+
+            self.assertEqual(count, 0)
+            self.assertFalse(task.done())
+            self.assertEqual(
+                worker._assignment_ids_by_effect["effect-key-recovery-owner"],
+                current["assignment_id"],
+            )
+            self.assertEqual(
+                service.repository.read_role_assignment(stale["assignment_id"])["state"],
+                RoleAssignmentState.QUEUED.value,
+            )
+            release.set()
+            await task
+
+        asyncio.run(scenario())
+
+    def test_expired_active_assignment_is_reused_for_logical_effect(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        self._create_role_scope(
+            service,
+            workflow_id="workflow-expired-reuse",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-expired-reuse",
+        )
+        service.repository.ensure_role_session(
+            session_id="session-expired-reuse",
+            workflow_id="workflow-expired-reuse",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-expired-reuse",
+            role="implementation",
+            mode="produce",
+            executor_profile_id="software_engineering.v2_coder",
+            family_binding_sha="binding",
+            scope_kind="module",
+            subject_key="router",
+        )
+        assignment = service.repository.create_role_assignment(
+            RoleAssignmentRequest(
+                assignment_key="expired-reuse-assignment",
+                session_id="session-expired-reuse",
+                workflow_id="workflow-expired-reuse",
+                aggregate_type=AggregateType.DAG_NODE_RUN.value,
+                aggregate_id="node-expired-reuse",
+                role="implementation",
+                mode="produce",
+                executor_profile_id="software_engineering.v2_coder",
+                family_binding_sha="binding",
+                input_fingerprint="original-input",
+                required_inputs=(),
+                input_refs={},
+                execution_spec={
+                    "effect_type": "run_implementation_role",
+                    "effect_key": "effect-key-expired-reuse",
+                    "workflow_id": "workflow-expired-reuse",
+                    "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                    "aggregate_id": "node-expired-reuse",
+                    "payload": {"role_mode": "produce"},
+                },
+                submission_kind="candidate",
+            )
+        )
+        attempt = service.repository.claim_role_assignment(str(assignment["assignment_id"]))
+        lease_resource = f"assignment:{assignment['assignment_id']}"
+        lease = service.repository.claim_lease(
+            lease_resource,
+            str(attempt["attempt_id"]),
+            ttl_seconds=120,
+        )
+        prompt_ref = service.artifacts.put_json(
+            {"stable": "original durable prompt"},
+            artifact_type="RolePromptPackArtifact",
+        )
+        service.repository.start_role_attempt(
+            assignment_id=str(assignment["assignment_id"]),
+            attempt_id_value=str(attempt["attempt_id"]),
+            lease_resource_key=lease_resource,
+            fencing_token=lease.fencing_token,
+            prompt_pack_ref=prompt_ref.to_dict(),
+        )
+        service.repository.release_lease(
+            lease_resource,
+            str(attempt["attempt_id"]),
+            lease.fencing_token,
+        )
+        worker = SemanticOrchestrator(service)
+        worker._assignment_ids_by_effect["effect-key-expired-reuse"] = str(
+            assignment["assignment_id"]
+        )
+        snapshot = SimpleNamespace(
+            workflow_id="workflow-expired-reuse",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-expired-reuse",
+        )
+
+        recovered = worker._retry_assignment_for_effect(
+            {"effect_key": "effect-key-expired-reuse"},
+            snapshot=snapshot,
+            role="implementation",
+            mode="produce",
+            submission_kind="candidate",
+        )
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered["assignment_id"], assignment["assignment_id"])
+        self.assertEqual(recovered["state"], RoleAssignmentState.RUNNING.value)
+        retryable = worker._queue_active_assignment_retry(
+            recovered,
+            error_kind="attempt_lease_expired",
+            error_text="test recovery",
+        )
+        self.assertEqual(retryable["state"], RoleAssignmentState.RETRY_QUEUED.value)
+        self.assertEqual(
+            worker._durable_assignment_prompt_ref(retryable),
+            prompt_ref,
+        )
+
+    def test_submission_settlement_uses_terminal_assignment_identity(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        self._create_role_scope(
+            service,
+            workflow_id="workflow-explicit-settlement",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-explicit-settlement",
+        )
+        service.repository.ensure_role_session(
+            session_id="session-explicit-settlement",
+            workflow_id="workflow-explicit-settlement",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-explicit-settlement",
+            role="implementation",
+            mode="produce",
+            executor_profile_id="software_engineering.v2_coder",
+            family_binding_sha="binding",
+            scope_kind="module",
+            subject_key="router",
+        )
+
+        def create_assignment(key: str, fingerprint: str) -> dict:
+            return service.repository.create_role_assignment(
+                RoleAssignmentRequest(
+                    assignment_key=key,
+                    session_id="session-explicit-settlement",
+                    workflow_id="workflow-explicit-settlement",
+                    aggregate_type=AggregateType.DAG_NODE_RUN.value,
+                    aggregate_id="node-explicit-settlement",
+                    role="implementation",
+                    mode="produce",
+                    executor_profile_id="software_engineering.v2_coder",
+                    family_binding_sha="binding",
+                    input_fingerprint=fingerprint,
+                    required_inputs=(),
+                    input_refs={},
+                    execution_spec={
+                        "effect_type": "run_implementation_role",
+                        "effect_key": "effect-key-explicit-settlement",
+                        "workflow_id": "workflow-explicit-settlement",
+                        "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                        "aggregate_id": "node-explicit-settlement",
+                        "payload": {"role_mode": "produce"},
+                    },
+                    submission_kind="candidate",
+                )
+            )
+
+        stale = create_assignment("stale-explicit-settlement", "old-input")
+        completed = create_assignment("completed-explicit-settlement", "new-input")
+        attempt = service.repository.claim_role_assignment(str(completed["assignment_id"]))
+        lease_resource = f"assignment:{completed['assignment_id']}"
+        lease = service.repository.claim_lease(
+            lease_resource,
+            str(attempt["attempt_id"]),
+            ttl_seconds=120,
+        )
+        prompt_ref = service.artifacts.put_json(
+            {"role": "implementation"},
+            artifact_type="RolePromptPackArtifact",
+        )
+        service.repository.start_role_attempt(
+            assignment_id=str(completed["assignment_id"]),
+            attempt_id_value=str(attempt["attempt_id"]),
+            lease_resource_key=lease_resource,
+            fencing_token=lease.fencing_token,
+            prompt_pack_ref=prompt_ref.to_dict(),
+        )
+        submission = {"status": "candidate_ready"}
+        submission_ref = service.artifacts.put_json(
+            submission,
+            artifact_type="CandidateRoleSubmissionArtifact",
+        )
+        service.repository.record_role_submission(
+            assignment_id=str(completed["assignment_id"]),
+            attempt_id_value=str(attempt["attempt_id"]),
+            fencing_token=lease.fencing_token,
+            artifact_ref=submission_ref.to_dict(),
+            payload_hash=stable_hash(submission),
+            settlement_action={"action_type": "SUBMIT_CANDIDATE"},
+        )
+        worker = SemanticOrchestrator(service)
+        worker._assignment_ids_by_effect["effect-key-explicit-settlement"] = str(
+            stale["assignment_id"]
+        )
+        terminal = worker._terminal_from_assignment_receipt(
+            service.repository.read_role_assignment(completed["assignment_id"]),
+            primary_artifact_name="candidate.json",
+            summary="candidate ready",
+        )
+
+        settlement = worker._role_submission_settlement(
+            {"effect_key": "effect-key-explicit-settlement"},
+            assignment_id=worker._terminal_role_assignment_id(terminal),
+        )
+
+        self.assertEqual(settlement["role_assignment_id"], completed["assignment_id"])
+        self.assertEqual(
+            settlement["role_submission_payload_hash"],
+            stable_hash(submission),
+        )
+
     def test_recovery_does_not_duplicate_a_live_role_attempt(self) -> None:
         async def scenario() -> None:
             service = MinionV2WorkflowService(self.runtime_root)
+            self._create_role_scope(
+                service,
+                workflow_id="workflow-live-recovery",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="architecture-live-recovery",
+            )
             service.repository.ensure_role_session(
                 session_id="session-live-recovery",
                 workflow_id="workflow-live-recovery",
@@ -1113,6 +1579,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 mode="architecture",
                 executor_profile_id="software_engineering.v2_reviewer",
                 family_binding_sha="binding",
+                scope_kind="architecture_cycle",
+                subject_key="architecture-live-recovery",
             )
             assignment = service.repository.create_role_assignment(
                 RoleAssignmentRequest(
@@ -1196,6 +1664,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_recovery_cancels_assignment_for_a_paused_aggregate(self) -> None:
         async def scenario() -> None:
             service = MinionV2WorkflowService(self.runtime_root)
+            self._create_role_scope(
+                service,
+                workflow_id="workflow-paused",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-paused",
+            )
             service.repository.ensure_role_session(
                 session_id="session-paused",
                 workflow_id="workflow-paused",
@@ -1205,6 +1679,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 mode="produce",
                 executor_profile_id="software_engineering.v2_coder",
                 family_binding_sha="binding",
+                scope_kind="module",
+                subject_key="router",
             )
             assignment = service.repository.create_role_assignment(
                 RoleAssignmentRequest(
@@ -1261,6 +1737,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 {"workspace_root": "/tmp/ephemeral"},
                 artifact_type="WorkspacePreparationArtifact",
             )
+            self._create_role_scope(
+                service,
+                workflow_id="workflow-duplicate-review",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="architecture-duplicate-review",
+            )
             service.repository.ensure_role_session(
                 session_id="session-duplicate-review",
                 workflow_id="workflow-duplicate-review",
@@ -1270,6 +1752,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 mode="architecture",
                 executor_profile_id="software_engineering.v2_reviewer",
                 family_binding_sha="binding",
+                scope_kind="architecture_cycle",
+                subject_key="architecture-duplicate-review",
             )
             assignment = service.repository.create_role_assignment(
                 RoleAssignmentRequest(
@@ -1365,12 +1849,13 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         processor._create_revision({"effect_key": "event-edit:0"})
 
-        self.assertEqual(
-            completed,
-            [architect_session_id(previous.workflow_id, previous.aggregate_id)],
-        )
+        self.assertEqual(completed, [])
         self.assertEqual([action.action_type for action in actions], ["CREATE_ARCHITECTURE_REVISION"])
         self.assertEqual(actions[0].payload["parent_revision_id"], previous.aggregate_id)
+        self.assertEqual(
+            actions[0].payload["architecture_cycle_id"],
+            previous.aggregate_id,
+        )
 
     def test_runner_checkpoint_uses_manager_selected_paths_and_ignores_stale_files(self) -> None:
         run_dir = self.runtime_root / "agent-session"
@@ -1895,14 +2380,14 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                     aggregate_id="node-coder-session",
                     state="QUEUED",
                     version=1,
-                    payload={"candidate_cycle": 0},
+                    payload={"candidate_cycle": 0, "module_name": "router"},
                 ),
                 SimpleNamespace(
                     workflow_id="wf-coder-session",
                     aggregate_id="node-coder-session",
                     state="REPAIR_QUEUED",
                     version=7,
-                    payload={"candidate_cycle": 1},
+                    payload={"candidate_cycle": 1, "module_name": "router"},
                 ),
             )
         )
@@ -1919,11 +2404,11 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR),
         )
 
-        expected = coder_session_id("node-coder-session")
+        expected = coder_session_id("wf-coder-session", "router")
         self.assertEqual(claims, [expected, expected])
         self.assertEqual([item.payload["active_worker_id"] for item in actions], [expected, expected])
 
-    def test_repeated_review_cycles_use_candidate_scoped_verifier_sessions(self) -> None:
+    def test_repeated_review_cycles_reuse_module_verifier_session(self) -> None:
         worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         claims: list[str] = []
         actions: list[ActionEnvelope] = []
@@ -1941,14 +2426,22 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                     aggregate_id="node-verifier-session",
                     state="REVIEW_QUEUED",
                     version=1,
-                    payload={"candidate_cycle": 1, "candidate_digest": "candidate-a"},
+                    payload={
+                        "candidate_cycle": 1,
+                        "candidate_digest": "candidate-a",
+                        "module_name": "router",
+                    },
                 ),
                 SimpleNamespace(
                     workflow_id="wf-verifier-session",
                     aggregate_id="node-verifier-session",
                     state="REVIEW_QUEUED",
                     version=9,
-                    payload={"candidate_cycle": 2, "candidate_digest": "candidate-b"},
+                    payload={
+                        "candidate_cycle": 2,
+                        "candidate_digest": "candidate-b",
+                        "module_name": "router",
+                    },
                 ),
             )
         )
@@ -1965,17 +2458,15 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
         )
 
-        expected = [
-            verifier_session_id("node-verifier-session", "candidate:candidate-a"),
-            verifier_session_id("node-verifier-session", "candidate:candidate-b"),
-        ]
+        session_id = module_verifier_session_id("wf-verifier-session", "router")
+        expected = [session_id, session_id]
         self.assertEqual(claims, expected)
         self.assertEqual(
             [item.payload["active_worker_id"] for item in actions],
             expected,
         )
 
-    def test_node_acceptance_closes_the_module_coder_session(self) -> None:
+    def test_node_acceptance_preserves_module_sessions(self) -> None:
         processor = MinionV2OutboxProcessor(MinionV2WorkflowService(self.runtime_root))
         node = SimpleNamespace(
             workflow_id="wf-module-pass",
@@ -1984,6 +2475,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "node_kind": "unit",
                 "epoch_id": "epoch-module-pass",
                 "role_session_generation": 0,
+                "module_name": "router",
             },
         )
         processor._effect_snapshot = lambda _effect: node
@@ -1996,10 +2488,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         with patch("pal.minion.v2.orchestration.DagScheduler.schedule_ready_nodes"):
             processor._node_accepted({"effect_key": "node-pass"})
 
-        self.assertEqual(
-            completed,
-            [coder_session_id("node-module-pass")],
-        )
+        self.assertEqual(completed, [])
 
     def test_snapshot_effect_rebinds_expired_lease_and_reacquires_workspace_lock(self) -> None:
         worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
@@ -2012,7 +2501,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             state="SNAPSHOTTING",
             version=8,
             payload={
-                "active_worker_id": coder_session_id("node-rebind"),
+                "module_name": "router",
+                "active_worker_id": coder_session_id("wf-rebind", "router"),
                 "lease_resource_key": "node:node-rebind:writer",
                 "fencing_token": 1,
                 "workspace_path": str(workspace),
@@ -2068,7 +2558,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             state="SNAPSHOTTING",
             version=4,
             payload={
-                "active_worker_id": coder_session_id("node-live-snapshot"),
+                "module_name": "router",
+                "active_worker_id": coder_session_id("wf-live-snapshot", "router"),
                 "lease_resource_key": "node:node-live-snapshot:writer",
                 "fencing_token": 3,
                 "workspace_path": str(workspace),
@@ -2078,7 +2569,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         worker.repository.assert_fencing_token = lambda *_args: None
         worker.repository.read_lease = lambda _key: {
-            "owner_id": coder_session_id("node-live-snapshot"),
+            "owner_id": coder_session_id("wf-live-snapshot", "router"),
             "fencing_token": 3,
             "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
             "metadata": {},
@@ -2130,10 +2621,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         workspace = self.runtime_root / "review-restart"
         workspace.mkdir()
-        verifier_id = verifier_session_id(
-            "node-review-restart",
-            "candidate:candidate-restart",
-        )
+        verifier_id = module_verifier_session_id("wf-review-restart", "router")
         node = SimpleNamespace(
             workflow_id="wf-review-restart",
             aggregate_id="node-review-restart",
@@ -2141,6 +2629,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             state="REVIEWING",
             version=5,
             payload={
+                "module_name": "router",
                 "active_worker_id": verifier_id,
                 "lease_resource_key": "node:node-review-restart:review",
                 "fencing_token": 6,
@@ -2331,6 +2820,46 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertNotIn("skeleton_commit_sha", view)
         self.assertNotIn("requirements_ref", view)
 
+    def test_architecture_reviewer_binds_human_edit_instruction_on_every_attempt(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        instruction_ref = service.artifacts.put_json(
+            {
+                "instruction": "Close the Ctrl-C lifecycle and dependency graph.",
+            },
+            artifact_type="ArchitectureEditInstructionArtifact",
+        )
+        references: dict[str, object] = {}
+        revision = SimpleNamespace(
+            payload={"edit_instruction_ref": instruction_ref.to_dict()}
+        )
+
+        bound = _bind_architecture_edit_instruction_for_review(
+            references,
+            revision,
+        )
+
+        self.assertTrue(bound)
+        self.assertEqual(references["edit_instruction"], instruction_ref)
+        retry_references: dict[str, object] = {}
+        self.assertTrue(
+            _bind_architecture_edit_instruction_for_review(
+                retry_references,
+                revision,
+            )
+        )
+        self.assertEqual(retry_references["edit_instruction"], instruction_ref)
+
+    def test_architecture_reviewer_omits_repair_reference_without_human_edit(self) -> None:
+        references: dict[str, object] = {}
+
+        bound = _bind_architecture_edit_instruction_for_review(
+            references,
+            SimpleNamespace(payload={}),
+        )
+
+        self.assertFalse(bound)
+        self.assertEqual(references, {})
+
     def test_skeleton_architect_submission_hands_live_lease_to_quiescer(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         worker = SemanticOrchestrator(service)
@@ -2380,11 +2909,16 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.engine.legal_actions = lambda *_args: {"START_ARCHITECT"}
         actions: list[ActionEnvelope] = []
 
-        def dispatch(action: ActionEnvelope):
+        def dispatch(action: ActionEnvelope, **_settlement):
             actions.append(action)
             return SimpleNamespace(snapshot=running)
 
         worker.repository.dispatch = dispatch
+        worker.repository.read_role_assignment = lambda _assignment_id: {
+            "assignment_id": "assignment-lease-handoff",
+            "state": RoleAssignmentState.RESULT_RECORDED.value,
+            "submission_payload_hash": "lease-handoff-payload",
+        }
         worker.repository.record_role_turn = lambda **_kwargs: None
         released: list[tuple[object, ...]] = []
         worker.repository.release_lease = lambda *args: released.append(args)
@@ -2394,6 +2928,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 {
                     "payload": {
                         "artifacts": [{"path": str(submission_path), "role": "primary"}],
+                        "role_assignment_id": "assignment-lease-handoff",
                         "session_turn_index": 1,
                     }
                 },
@@ -2622,6 +3157,27 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             aggregate_id="arch-seeded-revision",
             payload={"research_mode": "local_only", "base_architecture_manifest_ref": ref.to_dict()},
         )
+        worker.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id=snapshot.workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=snapshot.workflow_id,
+                actor="test",
+                expected_version=0,
+            )
+        )
+        worker.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_ARCHITECTURE_REVISION",
+                workflow_id=snapshot.workflow_id,
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=snapshot.aggregate_id,
+                actor="test",
+                expected_version=0,
+                payload={"architecture_cycle_id": snapshot.aggregate_id},
+            )
+        )
         worker.repository.read_snapshot = lambda *_args: SimpleNamespace(
             payload={"family_binding_ref": {"sha256": "binding"}}
         )
@@ -2760,6 +3316,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         leased_invocation_id = "inv_scheduler_owned"
         captured: dict[str, object] = {}
+        self._create_role_scope(
+            worker.service,
+            workflow_id="wf-lease-owner",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch-lease-owner",
+        )
 
         def capture_invocation(**kwargs) -> None:
             captured["invocation_id"] = str(kwargs["invocation_id"])
@@ -3208,7 +3770,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         validated = MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput.model_validate(
             {"task": "OHOS platform layer", "decision": "accept"}
         )
-        self.assertIsNone(validated.edit_scope)
+        self.assertIsNone(validated.edit_instruction)
         provider = MinionV2PublicProvider(
             runtime_root=self.runtime_root,
             wake_manager=lambda: wakes.append("wake"),

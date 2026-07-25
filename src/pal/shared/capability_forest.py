@@ -42,6 +42,7 @@ class CapabilityActionBlueprint:
     scope: str
     action_name: str
     handler_name: str
+    async_handler_name: str | None = None
     family: str = ""
     description: str = ""
     aliases: tuple[str, ...] = ()
@@ -147,6 +148,7 @@ def capability_action(
     execution: ToolExecutionSemantics | None = None,
     search_text: str = "",
     examples: tuple[dict[str, Any], ...] = (),
+    async_handler_name: str | None = None,
     metadata: dict[str, Any] | None = None,
 ):
     def decorator(fn):
@@ -157,6 +159,7 @@ def capability_action(
                 scope=scope,
                 action_name=action_name,
                 handler_name=fn.__name__,
+                async_handler_name=str(async_handler_name or "").strip() or None,
                 family=family,
                 description=description,
                 aliases=tuple(aliases),

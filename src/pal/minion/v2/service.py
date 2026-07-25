@@ -425,6 +425,7 @@ class MinionV2WorkflowService:
                     "active_channel": source_channel,
                     "control_route": dict(data.get("control_route") or {}),
                     "desired_state": "ACTIVE",
+                    "orchestration_contract_version": "3",
                 },
             )
         )
@@ -1066,21 +1067,11 @@ class MinionV2WorkflowService:
         decision = str(data.get("decision") or "").strip().lower()
         if decision not in {"accept", "edit", "reject"}:
             raise ValueError("human decision must be accept, edit, or reject")
-        edit_scope = str(data.get("edit_scope") or "architecture").strip().lower()
-        amendment = str(data.get("amendment") or "")
-        has_amendment = bool(amendment.strip())
         if decision == "edit":
-            if edit_scope not in {"architecture", "requirements"}:
-                raise ValueError("edit_scope must be architecture or requirements")
-            if edit_scope == "architecture":
-                if not str(data.get("edit_instruction") or "").strip():
-                    raise ValueError("architecture edit requires edit_instruction")
-                if has_amendment:
-                    raise ValueError("architecture edit cannot amend the task ledger")
-            elif not has_amendment:
-                raise ValueError("requirements edit requires amendment prose")
-        elif data.get("edit_scope") or has_amendment:
-            raise ValueError("edit_scope and task-ledger revisions are valid only for decision=edit")
+            if not str(data.get("edit_instruction") or "").strip():
+                raise ValueError("architecture edit requires edit_instruction")
+        elif data.get("edit_instruction"):
+            raise ValueError("edit_instruction is valid only for decision=edit")
         self._rebind_human_decision_channel(data)
         token = str(data.get("decision_token") or "")
         if not token:
@@ -1113,43 +1104,15 @@ class MinionV2WorkflowService:
         }
         if decision == "edit":
             instruction = str(data.get("edit_instruction") or "").strip()
-            if edit_scope == "requirements":
-                authority = TaskRevisionAuthority(
-                    title="Human review task revision",
-                    question=(
-                        "What requirement change should supersede the reviewed task "
-                        "specification?"
-                    ),
-                    answer=amendment,
-                    observed_at=datetime.now(UTC).isoformat(),
-                    origin="human_review_edit",
-                )
-                requirements_ref = self.task_ledger.append_revision(
-                    base_ref=dict(revision.payload.get("requirements_ref") or {}),
-                    authority=authority,
-                    actor=str(data.get("actor") or "pal"),
-                    source_channel=str(data.get("source_channel") or "local"),
-                )
-                payload["requirements_ref"] = requirements_ref.to_dict()
-                payload["task_revision"] = authority.model_dump(mode="json")
-                instruction = instruction or (
-                    "Revise the existing architecture against the updated append-only task ledger."
-                )
             edit_ref = self.artifacts.put_json(
                 {
                     "instruction": instruction,
-                    "edit_scope": edit_scope,
                 },
-                artifact_type=(
-                    "RequirementsEditInstructionArtifact"
-                    if edit_scope == "requirements"
-                    else "ArchitectureEditInstructionArtifact"
-                ),
+                artifact_type="ArchitectureEditInstructionArtifact",
                 provenance={"actor": data.get("actor"), "source_channel": data.get("source_channel")},
                 child_refs=((manifest_sha, "revises"),),
             )
             payload["edit_instruction_ref"] = edit_ref.to_dict()
-            payload["edit_scope"] = edit_scope
         result = self.repository.dispatch(
             ActionEnvelope(
                 action_type=action_types[decision],
@@ -1168,12 +1131,6 @@ class MinionV2WorkflowService:
             "workflow_id": workflow_id,
             "revision_id": revision_id,
             "state": result.snapshot.state,
-            **({"edit_scope": edit_scope} if decision == "edit" else {}),
-            **(
-                {"requirements_ref": payload["requirements_ref"]}
-                if decision == "edit" and edit_scope == "requirements"
-                else {}
-            ),
         }
 
     def append_architect_clarification(self, request: Mapping[str, Any]) -> dict[str, Any]:

@@ -8,18 +8,18 @@ VERIFICATION_EFFECT_ROUTES = {
     "admit_verifier_role": SemanticEffectRoute(
         "_admit_verifier_role",
         OrchestrationRole.VERIFIER,
-        frozenset({RoleMode.MODULE, RoleMode.SCENARIO}),
+        frozenset({RoleMode.MODULE, RoleMode.SYSTEM}),
     ),
     "run_verifier_role": SemanticEffectRoute(
         "_run_verification_role",
         OrchestrationRole.VERIFIER,
-        frozenset({RoleMode.MODULE, RoleMode.SCENARIO}),
+        frozenset({RoleMode.MODULE, RoleMode.SYSTEM}),
         background=True,
     ),
     "quiesce_verifier_role": SemanticEffectRoute(
         "_quiesce_verifier_role",
         OrchestrationRole.VERIFIER,
-        frozenset({RoleMode.MODULE, RoleMode.SCENARIO}),
+        frozenset({RoleMode.MODULE, RoleMode.SYSTEM}),
     ),
     "snapshot_verifier_result": SemanticEffectRoute("_snapshot_semantic_verification"),
 }

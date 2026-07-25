@@ -23,9 +23,8 @@ from pal.minion.v2.machines import machine_spec_for
 from pal.minion.v2.replan import collect_architecture_finding_batch
 from pal.minion.v2.service import MinionV2WorkflowService, workflow_request_from_snapshot
 from pal.minion.v2.sessions import (
+    architecture_reviewer_session_id,
     architect_session_id_for_revision,
-    coder_session_id,
-    node_role_generation,
 )
 from pal.minion.v2.verification import DefectPropagationService
 
@@ -47,7 +46,7 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "create_architecture_revision",
     "schedule_ready_nodes",
     "notify_node_accepted",
-    "prepare_verification_scenario",
+    "prepare_system_verification",
     "publish_accepted_memory_candidate",
     "queue_integration_node",
     "propagate_pause",
@@ -272,8 +271,8 @@ class MinionV2OutboxProcessor:
             return {}
         if effect_type == "notify_node_accepted":
             return self._node_accepted(effect)
-        if effect_type == "prepare_verification_scenario":
-            return self._prepare_verification_scenario(effect)
+        if effect_type == "prepare_system_verification":
+            return self._prepare_system_verification(effect)
         if effect_type == "publish_accepted_memory_candidate":
             return self._publish_accepted_memory_candidate(effect)
         if effect_type in {
@@ -350,6 +349,7 @@ class MinionV2OutboxProcessor:
                     payload={"result_artifact_ref": epoch.payload.get("published_deliverable_ref")},
                 )
             )
+            self.repository.complete_workflow_role_sessions(epoch.workflow_id)
             return {}
         if effect_type == "submit_standalone_completion":
             review = self._effect_snapshot(effect)
@@ -366,6 +366,7 @@ class MinionV2OutboxProcessor:
                     payload={"result_artifact_ref": review.payload.get("verification_artifact_ref")},
                 )
             )
+            self.repository.complete_workflow_role_sessions(review.workflow_id)
             return {}
         if effect_type == "start_review_repair_execution":
             review = self._effect_snapshot(effect)
@@ -379,13 +380,7 @@ class MinionV2OutboxProcessor:
             return self._start_replacement_workflow_from_architecture(effect)
         if effect_type == "submit_workflow_rejection":
             revision = self._effect_snapshot(effect)
-            self.repository.complete_role_session(
-                architect_session_id_for_revision(
-                    revision.workflow_id,
-                    revision.aggregate_id,
-                    revision.payload,
-                )
-            )
+            self._complete_architecture_cycle_sessions(revision)
             workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, revision.workflow_id)
             if workflow is not None and workflow.state == "ACTIVE":
                 self.repository.dispatch(
@@ -399,6 +394,7 @@ class MinionV2OutboxProcessor:
                         idempotency_key=f"effect:{effect['effect_key']}:reject-workflow",
                     )
                 )
+                self.repository.complete_workflow_role_sessions(revision.workflow_id)
             return {}
         if effect_type == "reconcile_execution_epoch":
             return await self._reconcile_execution_epoch(effect)
@@ -754,6 +750,7 @@ class MinionV2OutboxProcessor:
                 payload={"result_artifact_ref": dict(result_ref)},
             )
         )
+        self.repository.complete_workflow_role_sessions(workflow.workflow_id)
 
     def _submit_effect_action(self, effect: Mapping[str, Any], payload: Mapping[str, Any]) -> Mapping[str, Any]:
         action_type = str(payload.get("action_type") or "")
@@ -762,13 +759,7 @@ class MinionV2OutboxProcessor:
             manifest_ref = dict(snapshot.payload.get("architecture_manifest_ref") or {})
             if not manifest_ref:
                 raise ValueError("accepted architecture revision has no manifest")
-            self.repository.complete_role_session(
-                architect_session_id_for_revision(
-                    snapshot.workflow_id,
-                    snapshot.aggregate_id,
-                    snapshot.payload,
-                )
-            )
+            self._complete_architecture_cycle_sessions(snapshot)
             return self._compile_execution(
                 workflow_id=snapshot.workflow_id,
                 manifest_ref=manifest_ref,
@@ -790,6 +781,26 @@ class MinionV2OutboxProcessor:
         )
         return {}
 
+    def _complete_architecture_cycle_sessions(
+        self,
+        revision: AggregateSnapshot,
+        *,
+        status: str = "completed",
+    ) -> None:
+        for session_id in (
+            architect_session_id_for_revision(
+                revision.workflow_id,
+                revision.aggregate_id,
+                revision.payload,
+            ),
+            architecture_reviewer_session_id(
+                revision.workflow_id,
+                revision.aggregate_id,
+                revision.payload,
+            ),
+        ):
+            self.repository.complete_role_session(session_id, status=status)
+
     def _route_workflow(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         workflow = self._effect_snapshot(effect)
         request = workflow_request_from_snapshot(self.service, workflow)
@@ -808,6 +819,7 @@ class MinionV2OutboxProcessor:
                     payload={
                         "request_ref": dict(workflow.payload["request_ref"]),
                         "requirements_ref": dict(request["requirements_ref"]),
+                        "architecture_cycle_id": revision_id,
                         "research_mode": str(request.get("research_mode") or "local_only"),
                         "revision_number": 1,
                     },
@@ -832,6 +844,7 @@ class MinionV2OutboxProcessor:
                     payload={
                         "architecture_manifest_ref": artifact_ref,
                         "requirements_ref": dict(request.get("requirements_ref") or {}),
+                        "architecture_cycle_id": revision_id,
                         "revision_number": 1,
                     },
                 )
@@ -868,13 +881,6 @@ class MinionV2OutboxProcessor:
 
     def _create_revision(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         previous = self._effect_snapshot(effect)
-        self.repository.complete_role_session(
-            architect_session_id_for_revision(
-                previous.workflow_id,
-                previous.aggregate_id,
-                previous.payload,
-            )
-        )
         revision_id = _derived_id("arch", str(effect["effect_key"]))
         self.repository.dispatch(
             ActionEnvelope(
@@ -889,9 +895,13 @@ class MinionV2OutboxProcessor:
                     "request_ref": previous.payload.get("request_ref"),
                     "requirements_ref": previous.payload.get("requirements_ref"),
                     "parent_revision_id": previous.aggregate_id,
+                    "architecture_cycle_id": str(
+                        previous.payload.get("architecture_cycle_id")
+                        or previous.payload.get("root_architecture_revision_id")
+                        or previous.aggregate_id
+                    ),
                     "revision_number": int(previous.payload.get("revision_number") or 1) + 1,
                     "edit_instruction_ref": previous.payload.get("edit_instruction_ref"),
-                    "edit_scope": previous.payload.get("edit_scope", "architecture"),
                     "base_architecture_manifest_ref": previous.payload.get("architecture_manifest_ref"),
                     "research_mode": previous.payload.get("research_mode", "local_only"),
                 },
@@ -1101,6 +1111,7 @@ class MinionV2OutboxProcessor:
                     "requirements_ref": dict(epoch.payload.get("requirements_ref") or {}),
                     "base_architecture_manifest_ref": dict(epoch.payload.get("architecture_manifest_ref") or {}),
                     "replan_finding_batch_ref": batch_ref,
+                    "architecture_cycle_id": revision_id,
                     "source_execution_epoch_id": epoch.aggregate_id,
                     "replan_generation": generation,
                     "research_mode": "local_only",
@@ -1294,11 +1305,6 @@ class MinionV2OutboxProcessor:
 
     def _node_accepted(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
-        if str(node.payload.get("node_kind") or "unit") == "unit":
-            generation = node_role_generation(node.payload)
-            self.repository.complete_role_session(
-                coder_session_id(node.aggregate_id, generation)
-            )
         epoch_id = str(node.payload.get("epoch_id") or "")
         if str(node.payload.get("node_kind") or "") == "integration":
             epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
@@ -1329,8 +1335,14 @@ class MinionV2OutboxProcessor:
         ]
         if nodes and not any(str(item.payload.get("node_kind") or "") == "integration" for item in nodes):
             implementation = [item for item in nodes if str(item.payload.get("node_kind") or "unit") == "unit"]
-            scenarios = [item for item in nodes if str(item.payload.get("node_kind") or "") == "verification"]
-            if implementation and scenarios and all(item.state == "ACCEPTED" for item in nodes):
+            system_nodes = [
+                item
+                for item in nodes
+                if str(item.payload.get("node_kind") or "") == "system_verification"
+            ]
+            if implementation and len(system_nodes) == 1 and all(
+                item.state == "ACCEPTED" for item in nodes
+            ):
                 epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
                 if epoch is not None and epoch.state == "RUNNING":
                     self.repository.dispatch(
@@ -1346,24 +1358,34 @@ class MinionV2OutboxProcessor:
                                 "accepted_candidate_refs": [dict(item.payload["candidate_ref"]) for item in implementation],
                                 "verification_artifact_refs": [
                                     dict(item.payload["verification_artifact_ref"])
-                                    for item in scenarios
+                                    for item in system_nodes
                                 ],
                             },
                         )
                     )
         return {}
 
-    def _prepare_verification_scenario(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
+    def _prepare_system_verification(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
-        if str(node.payload.get("node_kind") or "") != "verification":
-            raise ValueError("scenario preparation requires a verification node")
-        scenario_ref = dict(node.payload.get("unit_contract_ref") or {})
-        scenario = dict(self.service.artifacts.read_json(scenario_ref))
+        if str(node.payload.get("node_kind") or "") != "system_verification":
+            raise ValueError("system verification preparation requires its single system node")
+        catalog_ref = dict(
+            node.payload.get("scenario_catalog_ref")
+            or node.payload.get("unit_contract_ref")
+            or {}
+        )
+        catalog = dict(self.service.artifacts.read_json(catalog_ref))
+        scenarios = {
+            str(name): dict(value or {})
+            for name, value in dict(catalog.get("scenarios") or {}).items()
+        }
+        if not scenarios:
+            raise ValueError("system verification requires a non-empty ScenarioCatalog")
         dependency_nodes: list[AggregateSnapshot] = []
         for dependency_id in list(node.payload.get("dependency_node_ids") or []):
             dependency = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, str(dependency_id))
             if dependency is None or dependency.state != "ACCEPTED":
-                raise ValueError("verification scenario dependency is not ACCEPTED")
+                raise ValueError("system verification dependency is not ACCEPTED")
             dependency_nodes.append(dependency)
         ordered_nodes = _topological_scenario_nodes(dependency_nodes)
         dependencies: list[dict[str, Any]] = []
@@ -1371,7 +1393,7 @@ class MinionV2OutboxProcessor:
             candidate_ref = dict(dependency.payload.get("candidate_ref") or {})
             candidate_digest = str(dependency.payload.get("candidate_digest") or "")
             if not candidate_ref.get("sha256") or not candidate_digest:
-                raise ValueError("verification scenario dependency has no accepted Candidate")
+                raise ValueError("system verification dependency has no accepted Candidate")
             dependencies.append(
                 {
                     "module_name": str(dependency.payload.get("module_name") or dependency.payload.get("unit_id") or ""),
@@ -1389,7 +1411,7 @@ class MinionV2OutboxProcessor:
         skeleton_sha = str(manifest.get("skeleton_commit_sha") or "")
         workspace = Path(str(node.payload.get("workspace_path") or ""))
         if not workspace.is_dir() or not skeleton_sha:
-            raise ValueError("verification scenario requires its accepted Skeleton worktree")
+            raise ValueError("system verification requires its accepted Skeleton worktree")
         _reset_scenario_worktree(workspace, skeleton_sha)
         try:
             union_ref, union_commit_sha = CandidateUnionService(self.service.artifacts).compose(
@@ -1399,33 +1421,24 @@ class MinionV2OutboxProcessor:
             )
         except CandidateUnionConflict as exc:
             raise ValueError(
-                "verification scenario Candidate union exposed an undeclared ownership dependency"
+                "system Candidate union exposed an undeclared ownership dependency"
             ) from exc
         fingerprint_payload = {
-            "verification_name": str(scenario.get("verification_name") or node.payload.get("module_name") or ""),
+            "verification_name": "system_delivery",
             "skeleton_commit_sha": skeleton_sha,
             "dependencies": dependencies,
-            "entrypoints": list(scenario.get("entrypoints") or []),
-            "contract_flow": list(scenario.get("contract_flow") or []),
-            "observable_behavior": str(scenario.get("observable_behavior") or ""),
-            "failure_behavior": str(scenario.get("failure_behavior") or ""),
-            "environment": dict(scenario.get("environment") or {}),
-            "requirements": {
-                str(name): dict(value or {})
-                for name, value in dict(scenario.get("requirements") or {}).items()
-            },
+            "scenarios": scenarios,
             "environment_fingerprint": str(node.payload.get("environment_fingerprint") or ""),
-            "scenario_tree_sha": _git_output(workspace, "rev-parse", f"{union_commit_sha}^{{tree}}"),
+            "system_tree_sha": _git_output(workspace, "rev-parse", f"{union_commit_sha}^{{tree}}"),
         }
-        scenario_fingerprint = hashlib.sha256(
+        system_fingerprint = hashlib.sha256(
             json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         work_view_ref = self.service.artifacts.put_json(
             {
-                "verification_name": fingerprint_payload["verification_name"],
-                "kind": str(scenario.get("kind") or ""),
-                "coverage_claims": list(scenario.get("covers") or []),
-                "contract_consumption": list(scenario.get("consumes") or []),
+                "schema_version": "1",
+                "verification_name": "system_delivery",
+                "kind": "system_and_delivery",
                 "accepted_modules": [
                     {
                         "module_name": item["module_name"],
@@ -1434,22 +1447,25 @@ class MinionV2OutboxProcessor:
                     }
                     for item in dependencies
                 ],
-                "entrypoints": list(scenario.get("entrypoints") or []),
-                "contract_flow": list(scenario.get("contract_flow") or []),
-                "environment": dict(scenario.get("environment") or {}),
-                "observable_behavior": str(scenario.get("observable_behavior") or ""),
-                "failure_behavior": str(scenario.get("failure_behavior") or ""),
-                "modules": {
-                    name: architecture_modules[name]
-                    for name in list(scenario.get("modules") or [])
-                    if name in architecture_modules
+                "scenarios": scenarios,
+                "public_module_contracts": {
+                    name: {
+                        "responsibility": module.get("responsibility"),
+                        "dependencies": list(module.get("dependencies") or []),
+                        "contract": dict(module.get("contract") or {}),
+                    }
+                    for name, module in sorted(architecture_modules.items())
                 },
-                "requirements": fingerprint_payload["requirements"],
+                "delivery_evidence_required": True,
+                "delivery_evidence_rule": (
+                    "Launch each task-mandated delivery surface through its real user boundary; "
+                    "source inspection, LSP, unit tests, and compile-only probes are not delivery evidence."
+                ),
             },
-            artifact_type="VerificationScenarioWorkViewArtifact",
+            artifact_type="SystemVerificationWorkViewArtifact",
             child_refs=(
-                (str(scenario_ref.get("sha256") or ""), "verification_contract"),
-                (union_ref.sha256, "scenario_candidate_union"),
+                (str(catalog_ref.get("sha256") or ""), "scenario_catalog"),
+                (union_ref.sha256, "system_candidate_union"),
                 (str(requirements_ref.get("sha256") or ""), "task_ledger"),
             ),
         )
@@ -1462,12 +1478,12 @@ class MinionV2OutboxProcessor:
                 aggregate_id=node.aggregate_id,
                 actor="minion-v2-manager",
                 expected_version=current.version,
-                idempotency_key=f"effect:{effect['effect_key']}:scenario-prepared",
+                idempotency_key=f"effect:{effect['effect_key']}:system-prepared",
                 payload={
-                    "scenario_fingerprint": scenario_fingerprint,
-                    "scenario_work_view_ref": work_view_ref.to_dict(),
-                    "scenario_candidate_union_ref": union_ref.to_dict(),
-                    "scenario_commit_sha": union_commit_sha,
+                    "system_fingerprint": system_fingerprint,
+                    "system_work_view_ref": work_view_ref.to_dict(),
+                    "system_candidate_union_ref": union_ref.to_dict(),
+                    "system_commit_sha": union_commit_sha,
                     "verification_workspace_fingerprint": workspace_content_fingerprint(workspace),
                 },
             )

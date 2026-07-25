@@ -202,8 +202,8 @@ class VerificationService:
             "reviewer_summary": reviewer_summary,
             "test_workspace_ref": dict(test_workspace_ref or {}),
             **(
-                {"scenario_fingerprint": str(node.payload.get("scenario_fingerprint") or "")}
-                if str(node.payload.get("node_kind") or "") == "verification"
+                {"system_fingerprint": str(node.payload.get("system_fingerprint") or "")}
+                if str(node.payload.get("node_kind") or "") == "system_verification"
                 else {}
             ),
         }
@@ -344,7 +344,7 @@ class VerificationService:
         module_node_id: str = "",
         dependency_node_ids: Sequence[str] = (),
         module_node_ids: Sequence[str] = (),
-        scenario_fingerprint: str = "",
+        system_fingerprint: str = "",
         role_assignment_id: str = "",
         role_submission_payload_hash: str = "",
         accepted_candidate_ref: ArtifactRef | None = None,
@@ -381,21 +381,25 @@ class VerificationService:
                 if str(item)
             )
         )
-        scenario = str(node.payload.get("node_kind") or "") == "verification"
-        if scenario:
-            if not scenario_fingerprint or scenario_fingerprint != str(node.payload.get("scenario_fingerprint") or ""):
-                raise ValueError("verification verdict does not match the prepared scenario fingerprint")
-            common["scenario_fingerprint"] = scenario_fingerprint
+        system = str(node.payload.get("node_kind") or "") == "system_verification"
+        if system:
+            if not system_fingerprint or system_fingerprint != str(
+                node.payload.get("system_fingerprint") or ""
+            ):
+                raise ValueError(
+                    "verification verdict does not match the prepared system fingerprint"
+                )
+            common["system_fingerprint"] = system_fingerprint
         if status == VerificationStatus.PASS:
-            action_type = "VERIFICATION_PASSED" if scenario else "REVIEW_PASSED"
+            action_type = "VERIFICATION_PASSED" if system else "REVIEW_PASSED"
             payload = common
         elif status == VerificationStatus.NOT_APPLICABLE:
-            action_type = "VERIFICATION_PASSED" if scenario else "REVIEW_PASSED"
+            action_type = "VERIFICATION_PASSED" if system else "REVIEW_PASSED"
             payload = {**common, "not_applicable": True}
         elif status == VerificationStatus.UNKNOWN:
             policy = unknown_policy or UnknownPolicy(False, None, True)
             if policy.allows():
-                action_type = "VERIFICATION_UNKNOWN_ALLOWED" if scenario else "REVIEW_UNKNOWN_ALLOWED"
+                action_type = "VERIFICATION_UNKNOWN_ALLOWED" if system else "REVIEW_UNKNOWN_ALLOWED"
                 payload = {
                     **common,
                     "policy_allows_unknown": True,
@@ -457,9 +461,9 @@ class VerificationService:
                     "failure_history": history,
                 }
             elif defect_kind == DefectKind.VERIFICATION:
-                if not scenario or not module_targets:
+                if not system or not module_targets:
                     raise ValueError(
-                        "verification defect requires a scenario and verifier-owned module target"
+                        "verification defect requires system verification and a verifier-owned target"
                     )
                 action_type = "VERIFICATION_DEFECT"
                 payload = {
@@ -470,9 +474,9 @@ class VerificationService:
                     "finding_fingerprint": finding_fingerprint_value,
                     "failure_history": history,
                 }
-            elif scenario:
+            elif system:
                 if not module_targets:
-                    raise ValueError("scenario module defect requires module_node_id")
+                    raise ValueError("system module defect requires module_node_id")
                 action_type = "MODULE_DEFECT"
                 payload = {
                     **common,

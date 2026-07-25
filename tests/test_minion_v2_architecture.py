@@ -240,14 +240,13 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                 "workflow_id": workflow_id,
                 "decision_token": card.decision_token,
                 "decision": "edit",
-                "edit_scope": "architecture",
                 "edit_instruction": "Split ownership from runtime wiring.",
                 "actor": "nathan",
                 "source_channel": "socket:test",
             }
         )
 
-        self.assertEqual(result["edit_scope"], "architecture")
+        self.assertEqual(result["status"], "accepted")
         superseded = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
         assert superseded is not None
         self.assertNotIn("task_revision_authority_ref", superseded.payload)
@@ -266,70 +265,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         )
         self.assertEqual(child.payload["requirements_ref"], requirements.to_dict())
 
-    def test_human_requirements_edit_appends_revision_before_architect_revision(self) -> None:
-        requirements, _evidence, manifest = self._publish_contract()
-        workflow_id = "wf_requirements_edit"
-        revision_id = "arch_requirements_edit"
-        card = self._prepare_workflow_human_review(
-            workflow_id=workflow_id,
-            revision_id=revision_id,
-            requirements_ref=requirements.to_dict(),
-            manifest_ref=manifest.to_dict(),
-        )
-        service = MinionV2WorkflowService(self.runtime_root)
-
-        result = service.submit_human_decision(
-            {
-                "workflow_id": workflow_id,
-                "decision_token": card.decision_token,
-                "decision": "edit",
-                "edit_scope": "requirements",
-                "amendment": (
-                    "Expose stable geometry values and deterministic validation.\n"
-                    "Preserve the existing public C ABI.\n"
-                ),
-                "actor": "nathan",
-                "source_channel": "socket:test",
-            }
-        )
-
-        requirements_ref = result["requirements_ref"]
-        ledger = self.store.read_json(requirements_ref)
-        authority = ledger["revisions"][-1]["authority"]
-        self.assertEqual(
-            authority["answer"],
-            "Expose stable geometry values and deterministic validation.\n"
-            "Preserve the existing public C ABI.\n",
-        )
-        self.assertEqual(
-            authority["question"],
-            "What requirement change should supersede the reviewed task specification?",
-        )
-        self.assertEqual(authority["origin"], "human_review_edit")
-        superseded = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
-        assert superseded is not None
-        self.assertEqual(superseded.payload["requirements_ref"], requirements_ref)
-        self.assertEqual(superseded.payload["task_revision"], authority)
-        edit_instruction = self.store.read_json(superseded.payload["edit_instruction_ref"])
-        self.assertNotIn("task_revision_authority_ref", edit_instruction)
-        MinionV2OutboxProcessor(service)._create_revision(
-            {
-                "effect_key": "requirements-edit-child",
-                "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
-                "aggregate_id": revision_id,
-            }
-        )
-        child = next(
-            item
-            for item in self.repository.list_workflow_snapshots(workflow_id)
-            if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
-            and item.payload.get("parent_revision_id") == revision_id
-        )
-        self.assertEqual(child.payload["requirements_ref"], requirements_ref)
-        self.assertNotIn("pending_task_revision_authority_ref", child.payload)
-        self.assertEqual(child.payload["edit_scope"], "requirements")
-
-    def test_invalid_requirements_edit_does_not_consume_human_decision(self) -> None:
+    def test_human_edit_requires_architecture_instruction_without_consuming_token(self) -> None:
         requirements, _evidence, manifest = self._publish_contract()
         workflow_id = "wf_invalid_requirements_edit"
         revision_id = "arch_invalid_requirements_edit"
@@ -340,13 +276,12 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             manifest_ref=manifest.to_dict(),
         )
 
-        with self.assertRaisesRegex(ValueError, "amendment prose"):
+        with self.assertRaisesRegex(ValueError, "edit_instruction"):
             MinionV2WorkflowService(self.runtime_root).submit_human_decision(
                 {
                     "workflow_id": workflow_id,
                     "decision_token": card.decision_token,
                     "decision": "edit",
-                    "edit_scope": "requirements",
                     "actor": "nathan",
                     "source_channel": "socket:test",
                 }

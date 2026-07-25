@@ -32,6 +32,9 @@ from pal.minion.v2.semantic_orchestration import (
     apply_v2_research_capability_policy,
     apply_v2_role_capability_policy,
 )
+from pal.minion.v2.semantic_orchestration.orchestrator import (
+    _role_mode_profile_payload,
+)
 from pal.shared import MinionInvocationPack, RuntimeStatus
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 
@@ -263,17 +266,13 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             "op_minion_verification_scratch_write",
             software.allowed_capabilities,
         )
-        scenario = apply_v2_role_capability_policy(
+        system = apply_v2_role_capability_policy(
             self._pack("software_engineering.v2_verifier"),
-            activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.SCENARIO),
+            activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.SYSTEM),
         )
         self.assertIn(
             "op_minion_verification_scratch_write",
-            scenario.allowed_capabilities,
-        )
-        self.assertNotIn(
-            "op_minion_verification_request_dependency_repairs",
-            scenario.allowed_capabilities,
+            system.allowed_capabilities,
         )
 
         for profile in ("general.verifier", "lifestyle.verifier"):
@@ -327,6 +326,28 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("op_minion_candidate_submit", coder.allowed_capabilities)
         self.assertNotIn("op_minion_artifact_write", coder.allowed_capabilities)
 
+    def test_verifier_profile_compiles_to_one_mode_specific_contract(self) -> None:
+        base = dict(
+            self._pack("software_engineering.v2_verifier").resolved_profile
+        )
+
+        module = _role_mode_profile_payload(base, mode="module")
+        system = _role_mode_profile_payload(base, mode="system")
+
+        self.assertIn("exactly one module Candidate", module["identity_fragment"])
+        self.assertIn("Do not search for task.yaml", module["behavior_fragment"])
+        self.assertNotIn(
+            "single workflow-level System Verifier",
+            module["behavior_fragment"],
+        )
+        self.assertIn(
+            "single workflow-level System Verifier",
+            system["identity_fragment"],
+        )
+        self.assertIn("Do not split scenarios into workers", system["behavior_fragment"])
+        self.assertIn("real system and delivery tests", system["behavior_fragment"])
+        self.assertNotEqual(module["behavior_fragment"], system["behavior_fragment"])
+
     def test_role_binding_replaces_the_shared_profiles_output_contract(self) -> None:
         cases = (
             (
@@ -349,7 +370,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             ),
             (
                 "general.generic",
-                RoleActivation(OrchestrationRole.VERIFIER, RoleMode.SCENARIO),
+                RoleActivation(OrchestrationRole.VERIFIER, RoleMode.SYSTEM),
                 "verification_submission.json",
                 ["SemanticVerificationSubmissionArtifact"],
             ),
@@ -832,8 +853,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         verifier_behavior = str(
             self._pack("software_engineering.v2_verifier").resolved_profile["behavior_fragment"]
         )
-        self.assertIn("missing production", verifier_behavior)
-        self.assertIn("platform probe plan", verifier_behavior)
+        self.assertIn("Manager-bound contract as adjudication truth", verifier_behavior)
+        self.assertIn("smallest sufficient checks", verifier_behavior)
+        self.assertNotIn("SystemVerificationWorkView", verifier_behavior)
+        self.assertNotIn("tests/<module_name>/verification", verifier_behavior)
         architecture_review_behavior = str(
             self._pack("software_engineering.v2_reviewer").resolved_profile[
                 "behavior_fragment"
@@ -972,7 +995,21 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         architecture_review = str(
             self._pack("software_engineering.v2_reviewer").resolved_profile["behavior_fragment"]
         )
-        verifier = str(self._pack("software_engineering.v2_verifier").resolved_profile["behavior_fragment"])
+        verifier_profile = dict(
+            self._pack("software_engineering.v2_verifier").resolved_profile
+        )
+        verifier = str(
+            _role_mode_profile_payload(
+                verifier_profile,
+                mode="module",
+            )["behavior_fragment"]
+        )
+        system_verifier = str(
+            _role_mode_profile_payload(
+                verifier_profile,
+                mode="system",
+            )["behavior_fragment"]
+        )
         generic = str(self._pack("general.generic").resolved_profile["behavior_fragment"])
 
         self.assertIn("single reference:task/task.yaml ledger is immutable and authoritative", architect)
@@ -1007,10 +1044,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("multiple active conventions", architect)
         self.assertNotIn("Shared build/bootstrap or composition-root glue", architect)
         coder = str(self._pack("software_engineering.v2_coder").resolved_profile["behavior_fragment"])
-        self.assertIn("contract declarations and adjacent contract comments come first", coder)
-        self.assertIn("outrank the read-only task.yaml ledger", coder)
-        self.assertIn("evidence, not authority", coder)
-        self.assertIn("Report the upstream defect instead of choosing a new contract", coder)
+        self.assertIn("Accepted Skeleton declarations, adjacent contract comments", coder)
+        self.assertIn("Do not search for task.yaml", coder)
+        self.assertIn("evidence and cannot silently redefine", coder)
+        self.assertIn("report the upstream contract/architecture defect", coder)
         self.assertIn("Audit breadth-first in one pass", architecture_review)
         self.assertIn("Read the same immutable task.yaml ledger", architecture_review)
         self.assertIn("exact Manager-recorded user communications", architecture_review)
@@ -1062,21 +1099,20 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         ))
         self.assertIn("manually simulating the data/state flow", architecture_review)
         self.assertIn("verify a local repair without reopening unchanged architecture", architecture_review)
-        self.assertIn("happens-before", verifier)
-        self.assertIn("exact public delivery surface", verifier)
-        self.assertIn("VerificationPolicy", verifier)
-        self.assertIn("requirements revision", verifier)
-        self.assertIn("exact Manager-assembled Candidate combination", verifier)
-        self.assertIn("object-address side tables", verifier)
-        self.assertIn("Do not turn implementation behavior into a new contract", verifier)
-        self.assertIn("The Candidate is the object under test, never a source of truth", verifier)
-        self.assertIn("cannot redefine or weaken the accepted contract", verifier)
-        self.assertIn("read the accepted module contract baseline", verifier)
-        self.assertIn("not to silently replace the accepted module contract", verifier)
-        self.assertIn("contract or architecture finding that is inherently source-level", verifier)
-        self.assertIn("must not dirty the immutable candidate", verifier)
+        self.assertIn("complete adjudication scope", verifier)
+        self.assertIn("dependency public contract as an axiom", verifier)
+        self.assertIn("Never inspect, audit, or infer", verifier)
+        self.assertIn("Do not search for task.yaml", verifier)
+        self.assertIn("reuse them across Candidate repairs", verifier)
+        self.assertIn("material complexity or resource growth", verifier)
+        self.assertIn("SystemVerificationWorkView", system_verifier)
+        self.assertIn("Do not split scenarios into workers", system_verifier)
+        self.assertIn("real system and delivery tests", system_verifier)
+        self.assertIn("PTY/tmux/expect-style harness", system_verifier)
+        self.assertIn("first public boundary", system_verifier)
+        self.assertIn("successful real-boundary evidence", system_verifier)
         self.assertIn("do not invent facts", generic)
-        self.assertIn("Perform the detailed local", str(self._pack("software_engineering.v2_coder").resolved_profile["behavior_fragment"]))
+        self.assertIn("Perform only the local implementation research", coder)
         self.assertIn(
             "review_guarded contract_paths, implementation_scopes, and developer test scope",
             coder,
@@ -1089,53 +1125,9 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("avoid speculative", coder)
         self.assertIn("call candidate_submit immediately", coder)
         self.assertIn("update_checklist", coder)
-        self.assertIn("never test evidence", coder)
-        self.assertIn("self-reported checklist", verifier)
-        self.assertIn("The checklist is a work ledger, not a verification report", verifier)
-        self.assertIn("durable Coder-authored regression corpus", verifier)
+        self.assertIn("never proves correctness", coder)
         self.assertIn("never acceptance evidence", verifier)
-        self.assertIn("Only your independent source audit and checks", verifier)
-        self.assertIn("bounded completion checklist", verifier)
-        self.assertIn("submit the semantic outcome immediately", verifier)
-        self.assertIn("Performance is part of semantic verification", verifier)
-        self.assertIn("never for stylistic micro-optimization", verifier)
-        self.assertIn("bounded optimization direction", verifier)
-        self.assertIn(
-            "treat every declared dependency contract as an axiom",
-            verifier,
-        )
-        self.assertIn(
-            "use the smallest contract-conforming test double needed",
-            verifier,
-        )
-        self.assertIn(
-            "first determine whether the current module mishandled",
-            verifier,
-        )
-        self.assertIn(
-            "actual accepted provider at its public contract boundary",
-            verifier,
-        )
-        self.assertIn(
-            "This dependency assumption does not apply to a Verification Scenario",
-            verifier,
-        )
-        self.assertIn(
-            "only rerun checks whose inputs that change invalidated",
-            verifier,
-        )
-        self.assertIn(
-            "do not recompile or reverify unchanged Candidate surfaces",
-            verifier,
-        )
-        self.assertIn(
-            "build and test-discovery rules before",
-            verifier,
-        )
-        self.assertIn("Manager prepares the LSP context", verifier)
-        self.assertIn("never invoke a language-server executable", verifier)
-        self.assertIn("Use the minimum sufficient build and test path", verifier)
-        self.assertIn("Missing optional build machinery is not a product defect", verifier)
+        self.assertIn("minimum sufficient focused build/test path", verifier)
         self.assertIn("missing state, ownership, dependency-injection, or cleanup seam", coder)
         self.assertNotIn("owned_impl", coder)
         self.assertNotIn("owned_test", coder)

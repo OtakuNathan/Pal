@@ -60,7 +60,6 @@ from pal.minion.v2.candidate_builder import (
     candidate_builder_tool_result,
 )
 from pal.minion.v2.swe_verification import (
-    SWE_VERIFICATION_TOOL_SPECS,
     _changed_paths,
     compile_swe_verification_tool_contract,
     infer_repair_target_modules,
@@ -242,53 +241,20 @@ class MinionV2VerificationTests(unittest.TestCase):
                 },
             }
         )
-        self.assertEqual(
-            contract["dependency_targets"],
-            ["drawing_backend", "event_input"],
-        )
+        self.assertNotIn("dependency_targets", contract)
         performance_guidance = contract["guidance_overrides"][
             ADD_FINDING_CAPABILITY
         ]["use_when"]
         self.assertIn("Material performance defects are valid findings", performance_guidance)
         self.assertIn("representative scaling probe", performance_guidance)
         self.assertIn("bounded contract-preserving optimization direction", performance_guidance)
-        dependency_guidance = contract["guidance_overrides"][
-            "op_minion_verification_request_dependency_repairs"
-        ]
-        self.assertIn(
-            "first excluding the current module's handling of contract-legal dependency behavior",
-            dependency_guidance["use_when"],
-        )
-        self.assertIn(
-            "actual accepted implementation at its public contract boundary",
-            dependency_guidance["use_when"],
-        )
-        self.assertIn(
-            "dependency source is absent from this module workspace",
-            dependency_guidance["do_not_use_when"],
-        )
-        self.assertIn(
-            "Verifier-authored test double failed",
-            dependency_guidance["do_not_use_when"],
-        )
-        dependency_tool_description = SWE_VERIFICATION_TOOL_SPECS[
-            "op_minion_verification_request_dependency_repairs"
-        ]["description"]
-        self.assertIn(
-            "actual accepted implementation",
-            dependency_tool_description,
-        )
-        self.assertIn(
-            "the disputed behavior is unspecified",
-            dependency_tool_description,
-        )
 
     def test_scenario_module_repair_derives_target_from_finding_location(self) -> None:
         workspace = self._bind_workspace(
             {
                 "artifact_dir": str(self.runtime_root / "scenario-artifacts"),
                 "artifact_stage_dir": str(self.runtime_root / "scenario-stage"),
-                "verification_scenario": True,
+                "system_verification": True,
                 "verification_scratch_only": True,
                 "review_tool_evidence_refs": [
                     {
@@ -301,7 +267,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 ],
             },
             role="verifier",
-            mode="scenario",
+            mode="system",
         )
         scratch = Path(str(workspace["review_scratch_dir"]))
         (scratch / "streaming_decoder_repro.py").write_text(
@@ -380,7 +346,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             {
                 "artifact_dir": str(self.runtime_root / "corpus-repair-artifacts"),
                 "artifact_stage_dir": str(self.runtime_root / "corpus-repair-stage"),
-                "verification_scenario": True,
+                "system_verification": True,
                 "verification_scratch_only": True,
                 "review_tool_evidence_refs": [
                     {
@@ -393,7 +359,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 ],
             },
             role="verifier",
-            mode="scenario",
+            mode="system",
         )
         scratch = Path(str(workspace["review_scratch_dir"]))
         (scratch / "corpus_repro.cpp").write_text(
@@ -598,26 +564,26 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
 
     def test_scenario_workspace_snapshot_never_treats_fingerprint_as_git_revision(self) -> None:
-        repo, scenario_commit_sha = self._git_repo("scenario-snapshot")
+        repo, system_commit_sha = self._git_repo("scenario-snapshot")
         scratch = self.runtime_root / "scenario-snapshot-scratch"
         scratch.mkdir()
         (scratch / "end_to_end_probe.txt").write_text("passed\n", encoding="utf-8")
-        scenario_fingerprint = "a" * 64
+        system_fingerprint = "a" * 64
 
         ref = SemanticOrchestrator(
             MinionV2WorkflowService(self.runtime_root)
         )._publish_verification_workspace(
             review_worktree=repo,
             review_scratch=scratch,
-            candidate_identity=scenario_fingerprint,
-            git_base_sha=scenario_commit_sha,
+            candidate_identity=system_fingerprint,
+            git_base_sha=system_commit_sha,
             execution_adapter="software_git.v2",
             include_candidate_patch=False,
         )
 
         snapshot = self.store.read_json(ref)
-        self.assertEqual(snapshot["candidate_identity"], scenario_fingerprint)
-        self.assertEqual(snapshot["git_base_sha"], scenario_commit_sha)
+        self.assertEqual(snapshot["candidate_identity"], system_fingerprint)
+        self.assertEqual(snapshot["git_base_sha"], system_commit_sha)
         self.assertEqual(
             snapshot["changed_paths"],
             ["review_scratch/end_to_end_probe.txt"],
@@ -908,7 +874,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             result = worker._complete_semantic_verifier(
                 effect={"effect_key": "verify-effect"},
                 node=node,
-                scenario_mode=False,
+                system_mode=False,
                 invocation_id="verifier-attempt",
                 lease_resource="node:router:review",
                 fencing_token=1,
@@ -920,7 +886,11 @@ class MinionV2VerificationTests(unittest.TestCase):
                 execution_adapter="software_git.v2",
                 work_view={"requirements": {}},
                 submission=submission,
-                terminal={},
+                terminal={
+                    "payload": {
+                        "role_assignment_id": "assignment-verifier",
+                    }
+                },
                 prompt_ref=prompt_ref,
                 terminal_ref=terminal_ref,
             )
@@ -1263,7 +1233,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             test_path.read_text(encoding="utf-8"),
         )
 
-    def test_verifier_receives_scoped_view_and_exact_task_ledgers(self) -> None:
+    def test_module_verifier_receives_scoped_view_without_task_ledger(self) -> None:
         requirements_ref = TaskLedgerService(self.runtime_root, self.store).publish(
             title="Router",
             task_spec={
@@ -1309,7 +1279,7 @@ class MinionV2VerificationTests(unittest.TestCase):
 
         self.assertEqual(references["module_work_view"], work_view_ref)
         self.assertEqual(references["candidate_diff"], candidate_view_ref)
-        self.assertEqual(references["task"], requirements_ref)
+        self.assertNotIn("task", references)
         self.assertEqual(
             self.store.read_json(references["coder_report"])["checklist"]["plan"],
             [
@@ -1318,11 +1288,6 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "status": "completed",
                 }
             ],
-        )
-        task_ledger = self.store.read_json(references["task"])
-        self.assertEqual(
-            task_ledger["original"]["objective"],
-            "Route matching must preserve the user's exact semantics.",
         )
 
     def test_module_verifier_receives_candidate_contract_and_repair_git_diffs(self) -> None:
@@ -2595,14 +2560,15 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertIn("do not record speculative micro-optimizations", performance_guidance)
         self.assertIn("bounded contract-preserving optimization direction", performance_guidance)
 
-        scenario = compile_verification_invocation_tool_contract(
+        system = compile_verification_invocation_tool_contract(
             work_view={
                 **work_view,
-                "verification_name": "rule_router_scenario",
+                "verification_name": "system_delivery",
+                "kind": "system_and_delivery",
             },
             verification_policy=policy,
         )
-        scratch_guidance = scenario["guidance_overrides"][
+        scratch_guidance = system["guidance_overrides"][
             "op_minion_verification_scratch_write"
         ]
         self.assertIn("returned scratch_path", scratch_guidance["use_when"])
@@ -2668,11 +2634,11 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("outside the bound node contract", result.llm_text)
 
-    def test_scenario_tool_contract_exposes_only_declared_usage_mode(self) -> None:
+    def test_system_tool_contract_exposes_delivery_usage_mode(self) -> None:
         dogfood = compile_verification_invocation_tool_contract(
             work_view={
                 "verification_name": "window_text_rendering",
-                "kind": "dogfood",
+                "kind": "system_and_delivery",
                 "requirements": [
                     {"section": "Rendering", "requirement": "Render a frame."}
                 ],
@@ -2691,7 +2657,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         platform = compile_verification_invocation_tool_contract(
             work_view={
                 "verification_name": "native_font_probe",
-                "kind": "consumer_probe",
+                "kind": "system_and_delivery",
                 "requirements": [
                     {"section": "Fonts", "requirement": "Measure native text."}
                 ],
@@ -2703,13 +2669,13 @@ class MinionV2VerificationTests(unittest.TestCase):
             verification_policy={},
         )
         platform_capabilities = set(platform["allowed_capabilities"])
-        self.assertIn(
+        self.assertNotIn(
             "op_minion_verification_run_consumer_probe", platform_capabilities
         )
         self.assertIn(
             "op_minion_verification_run_platform_probe", platform_capabilities
         )
-        self.assertNotIn(
+        self.assertIn(
             "op_minion_verification_run_dogfood", platform_capabilities
         )
 
@@ -3040,6 +3006,31 @@ class MinionV2VerificationTests(unittest.TestCase):
     def test_manager_resolves_fenced_attempt_to_logical_role_session(self) -> None:
         logical_session_id = "inv_logical_verifier"
         input_fingerprint = "logical-verifier-input"
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id="wf_verify",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_verify",
+                actor="test",
+                expected_version=0,
+            )
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="wf_verify",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node_drawing",
+                actor="test",
+                expected_version=0,
+                payload={
+                    "epoch_id": "epoch",
+                    "module_name": "drawing",
+                    "unit_contract_ref": {"sha256": "contract-drawing"},
+                },
+            )
+        )
         self.repository.ensure_role_session(
             session_id=logical_session_id,
             workflow_id="wf_verify",
@@ -3049,6 +3040,8 @@ class MinionV2VerificationTests(unittest.TestCase):
             mode="module",
             executor_profile_id="software_engineering.v2_verifier",
             family_binding_sha="binding",
+            scope_kind="module",
+            subject_key="drawing",
         )
         assignment = self.repository.create_role_assignment(
             RoleAssignmentRequest(
@@ -3793,7 +3786,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             plan={"affected_module": str(node.payload.get("module_name") or "router")},
             status=VerificationStatus.FAIL,
             defect_kind=DefectKind.MODULE,
-            scenario_mode=False,
+            system_mode=False,
         )
 
         self.assertEqual(dependency_node_id, "")
@@ -3802,7 +3795,7 @@ class MinionV2VerificationTests(unittest.TestCase):
     def test_scenario_repair_targets_do_not_replace_dependency_graph(self) -> None:
         node_id = "node_scenario_repair_route"
         dependency_ids = ("node_encoder", "node_streaming_decoder")
-        scenario_fingerprint = "scenario-repair-fingerprint"
+        system_fingerprint = "scenario-repair-fingerprint"
         contract = self.store.put_json(
             {"verification_name": "streaming_round_trip"},
             artifact_type="VerificationScenarioContractArtifact",
@@ -3817,7 +3810,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 {
                     "unit_contract_ref": contract.to_dict(),
                     "epoch_id": "epoch",
-                    "node_kind": "verification",
+                    "node_kind": "system_verification",
                     "dependency_node_ids": list(dependency_ids),
                 },
             ),
@@ -3831,13 +3824,13 @@ class MinionV2VerificationTests(unittest.TestCase):
             (
                 "VERIFICATION_PREPARED",
                 {
-                    "scenario_fingerprint": scenario_fingerprint,
-                    "scenario_candidate_union_ref": union.to_dict(),
-                    "scenario_commit_sha": "scenario-commit",
+                    "system_fingerprint": system_fingerprint,
+                    "system_candidate_union_ref": union.to_dict(),
+                    "system_commit_sha": "scenario-commit",
                     "verification_workspace_fingerprint": "scenario-tree",
                 },
             ),
-            ("START_SCENARIO_VERIFICATION", {"fencing_token": 1}),
+            ("START_SYSTEM_VERIFICATION", {"fencing_token": 1}),
             (
                 "SUBMIT_SEMANTIC_VERIFICATION",
                 {"pending_verification_ref": {"sha256": "pending-scenario"}},
@@ -3872,7 +3865,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
         assert node is not None
         verification_ref = self.store.put_json(
-            {"status": "FAIL", "scenario_fingerprint": scenario_fingerprint},
+            {"status": "FAIL", "system_fingerprint": system_fingerprint},
             artifact_type="VerificationArtifact",
         )
         repair_ref = self.store.put_json(
@@ -3889,7 +3882,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             finding_fingerprint_value="decoder-corpus-finding",
             defect_kind=DefectKind.MODULE,
             module_node_ids=("node_streaming_decoder",),
-            scenario_fingerprint=scenario_fingerprint,
+            system_fingerprint=system_fingerprint,
         ).snapshot
 
         self.assertEqual(failed.state, "STALE")
@@ -3908,7 +3901,7 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_scenario_verification_defect_reopens_verifier_not_coder(self) -> None:
         node_id = "node_scenario_verifier_repair"
-        scenario_fingerprint = "scenario-verifier-repair-fingerprint"
+        system_fingerprint = "scenario-verifier-repair-fingerprint"
         contract = self.store.put_json(
             {"verification_name": "streaming_round_trip"},
             artifact_type="VerificationScenarioContractArtifact",
@@ -3923,7 +3916,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 {
                     "unit_contract_ref": contract.to_dict(),
                     "epoch_id": "epoch",
-                    "node_kind": "verification",
+                    "node_kind": "system_verification",
                     "dependency_node_ids": ["node_streaming_decoder"],
                 },
             ),
@@ -3937,13 +3930,13 @@ class MinionV2VerificationTests(unittest.TestCase):
             (
                 "VERIFICATION_PREPARED",
                 {
-                    "scenario_fingerprint": scenario_fingerprint,
-                    "scenario_candidate_union_ref": union.to_dict(),
-                    "scenario_commit_sha": "scenario-commit",
+                    "system_fingerprint": system_fingerprint,
+                    "system_candidate_union_ref": union.to_dict(),
+                    "system_commit_sha": "scenario-commit",
                     "verification_workspace_fingerprint": "scenario-tree",
                 },
             ),
-            ("START_SCENARIO_VERIFICATION", {"fencing_token": 1}),
+            ("START_SYSTEM_VERIFICATION", {"fencing_token": 1}),
             (
                 "SUBMIT_SEMANTIC_VERIFICATION",
                 {"pending_verification_ref": {"sha256": "pending-verification"}},
@@ -3978,7 +3971,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
         assert node is not None
         verification_ref = self.store.put_json(
-            {"status": "FAIL", "scenario_fingerprint": scenario_fingerprint},
+            {"status": "FAIL", "system_fingerprint": system_fingerprint},
             artifact_type="VerificationArtifact",
         )
         repair_ref = self.store.put_json(
@@ -3995,7 +3988,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             finding_fingerprint_value="verifier-corpus-finding",
             defect_kind=DefectKind.VERIFICATION,
             module_node_ids=("node_streaming_decoder",),
-            scenario_fingerprint=scenario_fingerprint,
+            system_fingerprint=system_fingerprint,
         )
         failed = verdict.snapshot
 
@@ -4066,7 +4059,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 idempotency_key=f"create:{scenario_id}",
                 payload={
                     "epoch_id": "epoch",
-                    "node_kind": "verification",
+                    "node_kind": "system_verification",
                     "module_name": "streaming_round_trip",
                     "unit_contract_ref": contract.to_dict(),
                     "dependency_node_ids": [
@@ -4601,13 +4594,13 @@ class MinionV2VerificationTests(unittest.TestCase):
             "STALE",
         )
 
-    def test_dependency_defect_stales_only_verification_scenarios_in_its_actual_closure(self) -> None:
+    def test_dependency_defect_stales_only_system_verifications_in_its_actual_closure(self) -> None:
         verification_ref = self.store.put_json(
-            {"status": "PASS", "scenario_fingerprint": "scenario-a"},
+            {"status": "PASS", "system_fingerprint": "scenario-a"},
             artifact_type="VerificationArtifact",
         )
         other_verification_ref = self.store.put_json(
-            {"status": "PASS", "scenario_fingerprint": "scenario-b"},
+            {"status": "PASS", "system_fingerprint": "scenario-b"},
             artifact_type="VerificationArtifact",
         )
         repair_ref = self.store.put_json(
@@ -4628,13 +4621,13 @@ class MinionV2VerificationTests(unittest.TestCase):
         scenario_a = self._accepted_scenario(
             "node_scenario_a",
             dependency_node_ids=(module_a.aggregate_id,),
-            scenario_fingerprint="scenario-a",
+            system_fingerprint="scenario-a",
             verification_ref=verification_ref,
         )
         scenario_b = self._accepted_scenario(
             "node_scenario_b",
             dependency_node_ids=(module_b.aggregate_id,),
-            scenario_fingerprint="scenario-b",
+            system_fingerprint="scenario-b",
             verification_ref=other_verification_ref,
         )
 
@@ -4718,7 +4711,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         node_id: str,
         *,
         dependency_node_ids: tuple[str, ...],
-        scenario_fingerprint: str,
+        system_fingerprint: str,
         verification_ref,
     ) -> AggregateSnapshot:
         contract = self.store.put_json(
@@ -4734,7 +4727,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 {
                     "unit_contract_ref": contract.to_dict(),
                     "epoch_id": "epoch",
-                    "node_kind": "verification",
+                    "node_kind": "system_verification",
                     "dependency_node_ids": list(dependency_node_ids),
                 },
             ),
@@ -4748,13 +4741,13 @@ class MinionV2VerificationTests(unittest.TestCase):
             (
                 "VERIFICATION_PREPARED",
                 {
-                    "scenario_fingerprint": scenario_fingerprint,
-                    "scenario_candidate_union_ref": union.to_dict(),
-                    "scenario_commit_sha": f"commit-{node_id}",
+                    "system_fingerprint": system_fingerprint,
+                    "system_candidate_union_ref": union.to_dict(),
+                    "system_commit_sha": f"commit-{node_id}",
                     "verification_workspace_fingerprint": f"tree-{node_id}",
                 },
             ),
-            ("START_SCENARIO_VERIFICATION", {"fencing_token": 1}),
+            ("START_SYSTEM_VERIFICATION", {"fencing_token": 1}),
             (
                 "SUBMIT_SEMANTIC_VERIFICATION",
                 {"pending_verification_ref": {"sha256": f"pending-{node_id}"}},
@@ -4772,7 +4765,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "VERIFICATION_PASSED",
                 {
                     "verification_artifact_ref": verification_ref.to_dict(),
-                    "scenario_fingerprint": scenario_fingerprint,
+                    "system_fingerprint": system_fingerprint,
                 },
             ),
         ]
