@@ -54,21 +54,37 @@ INSERT INTO channel_endpoints (
   channel_kind,
   binding_key,
   enabled,
+  max_message_chars,
+  preferred_parse_mode,
+  segment_by_default,
+  preserve_code_blocks,
+  supports_typing,
+  supports_receipt_marker,
+  supports_message_edit,
   binding_metadata,
   send_policy_blob,
   created_at,
-  updated_at
+  updated_at,
+  detached_at
 ) VALUES (
   'websocket_bridge_main',
   'websocket_bridge',
   'lan:default',
   1,
+  NULL,
+  NULL,
+  0,
+  1,
+  0,
+  0,
+  0,
   -- json: transport configuration
-  '{"bind_host":"0.0.0.0","bind_port":8765,"peer_url":null,"reconnect_initial_delay_seconds":1.0,"reconnect_max_delay_seconds":30.0}',
+  '{"bind_host":"0.0.0.0","bind_port":8765,"peer_url":null,"reconnect_initial_delay_seconds":1.0,"reconnect_max_delay_seconds":30.0,"message_timeout_seconds":3000.0}',
   -- json: send policy overrides (empty = inherit socket channel semantics)
   '{}',
   strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-  strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+  strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+  NULL
 )
 ON CONFLICT(channel_kind, binding_key) DO UPDATE SET
   binding_metadata = excluded.binding_metadata,

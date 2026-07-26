@@ -907,6 +907,13 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertIn("reference:task: read-only semantic input", prompt)
             self.assertIn("path=/pal/references/task", prompt)
             self.assertIn('read_file_args={"file_path":"/pal/references/architecture_index/manifest.json"}', prompt)
+            self.assertLess(
+                prompt.index("## Execution Discipline — High Priority"),
+                prompt.index("## Immutable Inputs"),
+            )
+            self.assertIn("Efficiency means eliminating duplicate work, never skipping decisive evidence", prompt)
+            self.assertIn("Request independent reads, searches, or checks together in one response", prompt)
+            self.assertIn("If read_file reports that content is unchanged", prompt)
             self.assertIn("## Tool Efficiency", prompt)
             self.assertIn("investigate what the supplied path currently contains", prompt)
             self.assertIn("Do not assume the path is a file", prompt)
@@ -924,8 +931,21 @@ class MinionSandboxTests(unittest.TestCase):
                     }
                 )
             )
-            self.assertIn("Once the owned contract, edit path", implementation_prompt)
-            self.assertIn("Do not over-abstract", implementation_prompt)
+            self.assertIn("once the owned contract, edit path", implementation_prompt)
+            self.assertIn("call candidate_submit immediately", implementation_prompt)
+
+            no_reference_pack_value = pack.to_dict()
+            no_reference_pack_value["workspace"] = {
+                **dict(no_reference_pack_value.get("workspace") or {}),
+                "reference_paths": [],
+            }
+            no_reference_pack_value["metadata"] = {"minion_v2": {"role": "verifier"}}
+            no_reference_prompt = render_minion_task_prompt(
+                MinionInvocationPack.from_dict(no_reference_pack_value)
+            )
+            self.assertIn("## Execution Discipline — High Priority", no_reference_prompt)
+            self.assertIn("Verification: treat VerificationPolicy", no_reference_prompt)
+            self.assertNotIn("## Tool Efficiency", no_reference_prompt)
 
             result = subprocess.run(
                 argv,

@@ -1,0 +1,11 @@
+# Runtime-root channel provider manifest for the Pal-to-Pal LAN WebSocket bridge.
+# Discovered by ChannelEndpointProviderManager under
+# <runtime_root>/channel/providers/websocket_bridge/ . The provider source ships
+# in-repo under src/pal/channel/providers/websocket_bridge/ and is loaded via the
+# entrypoint below (build_channel_provider). See README.md for usage and non-goals.
+provider_id = "websocket_bridge"
+entrypoint = "runtime.py"
+version = "0.1.0"
+enabled = true
+
+reload_modules = ["runtime", "sidecar", "sidecar_main", "protocol"]

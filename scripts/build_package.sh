@@ -20,6 +20,11 @@ if [[ -z "${wheel_path:-}" || ! -f "$wheel_path" ]]; then
 fi
 
 required_wheel_paths=(
+  "pal/channel/providers/websocket_bridge/provider.toml"
+  "pal/channel/providers/websocket_bridge/runtime.py"
+  "pal/channel/providers/websocket_bridge/sidecar.py"
+  "pal/channel/providers/websocket_bridge/sidecar_main.py"
+  "pal/channel/providers/websocket_bridge/protocol.py"
   "pal/core/tool_surface.toml"
   "pal/lsp/server_templates/clangd.toml"
   "pal/lsp/server_templates/pyright.toml"
@@ -34,37 +39,54 @@ required_wheel_paths=(
   "pal/minion/family_templates/lifestyle.toml"
   "pal/minion/family_templates/software_engineering.toml"
   "pal/minion/profile_templates/generic.toml"
-  "pal/minion/profile_templates/general/requirements_analyst.toml"
-  "pal/minion/profile_templates/general/researcher.toml"
-  "pal/minion/profile_templates/general/contract_planner.toml"
-  "pal/minion/profile_templates/general/architecture_reviewer.toml"
+  "pal/minion/profile_templates/general/architect.toml"
   "pal/minion/profile_templates/general/verifier.toml"
-  "pal/minion/profile_templates/lifestyle/requirements_analyst.toml"
-  "pal/minion/profile_templates/lifestyle/researcher.toml"
-  "pal/minion/profile_templates/lifestyle/contract_planner.toml"
-  "pal/minion/profile_templates/lifestyle/architecture_reviewer.toml"
+  "pal/minion/profile_templates/lifestyle/architect.toml"
   "pal/minion/profile_templates/lifestyle/nutrition_checkin_producer.toml"
   "pal/minion/profile_templates/lifestyle/verifier.toml"
-  "pal/minion/profile_templates/software_engineering/v2_requirements_analyst.toml"
-  "pal/minion/profile_templates/software_engineering/v2_researcher.toml"
-  "pal/minion/profile_templates/software_engineering/v2_contract_planner.toml"
-  "pal/minion/profile_templates/software_engineering/v2_architecture_reviewer.toml"
+  "pal/minion/profile_templates/software_engineering/v2_architect.toml"
   "pal/minion/profile_templates/software_engineering/v2_coder.toml"
-  "pal/minion/profile_templates/software_engineering/v2_verifier.toml"
   "pal/minion/profile_templates/software_engineering/v2_reviewer.toml"
+  "pal/minion/profile_templates/software_engineering/v2_verifier.toml"
   "pal/minion/v2/adapters.py"
+  "pal/minion/v2/architecture.py"
   "pal/minion/v2/artifacts.py"
+  "pal/minion/v2/candidate_builder.py"
+  "pal/minion/v2/capabilities.py"
   "pal/minion/v2/catalog.py"
   "pal/minion/v2/contract_builder.py"
   "pal/minion/v2/contracts.py"
   "pal/minion/v2/execution.py"
+  "pal/minion/v2/execution_state.py"
+  "pal/minion/v2/integration.py"
   "pal/minion/v2/machines.py"
+  "pal/minion/v2/module_protocol.py"
   "pal/minion/v2/orchestration.py"
+  "pal/minion/v2/paths.py"
+  "pal/minion/v2/process_lifecycle.py"
+  "pal/minion/v2/projections.py"
+  "pal/minion/v2/recovery.py"
+  "pal/minion/v2/replan.py"
   "pal/minion/v2/repository.py"
+  "pal/minion/v2/review_findings.py"
+  "pal/minion/v2/role_gateway.py"
   "pal/minion/v2/service.py"
+  "pal/minion/v2/sessions.py"
+  "pal/minion/v2/skeleton.py"
+  "pal/minion/v2/skeleton_builder.py"
+  "pal/minion/v2/submission_drafts.py"
+  "pal/minion/v2/submission_preflight.py"
+  "pal/minion/v2/swe_verification.py"
+  "pal/minion/v2/task_ledger.py"
   "pal/minion/v2/verification.py"
+  "pal/minion/v2/verification_builder.py"
   "pal/minion/v2/worker_main.py"
-  "pal/minion/v2/workers.py"
+  "pal/minion/v2/semantic_orchestration/architecture.py"
+  "pal/minion/v2/semantic_orchestration/contracts.py"
+  "pal/minion/v2/semantic_orchestration/implementation.py"
+  "pal/minion/v2/semantic_orchestration/orchestrator.py"
+  "pal/minion/v2/semantic_orchestration/review.py"
+  "pal/minion/v2/semantic_orchestration/verification.py"
   "pal/plugins_builtin/minion/plugin.toml"
   "pal/plugins_builtin/minion/runtime.py"
 )
@@ -104,6 +126,43 @@ with zipfile.ZipFile(wheel_path) as wheel:
             fail(f"missing {path}")
         return wheel.read(path).decode("utf-8")
 
+    websocket_manifest = tomllib.loads(
+        read_text("pal/channel/providers/websocket_bridge/provider.toml")
+    )
+    if websocket_manifest.get("provider_id") != "websocket_bridge":
+        fail("WebSocket bridge manifest has the wrong provider_id")
+    if websocket_manifest.get("entrypoint") != "runtime.py":
+        fail("WebSocket bridge manifest must load runtime.py")
+    if websocket_manifest.get("enabled") is not True:
+        fail("WebSocket bridge manifest must be enabled")
+
+    channel_capabilities = read_text("pal/channel/capabilities.py")
+    for token in (
+        'aliases=("channel_send_message",)',
+        "ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput",
+        "ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput",
+    ):
+        if token not in channel_capabilities:
+            fail(f"channel active-send contract is missing {token}")
+
+    websocket_sidecar = read_text("pal/channel/providers/websocket_bridge/sidecar.py")
+    for token in (
+        'method == "send_message"',
+        'finish_reason == "tool_calls"',
+        "pending.current_text_parts.clear()",
+    ):
+        if token not in websocket_sidecar:
+            fail(f"WebSocket sidecar final-message filtering is missing {token}")
+
+    metadata_paths = sorted(name for name in names if name.endswith(".dist-info/METADATA"))
+    if len(metadata_paths) != 1:
+        fail(f"expected one wheel METADATA file, found {len(metadata_paths)}")
+    metadata = read_text(metadata_paths[0])
+    if not any(
+        line.startswith("Requires-Dist: websockets") for line in metadata.splitlines()
+    ):
+        fail("wheel metadata does not declare the websockets dependency")
+
     legacy_paths = {
         "pal/minion/plan_builder.py",
         "pal/minion/plan_store.py",
@@ -116,12 +175,25 @@ with zipfile.ZipFile(wheel_path) as wheel:
         "pal/minion/profile_templates/software_engineering/architect.toml",
         "pal/minion/profile_templates/software_engineering/coder.toml",
         "pal/minion/profile_templates/software_engineering/reviewer.toml",
+        "pal/minion/profile_templates/general/requirements_analyst.toml",
+        "pal/minion/profile_templates/general/researcher.toml",
+        "pal/minion/profile_templates/general/contract_planner.toml",
+        "pal/minion/profile_templates/general/architecture_reviewer.toml",
+        "pal/minion/profile_templates/lifestyle/requirements_analyst.toml",
+        "pal/minion/profile_templates/lifestyle/researcher.toml",
+        "pal/minion/profile_templates/lifestyle/contract_planner.toml",
+        "pal/minion/profile_templates/lifestyle/architecture_reviewer.toml",
+        "pal/minion/profile_templates/software_engineering/v2_requirements_analyst.toml",
+        "pal/minion/profile_templates/software_engineering/v2_researcher.toml",
+        "pal/minion/profile_templates/software_engineering/v2_contract_planner.toml",
+        "pal/minion/profile_templates/software_engineering/v2_architecture_reviewer.toml",
+        "pal/minion/v2/workers.py",
     }
     leaked = sorted(legacy_paths & names)
     if leaked:
         fail(f"legacy Minion workflow files were packaged: {leaked}")
 
-    required_roles = {"requirements", "research", "planner", "architecture_reviewer", "producer", "repair", "verifier"}
+    required_roles = {"architect", "reviewer", "implementation", "verifier"}
     for family_id in ("general", "lifestyle", "software_engineering"):
         path = f"pal/minion/family_templates/{family_id}.toml"
         payload = tomllib.loads(read_text(path))
@@ -129,18 +201,18 @@ with zipfile.ZipFile(wheel_path) as wheel:
             fail(f"{path} has the wrong family_id")
         if payload.get("workflow_template") != "contract_dag.v2":
             fail(f"{path} must use contract_dag.v2")
-        if not required_roles.issubset(set(dict(payload.get("roles") or {}))):
+        if set(dict(payload.get("role_bindings") or {})) != required_roles:
             fail(f"{path} does not bind the complete role set")
         if set(dict(payload.get("builders") or {}).values()) - {
-            "requirements.v2", "evidence_catalog.v2", "contract_sketch.v2", "verification.v2"
+            "contract_sketch.v2", "skeleton_git.v2", "verification.v2"
         }:
             fail(f"{path} references an unknown builder")
         if any(not str(value).endswith(".v2") for value in dict(payload.get("adapters") or {}).values()):
             fail(f"{path} references a non-V2 adapter")
 
     profile_paths = sorted(name for name in names if name.startswith("pal/minion/profile_templates/") and name.endswith(".toml"))
-    if len(profile_paths) != 19:
-        fail(f"expected 19 builtin role profiles, found {len(profile_paths)}")
+    if len(profile_paths) != 10:
+        fail(f"expected 10 builtin role profiles, found {len(profile_paths)}")
     for path in profile_paths:
         payload = tomllib.loads(read_text(path))
         if not str(payload.get("profile_id") or "").strip() or not str(payload.get("profile_group") or "").strip():
@@ -155,7 +227,14 @@ with zipfile.ZipFile(wheel_path) as wheel:
             fail(f"{path} must be a managed builtin profile")
 
     scoped_execution = read_text("pal/minion/scoped_execution.py")
-    for token in ("CONTRACT_BUILDER_TOOL_SPECS", "WORKSPACE_FILE_TOOL_SPECS", "op_path_delete", "op_git"):
+    for token in (
+        "CONTRACT_BUILDER_TOOL_SPECS",
+        "CANDIDATE_BUILDER_TOOL_SPECS",
+        "SKELETON_BUILDER_TOOL_SPECS",
+        "VERIFICATION_BUILDER_TOOL_SPECS",
+        "SWE_VERIFICATION_TOOL_SPECS",
+        "op_path_delete",
+    ):
         if token not in scoped_execution:
             fail(f"scoped execution is missing {token}")
     for forbidden in ("PLAN_BUILDER_CAPABILITIES", "op_minion_checkpoint_commit", "op_minion_review_checkpoint"):
@@ -172,7 +251,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if forbidden in shared_messages:
             fail(f"shared worker transport contains legacy symbol {forbidden}")
 
-print("Verified V2 families, role profiles, controlled builders, adapters, worker transport, and legacy cutover")
+print("Verified WebSocket channel packaging, V2 families, role profiles, controlled builders, adapters, worker transport, and legacy cutover")
 PY
 
 echo "Built $wheel_path"

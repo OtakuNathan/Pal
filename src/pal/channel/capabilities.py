@@ -9,16 +9,20 @@ from pal.execution.generated_tool_models import (
     ChannelCapabilitiesChannelIntrospectionProviderRescanInput,
     ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput,
     ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentOutput,
+    ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput,
+    ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput,
     ChannelCapabilitiesChannelIntrospectionProviderSetAuthMaterialInput,
 )
 from pal.execution.tool_semantics import INDIRECT_EXTERNAL_WRITE
 from pal.execution.channel_attachment import ChannelSendAttachmentTool
+from pal.execution.tool_facade import ToolGuidance
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pal.channel.models import ChannelEndpointModel
+from pal.channel.contracts import ChannelDeliveryError
 from pal.channel.provider_manager import (
     ChannelEndpointProviderManager,
     build_default_channel_provider_manager,
@@ -226,6 +230,102 @@ class ChannelIntrospectionProvider:
             dict(call.args),
             runtime=execution_runtime,
             turn_id=str(call.meta.get("turn_id") or "") or None,
+        )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="channel",
+        action_name="send_message",
+        description="Send an ordinary text message through one configured channel endpoint.",
+        aliases=("channel_send_message",),
+        InputModel=ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput,
+        OutputModel=ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput,
+        guidance=ToolGuidance(
+            purpose="Send an ordinary text message through a configured channel endpoint.",
+            use_when=(
+                "Use when you need to initiate a message on an attached, enabled endpoint; "
+                "obtain channel_id from channel_list."
+            ),
+            do_not_use_when=(
+                "Do not use for the normal reply to the current user turn, attachments, slash commands, "
+                "channel management, or provider-specific target addressing."
+            ),
+            failure_next_steps=(
+                "For not-found, detached, or disabled endpoints inspect channel_list and repair endpoint state. "
+                "For an uncertain delivery failure, reconcile with the recipient before retrying."
+            ),
+        ),
+        execution=INDIRECT_EXTERNAL_WRITE,
+        search_text=(
+            "channel send message active proactive ordinary text configured endpoint "
+            "telegram websocket peer"
+        ),
+        examples=(
+            {
+                "channel_id": "telegram-main",
+                "message": "The scheduled task has completed.",
+            },
+        ),
+    )
+    async def send_message(self, call: IntrospectionCall) -> IntrospectionResult:
+        channel_id = str(call.args.get("channel_id") or "").strip()
+        message = str(call.args.get("message") or "")
+        if not channel_id:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="channel_id is required",
+                structured={"reason": "channel_id_required"},
+                llm_text="channel_id is required; use channel_list to choose an endpoint.",
+            )
+        if not message.strip():
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="message is required",
+                structured={"channel_id": channel_id, "reason": "message_required"},
+                llm_text="message must contain ordinary non-blank text.",
+            )
+        if message.lstrip().startswith("/"):
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="slash commands are not ordinary channel messages",
+                structured={"channel_id": channel_id, "reason": "slash_command_not_allowed"},
+                llm_text="channel_send_message accepts ordinary text, not slash commands.",
+            )
+        try:
+            receipt = await self.runtime.send_message(channel_id, message)
+        except ChannelDeliveryError as exc:
+            reason = str(getattr(exc, "reason", "") or "delivery_failed")
+            if reason == "channel_not_found":
+                status = RuntimeStatus.NOT_FOUND
+            elif reason == "active_send_unsupported":
+                status = RuntimeStatus.UNSUPPORTED
+            elif reason in {"channel_detached", "channel_disabled"}:
+                status = RuntimeStatus.FORBIDDEN
+            else:
+                status = RuntimeStatus.ERROR
+            payload = {
+                "channel_id": channel_id,
+                "reason": reason,
+                "permanent": bool(exc.permanent),
+            }
+            return IntrospectionResult(
+                status=status,
+                text=str(exc),
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Channel message was not sent", payload),
+            )
+        payload = {
+            "channel_id": receipt.endpoint_id,
+            "message_id": receipt.message_id,
+            "status": receipt.status,
+            "response": receipt.response_text or None,
+        }
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="channel message accepted",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Channel message accepted", payload),
         )
 
     @capability_action(

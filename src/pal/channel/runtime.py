@@ -6,7 +6,17 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from pal.channel.contracts import ChannelAdapter, ChannelEnvelope, ChannelRuntimePort, QueuedAttachment, QueuedReply, QueuedStatus, QueuedStreamEvent
+from pal.channel.contracts import (
+    ChannelAdapter,
+    ChannelDeliveryError,
+    ChannelEnvelope,
+    ChannelMessageReceipt,
+    ChannelRuntimePort,
+    QueuedAttachment,
+    QueuedReply,
+    QueuedStatus,
+    QueuedStreamEvent,
+)
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
 from pal.core.mailbox import Mailbox
 from pal.foundation import AttachmentSpec, EventEnvelope
@@ -149,6 +159,28 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def list_endpoints(self) -> tuple[ChannelEndpointBase, ...]:
         return self.endpoint_registry.values()
+
+    async def send_message(self, endpoint_id: str, message: str) -> ChannelMessageReceipt:
+        endpoint = self.get_endpoint(endpoint_id)
+        if endpoint is None:
+            raise ChannelDeliveryError(
+                f"channel endpoint {endpoint_id!r} was not found",
+                permanent=True,
+                reason="channel_not_found",
+            )
+        if not endpoint.attached:
+            raise ChannelDeliveryError(
+                f"channel endpoint {endpoint_id!r} is detached",
+                permanent=True,
+                reason="channel_detached",
+            )
+        if not endpoint.enabled:
+            raise ChannelDeliveryError(
+                f"channel endpoint {endpoint_id!r} is disabled",
+                permanent=True,
+                reason="channel_disabled",
+            )
+        return await endpoint.send_message(message)
 
     def enable_endpoint(self, endpoint_id: str) -> bool:
         endpoint = self.get_endpoint(endpoint_id)

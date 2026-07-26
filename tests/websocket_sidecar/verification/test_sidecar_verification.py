@@ -269,7 +269,7 @@ class FrameLoopBoundaryTests(unittest.IsolatedAsyncioTestCase):
                         "/secret",                                       # slash -> rejected
                         "   /reset",                                     # ws-obfuscated slash -> rejected
                         json.dumps({"type": "slash_command", "text": "/x"}),  # forged -> rejected
-                        json.dumps({"type": "user_message", "text": "ok"}),  # plain JSON -> delivered
+                        json.dumps({"type": "user_message", "text": "ok"}),  # socket frame -> delivered
                         "   \n\t",                                       # blank -> dropped, no rejection
                         "hi again",                                      # ordinary -> delivered
                     ]
@@ -281,13 +281,13 @@ class FrameLoopBoundaryTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await channel.stop()
 
-            # ONLY the two ordinary frames (and the plain-JSON user content)
+            # ONLY the two ordinary frames (and the framed user message)
             # reached the socket channel, each as a user_message.
             user_messages = [
                 m for m in channel.received if str(m.get("type") or "") == "user_message"
             ]
             texts = [str(m.get("text") or "") for m in user_messages]
-            self.assertEqual(texts, ["hello world", json.dumps({"type": "user_message", "text": "ok"}), "hi again"])
+            self.assertEqual(texts, ["hello world", "ok", "hi again"])
             # No frame was ever classified as a slash_command by the delivery path.
             self.assertFalse(
                 any(str(m.get("type") or "") == "slash_command" for m in channel.received)

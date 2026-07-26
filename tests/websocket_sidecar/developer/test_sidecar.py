@@ -245,6 +245,135 @@ class StateMachineTests(unittest.TestCase):
 
 
 class DeliveryAndForwardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_active_send_returns_peer_response_without_redelivery(self) -> None:
+        runtime = sidecar._SidecarRuntime(
+            config=SidecarConfig(
+                Path("/tmp"),
+                Path("/tmp/pal.sock"),
+                message_timeout_seconds=1.0,
+            )
+        )
+        peer = _FakeWebSocket()
+        runtime.peers["peer-1"] = sidecar._PeerConnection(peer, "peer-1")
+
+        send_task = asyncio.create_task(runtime._send_message("hello peer"))
+        await asyncio.sleep(0)
+        request = json.loads(peer.sent[0])
+        self.assertEqual(request["type"], "user_message")
+        self.assertEqual(request["text"], "hello peer")
+
+        replies = _FakeWebSocket(
+            frames=[
+                json.dumps(
+                    {
+                        "type": "reasoning_delta",
+                        "request_id": request["request_id"],
+                        "reasoning_text": "private reasoning",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "text_delta",
+                        "request_id": request["request_id"],
+                        "text": "intermediate content",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "op_tool_call",
+                        "request_id": request["request_id"],
+                        "op_tool_call": {"name": "some_tool", "args": {}},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "llm_done",
+                        "request_id": request["request_id"],
+                        "finish_reason": "tool_calls",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "text_delta",
+                        "request_id": request["request_id"],
+                        "text": "hello ",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "text_delta",
+                        "request_id": request["request_id"],
+                        "text": "back",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "done",
+                        "request_id": request["request_id"],
+                        "finish_reason": "stop",
+                    }
+                ),
+            ]
+        )
+        await runtime._process_peer_frames(replies, "peer-1")
+
+        result = await send_task
+        self.assertEqual(result["message_id"], request["request_id"])
+        self.assertEqual(result["response"], "hello back")
+        self.assertNotIn("private reasoning", result["response"])
+        self.assertNotIn("intermediate content", result["response"])
+        self.assertEqual(runtime.deliveries, {})
+
+    async def test_active_send_requires_exactly_one_peer(self) -> None:
+        runtime = sidecar._SidecarRuntime(
+            config=SidecarConfig(Path("/tmp"), Path("/tmp/pal.sock"))
+        )
+        with self.assertRaisesRegex(RuntimeError, "not connected"):
+            await runtime._send_message("hello")
+        runtime.peers["a"] = sidecar._PeerConnection(_FakeWebSocket(), "a")
+        runtime.peers["b"] = sidecar._PeerConnection(_FakeWebSocket(), "b")
+        with self.assertRaisesRegex(RuntimeError, "multiple"):
+            await runtime._send_message("hello")
+
+    async def test_framed_user_message_preserves_request_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            runtime_root = Path(raw_root)
+            socket_path = runtime_root / "pal.sock"
+            channel = _FakeSocketChannel(
+                socket_path,
+                replies=[
+                    {"type": "text_delta", "text": "pong"},
+                    {"type": "done", "finish_reason": "stop"},
+                ],
+            )
+            await channel.start()
+            try:
+                runtime = sidecar._SidecarRuntime(
+                    config=SidecarConfig(runtime_root, socket_path)
+                )
+                peer = _FakeWebSocket(
+                    frames=[
+                        json.dumps(
+                            {
+                                "type": "user_message",
+                                "request_id": "remote-request",
+                                "text": "ping",
+                            }
+                        )
+                    ]
+                )
+                runtime.peers["peer-1"] = sidecar._PeerConnection(peer, "peer-1")
+                sidecar._RUNTIME = runtime
+                await runtime._process_peer_frames(peer, "peer-1")
+            finally:
+                sidecar._RUNTIME = None
+                await channel.stop()
+
+        self.assertEqual(channel.received[0]["request_id"], "remote-request")
+        forwarded = [json.loads(item) for item in peer.sent]
+        self.assertEqual([item["type"] for item in forwarded], ["text_delta", "done"])
+        self.assertTrue(all(item["request_id"] == "remote-request" for item in forwarded))
+
     async def test_deliver_inbound_round_trip_forwards_replies(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             runtime_root = Path(raw_root)

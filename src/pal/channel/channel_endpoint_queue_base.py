@@ -13,6 +13,7 @@ from uuid import uuid4
 from pal.channel.contracts import (
     ChannelDeliveryError,
     ChannelEnvelope,
+    ChannelMessageReceipt,
     EndpointConfig,
     QueuedAttachment,
     QueuedReply,
@@ -70,6 +71,31 @@ class ChannelEndpointQueueBase(ABC):
 
     def derive_default_reply_target(self) -> dict[str, Any]:
         return {}
+
+    async def send_message(self, message: str) -> ChannelMessageReceipt:
+        """Accept an active message for this configured endpoint.
+
+        Reply-oriented transports can reuse their normal outbox when the
+        endpoint binding provides an unambiguous default target. Transports
+        without such a binding must override this method or reject the
+        operation; callers never supply provider-specific target data.
+        """
+        target = self.derive_default_reply_target()
+        if not target:
+            raise ChannelDeliveryError(
+                f"channel endpoint {self.endpoint.endpoint_id!r} does not support active messages",
+                permanent=True,
+                reason="active_send_unsupported",
+            )
+        message_id = self.queue_reply(
+            message,
+            response_handle=self.build_response_handle(reply_target=target),
+        )
+        return ChannelMessageReceipt(
+            endpoint_id=self.endpoint.endpoint_id,
+            message_id=message_id,
+            status="accepted",
+        )
 
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
         if kind == "control_catalog":

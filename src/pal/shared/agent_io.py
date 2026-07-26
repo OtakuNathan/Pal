@@ -23,6 +23,14 @@ class ResponseHandle:
 
 
 @dataclass(frozen=True)
+class ChannelMessageReceipt:
+    endpoint_id: str
+    message_id: str
+    status: str = "accepted"
+    response_text: str = ""
+
+
+@dataclass(frozen=True)
 class ChannelEnvelope:
     event: EventEnvelope
     endpoint: EndpointConfig
@@ -67,9 +75,16 @@ class QueuedAttachment:
 
 
 class ChannelDeliveryError(RuntimeError):
-    def __init__(self, message: str, *, permanent: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        permanent: bool = False,
+        reason: str = "delivery_failed",
+    ) -> None:
         super().__init__(message)
         self.permanent = permanent
+        self.reason = reason
 
 
 class ChannelAdapter(Protocol):
@@ -102,6 +117,9 @@ class AgentOutputPort(Protocol):
 
 
 class ChannelRuntimePort(AgentOutputPort, Protocol):
+    async def send_message(self, endpoint_id: str, message: str) -> ChannelMessageReceipt:
+        ...
+
     def emit(self, envelope: ChannelEnvelope) -> None:
         ...
 

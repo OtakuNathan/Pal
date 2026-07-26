@@ -4174,8 +4174,13 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         self.assertIn("socket", result.structured["providers_after"])
         self.assertIn("telegram", result.structured["providers_after"])
+        self.assertIn("websocket_bridge", result.structured["providers_after"])
         self.assertEqual(result.structured["endpoint_type_map"]["socket"], "socket")
         self.assertEqual(result.structured["endpoint_type_map"]["telegram"], "telegram")
+        self.assertEqual(
+            result.structured["endpoint_type_map"]["websocket_bridge"],
+            "websocket_bridge",
+        )
 
     def test_compose_runtime_loads_runtime_root_channel_provider(self) -> None:
         self.wizard.seed_defaults(self.registration)

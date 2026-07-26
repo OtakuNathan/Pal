@@ -95,6 +95,7 @@ Examples:
 - `artifact_grep`
 - `artifact_transcribe`
 - `channel_send_attachment`
+- `channel_send_message`
 - `skill_assimilate`
 - `skill_commit`
 - `skill_update`

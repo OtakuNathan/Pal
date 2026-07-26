@@ -10,10 +10,14 @@ are private implementation owned by the Coder. The formal connection state
 machine is recorded in architecture.yaml ``websocket_sidecar``.
 
 Invariants (frozen by ``bridge_protocol``):
-* The socket channel is the sole local Pal Channel; no new message kind,
-  envelope, IPC contract, RPC, control protocol, or semantics is introduced.
+* The socket channel is the sole local Pal Channel; WebSocket peers reuse its
+  request/response message shapes without adding a new wire message kind,
+  envelope, control protocol, or semantics.
 * Inbound ordinary messages reach the runtime only through the existing socket
   channel user-message path (equivalent to ``pal client --message``).
+* Active requests are correlated by the existing request id. Reasoning,
+  tool-call progress, and intermediate model-round text are never surfaced as
+  extra messages.
 * Slash-prefixed and control-plane-like inbound frames are rejected at the
   boundary and never reach the slash-command dispatcher.
 * ``websockets`` is the only WebSocket wire implementation.
@@ -71,6 +75,18 @@ SIDECAR_NAME = "websocket_bridge"
 # ``slash_command``), so only ``slash_command`` is a control-plane type an
 # inbound frame could try to impersonate. Plain JSON user content is delivered.
 _CONTROL_PLANE_FORGED_TYPES = frozenset({"slash_command"})
+_SOCKET_RESPONSE_TYPES = frozenset(
+    {
+        "reasoning_delta",
+        "text_delta",
+        "op_tool_call",
+        "llm_done",
+        "llm_error",
+        "done",
+        "error",
+        "attachment",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -94,8 +110,24 @@ def _looks_control_plane(text: str) -> bool:
     return str(decoded.get("type") or "") in _CONTROL_PLANE_FORGED_TYPES
 
 
+def _decode_protocol_payload(text: str) -> dict[str, Any] | None:
+    candidate = text.strip()
+    if not candidate.startswith("{"):
+        return None
+    try:
+        decoded = json.loads(candidate)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    payload_type = str(decoded.get("type") or "")
+    if payload_type not in {"user_message", "slash_command", *_SOCKET_RESPONSE_TYPES}:
+        return None
+    return decoded
+
+
 def classify_inbound(text: str) -> InboundClassification:
-    """Classify one envelope-less inbound WebSocket text frame.
+    """Classify one ordinary inbound WebSocket message text.
 
     The hard invariant is the slash prefix: any frame whose first non-whitespace
     character is ``SLASH_PREFIX`` is rejected (this also defeats whitespace
@@ -270,6 +302,14 @@ class _PeerConnection:
 
 
 @dataclass
+class _PendingRequest:
+    peer_id: str
+    future: asyncio.Future[dict[str, Any]]
+    current_text_parts: list[str] = field(default_factory=list)
+    error_text: str = ""
+
+
+@dataclass
 class _SidecarRuntime:
     """Mutable transport state for one sidecar process (single active instance)."""
 
@@ -280,6 +320,7 @@ class _SidecarRuntime:
     rejection_count: int = 0
     peers: dict[str, _PeerConnection] = field(default_factory=dict)
     deliveries: dict[str, str] = field(default_factory=dict)  # request_id -> peer_id
+    pending_requests: dict[str, _PendingRequest] = field(default_factory=dict)
     manager_server: Any = None
     manager_endpoint_info: dict[str, Any] = field(default_factory=dict)
     shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -306,19 +347,69 @@ class _SidecarRuntime:
         await handle_sidecar_client(reader, writer, self._dispatch)
 
     async def _dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
-        return await dispatch_sidecar_request(request, self._call_method, logger=logger)
+        return await dispatch_sidecar_request(
+            request,
+            self._call_method,
+            error_kind=lambda exc: "timeout" if isinstance(exc, TimeoutError) else "sidecar",
+            logger=logger,
+        )
 
     async def _call_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if method in {"health", "status"}:
             return self._health_payload()
+        if method == "send_message":
+            return await self._send_message(str(params.get("message") or ""))
         if method == "shutdown":
             await self._begin_shutdown()
             return {"ok": True}
         raise ValueError(f"unknown websocket sidecar method: {method}")
 
+    async def _send_message(self, message: str) -> dict[str, Any]:
+        classification = classify_inbound(message)
+        if not classification.deliverable:
+            reason = classification.reason or "blank_message_rejected"
+            raise ValueError(reason)
+        active_peers = [peer for peer in self.peers.values() if not peer.closed]
+        if not active_peers:
+            raise RuntimeError("websocket peer is not connected")
+        if len(active_peers) != 1:
+            raise RuntimeError("websocket endpoint has multiple connected peers")
+        peer = active_peers[0]
+        request_id = str(uuid4())
+        pending = _PendingRequest(
+            peer_id=peer.peer_id,
+            future=asyncio.get_running_loop().create_future(),
+        )
+        self.pending_requests[request_id] = pending
+        frame = {
+            "type": "user_message",
+            "request_id": request_id,
+            "text": message,
+        }
+        try:
+            await peer.send(json.dumps(frame, ensure_ascii=False, separators=(",", ":")))
+            result = await asyncio.wait_for(
+                asyncio.shield(pending.future),
+                timeout=max(float(self.config.message_timeout_seconds), 0.001),
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"peer response timed out after {self.config.message_timeout_seconds:.3g}s"
+            ) from exc
+        finally:
+            self.pending_requests.pop(request_id, None)
+            if not pending.future.done():
+                pending.future.cancel()
+        return {
+            "message_id": request_id,
+            "response": str(result.get("response") or ""),
+            "finish_reason": str(result.get("finish_reason") or ""),
+        }
+
     async def _begin_shutdown(self) -> None:
         self._safe_advance(ConnectionStateEvent.SHUTDOWN_REQUESTED)
         self.shutdown_event.set()
+        self._fail_pending_requests("websocket bridge is shutting down")
         # Unblock any active peer frame loops so a connected transport shuts down
         # promptly rather than waiting for the next inbound frame.
         for peer in list(self.peers.values()):
@@ -361,6 +452,53 @@ class _SidecarRuntime:
         preview = text.strip()[:80]
         self.last_error = f"{reason}: {preview}" if preview else reason
         logger.warning("websocket bridge rejected inbound frame (%s): %r", reason, preview)
+
+    def _route_response(self, payload: dict[str, Any]) -> bool:
+        request_id = str(payload.get("request_id") or "")
+        pending = self.pending_requests.get(request_id)
+        if pending is None:
+            return False
+        payload_type = str(payload.get("type") or "")
+        if payload_type == "text_delta":
+            text = str(payload.get("text") or "")
+            if text:
+                pending.current_text_parts.append(text)
+        elif payload_type in {"llm_error", "error"}:
+            pending.error_text = str(
+                payload.get("error_text") or payload.get("text") or "remote Pal failed"
+            )
+        terminal = payload_type in {"done", "error"}
+        if payload_type == "llm_done":
+            finish_reason = str(payload.get("finish_reason") or "")
+            if finish_reason == "tool_calls":
+                # Text emitted before a tool call belongs to an intermediate
+                # model round. It is transport progress, not the peer's final
+                # reply, so do not surface it as another message.
+                pending.current_text_parts.clear()
+                return True
+            terminal = bool(finish_reason and finish_reason != "tool_calls")
+        if not terminal or pending.future.done():
+            return True
+        if pending.error_text:
+            pending.future.set_exception(RuntimeError(pending.error_text))
+        else:
+            pending.future.set_result(
+                {
+                    "response": "".join(pending.current_text_parts),
+                    "finish_reason": str(payload.get("finish_reason") or "stop"),
+                }
+            )
+        return True
+
+    def _fail_pending_for_peer(self, peer_id: str, reason: str) -> None:
+        for pending in list(self.pending_requests.values()):
+            if pending.peer_id == peer_id and not pending.future.done():
+                pending.future.set_exception(ConnectionError(reason))
+
+    def _fail_pending_requests(self, reason: str) -> None:
+        for pending in list(self.pending_requests.values()):
+            if not pending.future.done():
+                pending.future.set_exception(ConnectionError(reason))
 
     # ---- lifecycle ----
     async def run(self) -> None:
@@ -433,6 +571,7 @@ class _SidecarRuntime:
                 self.last_error = f"peer disconnected: {exc.__class__.__name__}: {exc}"
             finally:
                 peer.closed = True
+                self._fail_pending_for_peer(peer.peer_id, "websocket peer disconnected")
                 async with self._lock:
                     self.peers.pop(peer.peer_id, None)
                 self.listener_bound = False
@@ -478,20 +617,43 @@ class _SidecarRuntime:
             logger.debug("websocket bridge peer %s disconnected: %s", peer_id, exc)
         finally:
             peer.closed = True
+            self._fail_pending_for_peer(peer.peer_id, "websocket peer disconnected")
             async with self._lock:
                 self.peers.pop(peer_id, None)
 
     async def _process_peer_frames(self, websocket: Any, peer_id: str) -> None:
         async for raw in websocket:
             text = raw if isinstance(raw, str) else bytes(raw).decode("utf-8", "replace")
-            classification = classify_inbound(text)
+            protocol_payload = _decode_protocol_payload(text)
+            inbound_text = text
+            request_id: str | None = None
+            if protocol_payload is not None:
+                payload_type = str(protocol_payload.get("type") or "")
+                if payload_type == "user_message":
+                    inbound_text = str(protocol_payload.get("text") or "")
+                    request_id = str(protocol_payload.get("request_id") or "") or None
+                elif payload_type == "slash_command":
+                    self._report_rejection(REJECTION_REASON_SLASH, text)
+                    continue
+                elif payload_type in _SOCKET_RESPONSE_TYPES:
+                    if not self._route_response(protocol_payload):
+                        self.last_error = (
+                            "orphan websocket response: "
+                            f"{payload_type}:{str(protocol_payload.get('request_id') or '')}"
+                        )
+                    continue
+            classification = classify_inbound(inbound_text)
             if not classification.deliverable:
                 if classification.reason is not None:
-                    self._report_rejection(classification.reason, text)
+                    self._report_rejection(classification.reason, inbound_text)
                 continue
             token = _current_peer.set(peer_id)
             try:
-                await deliver_inbound(text, config=self.config)
+                await deliver_inbound(
+                    inbound_text,
+                    config=self.config,
+                    request_id=request_id,
+                )
             except Exception as exc:  # transient delivery failure: report, keep bridging
                 self.last_error = f"delivery failed: {exc.__class__.__name__}: {exc}"
                 logger.exception("websocket bridge delivery failed")
@@ -507,6 +669,8 @@ class _SidecarRuntime:
                 await peer.websocket.close()
         self.peers.clear()
         self.deliveries.clear()
+        self._fail_pending_requests("websocket bridge stopped")
+        self.pending_requests.clear()
         self.listener_bound = False
         if self.manager_server is not None:
             self.manager_server.close()
@@ -535,6 +699,7 @@ class SidecarConfig:
     peer_url: str | None = None
     reconnect_initial_delay_seconds: float = 1.0
     reconnect_max_delay_seconds: float = 30.0
+    message_timeout_seconds: float = 3000.0
     binding_metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -567,7 +732,12 @@ async def serve(config: SidecarConfig) -> None:
             _RUNTIME = None
 
 
-async def deliver_inbound(text: str, *, config: SidecarConfig) -> None:
+async def deliver_inbound(
+    text: str,
+    *,
+    config: SidecarConfig,
+    request_id: str | None = None,
+) -> None:
     """Deliver one ordinary inbound message into the existing socket channel
     user-message path (SocketSession send to pal.sock). Slash-prefixed or
     control-plane-like text MUST be rejected before this path is reached.
@@ -584,23 +754,23 @@ async def deliver_inbound(text: str, *, config: SidecarConfig) -> None:
     runtime = _RUNTIME
     peer_id = _current_peer.get()
     session: SocketSession | None = None
-    request_id = ""
+    active_request_id = ""
     try:
         reader, writer = await asyncio.open_unix_connection(str(config.socket_channel_path))
         session = SocketSession(
             reader,
             writer,
             read_message=read_socket_message,
-            request_id_factory=lambda: str(uuid4()),
+            request_id_factory=lambda: request_id or str(uuid4()),
         )
-        request_id = await session.send(text)
+        active_request_id = await session.send(text)
         if runtime is not None and peer_id is not None:
-            runtime._register_delivery(request_id, peer_id)
-        async for payload in session.stream_response(request_id):
+            runtime._register_delivery(active_request_id, peer_id)
+        async for payload in session.stream_response(active_request_id):
             await forward_reply(payload, config=config)
     finally:
-        if runtime is not None and request_id:
-            runtime._unregister_delivery(request_id)
+        if runtime is not None and active_request_id:
+            runtime._unregister_delivery(active_request_id)
         if session is not None:
             await session.aclose()
 

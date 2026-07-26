@@ -1,6 +1,7 @@
 from pal.channel.contracts import (
     ChannelAdapter,
     ChannelEnvelope,
+    ChannelMessageReceipt,
     ChannelNormalizer,
     ChannelRuntimePort,
     EndpointConfig,
@@ -48,6 +49,7 @@ __all__ = [
     "ChannelEndpointRepository",
     "ChannelProviderBuildContext",
     "ChannelEnvelope",
+    "ChannelMessageReceipt",
     "ChannelEventSource",
     "ChannelIntrospectionProvider",
     "ChannelNormalizer",

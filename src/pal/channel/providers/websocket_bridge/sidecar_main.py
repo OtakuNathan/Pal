@@ -56,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum reconnect backoff delay in seconds",
     )
     parser.add_argument(
+        "--message-timeout-seconds",
+        type=float,
+        default=3000.0,
+        help="maximum time to wait for a peer Pal response",
+    )
+    parser.add_argument(
         "--binding-metadata",
         default=None,
         help="optional JSON object of provider binding metadata",
@@ -87,6 +93,7 @@ def build_config(args: argparse.Namespace) -> SidecarConfig:
         peer_url=args.peer_url,
         reconnect_initial_delay_seconds=args.reconnect_initial_delay_seconds,
         reconnect_max_delay_seconds=args.reconnect_max_delay_seconds,
+        message_timeout_seconds=args.message_timeout_seconds,
         binding_metadata=_parse_binding_metadata(args.binding_metadata),
     )
 

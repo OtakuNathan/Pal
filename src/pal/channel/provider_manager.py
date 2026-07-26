@@ -21,6 +21,7 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 
 RUNTIME_CHANNEL_PROVIDER_DIR = "channel/providers"
 CHANNEL_PROVIDER_MANIFEST_FILENAME = "provider.toml"
+PACKAGED_CHANNEL_PROVIDER_DIR = Path(__file__).resolve().parent / "providers"
 
 
 @dataclass(frozen=True)
@@ -610,7 +611,22 @@ def build_default_channel_provider_manager(
 
 
 def _runtime_provider_dirs(runtime_root: Path) -> tuple[Path, ...]:
-    return (runtime_root / RUNTIME_CHANNEL_PROVIDER_DIR,)
+    # Packaged providers make a wheel self-contained. Runtime-root providers are
+    # scanned afterwards so an explicitly installed provider can override the
+    # packaged implementation with the same provider id.
+    candidates = (
+        PACKAGED_CHANNEL_PROVIDER_DIR,
+        runtime_root / RUNTIME_CHANNEL_PROVIDER_DIR,
+    )
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return tuple(unique)
 
 
 def _iter_runtime_provider_manifest_paths(providers_dir: Path) -> tuple[Path, ...]:

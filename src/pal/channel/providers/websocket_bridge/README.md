@@ -45,22 +45,29 @@ sidecar convention, mirroring the LSP manager). It:
   `PAL_WEBSOCKET_BRIDGE_CONFIG` environment variable (the child reconstructs the
   config and runs the declared `serve` entrypoint),
 * probes `health` and `shutdown` over the manager socket,
+* accepts the endpoint-private `send_message` RPC used by
+  `channel_send_message(channel_id, message)`,
 * force-terminates the process group if a clean shutdown does not return in time.
 
 The sidecar process **exclusively owns** its WebSocket connections and its socket
 channel client sessions. The provider owns neither.
 
-## No message ingress
+## Message path
 
-The bridge endpoint performs **no** message ingress and adds **no** channel
-semantics:
+The provider endpoint performs **no direct** message ingress and adds no new
+wire-level channel semantics:
 
 * `normalize_raw` returns an empty dict for every inbound payload.
 * `send_reply` is a no-op — replies flow back over the existing socket channel.
+* `send_message(message)` asks the sidecar to send an existing socket-protocol
+  `user_message` frame to its single configured peer and waits for the matching
+  final response.
 
 Inbound WebSocket messages are delivered by the sidecar into the existing socket
-channel user-message path. No new message kind, envelope schema, IPC contract,
-RPC, control protocol, or message semantics is introduced.
+channel user-message path. WebSocket response frames are correlated by the
+existing `request_id`; reasoning, tool progress, and text from intermediate
+tool-call rounds are filtered rather than redelivered as messages. The manager
+RPC is private sidecar IPC and does not add a WebSocket wire protocol.
 
 ## Health
 
@@ -94,7 +101,8 @@ Binding metadata on the row carries the transport configuration, e.g.:
   "bind_port": 8765,
   "peer_url": "ws://peer-host:8765",
   "reconnect_initial_delay_seconds": 1.0,
-  "reconnect_max_delay_seconds": 30.0
+  "reconnect_max_delay_seconds": 30.0,
+  "message_timeout_seconds": 3000.0
 }
 ```
 
@@ -129,8 +137,8 @@ The following architectural non-goals also apply:
   socket channel — it does not introduce message kinds, envelopes, or semantics.
 * **No message ingress in the provider.** All ingress is owned by the sidecar and
   delivered through the socket channel.
-* **No parallel reply path.** Replies always flow over the existing socket
-  channel.
+* **No parallel reply semantics.** Replies retain the existing socket response
+  shapes and request ids; the sidecar only correlates them for the active sender.
 * **No schema mutation without approval.** Production `channel_endpoints` row or
   schema changes are prepared as a patch (`docs/`) and applied only with explicit
   user approval.

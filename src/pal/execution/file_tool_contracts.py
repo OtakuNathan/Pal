@@ -14,7 +14,9 @@ FILE_READ_DESCRIPTION = (
     "Use offset and limit for large files. Read the complete file before editing, "
     "overwriting, or deleting it so stale changes can be detected. Re-reading an "
     "unchanged line range already present in the current context returns a compact "
-    "unchanged marker instead of duplicating its content."
+    "unchanged marker instead of duplicating its content. When that marker is returned, "
+    "refer to the earlier read result and do not call read_file again unless the file "
+    "has changed or a previously uncovered line range is needed."
 )
 
 FILE_EDIT_DESCRIPTION = (

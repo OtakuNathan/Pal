@@ -757,6 +757,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             "Do not use when: Do not use it for broad repository archaeology.",
             provider["description"],
         )
+        self.assertIn(
+            "refer to the earlier read result and do not call read_file again",
+            provider["description"],
+        )
 
     def test_reference_normalization_preserves_semantic_reference_name(self) -> None:
         bound = self.root / "bound-input.json"

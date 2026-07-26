@@ -4,6 +4,7 @@ Owns:
 - endpoint runtime instances and their parent management layer
 - inbound mailbox and outbound outbox runtime
 - normalize, reply routing, and response handles
+- active text delivery resolved by configured endpoint id
 - adapter registry for legacy/transport compatibility
 - provider manager for plugin-contributed channel providers
 - delivery diagnostics for queued replies
@@ -18,6 +19,7 @@ Does not own:
 Exposes:
 - `EndpointConfig`
 - `ResponseHandle`
+- `ChannelMessageReceipt`
 - `ChannelEnvelope`
 - `ChannelEndpointBase`
 - `ChannelEndpointQueueBase`
@@ -39,6 +41,14 @@ Interaction rule:
   - `send_reply(...)`
   - `inspect_health(...)`
   - `inspect_auth_state(...)`
+- active delivery is a separate contract from replying to a turn:
+  - LLM-facing: `channel_send_message(channel_id, message)`
+  - runtime: resolve one attached, enabled endpoint by `channel_id`
+  - endpoint: `send_message(message)` using only its persisted binding
+  - provider-specific recipients are never accepted from the LLM
+  - the default endpoint implementation reuses the reply outbox only when
+    `derive_default_reply_target()` yields one unambiguous bound recipient
+  - reply-only endpoints (including the local socket endpoint) reject active send
 - concrete endpoints may override the channel-neutral interaction hooks:
   - `apply_control_catalog(...)`
   - `apply_interaction_status(...)`
@@ -76,5 +86,6 @@ Interaction rule:
 - channel providers are registered through `ChannelEndpointProviderManager`, so
   built-in and community plugins can contribute new endpoint type providers
   without changing the channel core
-- no channel operation surface is exposed to `Pal/LLM`
+- only channel-neutral operations are exposed to `Pal/LLM`; provider-specific
+  target addressing stays private to the endpoint
 - secrets/tokens are write-only; introspection never returns them

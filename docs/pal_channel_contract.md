@@ -243,6 +243,7 @@ def build_channel_provider(context):
 - `iter_inbound() -> AsyncIterator[ChannelEnvelope]`
 - `normalize(raw) -> ChannelEnvelope`
 - `respond(handle, text: str)`
+- `send_message(text: str) -> ChannelMessageReceipt`
 - `set_status(handle, kind: str)`
 
 如果某个实现更喜欢把最后两步收进 handle 自身，也可以等价理解成：
@@ -255,6 +256,22 @@ def build_channel_provider(context):
 - 输入统一成 envelope
 - 输出统一成 respond/status
 - 具体平台差异留在 channel provider / endpoint 内部
+
+### Active Message Contract
+
+主动发消息与当前 turn 的 reply 是两个契约：
+
+- LLM 只调用 `channel_send_message(channel_id, message)`
+- `channel_id` 是 `channel_list` 返回的已配置 endpoint id
+- `ChannelRuntime` 负责解析 endpoint，并机械检查 attached/enabled 状态
+- endpoint 内部只接收 `send_message(message)`，收件人由 endpoint 的持久化 binding 决定
+- Telegram chat id、WebSocket peer URL 等 provider-specific target 不得出现在 LLM 输入中
+- 没有唯一默认收件人的 endpoint 必须返回 `active_send_unsupported`
+- `send_reply(ResponseHandle, text)` 仍只用于回复已有 ingress turn，不能与主动发送混为一谈
+
+主动发送是 non-idempotent external write。失败且无法确认实际发送结果时不得自动重试，
+应先与接收端 reconcile。返回的 receipt 表达 endpoint 已接受或已完成本次发送；它不伪造
+底层平台不存在的 delivery guarantee。
 
 ## Interaction Contract
 

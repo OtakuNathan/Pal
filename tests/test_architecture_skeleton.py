@@ -912,9 +912,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         capability = result.structured
         self.assertEqual(capability["alias"], "run_shell")
         self.assertIn("shell", result.llm_text)
-        self.assertIn("tree -a -L 3 --filelimit 200 --noreport", capability["description"])
-        self.assertIn("Pal runtime, module, capability, minion", capability["description"])
-        self.assertIn("use search_tools/read_tool/call_tool", capability["description"])
+        self.assertIn("bounded directory listings", capability["description"])
+        self.assertIn(
+            "Pal runtime, module, capability, or Minion state",
+            capability["description"],
+        )
+        self.assertIn("search for repository text search", capability["description"])
         self.assertIn("cmd", capability["input_schema"]["properties"])
         cmd_description = capability["input_schema"]["properties"]["cmd"]["description"]
         self.assertIn("search for text search", cmd_description)
@@ -1045,8 +1048,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("echo", exposed_names)
             exec_tool = next(item for item in request.tools if item["function"]["name"] == "run_shell")
             self.assertIn("cmd", exec_tool["function"]["input_schema"]["properties"])
-            self.assertIn("Pal runtime, module, capability, minion", exec_tool["function"]["description"])
-            self.assertIn("use search_tools/read_tool/call_tool", exec_tool["function"]["description"])
+            self.assertIn(
+                "Pal runtime, module, capability, or Minion state",
+                exec_tool["function"]["description"],
+            )
+            self.assertIn(
+                "search for repository text search",
+                exec_tool["function"]["description"],
+            )
             self.assertNotIn("op_", exec_tool["function"]["description"])
             memory_update = next(item for item in request.tools if item["function"]["name"] == "update_memory")
             self.assertIn("mem_ref", memory_update["function"]["input_schema"]["properties"])
@@ -1763,6 +1772,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         published = core.publish_module_capabilities("channel")
 
         self.assertIn("channel_list", published)
+        self.assertIn("channel_send_message", published)
         self.assertIn("channel_enable", published)
         self.assertIn("channel_disable", published)
         self.assertIn("channel_attach", published)
@@ -2082,7 +2092,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(read.ok)
         self.assertEqual(read.structured["alias"], "run_shell")
         self.assertNotIn("[truncated]", read.structured["description"])
-        self.assertIn("checkpoint commit capability instead", read.structured["description"])
+        self.assertIn("git for Git operations", read.structured["description"])
         self.assertNotIn("op_exec_shell", read.llm_text)
         self.assertFalse(compat.ok)
         self.assertEqual(compat.status, "unknown_tool")

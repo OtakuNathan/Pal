@@ -228,6 +228,24 @@ ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentOutput = _strict_mo
     },
 )
 
+ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput = _strict_model(
+    'ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput',
+    {
+        'channel_id': (str, Field(..., min_length=1, description='Configured endpoint id from channel_list.')),
+        'message': (str, Field(..., min_length=1, description='Ordinary text message to send through that endpoint.')),
+    },
+)
+
+ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput = _strict_model(
+    'ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput',
+    {
+        'channel_id': (str, Field(...)),
+        'message_id': (str, Field(...)),
+        'status': (Literal['accepted', 'completed'], Field(...)),
+        'response': (str | None, Field(None, description='Remote response text when the transport waits for one.')),
+    },
+)
+
 ChannelCapabilitiesChannelIntrospectionProviderEnableInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderEnableInput',
     {

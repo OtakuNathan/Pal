@@ -50,6 +50,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "pal.core" = ["tool_surface.toml"]
+"pal.channel.providers.websocket_bridge" = ["provider.toml", "README.md"]
 "pal.lsp" = ["server_templates/*.toml"]
 "pal.mcp" = ["templates/*.toml"]
 "pal.minion" = ["family_templates/*.toml", "profile_templates/*.toml", "profile_templates/**/*.toml"]
