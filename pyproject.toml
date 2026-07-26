@@ -23,6 +23,7 @@ dependencies = [
     "rich>=13,<15",
     "sqlite-vec>=0.1.6,<1",
     "telegramify-markdown>=0.4,<1",
+    "websockets>=13,<15",
 ]
 
 [project.optional-dependencies]
