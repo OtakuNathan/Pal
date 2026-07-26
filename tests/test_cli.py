@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from pal.main import _build_parser
 
@@ -20,6 +21,28 @@ class PalV2CliParserTests(unittest.TestCase):
         for command in ("tool-call", "cap-call"):
             with self.subTest(command=command), self.assertRaises(SystemExit):
                 parser.parse_args([command])
+
+    def test_tty_subcommand_parses_with_runtime_root(self) -> None:
+        args = _build_parser().parse_args(
+            ["tty", "--runtime-root", "/tmp/pal-runtime"]
+        )
+
+        self.assertEqual(args.command, "tty")
+        self.assertEqual(args.runtime_root, Path("/tmp/pal-runtime"))
+
+    def test_client_subcommand_still_parses(self) -> None:
+        args = _build_parser().parse_args(
+            [
+                "client",
+                "--runtime-root",
+                "/tmp/pal-runtime",
+                "--message",
+                "hello",
+            ]
+        )
+
+        self.assertEqual(args.command, "client")
+        self.assertEqual(args.message, "hello")
 
 
 if __name__ == "__main__":

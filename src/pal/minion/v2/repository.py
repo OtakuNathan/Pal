@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, TypeVar
 from uuid import uuid4
 
 from pal.foundation import utc_now
@@ -54,6 +54,7 @@ _QUEUED_STATES = {
 _HUMAN_WAIT_STATES = {"HUMAN_REVIEW"}
 _TERMINAL_WORKFLOW_STATES = {"COMPLETED", "REJECTED", "CANCELLED"}
 _TASK_FTS_INDEX_VERSION = "jieba-v1"
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -1590,6 +1591,103 @@ class MinionV2Repository:
             ).fetchone()
         return _decode_role_session(row) if row is not None else None
 
+    def read_role_execution_state(self, session_id: str) -> dict[str, Any]:
+        """Read Manager-owned logical execution state for one role session."""
+
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT status, execution_state_json
+                FROM minion_v2_role_sessions
+                WHERE session_id = ?
+                """,
+                (str(session_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown role session: {session_id}")
+        state = _decode_role_execution_state(str(row["execution_state_json"] or "{}"))
+        if str(row["status"]) in {
+            RoleSessionState.COMPLETED.value,
+            RoleSessionState.CANCELLED.value,
+        }:
+            state["retired"] = True
+        return state
+
+    def mutate_role_execution_state(
+        self,
+        session_id: str,
+        mutator: Callable[[dict[str, Any]], tuple[dict[str, Any], _T]],
+    ) -> _T:
+        """Atomically mutate logical execution state under the role-session row."""
+
+        self.ensure_schema()
+        with self._transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT status, execution_state_json
+                FROM minion_v2_role_sessions
+                WHERE session_id = ?
+                """,
+                (str(session_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown role session: {session_id}")
+            state = _decode_role_execution_state(
+                str(row["execution_state_json"] or "{}")
+            )
+            if str(row["status"]) in {
+                RoleSessionState.COMPLETED.value,
+                RoleSessionState.CANCELLED.value,
+            }:
+                state["retired"] = True
+            next_state, result = mutator(state)
+            connection.execute(
+                """
+                UPDATE minion_v2_role_sessions
+                SET execution_state_json = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (_json(dict(next_state)), utc_now(), str(session_id)),
+            )
+            return result
+
+    def begin_role_execution_input(
+        self,
+        session_id: str,
+        *,
+        input_id: str,
+        retention_user_turns: int = 5,
+    ) -> dict[str, Any]:
+        """Advance the semantic user-turn clock exactly once per input ID."""
+
+        normalized_input = str(input_id or "").strip()
+        if not normalized_input:
+            raise ValueError("logical execution input_id is required")
+
+        def mutate(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+            if bool(state.get("retired")):
+                raise RuntimeError("logical execution session is retired")
+            input_ids = dict(state.get("input_ids") or {})
+            current = max(0, int(state.get("current_user_turn") or 0))
+            if normalized_input not in input_ids:
+                current += 1
+                input_ids[normalized_input] = current
+            state.update(
+                {
+                    "current_user_turn": current,
+                    "input_ids": input_ids,
+                    "retention_user_turns": max(
+                        1, int(retention_user_turns or 5)
+                    ),
+                }
+            )
+            return state, _role_execution_context(
+                str(session_id), normalized_input, state
+            )
+
+        return self.mutate_role_execution_state(str(session_id), mutate)
+
     def complete_workflow_role_sessions(
         self,
         workflow_id: str,
@@ -1689,6 +1787,24 @@ class MinionV2Repository:
                 if str(existing["request_hash"]) != request.request_hash:
                     raise ValueError("role assignment key was reused with different inputs")
                 return _decode_role_assignment(existing)
+            open_assignment = connection.execute(
+                """
+                SELECT assignment_id
+                FROM minion_v2_role_assignments
+                WHERE session_id = ?
+                  AND state IN (
+                      'queued', 'claimed', 'running', 'retry_queued',
+                      'result_recorded'
+                  )
+                LIMIT 1
+                """,
+                (request.session_id,),
+            ).fetchone()
+            if open_assignment is not None:
+                raise ValueError(
+                    "role session already has an open assignment: "
+                    + str(open_assignment["assignment_id"])
+                )
             connection.execute(
                 """
                 INSERT INTO minion_v2_role_assignments(
@@ -2837,15 +2953,31 @@ class MinionV2Repository:
             "REJECTED",
             "CANCELLED",
         }
+        role = str(session["role"] or "")
         scope_kind = str(session["scope_kind"] or "")
         subject_key = str(session["subject_key"] or "")
-        if scope_kind in {"module", "system_delivery"}:
+        if scope_kind == "module":
+            if cancelled and self._module_absent_from_latest_epoch_locked(
+                connection,
+                workflow_id=workflow_id,
+                module_name=subject_key,
+            ):
+                return
+            if not workflow_terminal:
+                raise ValueError(
+                    "module role session lives for its Module identity and "
+                    "cannot complete before that Module is deleted"
+                )
+            return
+        if scope_kind == "system_delivery":
             if not workflow_terminal:
                 raise ValueError(
                     f"{scope_kind} role session lives for the workflow and cannot complete early"
                 )
             return
         if scope_kind == "architecture_cycle":
+            if role == "reviewer":
+                return
             rows = connection.execute(
                 """
                 SELECT * FROM minion_v2_aggregate_snapshots
@@ -2882,6 +3014,45 @@ class MinionV2Repository:
                 "aggregate-bound role session cannot complete before its aggregate is terminal"
             )
 
+    def _module_absent_from_latest_epoch_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workflow_id: str,
+        module_name: str,
+    ) -> bool:
+        epoch_row = connection.execute(
+            """
+            SELECT * FROM minion_v2_aggregate_snapshots
+            WHERE workflow_id = ? AND aggregate_type = ?
+            ORDER BY created_at DESC, aggregate_id DESC
+            LIMIT 1
+            """,
+            (str(workflow_id), AggregateType.EXECUTION_EPOCH.value),
+        ).fetchone()
+        if epoch_row is None:
+            return False
+        epoch = _snapshot_from_row(epoch_row)
+        node_rows = connection.execute(
+            """
+            SELECT * FROM minion_v2_aggregate_snapshots
+            WHERE workflow_id = ? AND aggregate_type = ?
+            """,
+            (str(workflow_id), AggregateType.DAG_NODE_RUN.value),
+        ).fetchall()
+        for row in node_rows:
+            node = _snapshot_from_row(row)
+            if str(node.payload.get("epoch_id") or "") != epoch.aggregate_id:
+                continue
+            subject = str(
+                node.payload.get("module_name")
+                or node.payload.get("unit_id")
+                or ""
+            )
+            if subject == str(module_name):
+                return False
+        return True
+
     @staticmethod
     def _transition_role_session_locked(
         connection: sqlite3.Connection,
@@ -2901,6 +3072,27 @@ class MinionV2Repository:
             "UPDATE minion_v2_role_sessions SET status = ?, updated_at = ? WHERE session_id = ?",
             (target.value, str(now), str(session_id)),
         )
+        if target in {RoleSessionState.COMPLETED, RoleSessionState.CANCELLED}:
+            row = connection.execute(
+                """
+                SELECT execution_state_json
+                FROM minion_v2_role_sessions
+                WHERE session_id = ?
+                """,
+                (str(session_id),),
+            ).fetchone()
+            state = _decode_role_execution_state(
+                str(row["execution_state_json"] or "{}") if row is not None else "{}"
+            )
+            state["retired"] = True
+            connection.execute(
+                """
+                UPDATE minion_v2_role_sessions
+                SET execution_state_json = ?
+                WHERE session_id = ?
+                """,
+                (_json(state), str(session_id)),
+            )
         return target
 
     def record_worker_event(self, event: Mapping[str, Any]) -> None:
@@ -3609,7 +3801,56 @@ def _decode_role_session(row: sqlite3.Row) -> dict[str, Any]:
     value["continuation_ref"] = json.loads(
         str(value.pop("continuation_ref_json", "{}") or "{}")
     )
+    value["execution_state"] = _decode_role_execution_state(
+        str(value.pop("execution_state_json", "{}") or "{}")
+    )
     return value
+
+
+def _decode_role_execution_state(value: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(str(value or "{}"))
+    except json.JSONDecodeError:
+        decoded = {}
+    state = dict(decoded) if isinstance(decoded, Mapping) else {}
+    return {
+        "schema_version": 1,
+        "current_user_turn": max(0, int(state.get("current_user_turn") or 0)),
+        "context_epoch": max(1, int(state.get("context_epoch") or 1)),
+        "input_ids": dict(state.get("input_ids") or {}),
+        "retention_user_turns": max(
+            1, int(state.get("retention_user_turns") or 5)
+        ),
+        "projection": [
+            str(item) for item in list(state.get("projection") or ())
+        ],
+        "handles": {
+            str(key): dict(item)
+            for key, item in dict(state.get("handles") or {}).items()
+            if str(key) and isinstance(item, Mapping)
+        },
+        "grants": {
+            str(key): dict(item)
+            for key, item in dict(state.get("grants") or {}).items()
+            if str(key) and isinstance(item, Mapping)
+        },
+        "retired": bool(state.get("retired")),
+    }
+
+
+def _role_execution_context(
+    session_id: str,
+    input_id: str,
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "logical_session_id": str(session_id),
+        "input_id": str(input_id),
+        "current_user_turn": max(
+            0, int(state.get("current_user_turn") or 0)
+        ),
+        "context_epoch": max(1, int(state.get("context_epoch") or 1)),
+    }
 
 
 def _decode_role_assignment(row: sqlite3.Row) -> dict[str, Any]:

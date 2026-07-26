@@ -36,6 +36,7 @@ from pal.minion.v2.swe_verification import (
 from pal.minion.v2.verification_builder import (
     STANDALONE_REVIEW_BUILDER_CAPABILITIES,
     VERIFICATION_BUILDER_CAPABILITIES,
+    VERIFICATION_EVIDENCE_CAPABILITIES,
     VERIFICATION_TOOL_CAPABILITIES,
     is_verification_builder_capability,
 )
@@ -393,6 +394,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "v2_verification_builder": VERIFICATION_BUILDER_CAPABILITIES,
     "v2_swe_verification": (
         *SWE_VERIFICATION_CAPABILITIES,
+        *VERIFICATION_EVIDENCE_CAPABILITIES,
         ADD_FINDING_CAPABILITY,
         "op_minion_verification_scratch_write",
     ),

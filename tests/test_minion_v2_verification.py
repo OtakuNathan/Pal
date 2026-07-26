@@ -41,7 +41,7 @@ from pal.minion.v2.verification import (
     VerificationCaseSpec,
     VerificationService,
     VerificationStatus,
-    candidate_reuse_fingerprint,
+    module_revision_fingerprint,
     finding_fingerprint,
     no_progress_detected,
     repair_bill_semantic_view,
@@ -853,6 +853,14 @@ class MinionV2VerificationTests(unittest.TestCase):
             "changed_test_paths": [],
             "tool_receipts": [
                 {"kind": "command", "ok": True, "structured": {}},
+            ],
+            "recorded_results": [
+                {
+                    "name": "current candidate delta",
+                    "case_kind": "diff_risk",
+                    "status": "PASS",
+                    "obligation_tags": ["candidate_delta_review"],
+                }
             ],
         }
 
@@ -1896,7 +1904,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         self.assertTrue(submitted.ok, submitted.text)
 
-    def test_repeated_historical_failure_can_submit_without_new_exploration(self) -> None:
+    def test_repeated_historical_failure_still_allows_current_diff_risk(self) -> None:
         stage_dir = self.runtime_root / "artifact-stage-failed-regression"
         work_view = self.runtime_root / "module-work-view-failed-regression.json"
         work_view.write_text(
@@ -1950,10 +1958,127 @@ class MinionV2VerificationTests(unittest.TestCase):
             },
         )
         self.assertTrue(finding.ok, finding.text)
+        diff_risk = self._verification_call(
+            workspace,
+            "op_minion_verification_run_diff_risk",
+            {
+                "name": "current candidate delta",
+                "command": "exit 0",
+                "path": "src/router.py",
+                "description": "Inspect the current Candidate after replaying the failed regression.",
+            },
+        )
+        self.assertTrue(diff_risk.ok, diff_risk.text)
         submitted = self._verification_call(
             workspace, "op_minion_verification_submit", produced=[]
         )
         self.assertTrue(submitted.ok, submitted.text)
+
+    def test_semantic_outcome_requires_assignment_local_diff_risk(self) -> None:
+        repo, _digest = self._git_repo("candidate-delta-gate")
+        policy_path = self.runtime_root / "candidate-delta-policy.json"
+        policy_path.write_text(
+            json.dumps(
+                {
+                    "require_candidate_delta_review": True,
+                    "allowed_obligations": [
+                        "candidate_delta_review",
+                        "compile",
+                        "focused_tests",
+                        "lsp",
+                        "warning_clean",
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "candidate-delta-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "candidate-delta-stage"),
+                "reference_paths": [
+                    {"name": "verification_policy", "path": str(policy_path)}
+                ],
+                "write_path_scopes": [
+                    {"kind": "directory", "path": "tests/router/verification"}
+                ],
+                "review_tool_evidence_refs": [
+                    {
+                        "kind": "command",
+                        "tool_name": "op_exec_shell",
+                        "ok": True,
+                        "args": {
+                            "cmd": "python -m pytest tests/router/verification"
+                        },
+                        "output_sha256": "ok",
+                    }
+                ],
+            },
+            role="verifier",
+        )
+
+        premature = swe_verification_tool_result(
+            CanonicalToolCall(
+                name="op_minion_verification_pass",
+                args={},
+                call_id="candidate-delta-premature",
+            ),
+            workspace,
+            [],
+        )
+        self.assertFalse(premature.ok)
+        self.assertIn("candidate_delta_review", premature.llm_text)
+
+        recorded = self._verification_call(
+            workspace,
+            "op_minion_verification_run_diff_risk",
+            {
+                "name": "current candidate delta",
+                "command": "exit 0",
+                "path": "src/router.py",
+                "description": "Exercise the current Candidate changed path.",
+            },
+        )
+        self.assertTrue(recorded.ok, recorded.text)
+        accepted = swe_verification_tool_result(
+            CanonicalToolCall(
+                name="op_minion_verification_pass",
+                args={},
+                call_id="candidate-delta-accepted",
+            ),
+            workspace,
+            [],
+        )
+        self.assertTrue(accepted.ok, accepted.llm_text)
+        next_workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "candidate-delta-next-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "candidate-delta-next-stage"),
+                "reference_paths": [
+                    {"name": "verification_policy", "path": str(policy_path)}
+                ],
+                "write_path_scopes": [
+                    {"kind": "directory", "path": "tests/router/verification"}
+                ],
+                "review_tool_evidence_refs": list(
+                    workspace["review_tool_evidence_refs"]
+                ),
+            },
+            role="verifier",
+        )
+        next_result = swe_verification_tool_result(
+            CanonicalToolCall(
+                name="op_minion_verification_pass",
+                args={},
+                call_id="next-candidate-with-old-evidence",
+            ),
+            next_workspace,
+            [],
+        )
+        self.assertFalse(next_result.ok)
+        self.assertIn("candidate_delta_review", next_result.llm_text)
 
     def test_candidate_defect_tool_binds_module_and_derives_report_fields(self) -> None:
         artifact_dir = self.runtime_root / "artifacts"
@@ -2542,6 +2667,17 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertNotIn(
             "op_minion_verification_run_historical_regression",
             first["allowed_capabilities"],
+        )
+        self.assertIn(
+            "op_minion_verification_run_diff_risk",
+            first["allowed_capabilities"],
+        )
+        self.assertTrue(
+            first["verification_policy"]["require_candidate_delta_review"]
+        )
+        self.assertIn(
+            "candidate_delta_review",
+            first["verification_policy"]["allowed_obligations"],
         )
         self.assertFalse(first["verification_policy"]["require_historical_regressions"])
         self.assertNotIn(
@@ -4282,7 +4418,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(no_progress_detected(history))
         self.assertFalse(no_progress_detected([{**item, "candidate_tree_hash": str(index)} for index, item in enumerate(history)]))
 
-    def test_candidate_reuse_fingerprint_requires_all_inputs(self) -> None:
+    def test_module_revision_fingerprint_requires_all_inputs(self) -> None:
         values = {
             "unit_contract_hash": "1",
             "relevant_requirements_hash": "2",
@@ -4295,11 +4431,11 @@ class MinionV2VerificationTests(unittest.TestCase):
             "integration_contract_subset_hash": "9",
             "environment_policy_hash": "10",
         }
-        first = candidate_reuse_fingerprint(**values)
-        second = candidate_reuse_fingerprint(**values)
+        first = module_revision_fingerprint(**values)
+        second = module_revision_fingerprint(**values)
         self.assertEqual(first, second)
         with self.assertRaises(ValueError):
-            candidate_reuse_fingerprint(**{**values, "relevant_evidence_hash": ""})
+            module_revision_fingerprint(**{**values, "relevant_evidence_hash": ""})
 
     def test_verdicts_drive_pass_fail_unknown_and_not_applicable_states(self) -> None:
         verification_ref = self.store.put_json({"status": "test"}, artifact_type="VerificationArtifact")

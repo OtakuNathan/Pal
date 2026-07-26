@@ -18,6 +18,8 @@ VARIABLES
     activeRole,
     candidateVersion,
     verifiedVersion,
+    regressionVersion,
+    deltaReviewVersion,
     corpusVersion,
     coderCorpusVersion,
     workflowState,
@@ -25,7 +27,8 @@ VARIABLES
 
 vars == <<
     nodeState, coderSession, verifierSession, activeRole,
-    candidateVersion, verifiedVersion, corpusVersion, coderCorpusVersion,
+    candidateVersion, verifiedVersion, regressionVersion, deltaReviewVersion,
+    corpusVersion, coderCorpusVersion,
     workflowState, managerUp
 >>
 
@@ -36,6 +39,8 @@ Init ==
     /\ activeRole = "None"
     /\ candidateVersion = 0
     /\ verifiedVersion = 0
+    /\ regressionVersion = 0
+    /\ deltaReviewVersion = 0
     /\ corpusVersion = 0
     /\ coderCorpusVersion = 0
     /\ workflowState = "Running"
@@ -51,6 +56,7 @@ StartCoder ==
     /\ coderSession' = "Active"
     /\ activeRole' = "Coder"
     /\ UNCHANGED <<verifierSession, candidateVersion, verifiedVersion,
+        regressionVersion, deltaReviewVersion,
         corpusVersion, coderCorpusVersion, workflowState, managerUp>>
 
 SubmitCandidate ==
@@ -63,7 +69,8 @@ SubmitCandidate ==
     /\ verifierSession' = "Suspended"
     /\ activeRole' = "None"
     /\ candidateVersion' = candidateVersion + 1
-    /\ UNCHANGED <<verifiedVersion, corpusVersion, coderCorpusVersion,
+    /\ UNCHANGED <<verifiedVersion, regressionVersion, deltaReviewVersion,
+        corpusVersion, coderCorpusVersion,
         workflowState, managerUp>>
 
 StartVerifier ==
@@ -75,25 +82,50 @@ StartVerifier ==
     /\ verifierSession' = "Active"
     /\ activeRole' = "Verifier"
     /\ UNCHANGED <<coderSession, candidateVersion, verifiedVersion,
+        regressionVersion, deltaReviewVersion,
         corpusVersion, coderCorpusVersion, workflowState, managerUp>>
+
+ReplayRegressions ==
+    /\ managerUp
+    /\ nodeState = "Verifying"
+    /\ activeRole = "Verifier"
+    /\ regressionVersion' = candidateVersion
+    /\ UNCHANGED <<nodeState, coderSession, verifierSession, activeRole,
+        candidateVersion, verifiedVersion, deltaReviewVersion, corpusVersion,
+        coderCorpusVersion, workflowState, managerUp>>
+
+ReviewCandidateDelta ==
+    /\ managerUp
+    /\ nodeState = "Verifying"
+    /\ activeRole = "Verifier"
+    /\ regressionVersion = candidateVersion
+    /\ deltaReviewVersion' = candidateVersion
+    /\ UNCHANGED <<nodeState, coderSession, verifierSession, activeRole,
+        candidateVersion, verifiedVersion, regressionVersion, corpusVersion,
+        coderCorpusVersion, workflowState, managerUp>>
 
 VerifierPass ==
     /\ managerUp
     /\ nodeState = "Verifying"
     /\ activeRole = "Verifier"
+    /\ regressionVersion = candidateVersion
+    /\ deltaReviewVersion = candidateVersion
     /\ corpusVersion < MaxCandidate
     /\ nodeState' = "Accepted"
     /\ verifierSession' = "Suspended"
     /\ activeRole' = "None"
     /\ verifiedVersion' = candidateVersion
     /\ corpusVersion' = corpusVersion + 1
-    /\ UNCHANGED <<coderSession, candidateVersion, coderCorpusVersion,
+    /\ UNCHANGED <<coderSession, candidateVersion, regressionVersion,
+        deltaReviewVersion, coderCorpusVersion,
         workflowState, managerUp>>
 
 VerifierFail ==
     /\ managerUp
     /\ nodeState = "Verifying"
     /\ activeRole = "Verifier"
+    /\ regressionVersion = candidateVersion
+    /\ deltaReviewVersion = candidateVersion
     /\ candidateVersion < MaxCandidate
     /\ corpusVersion < MaxCandidate
     /\ nodeState' = "RepairReady"
@@ -102,6 +134,7 @@ VerifierFail ==
     /\ corpusVersion' = corpusVersion + 1
     /\ coderCorpusVersion' = corpusVersion + 1
     /\ UNCHANGED <<coderSession, candidateVersion, verifiedVersion,
+        regressionVersion, deltaReviewVersion,
         workflowState, managerUp>>
 
 ReopenAccepted ==
@@ -112,7 +145,7 @@ ReopenAccepted ==
     /\ verifiedVersion' = candidateVersion - 1
     /\ UNCHANGED <<coderSession, verifierSession, activeRole,
         candidateVersion, corpusVersion, coderCorpusVersion,
-        workflowState, managerUp>>
+        regressionVersion, deltaReviewVersion, workflowState, managerUp>>
 
 EnterTriage ==
     /\ nodeState \notin {"Cancelled", "Triage"}
@@ -123,7 +156,8 @@ EnterTriage ==
     /\ verifierSession' =
         IF verifierSession = "Active" THEN "Suspended" ELSE verifierSession
     /\ activeRole' = "None"
-    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion,
+    /\ UNCHANGED <<candidateVersion, verifiedVersion, regressionVersion,
+        deltaReviewVersion, corpusVersion,
         coderCorpusVersion, workflowState, managerUp>>
 
 ResumeTriage ==
@@ -132,7 +166,8 @@ ResumeTriage ==
     /\ nodeState' = IF candidateVersion = 0 THEN "CoderReady" ELSE "VerifierReady"
     /\ UNCHANGED <<coderSession, verifierSession, activeRole,
         candidateVersion, verifiedVersion, corpusVersion,
-        coderCorpusVersion, workflowState, managerUp>>
+        regressionVersion, deltaReviewVersion, coderCorpusVersion,
+        workflowState, managerUp>>
 
 CompleteWorkflow ==
     /\ managerUp
@@ -143,6 +178,8 @@ CompleteWorkflow ==
     /\ verifierSession' = "Completed"
     /\ UNCHANGED <<nodeState, activeRole, candidateVersion,
         verifiedVersion, corpusVersion, coderCorpusVersion, managerUp>>
+        \* Regression and delta evidence remain auditable after closure.
+    /\ UNCHANGED <<regressionVersion, deltaReviewVersion>>
 
 CancelWorkflow ==
     /\ workflowState = "Running"
@@ -151,7 +188,8 @@ CancelWorkflow ==
     /\ coderSession' = "Cancelled"
     /\ verifierSession' = "Cancelled"
     /\ activeRole' = "None"
-    /\ UNCHANGED <<candidateVersion, verifiedVersion, corpusVersion,
+    /\ UNCHANGED <<candidateVersion, verifiedVersion, regressionVersion,
+        deltaReviewVersion, corpusVersion,
         coderCorpusVersion, managerUp>>
 
 CrashManager ==
@@ -163,6 +201,7 @@ CrashManager ==
         IF verifierSession = "Active" THEN "Suspended" ELSE verifierSession
     /\ activeRole' = "None"
     /\ UNCHANGED <<nodeState, candidateVersion, verifiedVersion,
+        regressionVersion, deltaReviewVersion,
         corpusVersion, coderCorpusVersion, workflowState>>
 
 RestartManager ==
@@ -170,12 +209,15 @@ RestartManager ==
     /\ managerUp' = TRUE
     /\ UNCHANGED <<nodeState, coderSession, verifierSession, activeRole,
         candidateVersion, verifiedVersion, corpusVersion,
-        coderCorpusVersion, workflowState>>
+        regressionVersion, deltaReviewVersion, coderCorpusVersion,
+        workflowState>>
 
 Next ==
     \/ StartCoder
     \/ SubmitCandidate
     \/ StartVerifier
+    \/ ReplayRegressions
+    \/ ReviewCandidateDelta
     \/ VerifierPass
     \/ VerifierFail
     \/ ReopenAccepted
@@ -195,6 +237,8 @@ TypeOK ==
     /\ activeRole \in ActiveRoles
     /\ candidateVersion \in 0..MaxCandidate
     /\ verifiedVersion \in 0..MaxCandidate
+    /\ regressionVersion \in 0..MaxCandidate
+    /\ deltaReviewVersion \in 0..MaxCandidate
     /\ corpusVersion \in 0..MaxCandidate
     /\ coderCorpusVersion \in 0..MaxCandidate
     /\ workflowState \in WorkflowStates
@@ -225,5 +269,13 @@ WorkflowTerminalClosesSessions ==
     workflowState \in {"Completed", "Cancelled"} =>
         /\ coderSession \in {"Completed", "Cancelled"}
         /\ verifierSession \in {"Completed", "Cancelled"}
+
+VerdictCoversCurrentCandidate ==
+    nodeState \in {"Accepted", "RepairReady"} =>
+        /\ regressionVersion = candidateVersion
+        /\ deltaReviewVersion = candidateVersion
+
+DeltaReviewFollowsRegression ==
+    deltaReviewVersion <= regressionVersion
 
 =============================================================================

@@ -105,7 +105,7 @@ class OverwriteTests(_TempFileMixin, unittest.TestCase):
         self.assertEqual(result.structured["error_code"], ERR_NOT_READ)
         self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
 
-    def test_sandboxed_continuation_retry_rebuilds_missing_read_snapshot(self) -> None:
+    def test_sandboxed_continuation_retry_does_not_bypass_missing_read_snapshot(self) -> None:
         path = self._path("retry.txt")
         path.write_text("old\n", encoding="utf-8")
 
@@ -119,8 +119,8 @@ class OverwriteTests(_TempFileMixin, unittest.TestCase):
         ):
             result = self.tool.invoke({"file_path": str(path), "content": "new\n"})
 
-        self.assertEqual(result.status, RuntimeStatus.OK)
-        self.assertEqual(path.read_text(encoding="utf-8"), "new\n")
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
 
     def test_overwrite_after_partial_read_fails(self) -> None:
         path = self._path("partial.txt")

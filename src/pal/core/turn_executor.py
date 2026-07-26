@@ -685,6 +685,28 @@ class TurnExecutor:
         )
         base_messages = list(prompt.messages)
         prepared_tool_protocol = self._prepare_tool_protocol_for_prompt(continuation.tool_protocol_messages)
+        reconcile = getattr(
+            self.context.execution_runtime,
+            "reconcile_tool_context",
+            None,
+        )
+        if callable(reconcile):
+            reconcile(
+                turn_id=continuation.turn_id,
+                original_messages=continuation.tool_protocol_messages,
+                projected_messages=prepared_tool_protocol,
+                delivery_records=dict(
+                    getattr(continuation, "tool_delivery_records", {}) or {}
+                ),
+            )
+        prepared_tool_protocol = [
+            {
+                key: value
+                for key, value in message.items()
+                if key != "_pal_visible_source_ranges"
+            }
+            for message in prepared_tool_protocol
+        ]
         prompt_messages = self._merge_tool_protocol_into_prompt(
             base_messages,
             prepared_tool_protocol,
@@ -841,7 +863,21 @@ class TurnExecutor:
         return self._config.fallback_max_output_tokens
 
     def _prepare_tool_protocol_for_prompt(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        result = [{**message} for message in messages]
+        result = [
+            {
+                **message,
+                **(
+                    {
+                        "_pal_visible_source_ranges": [
+                            [0, len(str(message.get("content") or ""))]
+                        ]
+                    }
+                    if str(message.get("role") or "").strip() == "tool"
+                    else {}
+                ),
+            }
+            for message in messages
+        ]
         total = self._tool_result_chars(result)
         if total <= self._config.max_tool_results_per_message_chars:
             return result
@@ -852,11 +888,17 @@ class TurnExecutor:
                 if str(result[idx].get("role") or "").strip() != "tool":
                     continue
                 old = str(result[idx].get("content", ""))
-                preview = self._render_tool_preview(old)
+                preview, visible_ranges = self._render_tool_preview_with_ranges(old)
                 if preview == old:
                     continue
                 total -= len(old) - len(preview)
-                result[idx] = {**result[idx], "content": preview}
+                result[idx] = {
+                    **result[idx],
+                    "content": preview,
+                    "_pal_visible_source_ranges": [
+                        list(item) for item in visible_ranges
+                    ],
+                }
         if total <= self._config.max_tool_results_per_message_chars:
             return result
         for batch_indices in self._tool_protocol_batches(result):
@@ -870,7 +912,14 @@ class TurnExecutor:
                 if minimal == old:
                     continue
                 total -= len(old) - len(minimal)
-                result[idx] = {**result[idx], "content": minimal}
+                result[idx] = {
+                    **result[idx],
+                    "content": minimal,
+                    # Minimal summaries are synthetic. Conservatively revoke
+                    # file delivery rather than guessing which repeated text
+                    # survived compaction.
+                    "_pal_visible_source_ranges": [],
+                }
         return result
 
     @staticmethod
@@ -918,13 +967,45 @@ class TurnExecutor:
         return str(content or "")
 
     def _render_tool_preview(self, content: str) -> str:
+        preview, _ = self._render_tool_preview_with_ranges(content)
+        return preview
+
+    def _render_tool_preview_with_ranges(
+        self,
+        content: str,
+    ) -> tuple[str, tuple[tuple[int, int], ...]]:
         if len(content) <= self._config.active_tool_result_preview:
-            return content
+            return content, ((0, len(content)),)
+        max_chars = self._config.active_tool_result_preview
         preview, preview_size = render_head_tail_preview_for_llm(
             content,
-            max_chars=self._config.active_tool_result_preview,
+            max_chars=max_chars,
         )
-        return f"{preview}\n\n[preview only: original={len(content)} chars, kept={preview_size} chars]"
+        rendered = (
+            f"{preview}\n\n"
+            f"[preview only: original={len(content)} chars, kept={preview_size} chars]"
+        )
+        if max_chars < 512:
+            kept = len(content[:max_chars].rstrip())
+            return rendered, ((0, kept),) if kept else ()
+        head_chars = max(256, max_chars // 2)
+        tail_chars = max_chars - head_chars
+        if tail_chars < 256:
+            tail_chars = 256
+            head_chars = max(1, max_chars - tail_chars)
+        head = content[:head_chars].rstrip()
+        raw_tail = content[-tail_chars:]
+        tail = raw_tail.lstrip()
+        tail_start = len(content) - tail_chars + (len(raw_tail) - len(tail))
+        ranges = tuple(
+            item
+            for item in (
+                (0, len(head)),
+                (tail_start, len(content)),
+            )
+            if item[1] > item[0]
+        )
+        return rendered, ranges
 
     @staticmethod
     def _render_minimal_tool_observation(content: str) -> str:
@@ -987,6 +1068,11 @@ class TurnExecutor:
             tool_results=continuation.pending_tool_results,
             render_tool_result_content=self._render_tool_result_content,
         )
+        for result in continuation.pending_tool_results:
+            call_id = str(getattr(result, "call_id", "") or "").strip()
+            delivery = getattr(result, "context_delivery", None)
+            if call_id and isinstance(delivery, dict):
+                continuation.tool_delivery_records[call_id] = dict(delivery)
         continuation.pending_assistant_tool_text = ""
         continuation.pending_assistant_provider_specific_fields = {}
         continuation.pending_tool_call_batch = []
@@ -995,6 +1081,8 @@ class TurnExecutor:
     def _render_tool_result_content(self, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> str:
         if self._is_memory_recall_tool_call(tool_call.name):
             return self._render_memory_recall_tool_observation(tool_call, result)
+        if isinstance(getattr(result, "context_delivery", None), dict):
+            return str(result.llm_text or "")
         if str(result.llm_text or "").strip():
             return str(result.llm_text).strip()
         return default_tool_result_text(result)

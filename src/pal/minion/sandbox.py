@@ -26,7 +26,6 @@ PAL_MINION_SANDBOX_SCRATCH_ROOT_ENV = "PAL_MINION_SANDBOX_SCRATCH_ROOT"
 PAL_MINION_SANDBOX_MIN_FREE_MB_ENV = "PAL_MINION_SANDBOX_MIN_FREE_MB"
 PAL_MINION_SANDBOX_MAX_RUN_DIRS_ENV = "PAL_MINION_SANDBOX_MAX_RUN_DIRS"
 PAL_MINION_RUNTIME_ROOT_ENV = "PAL_MINION_RUNTIME_ROOT"
-PAL_MINION_TOOL_RESULT_ROOT_ENV = "PAL_MINION_TOOL_RESULT_ROOT"
 DEFAULT_MINION_SANDBOX_MIN_FREE_MB = 256
 DEFAULT_MINION_SANDBOX_MAX_RUN_DIRS = 128
 MINION_SANDBOX_REFERENCE_ROOT = PurePosixPath("/pal/references")
@@ -289,11 +288,7 @@ def scrub_minion_sandbox_env(
         result[str(key)] = str(value)
     scratch = _coerce_scratch_dir(runtime_root, run_id, scratch_dir)
     result["PAL_MINION_SANDBOXED"] = "1"
-    agent_session = dict(dict(pack.metadata or {}).get("agent_session") or {}) if pack else {}
-    if str(agent_session.get("continuation_input_path") or "").strip():
-        result["PAL_MINION_CONTINUATION_RETRY"] = "1"
-    else:
-        result.pop("PAL_MINION_CONTINUATION_RETRY", None)
+    result.pop("PAL_MINION_CONTINUATION_RETRY", None)
     result["PAL_MINION_LLM_BROKER"] = "1"
     result["PAL_MINION_WEB_BROKER"] = "1"
     result["PAL_DATABASE_READ_ONLY"] = "1"
@@ -318,11 +313,6 @@ def scrub_minion_sandbox_env(
         result["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(python_paths))
     if pack is not None:
         _apply_workspace_execution_env(result, pack)
-        run_dir = str((pack.workspace or {}).get("run_dir") or "").strip()
-        if run_dir:
-            result[PAL_MINION_TOOL_RESULT_ROOT_ENV] = str(
-                Path(run_dir).expanduser() / "tool-results"
-            )
     return result
 
 

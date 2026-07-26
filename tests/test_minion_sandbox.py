@@ -47,7 +47,6 @@ from pal.minion.user_interaction import (
 from pal.minion.v2.worker_main import _read_control_message
 from pal.minion.sandbox import (
     PAL_MINION_RUNTIME_ROOT_ENV,
-    PAL_MINION_TOOL_RESULT_ROOT_ENV,
     build_sandboxed_runner_invocation,
     ensure_sandbox_files,
     minion_sandbox_scratch_dir,
@@ -377,7 +376,7 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(env["XDG_CACHE_HOME"], "/tmp/cache")
             self.assertEqual(env["PYTHONPYCACHEPREFIX"], "/tmp/pycache")
 
-    def test_sandbox_env_marks_only_continuation_attempts_as_retries(self) -> None:
+    def test_sandbox_env_never_exposes_a_file_mutation_retry_bypass(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_retry_env_") as tmp:
             retry_pack = MinionInvocationPack(
                 invocation_id="retry",
@@ -400,7 +399,7 @@ class MinionSandboxTests(unittest.TestCase):
                 pack=MinionInvocationPack(invocation_id="fresh"),
             )
 
-        self.assertEqual(retry_env["PAL_MINION_CONTINUATION_RETRY"], "1")
+        self.assertNotIn("PAL_MINION_CONTINUATION_RETRY", retry_env)
         self.assertNotIn("PAL_MINION_CONTINUATION_RETRY", fresh_env)
 
     def test_sandbox_env_applies_workspace_execution_env(self) -> None:
@@ -1030,10 +1029,7 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertIn(["--ro-bind", str(pal_db), str(pal_db)], triples)
             self.assertIn(["--ro-bind", str(role_socket), str(role_socket)], triples)
             self.assertIn(["--bind", str(run_dir), str(run_dir)], triples)
-            self.assertEqual(
-                _env[PAL_MINION_TOOL_RESULT_ROOT_ENV],
-                str(run_dir / "tool-results"),
-            )
+            self.assertNotIn("PAL_MINION_TOOL_RESULT_ROOT", _env)
             self.assertNotIn(str(root / "data" / "tool_results"), argv)
             self.assertNotIn(str(root / "artifacts"), argv)
             self.assertNotIn(

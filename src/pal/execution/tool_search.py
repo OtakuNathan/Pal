@@ -155,13 +155,40 @@ class ExecutionDiscoveryCapabilityMixin:
             page=int(call.args.get("page") or 1),
             page_size=call.args.get("page_size"),
             anchor="tail" if bool(call.args.get("tail")) else str(call.args.get("anchor") or "head"),
+            turn_id=str(call.meta.get("turn_id") or "") or None,
         )
         if page is None:
             return CapabilityResult(
                 status=RuntimeStatus.NOT_FOUND,
-                text="tool result page not found or expired",
-                structured={"reason": "result_handle_expired"},
-                llm_text="tool result page not found or expired",
+                text="tool result handle is unknown in this logical session",
+                structured={"reason": "unknown_result_handle"},
+                llm_text="tool result handle is unknown in this logical session",
+            )
+        if page.state != "ok":
+            reason = (
+                "expired_handle"
+                if page.state == "expired_handle"
+                else page.state
+            )
+            return CapabilityResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text=(
+                    "tool result handle expired"
+                    if reason == "expired_handle"
+                    else "tool result page is unavailable"
+                ),
+                structured={
+                    "reason": reason,
+                    "result_ref": page.result_ref,
+                    "origin": dict(page.origin),
+                    "expires_at_user_turn": page.expires_at_user_turn,
+                    "current_user_turn": page.current_user_turn,
+                },
+                llm_text=(
+                    "tool result handle expired"
+                    if reason == "expired_handle"
+                    else "tool result page is unavailable"
+                ),
             )
         payload = {
             "result_ref": page.result_ref,
@@ -183,6 +210,11 @@ class ExecutionDiscoveryCapabilityMixin:
             text=page.content,
             structured=payload,
             llm_text=page.content,
+            context_delivery=(
+                dict(page.context_delivery)
+                if page.context_delivery
+                else None
+            ),
         )
 
 

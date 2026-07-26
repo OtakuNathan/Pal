@@ -23,7 +23,9 @@ from pal.minion.v2.review_findings import (
     structured_findings,
 )
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.semantic_evidence import recorded_cases
 from pal.minion.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
+from pal.minion.v2.verification_builder import semantic_verification_draft_errors
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
@@ -260,6 +262,10 @@ def swe_verification_tool_result(
             reason=reason,
             workspace=workspace,
         )
+        errors.extend(
+            semantic_verification_draft_errors(snapshot.payload, workspace)
+        )
+        errors = list(dict.fromkeys(errors))
         if errors:
             raise ValueError("Submission has the following errors:\n- " + "\n- ".join(errors))
 
@@ -269,14 +275,16 @@ def swe_verification_tool_result(
             if isinstance(item, Mapping)
         ]
         changed_paths = _changed_paths(workspace)
+        cases = recorded_cases(snapshot.payload)
         submission = {
-            "schema_version": "3",
+            "schema_version": "4",
             "outcome": outcome,
             "findings": findings,
             **({"reason": reason} if reason else {}),
             **({"target_modules": target_modules} if target_modules else {}),
             "changed_test_paths": changed_paths,
             "tool_receipts": receipts,
+            "recorded_results": cases,
         }
         submission_ref: dict[str, Any]
         if store.uses_role_gateway:

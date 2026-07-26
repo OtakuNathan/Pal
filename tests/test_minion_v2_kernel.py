@@ -390,7 +390,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         )
         self.assertIsNotNone(restore_path)
         restored = json.loads(Path(restore_path).read_text(encoding="utf-8"))
-        self.assertEqual(restored["schema_version"], "2")
+        self.assertEqual(restored["schema_version"], "3")
         self.assertEqual(restored["scope_kind"], "architecture_revision")
         self.assertEqual(restored["subject_key"], "arch-session")
         self.assertFalse(checkpoint_path.exists())
@@ -473,6 +473,26 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 {"architecture_cycle_id": "cycle-1"},
             ),
         )
+        self.assertNotEqual(
+            architecture_reviewer_session_id(
+                "wf-1",
+                "arch-1",
+                {
+                    "architecture_cycle_id": "cycle-1",
+                    "architecture_submission_cycle": 1,
+                    "architecture_manifest_ref": {"sha256": "manifest-a"},
+                },
+            ),
+            architecture_reviewer_session_id(
+                "wf-1",
+                "arch-1",
+                {
+                    "architecture_cycle_id": "cycle-1",
+                    "architecture_submission_cycle": 2,
+                    "architecture_manifest_ref": {"sha256": "manifest-b"},
+                },
+            ),
+        )
         self.assertEqual(
             architect_session_id_for_revision(
                 "wf-1",
@@ -536,6 +556,14 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertNotEqual(
             coder_session_id("wf-1", "router"),
             coder_session_id("wf-1", "codec"),
+        )
+        self.assertEqual(
+            module_verifier_session_id("wf-1", "router"),
+            module_verifier_session_id("wf-1", "router"),
+        )
+        self.assertEqual(
+            system_verifier_session_id("wf-1"),
+            system_verifier_session_id("wf-1"),
         )
         self.assertEqual(
             module_verifier_session_id("wf-1", "router"),
@@ -929,7 +957,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         )
         self.assertEqual(refreshed.payload["blocker"]["kind"], "triage_quiesce_failed")
 
-    def test_reopened_terminal_node_gets_a_new_role_session_generation(self) -> None:
+    def test_reopened_terminal_node_preserves_its_module_role_session(self) -> None:
         accepted = AggregateSnapshot(
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-reopened",
@@ -1163,6 +1191,11 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 self.assertEqual(result.snapshot.state, expected_state)
                 for field in ("blocker", "active_worker_id", "fencing_token", "lease_resource_key"):
                     self.assertNotIn(field, result.snapshot.payload)
+                if aggregate_type == AggregateType.DAG_NODE_RUN:
+                    self.assertEqual(
+                        result.snapshot.payload.get("role_session_generation", 0),
+                        0,
+                    )
 
     def test_worker_completion_transitions_clear_active_lease_fields(self) -> None:
         node_cases = (
@@ -1461,7 +1494,43 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ),
         )
         self.assertEqual(reviewed.snapshot.state, ArchitectureRevisionState.REVIEW_QUEUED)
+        self.assertEqual(reviewed.snapshot.payload["architecture_submission_cycle"], 1)
         self.assertEqual(reviewed.effects[0].effect_type, "run_reviewer_role")
+
+    def test_system_verification_preparation_starts_a_new_verifier_cycle(self) -> None:
+        preparing = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="system-verification",
+            workflow_id="wf_test",
+            state=DagNodeRunState.VERIFY_PREPARING,
+            version=3,
+            payload={
+                "node_kind": "system_verification",
+                "system_verification_cycle": 4,
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        prepared = self.engine.transition(
+            preparing,
+            self.action(
+                "VERIFICATION_PREPARED",
+                AggregateType.DAG_NODE_RUN,
+                "system-verification",
+                payload={
+                    "system_fingerprint": "union-b",
+                    "system_candidate_union_ref": {"sha256": "union-ref"},
+                    "system_commit_sha": "commit-b",
+                    "verification_workspace_fingerprint": "workspace-b",
+                },
+                expected_version=3,
+            ),
+        )
+
+        self.assertEqual(prepared.snapshot.state, DagNodeRunState.QUEUED)
+        self.assertEqual(prepared.snapshot.payload["system_verification_cycle"], 5)
+        self.assertEqual(prepared.effects[0].effect_type, "admit_verifier_role")
 
     def test_start_architect_clears_stale_quiesce_state(self) -> None:
         queued = AggregateSnapshot(
@@ -1547,7 +1616,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         ).snapshot
 
         self.assertEqual(resumed.state, ArchitectureRevisionState.ARCHITECT_QUIESCING)
-        self.assertEqual(resumed.payload["architect_session_generation"], 1)
+        self.assertEqual(resumed.payload.get("architect_session_generation", 0), 0)
         self.assertEqual(
             resumed.payload["pending_architecture_submission_ref"],
             {"sha256": "submission"},

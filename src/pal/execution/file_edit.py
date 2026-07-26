@@ -22,7 +22,6 @@ from typing import Any
 from pal.execution.contracts import CapabilityResult
 from pal.execution.file_state import (
     FileStateCache,
-    minion_retry_allows_uncached_mutation,
     resolve_file_path,
 )
 from pal.shared import RuntimeStatus
@@ -103,24 +102,12 @@ class FileEditTool:
         cached_state = self.cache.get_valid_state(file_path)
         if cached_state is None:
             if not had_record:
-                if minion_retry_allows_uncached_mutation():
-                    try:
-                        resolved = resolve_file_path(file_path)
-                        cached_content = resolved.read_text(encoding="utf-8")
-                    except (OSError, UnicodeError) as exc:
-                        return _err(
-                            RuntimeStatus.ERROR,
-                            f"failed to read file before editing: {exc}",
-                            error_code="READ_FAILED",
-                            file_path=file_path,
-                        )
-                else:
-                    return _err(
-                        RuntimeStatus.FORBIDDEN,
-                        _ERROR_LLMS[ERR_NOT_READ],
-                        error_code=ERR_NOT_READ,
-                        file_path=file_path,
-                    )
+                return _err(
+                    RuntimeStatus.FORBIDDEN,
+                    _ERROR_LLMS[ERR_NOT_READ],
+                    error_code=ERR_NOT_READ,
+                    file_path=file_path,
+                )
             else:
                 return _err(
                     RuntimeStatus.FORBIDDEN,

@@ -46,7 +46,7 @@ class PathDeleteReadSafetyTests(_TempPathMixin, unittest.TestCase):
         self.assertEqual(result.structured["error_code"], ERR_NOT_READ)
         self.assertTrue(path.exists())
 
-    def test_sandboxed_continuation_retry_deletes_without_process_local_read(self) -> None:
+    def test_sandboxed_continuation_retry_does_not_bypass_read_before_delete(self) -> None:
         path = self._path("retry.txt")
         path.write_text("hello\n", encoding="utf-8")
 
@@ -60,8 +60,8 @@ class PathDeleteReadSafetyTests(_TempPathMixin, unittest.TestCase):
         ):
             result = self.tool.invoke({"file_path": str(path)})
 
-        self.assertEqual(result.status, RuntimeStatus.OK)
-        self.assertFalse(path.exists())
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertTrue(path.exists())
 
     def test_path_delete_file_after_read_succeeds_and_invalidates_cache(self) -> None:
         path = self._path("sample.txt")

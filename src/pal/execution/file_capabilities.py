@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from uuid import uuid4
-
 from pal.execution.generated_tool_models import (
     ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput,
     ExecutionFileCapabilitiesFileCapabilityMixinDeleteOutput,
@@ -21,10 +19,19 @@ from pal.execution.file_tool_contracts import (
     FILE_WRITE_DESCRIPTION,
 )
 from pal.execution.file_edit import FileEditTool
-from pal.execution.file_read import FileReadTool, FileVisibilityCache
-from pal.execution.file_state import FileStateCache, FileStateTool
+from pal.execution.file_read import (
+    FileReadTool,
+    FileVisibilityCache,
+    SessionFileVisibilityCache,
+)
+from pal.execution.file_state import (
+    FileStateCache,
+    FileStateTool,
+    SessionFileStateCache,
+)
 from pal.execution.file_write import FileWriteTool
 from pal.execution.path_delete import PathDeleteTool
+from pal.execution.session_state import InMemoryLogicalExecutionState
 from pal.execution.tool_semantics import (
     DIRECT_LOCAL_READ,
     DIRECT_LOCAL_WRITE,
@@ -34,26 +41,58 @@ from pal.execution.tool_semantics import (
 from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, RuntimeStatus, capability_action
 
 
-_FILE_STATE_CACHE = FileStateCache()
-_FILE_VISIBILITY_CACHE = FileVisibilityCache()
-
-
 def get_file_state_cache() -> FileStateCache:
-    return _FILE_STATE_CACHE
+    """Return an isolated legacy cache for direct business-handler callers."""
+
+    return FileStateCache()
 
 
 def _tool_capability_result(tool: object, args: dict[str, object]) -> IntrospectionResult:
     return tool.invoke(dict(args))
 
 
-def _file_visibility_scope(call: IntrospectionCall) -> str:
-    """Return a stable LLM-context identity without exposing it in tool args."""
-    turn_id = str(call.meta.get("turn_id") or "").strip()
-    if turn_id:
-        return turn_id
-    # Calls outside the normal turn runtime have no trustworthy shared context.
-    # Isolate them instead of claiming content from another caller is visible.
-    return f"unscoped:{uuid4().hex}"
+def _session_file_tools(owner: object, call: IntrospectionCall):
+    runtime = call.meta.get("execution_runtime")
+    if runtime is not None and callable(getattr(runtime, "logical_context_for_turn", None)):
+        context = runtime.logical_context_for_turn(call.meta.get("turn_id"))
+        backend = runtime.logical_state
+        return (
+            SessionFileStateCache(backend=backend, context=context),
+            SessionFileVisibilityCache(backend=backend, context=context),
+            context,
+            True,
+        )
+    turn_id = str(
+        call.meta.get("turn_id")
+        or call.meta.get("direct_context_id")
+        or ""
+    ).strip()
+    if not turn_id:
+        state = FileStateCache()
+        visibility = FileVisibilityCache()
+        turn_id = f"unscoped:{id(call)}"
+    else:
+        states = getattr(owner, "_direct_file_states", None)
+        if states is None:
+            states = {}
+            setattr(owner, "_direct_file_states", states)
+        state = states.setdefault(turn_id, FileStateCache())
+        visibility_by_turn = getattr(owner, "_direct_file_visibility", None)
+        if visibility_by_turn is None:
+            visibility_by_turn = {}
+            setattr(owner, "_direct_file_visibility", visibility_by_turn)
+        visibility = visibility_by_turn.setdefault(turn_id, FileVisibilityCache())
+    backend = InMemoryLogicalExecutionState()
+    context = backend.begin_input(
+        logical_session_id=f"direct:{id(owner)}:{turn_id}",
+        input_id=turn_id,
+    )
+    return (
+        state,
+        visibility,
+        context,
+        False,
+    )
 
 
 class FileCapabilityMixin:
@@ -70,11 +109,15 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_read"},
     )
     def file_read(self, call: IntrospectionCall) -> IntrospectionResult:
+        state, visibility, context, defer_delivery = _session_file_tools(self, call)
         return _tool_capability_result(
             FileReadTool(
-                cache=_FILE_STATE_CACHE,
-                visibility_cache=_FILE_VISIBILITY_CACHE,
-                visibility_scope=_file_visibility_scope(call),
+                cache=state,
+                visibility_cache=visibility,
+                visibility_scope=(
+                    f"{context.logical_session_id}:{context.context_epoch}"
+                ),
+                defer_delivery=defer_delivery,
             ),
             call.args,
         )
@@ -92,7 +135,8 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_edit"},
     )
     def file_edit(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(FileEditTool(cache=_FILE_STATE_CACHE), call.args)
+        state, _, _, _ = _session_file_tools(self, call)
+        return _tool_capability_result(FileEditTool(cache=state), call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -107,7 +151,8 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_write"},
     )
     def file_write(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(FileWriteTool(cache=_FILE_STATE_CACHE), call.args)
+        state, _, _, _ = _session_file_tools(self, call)
+        return _tool_capability_result(FileWriteTool(cache=state), call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -125,7 +170,8 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_path_delete"},
     )
     def path_delete(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(PathDeleteTool(cache=_FILE_STATE_CACHE), call.args)
+        state, _, _, _ = _session_file_tools(self, call)
+        return _tool_capability_result(PathDeleteTool(cache=state), call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -143,4 +189,5 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_state"},
     )
     def file_state(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(FileStateTool(cache=_FILE_STATE_CACHE), call.args)
+        state, _, _, _ = _session_file_tools(self, call)
+        return _tool_capability_result(FileStateTool(cache=state), call.args)

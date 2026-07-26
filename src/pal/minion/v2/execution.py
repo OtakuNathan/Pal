@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, IO, Iterator, Mapping, Protocol
+from typing import Any, IO, Iterator, Mapping
 
 from pal.minion.v2.architecture import ArchitectureArtifactService, validate_architecture_manifest
 from pal.minion.v2.adapters import (
@@ -31,6 +31,11 @@ from pal.minion.v2.paths import (
     verification_scratch_root,
 )
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.sessions import (
+    coder_session_id,
+    module_verifier_session_id,
+    node_role_generation,
+)
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_SKELETON_ARTIFACT,
     SKELETON_MODULE_CONTRACT_ARTIFACT,
@@ -38,7 +43,7 @@ from pal.minion.v2.skeleton import (
     module_developer_test_path,
     module_verification_corpus_path,
 )
-from pal.minion.v2.verification import candidate_reuse_fingerprint, repair_bill_semantic_view
+from pal.minion.v2.verification import module_revision_fingerprint, repair_bill_semantic_view
 
 
 @dataclass(frozen=True)
@@ -73,15 +78,6 @@ class NodeRunJournal:
 
 
 @dataclass(frozen=True)
-class QuiesceResult:
-    fencing_token: int
-    process_group_reaped: bool
-    exclusive_workspace_lock: bool
-    workspace_fingerprint: str
-    lock_path: Path
-
-
-@dataclass(frozen=True)
 class WorkspaceProcessHolder:
     pid: int
     process_group: int
@@ -105,13 +101,19 @@ class WorkspaceProcessHolder:
 
 @dataclass
 class WorkspaceLockRegistry:
-    _streams: dict[str, IO[str]] = field(default_factory=dict, init=False)
+    _streams_by_workspace: dict[str, IO[str]] = field(default_factory=dict, init=False)
+    _workspace_by_owner: dict[str, str] = field(default_factory=dict, init=False)
 
-    def acquire(self, node_run_id: str, workspace: Path) -> Path:
+    def acquire(self, owner_id: str, workspace: Path) -> Path:
         import fcntl
 
-        if node_run_id in self._streams:
-            raise RuntimeError(f"workspace lock is already held for {node_run_id}")
+        canonical_workspace = os.path.realpath(workspace)
+        if owner_id in self._workspace_by_owner:
+            raise RuntimeError(f"workspace lock owner already holds a lock: {owner_id}")
+        if canonical_workspace in self._streams_by_workspace:
+            raise BlockingIOError(
+                f"workspace lock is already held: {canonical_workspace}"
+            )
         git_probe = subprocess.run(
             ["git", "rev-parse", "--git-dir"],
             cwd=workspace,
@@ -124,7 +126,10 @@ class WorkspaceLockRegistry:
             git_dir = (workspace / git_probe.stdout.strip()).resolve()
             lock_path = git_dir / "pal-minion-v2.snapshot.lock"
         else:
-            lock_path = workspace.parent / ".pal-candidate-locks" / f"{_safe_ref(node_run_id)}.lock"
+            workspace_key = hashlib.sha256(
+                canonical_workspace.encode("utf-8")
+            ).hexdigest()[:24]
+            lock_path = workspace.parent / ".pal-candidate-locks" / f"{workspace_key}.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         stream = lock_path.open("a+")
         try:
@@ -132,13 +137,19 @@ class WorkspaceLockRegistry:
         except BaseException:
             stream.close()
             raise
-        self._streams[node_run_id] = stream
+        self._streams_by_workspace[canonical_workspace] = stream
+        self._workspace_by_owner[owner_id] = canonical_workspace
         return lock_path
 
-    def release(self, node_run_id: str) -> None:
+    def release(self, owner_id: str) -> None:
         import fcntl
 
-        stream = self._streams.pop(node_run_id, None)
+        canonical_workspace = self._workspace_by_owner.pop(owner_id, None)
+        stream = (
+            self._streams_by_workspace.pop(canonical_workspace, None)
+            if canonical_workspace is not None
+            else None
+        )
         if stream is None:
             return
         try:
@@ -146,69 +157,8 @@ class WorkspaceLockRegistry:
         finally:
             stream.close()
 
-    def is_held(self, node_run_id: str) -> bool:
-        return node_run_id in self._streams
-
-
-class WorkerProcessController(Protocol):
-    def revoke_tool_token(self, worker_id: str, fencing_token: int) -> None:
-        ...
-
-    def request_cooperative_stop(self, worker_id: str) -> None:
-        ...
-
-    def kill_and_reap_process_group(self, worker_id: str, timeout_seconds: float) -> bool:
-        ...
-
-    def has_live_processes_for_workspace(self, worktree: Path) -> bool:
-        ...
-
-
-@dataclass
-class PosixWorkerProcessController:
-    process_group_by_worker: dict[str, int] = field(default_factory=dict)
-    revoked_tokens: set[tuple[str, int]] = field(default_factory=set)
-
-    def revoke_tool_token(self, worker_id: str, fencing_token: int) -> None:
-        self.revoked_tokens.add((worker_id, fencing_token))
-
-    def request_cooperative_stop(self, worker_id: str) -> None:
-        process_group = self.process_group_by_worker.get(worker_id)
-        if process_group is not None:
-            try:
-                os.killpg(process_group, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-
-    def kill_and_reap_process_group(self, worker_id: str, timeout_seconds: float) -> bool:
-        process_group = self.process_group_by_worker.get(worker_id)
-        if process_group is None:
-            return True
-        deadline = time.monotonic() + max(0.1, timeout_seconds)
-        while time.monotonic() < deadline:
-            try:
-                os.killpg(process_group, 0)
-            except ProcessLookupError:
-                self.process_group_by_worker.pop(worker_id, None)
-                return True
-            time.sleep(0.05)
-        try:
-            os.killpg(process_group, signal.SIGKILL)
-        except ProcessLookupError:
-            self.process_group_by_worker.pop(worker_id, None)
-            return True
-        deadline = time.monotonic() + max(0.1, timeout_seconds)
-        while time.monotonic() < deadline:
-            try:
-                os.killpg(process_group, 0)
-            except ProcessLookupError:
-                self.process_group_by_worker.pop(worker_id, None)
-                return True
-            time.sleep(0.05)
-        return False
-
-    def has_live_processes_for_workspace(self, worktree: Path) -> bool:
-        return workspace_has_live_processes(worktree)
+    def is_held(self, owner_id: str) -> bool:
+        return owner_id in self._workspace_by_owner
 
 
 @dataclass
@@ -223,7 +173,7 @@ class ExecutionCompiler:
         epoch_id: str,
         manifest_ref: ArtifactRef,
         actor: str = "minion-manager",
-        reuse_from_epoch_id: str = "",
+        source_epoch_id: str = "",
         initial_repair_bill_ref: Mapping[str, Any] | None = None,
     ) -> ExecutionCompilation:
         record = self.repository.read_artifact_record(manifest_ref.sha256)
@@ -233,7 +183,7 @@ class ExecutionCompiler:
                 epoch_id=epoch_id,
                 manifest_ref=manifest_ref,
                 actor=actor,
-                reuse_from_epoch_id=reuse_from_epoch_id,
+                source_epoch_id=source_epoch_id,
                 initial_repair_bill_ref=initial_repair_bill_ref,
             )
         manifest = validate_architecture_manifest(self.architecture.artifacts.read_json(manifest_ref))
@@ -273,6 +223,18 @@ class ExecutionCompiler:
         )
 
         unit_node_ids = {unit_id: f"{epoch_id}:node:{unit_id}" for unit_id in unit_refs_by_id}
+        source_role_generations = _module_role_session_generations(
+            self.repository,
+            workflow_id=workflow_id,
+            source_epoch_id=source_epoch_id,
+            target_subjects={*unit_refs_by_id, "integration"},
+        )
+        module_identity_delta = _module_identity_delta(
+            self.repository,
+            workflow_id=workflow_id,
+            source_epoch_id=source_epoch_id,
+            target_module_names=set(unit_refs_by_id),
+        )
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
         request = (
             self.architecture.artifacts.read_json(dict(workflow.payload.get("request_ref") or {}))
@@ -284,11 +246,10 @@ class ExecutionCompiler:
         adapters = dict(binding.get("adapters") or {})
         execution_adapter = str(adapters.get("workspace") or SOFTWARE_GIT_ADAPTER)
         if execution_adapter == SOFTWARE_GIT_ADAPTER:
-            workspaces = provision_epoch_worktrees(
+            workspaces = provision_module_worktrees(
                 self.repository.runtime_root,
                 workflow_id=workflow_id,
                 workflow_name=str(request.get("workflow_name") or request.get("goal") or workflow_id),
-                epoch_id=epoch_id,
                 unit_ids=sorted(unit_refs_by_id),
                 workspace=dict(request.get("workspace") or {}),
             )
@@ -331,6 +292,10 @@ class ExecutionCompiler:
                         "dependency_node_ids": dependency_node_ids,
                         "accepted_dependency_node_ids": [],
                         "epoch_frozen": False,
+                        "role_session_generation": source_role_generations.get(
+                            unit_id,
+                            0,
+                        ),
                         "environment_fingerprint": environment_fingerprint,
                         **dict(workspaces[unit_id]),
                     },
@@ -356,17 +321,21 @@ class ExecutionCompiler:
                     "dependency_node_ids": integration_dependencies,
                     "accepted_dependency_node_ids": [],
                     "epoch_frozen": False,
+                    "role_session_generation": source_role_generations.get(
+                        "integration",
+                        0,
+                    ),
                     "environment_fingerprint": environment_fingerprint,
                     **dict(workspaces["integration"]),
                 },
             )
         )
-        if reuse_from_epoch_id:
-            reuse_accepted_candidates(
+        if source_epoch_id:
+            reconcile_module_identities(
                 repository=self.repository,
                 architecture=self.architecture,
                 workflow_id=workflow_id,
-                source_epoch_id=reuse_from_epoch_id,
+                source_epoch_id=source_epoch_id,
                 target_epoch_id=epoch_id,
                 target_manifest_ref=manifest_ref,
                 actor=actor,
@@ -380,7 +349,11 @@ class ExecutionCompiler:
                 epoch_id,
                 actor,
                 2,
-                {"node_ids": list(node_ids), "integration_node_id": integration_node_id},
+                {
+                    "node_ids": list(node_ids),
+                    "integration_node_id": integration_node_id,
+                    "module_identity_delta": module_identity_delta,
+                },
             )
         )
         return ExecutionCompilation(
@@ -397,7 +370,7 @@ class ExecutionCompiler:
         epoch_id: str,
         manifest_ref: ArtifactRef,
         actor: str,
-        reuse_from_epoch_id: str,
+        source_epoch_id: str,
         initial_repair_bill_ref: Mapping[str, Any] | None,
     ) -> ExecutionCompilation:
         artifact = dict(self.architecture.artifacts.read_json(manifest_ref))
@@ -546,12 +519,11 @@ class ExecutionCompiler:
             else {}
         )
         system_unit_id = "system_delivery"
-        workspaces = provision_skeleton_epoch_worktrees(
+        workspaces = provision_skeleton_module_worktrees(
             self.repository.runtime_root,
             artifacts=self.architecture.artifacts,
             workflow_id=workflow_id,
             workflow_name=str(request.get("workflow_name") or request.get("goal") or workflow_id),
-            epoch_id=epoch_id,
             unit_ids=sorted([*implementation_modules, system_unit_id]),
             verification_unit_ids={system_unit_id},
             workspace=dict(request.get("workspace") or {}),
@@ -574,6 +546,18 @@ class ExecutionCompiler:
         )
         unit_node_ids = {name: f"{epoch_id}:node:{name}" for name in implementation_modules}
         system_verification_node_id = f"{epoch_id}:system-verification"
+        source_role_generations = _module_role_session_generations(
+            self.repository,
+            workflow_id=workflow_id,
+            source_epoch_id=source_epoch_id,
+            target_subjects={*implementation_modules, system_unit_id},
+        )
+        module_identity_delta = _module_identity_delta(
+            self.repository,
+            workflow_id=workflow_id,
+            source_epoch_id=source_epoch_id,
+            target_module_names=set(implementation_modules),
+        )
         for name in sorted(implementation_modules):
             paths = dict(modules[name].get("paths") or {})
             self.repository.dispatch(
@@ -602,6 +586,10 @@ class ExecutionCompiler:
                         ],
                         "accepted_dependency_node_ids": [],
                         "epoch_frozen": False,
+                        "role_session_generation": source_role_generations.get(
+                            name,
+                            0,
+                        ),
                         "environment_fingerprint": environment_fingerprint,
                         "global_constraint_hash": global_constraint_hash,
                         "path_policy": {
@@ -648,6 +636,10 @@ class ExecutionCompiler:
                     ],
                     "accepted_dependency_node_ids": [],
                     "epoch_frozen": False,
+                    "role_session_generation": source_role_generations.get(
+                        system_unit_id,
+                        0,
+                    ),
                     "environment_fingerprint": environment_fingerprint,
                     "global_constraint_hash": global_constraint_hash,
                     "path_policy": {
@@ -662,12 +654,12 @@ class ExecutionCompiler:
                 },
             )
         )
-        if reuse_from_epoch_id:
-            reuse_accepted_candidates(
+        if source_epoch_id:
+            reconcile_module_identities(
                 repository=self.repository,
                 architecture=self.architecture,
                 workflow_id=workflow_id,
-                source_epoch_id=reuse_from_epoch_id,
+                source_epoch_id=source_epoch_id,
                 target_epoch_id=epoch_id,
                 target_manifest_ref=manifest_ref,
                 actor=actor,
@@ -688,6 +680,7 @@ class ExecutionCompiler:
                     "node_ids": list(node_ids),
                     "implementation_node_ids": list(unit_node_ids.values()),
                     "system_verification_node_id": system_verification_node_id,
+                    "module_identity_delta": module_identity_delta,
                 },
             )
         )
@@ -699,7 +692,7 @@ class ExecutionCompiler:
         )
 
 
-def reuse_accepted_candidates(
+def reconcile_module_identities(
     *,
     repository: MinionV2Repository,
     architecture: ArchitectureArtifactService,
@@ -726,7 +719,7 @@ def reuse_accepted_candidates(
     if source_is_skeleton or target_is_skeleton:
         if not (source_is_skeleton and target_is_skeleton):
             return ()
-        return _reuse_accepted_skeleton_candidates(
+        return _reconcile_skeleton_module_identities(
             repository=repository,
             architecture=architecture,
             workflow_id=workflow_id,
@@ -759,7 +752,7 @@ def reuse_accepted_candidates(
     target_contracts = _contracts_by_id(target_manifest, target_fragments)
     source_dependencies = _module_dependencies(source_fragments)
     target_dependencies = _module_dependencies(target_fragments)
-    reused: list[str] = []
+    carried_forward: list[str] = []
     for unit_id in _topological_module_order(target_dependencies):
         source_node = source_nodes.get(unit_id)
         target_node = repository.read_snapshot(
@@ -781,7 +774,7 @@ def reuse_accepted_candidates(
         ]
         if len(accepted_dependencies) != len(dependency_ids):
             continue
-        source_fingerprint = _candidate_reuse_signature(
+        source_fingerprint = _module_revision_signature(
             manifest=source_manifest,
             fragments=source_fragments,
             contract_ref=source_contracts[unit_id][0],
@@ -791,7 +784,7 @@ def reuse_accepted_candidates(
             node=source_node,
             node_by_module=source_nodes,
         )
-        target_fingerprint = _candidate_reuse_signature(
+        target_fingerprint = _module_revision_signature(
             manifest=target_manifest,
             fragments=target_fragments,
             contract_ref=target_contracts[unit_id][0],
@@ -816,12 +809,12 @@ def reuse_accepted_candidates(
         if source_adapter != target_adapter:
             continue
         if target_adapter == SOFTWARE_GIT_ADAPTER:
-            _import_reused_candidate(source_node, target_node, candidate_digest)
+            _carry_forward_candidate(source_node, target_node, candidate_digest)
         elif target_adapter != ARTIFACT_BUNDLE_ADAPTER:
             continue
         result = repository.dispatch(
             _action(
-                "REUSE_ACCEPTED_CANDIDATE",
+                "CARRY_FORWARD_MODULE",
                 workflow_id,
                 AggregateType.DAG_NODE_RUN,
                 target_node.aggregate_id,
@@ -831,22 +824,28 @@ def reuse_accepted_candidates(
                     "candidate_ref": candidate_ref,
                     "candidate_digest": candidate_digest,
                     "verification_artifact_ref": verification_ref,
-                    "reuse_fingerprint": target_fingerprint,
+                    "module_revision_fingerprint": target_fingerprint,
                     "accepted_dependency_node_ids": accepted_dependencies,
                     "epoch_frozen": False,
                     "output_hashes": dict(source_node.payload.get("output_hashes") or {}),
                     "dependency_output_hashes": dict(source_node.payload.get("dependency_output_hashes") or {}),
-                    "reused_from_epoch_id": source_epoch_id,
-                    "reused_from_node_run_id": source_node.aggregate_id,
+                    "carried_forward_from_epoch_id": source_epoch_id,
+                    "carried_forward_from_node_run_id": source_node.aggregate_id,
                 },
             )
         )
         target_nodes[unit_id] = result.snapshot
-        reused.append(result.snapshot.aggregate_id)
-    return tuple(reused)
+        carried_forward.append(result.snapshot.aggregate_id)
+    _retire_removed_module_resources(
+        repository=repository,
+        workflow_id=workflow_id,
+        source_nodes=source_nodes,
+        target_module_names=set(target_nodes),
+    )
+    return tuple(carried_forward)
 
 
-def _reuse_accepted_skeleton_candidates(
+def _reconcile_skeleton_module_identities(
     *,
     repository: MinionV2Repository,
     architecture: ArchitectureArtifactService,
@@ -888,65 +887,120 @@ def _reuse_accepted_skeleton_candidates(
         )
         for name, node in target_nodes.items()
     }
-    dependencies = {
+    contract_dependencies = {
         name: [
             str(item)
             for item in dict(dict(contract.get("module") or {}).get("dependencies") or {})
         ]
         for name, (_ref, contract) in target_contracts.items()
     }
-    if set(dependencies) != set(target_nodes):
+    if set(contract_dependencies) != set(target_nodes):
         return ()
-    reused: list[str] = []
+    # Contract-only modules participate in the architecture graph but do not
+    # have execution nodes. Module revision fingerprints include implementation
+    # dependency interfaces, but never waits for replacement implementations
+    # or their optional output projections. The unit-contract hash still
+    # covers the consumer's complete declared dependency set.
+    dependencies = {
+        name: [
+            dependency
+            for dependency in module_dependencies
+            if dependency in target_nodes
+        ]
+        for name, module_dependencies in contract_dependencies.items()
+    }
+    carried_forward: list[str] = []
     for module_name in _topological_module_order(dependencies):
         source_node = source_nodes.get(module_name)
         target_node = repository.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             target_nodes[module_name].aggregate_id,
         )
-        if source_node is None or source_node.state != "ACCEPTED" or target_node is None:
+        if source_node is None or target_node is None:
             continue
         source_contract = source_contracts.get(module_name)
         target_contract = target_contracts.get(module_name)
         if source_contract is None or target_contract is None:
             continue
-        target_node_by_module = {
-            name: repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id) or node
-            for name, node in target_nodes.items()
-        }
         dependency_modules = dependencies[module_name]
-        if any(target_node_by_module[name].state != "ACCEPTED" for name in dependency_modules):
-            continue
-        source_fingerprint = _skeleton_candidate_reuse_signature(
+        source_fingerprint = _skeleton_module_revision_signature(
             artifact=source_artifact,
             contract_ref=source_contract[0],
             contract=source_contract[1],
             node=source_node,
             dependencies=dependency_modules,
-            node_by_module=source_nodes,
             contracts_by_module=source_contracts,
         )
-        target_fingerprint = _skeleton_candidate_reuse_signature(
+        target_fingerprint = _skeleton_module_revision_signature(
             artifact=target_artifact,
             contract_ref=target_contract[0],
             contract=target_contract[1],
             node=target_node,
             dependencies=dependency_modules,
-            node_by_module=target_node_by_module,
             contracts_by_module=target_contracts,
         )
-        if not source_fingerprint or source_fingerprint != target_fingerprint:
-            continue
         source_candidate_ref = dict(source_node.payload.get("candidate_ref") or {})
         verification_ref = dict(source_node.payload.get("verification_artifact_ref") or {})
         source_candidate_digest = str(source_node.payload.get("candidate_digest") or "")
-        if not source_candidate_ref or not verification_ref or not source_candidate_digest:
-            continue
+        if not source_candidate_ref or not source_candidate_digest:
+            (
+                source_candidate_ref,
+                source_candidate_digest,
+            ) = _snapshot_module_workspace_for_replan(
+                architecture=architecture,
+                source_node=source_node,
+                target_node=target_node,
+            )
         target_nodes_by_id = {
-            item.aggregate_id: item for item in target_node_by_module.values()
+            item.aggregate_id: (
+                repository.read_snapshot(
+                    AggregateType.DAG_NODE_RUN,
+                    item.aggregate_id,
+                )
+                or item
+            )
+            for item in target_nodes.values()
         }
         baseline = prepare_node_dependency_baseline(target_node, target_nodes_by_id)
-        candidate_ref, candidate_digest, target_base = _transplant_skeleton_candidate(
+        if (
+            source_node.state != "ACCEPTED"
+            or not verification_ref
+            or not source_fingerprint
+            or source_fingerprint != target_fingerprint
+        ):
+            prepared = _preserve_skeleton_module_worktree(
+                architecture=architecture,
+                source_node=source_node,
+                target_node=target_node,
+                source_candidate_ref=source_candidate_ref,
+                source_candidate_digest=source_candidate_digest,
+                baseline=baseline,
+            )
+            result = repository.dispatch(
+                _action(
+                    "PRESERVE_MODULE_WORKTREE",
+                    workflow_id,
+                    AggregateType.DAG_NODE_RUN,
+                    target_node.aggregate_id,
+                    actor,
+                    target_node.version,
+                    {
+                        "preserved_from_epoch_id": source_epoch_id,
+                        "preserved_from_node_run_id": source_node.aggregate_id,
+                        "parent_candidate_digest": source_candidate_digest,
+                        **baseline,
+                        **prepared,
+                    },
+                )
+            )
+            target_nodes[module_name] = result.snapshot
+            continue
+        (
+            candidate_ref,
+            candidate_digest,
+            target_base,
+            manager_seeded_corpus_hashes,
+        ) = _carry_forward_exact_skeleton_candidate(
             architecture=architecture,
             source_node=source_node,
             target_node=target_node,
@@ -956,12 +1010,9 @@ def _reuse_accepted_skeleton_candidates(
             target_fingerprint=target_fingerprint,
             baseline=baseline,
         )
-        accepted_dependencies = [
-            str(target_node_by_module[name].aggregate_id) for name in dependency_modules
-        ]
         result = repository.dispatch(
             _action(
-                "REUSE_ACCEPTED_CANDIDATE",
+                "CARRY_FORWARD_MODULE",
                 workflow_id,
                 AggregateType.DAG_NODE_RUN,
                 target_node.aggregate_id,
@@ -971,11 +1022,12 @@ def _reuse_accepted_skeleton_candidates(
                     "candidate_ref": candidate_ref.to_dict(),
                     "candidate_digest": candidate_digest,
                     "verification_artifact_ref": verification_ref,
-                    "reuse_fingerprint": target_fingerprint,
-                    "accepted_dependency_node_ids": accepted_dependencies,
+                    "module_revision_fingerprint": target_fingerprint,
+                    "accepted_dependency_node_ids": [],
                     "epoch_frozen": False,
                     "output_hashes": dict(source_node.payload.get("output_hashes") or {}),
-                    "reused_from_epoch_id": source_epoch_id,
+                    "carried_forward_from_epoch_id": source_epoch_id,
+                    "manager_seeded_corpus_hashes": manager_seeded_corpus_hashes,
                     **baseline,
                     "base_sha": target_base,
                     "base_digest": target_base,
@@ -983,37 +1035,169 @@ def _reuse_accepted_skeleton_candidates(
             )
         )
         target_nodes[module_name] = result.snapshot
-        reused.append(result.snapshot.aggregate_id)
-    return tuple(reused)
+        carried_forward.append(result.snapshot.aggregate_id)
+    _retire_removed_module_resources(
+        repository=repository,
+        workflow_id=workflow_id,
+        source_nodes=source_nodes,
+        target_module_names=set(target_nodes),
+    )
+    return tuple(carried_forward)
 
 
-def _skeleton_candidate_reuse_signature(
+def _snapshot_module_workspace_for_replan(
+    *,
+    architecture: ArchitectureArtifactService,
+    source_node: AggregateSnapshot,
+    target_node: AggregateSnapshot,
+) -> tuple[dict[str, Any], str]:
+    """Capture current Module assets before rebasing its stable worktree."""
+
+    worktree = Path(str(source_node.payload.get("workspace_path") or ""))
+    if not worktree.is_dir():
+        raise ValueError("preserved Module has no stable worktree")
+    current_head = _git(worktree, "rev-parse", "HEAD").strip()
+    source_base = str(source_node.payload.get("base_sha") or current_head)
+    _git(worktree, "add", "-A")
+    tree_sha = _git(worktree, "write-tree").strip()
+    preserved_digest = _git(
+        worktree,
+        "-c",
+        "user.name=Pal Minion",
+        "-c",
+        "user.email=minion@localhost",
+        "commit-tree",
+        tree_sha,
+        "-p",
+        source_base,
+        "-m",
+        f"preserve Module assets for {target_node.aggregate_id}",
+    ).strip()
+    changed_paths = [
+        item.decode("utf-8", errors="surrogateescape")
+        for item in _git_bytes(
+            worktree,
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            source_base,
+            preserved_digest,
+            "--",
+        ).split(b"\0")
+        if item
+    ]
+    _git(
+        worktree,
+        "update-ref",
+        f"refs/pal/replan-assets/{_safe_ref(target_node.aggregate_id)}",
+        preserved_digest,
+    )
+    _git(worktree, "reset", "--mixed", current_head)
+    manager_seeded_hashes = dict(
+        source_node.payload.get("manager_seeded_corpus_hashes") or {}
+    )
+    ref = architecture.artifacts.put_json(
+        {
+            "schema_version": "1",
+            "candidate_digest": preserved_digest,
+            "base_sha": source_base,
+            "changed_paths": sorted(set(changed_paths)),
+            "manager_seeded_paths": sorted(manager_seeded_hashes),
+            "capture_kind": "module_replan_assets",
+            "source_node_run_id": source_node.aggregate_id,
+        },
+        artifact_type="ModuleReplanAssetsArtifact",
+    )
+    return ref.to_dict(), preserved_digest
+
+
+def _retire_removed_module_resources(
+    *,
+    repository: MinionV2Repository,
+    workflow_id: str,
+    source_nodes: Mapping[str, AggregateSnapshot],
+    target_module_names: set[str],
+) -> tuple[str, ...]:
+    """Retire only Module identities deleted by the accepted architecture.
+
+    The old epoch has already drained before its replacement can compile.  A
+    process holder here therefore means Manager accounting is wrong, so the
+    cutover fails instead of inventing another ownership mechanism.
+    """
+
+    retired: list[str] = []
+    for module_name in sorted(set(source_nodes) - set(target_module_names)):
+        source_node = source_nodes[module_name]
+        workspace = Path(str(source_node.payload.get("workspace_path") or ""))
+        common_git_dir = Path(str(source_node.payload.get("common_git_dir") or ""))
+        branch = str(source_node.payload.get("worktree_branch") or "")
+        if workspace.is_dir():
+            holders = workspace_process_holders(workspace)
+            if holders:
+                raise RuntimeError(
+                    f"removed Module {module_name!r} still has live workspace holders:\n"
+                    + format_workspace_process_holders(holders)
+                )
+
+        generation = node_role_generation(source_node.payload)
+        for session_id in (
+            coder_session_id(workflow_id, module_name, generation),
+            module_verifier_session_id(workflow_id, module_name, generation),
+        ):
+            repository.complete_role_session(session_id, status="cancelled")
+
+        if workspace.is_dir():
+            if not common_git_dir.is_dir() or "/module/" not in branch:
+                raise RuntimeError(
+                    f"removed Module {module_name!r} has invalid stable worktree metadata"
+                )
+            completed = subprocess.run(
+                [
+                    "git",
+                    f"--git-dir={common_git_dir}",
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(workspace),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    completed.stderr
+                    or completed.stdout
+                    or f"failed to retire Module worktree {workspace}"
+                )
+        if branch and _git_branch_exists(common_git_dir, branch):
+            _git_dir(common_git_dir, "branch", "-D", branch)
+        retired.append(module_name)
+    return tuple(retired)
+
+
+def _skeleton_module_revision_signature(
     *,
     artifact: Mapping[str, Any],
     contract_ref: Mapping[str, Any],
     contract: Mapping[str, Any],
     node: AggregateSnapshot,
     dependencies: list[str],
-    node_by_module: Mapping[str, AggregateSnapshot],
     contracts_by_module: Mapping[str, tuple[Mapping[str, Any], Mapping[str, Any]]],
 ) -> str:
-    dependency_outputs: dict[str, Any] = {}
     dependency_interfaces: dict[str, Any] = {}
     for dependency in sorted(dependencies):
-        dependency_node = node_by_module.get(dependency)
         dependency_contract = contracts_by_module.get(dependency)
-        if dependency_node is None or dependency_contract is None:
+        if dependency_contract is None:
             return ""
-        output_hashes = dict(dependency_node.payload.get("output_hashes") or {})
-        if not output_hashes:
-            return ""
-        dependency_outputs[dependency] = output_hashes
         dependency_interfaces[dependency] = {
             "contract_hash": str(dependency_contract[0].get("sha256") or ""),
             "contract_file_hashes": dict(dependency_contract[1].get("contract_file_hashes") or {}),
         }
     try:
-        return candidate_reuse_fingerprint(
+        return module_revision_fingerprint(
             unit_contract_hash=str(contract_ref.get("sha256") or ""),
             relevant_requirements_hash=_stable_json_hash(dict(artifact.get("requirements_ref") or {})),
             relevant_evidence_hash=_stable_json_hash({}),
@@ -1021,7 +1205,10 @@ def _skeleton_candidate_reuse_signature(
             owned_area_hash=_stable_json_hash(dict(contract.get("paths") or {})),
             dependency_set_hash=_stable_json_hash(sorted(dependencies)),
             dependency_interface_hash=_stable_json_hash(dependency_interfaces),
-            dependency_output_hash=_stable_json_hash(dependency_outputs),
+            # Skeleton modules consume declared interfaces. The concrete
+            # implementation chosen for an upstream module is deliberately
+            # outside the consumer Module revision identity.
+            dependency_output_hash=_stable_json_hash({}),
             integration_contract_subset_hash=_stable_json_hash({}),
             environment_policy_hash=str(node.payload.get("environment_fingerprint") or ""),
         )
@@ -1029,7 +1216,167 @@ def _skeleton_candidate_reuse_signature(
         return ""
 
 
-def _transplant_skeleton_candidate(
+def _preserve_skeleton_module_worktree(
+    *,
+    architecture: ArchitectureArtifactService,
+    source_node: AggregateSnapshot,
+    target_node: AggregateSnapshot,
+    source_candidate_ref: Mapping[str, Any],
+    source_candidate_digest: str,
+    baseline: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project reusable implementation assets into the same Module worktree.
+
+    The target worktree has already been reset to the newly accepted skeleton.
+    Its HEAD remains that skeleton while the prior Candidate delta is restored
+    as ordinary working-tree changes for the existing Coder session.
+    """
+
+    source_candidate = dict(architecture.artifacts.read_json(source_candidate_ref))
+    source_base = str(source_candidate.get("base_sha") or "")
+    source_changed_paths = [
+        str(item).replace(os.sep, "/").strip("/")
+        for item in list(source_candidate.get("changed_paths") or [])
+        if str(item).strip()
+    ]
+    source_git = Path(str(source_node.payload.get("common_git_dir") or ""))
+    target_worktree = Path(str(target_node.payload.get("workspace_path") or ""))
+    if (
+        not source_base
+        or not source_candidate_digest
+        or not source_git.is_dir()
+        or not target_worktree.is_dir()
+    ):
+        raise ValueError("preserved Module Candidate has incomplete Git provenance")
+
+    path_policy = dict(target_node.payload.get("path_policy") or {})
+    manager_seeded_paths = {
+        str(item).replace(os.sep, "/").strip("/")
+        for item in list(source_candidate.get("manager_seeded_paths") or [])
+    }
+    source_manager_seeded_hashes = dict(
+        source_node.payload.get("manager_seeded_corpus_hashes") or {}
+    )
+    manager_seeded_corpus_hashes = {
+        path: str(source_manager_seeded_hashes[path])
+        for path in sorted(manager_seeded_paths)
+        if path in source_manager_seeded_hashes
+    }
+    writable_patterns: list[str] = []
+    for scope in compiled_module_write_scopes(path_policy):
+        path = str(scope.get("path") or "").strip("/")
+        if not path:
+            continue
+        writable_patterns.append(
+            path if str(scope.get("kind") or "") == "file" else f"{path}/**"
+        )
+    reusable_paths = [
+        path
+        for path in source_changed_paths
+        if path in manager_seeded_paths or _matches_any(path, writable_patterns)
+    ]
+    if not reusable_paths:
+        return {
+            "module_replan_prepared": True,
+            "preserved_workspace_paths": [],
+            "replan_conflict_paths": [],
+            "manager_seeded_corpus_hashes": {},
+        }
+
+    completed = subprocess.run(
+        [
+            "git",
+            f"--git-dir={source_git}",
+            "diff",
+            "--binary",
+            source_base,
+            source_candidate_digest,
+            "--",
+            *reusable_paths,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            completed.stderr.decode("utf-8", errors="replace")
+            or "failed to read preserved Module delta"
+        )
+    if not completed.stdout:
+        return {
+            "module_replan_prepared": True,
+            "preserved_workspace_paths": [],
+            "replan_conflict_paths": [],
+            "manager_seeded_corpus_hashes": {},
+        }
+
+    applied = subprocess.run(
+        ["git", "-C", str(target_worktree), "apply", "--3way", "--index", "--binary", "-"],
+        input=completed.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    conflicts = [
+        item.decode("utf-8", errors="surrogateescape")
+        for item in subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(target_worktree),
+                "diff",
+                "--name-only",
+                "--diff-filter=U",
+                "-z",
+            ]
+        ).split(b"\0")
+        if item
+    ]
+    if applied.returncode != 0 and not conflicts:
+        raise RuntimeError(
+            applied.stderr.decode("utf-8", errors="replace")
+            or "preserved Module delta could not be applied"
+        )
+    forbidden_conflicts = [
+        path
+        for path in conflicts
+        if path in manager_seeded_paths or not _matches_any(path, writable_patterns)
+    ]
+    if forbidden_conflicts:
+        raise RuntimeError(
+            "replan conflicts with Manager-owned or non-writable paths: "
+            + ", ".join(sorted(forbidden_conflicts))
+        )
+
+    # Convert Git's temporary index state into ordinary working-tree changes.
+    # The Coder owns conflict resolution; Manager continues to own Git state.
+    _git(target_worktree, "add", "-A")
+    _git(target_worktree, "reset", "--mixed", str(baseline.get("base_sha") or "HEAD"))
+    actual_paths = git_changed_paths(
+        target_worktree,
+        str(baseline.get("base_sha") or ""),
+    )
+    _validate_skeleton_candidate_paths(
+        actual_paths,
+        path_policy,
+        manager_seeded_paths=manager_seeded_paths,
+    )
+    retained_seeded_hashes = {
+        path: digest
+        for path, digest in manager_seeded_corpus_hashes.items()
+        if path in actual_paths
+    }
+    _validate_manager_seeded_paths(target_worktree, retained_seeded_hashes)
+    return {
+        "module_replan_prepared": True,
+        "preserved_workspace_paths": actual_paths,
+        "replan_conflict_paths": sorted(conflicts),
+        "manager_seeded_corpus_hashes": retained_seeded_hashes,
+    }
+
+
+def _carry_forward_exact_skeleton_candidate(
     *,
     architecture: ArchitectureArtifactService,
     source_node: AggregateSnapshot,
@@ -1039,16 +1386,36 @@ def _transplant_skeleton_candidate(
     target_contract_ref: Mapping[str, Any],
     target_fingerprint: str,
     baseline: Mapping[str, Any],
-) -> tuple[ArtifactRef, str, str]:
+) -> tuple[ArtifactRef, str, str, dict[str, str]]:
     source_candidate = dict(architecture.artifacts.read_json(source_candidate_ref))
     source_base = str(source_candidate.get("base_sha") or "")
     changed_paths = [str(item) for item in list(source_candidate.get("changed_paths") or [])]
+    manager_seeded_paths = {
+        str(item).replace(os.sep, "/").strip("/")
+        for item in list(source_candidate.get("manager_seeded_paths") or [])
+    }
+    source_manager_seeded_hashes = dict(
+        source_node.payload.get("manager_seeded_corpus_hashes") or {}
+    )
+    manager_seeded_corpus_hashes = {
+        path: str(source_manager_seeded_hashes[path])
+        for path in sorted(manager_seeded_paths)
+        if path in source_manager_seeded_hashes
+    }
+    if set(manager_seeded_corpus_hashes) != manager_seeded_paths:
+        raise ValueError(
+            "reusable skeleton candidate is missing Manager-seeded corpus hashes"
+        )
     source_git = Path(str(source_node.payload.get("common_git_dir") or ""))
     target_worktree = Path(str(target_node.payload.get("workspace_path") or ""))
     if not source_base or not changed_paths or not source_git.is_dir() or not target_worktree.is_dir():
         raise ValueError("reusable skeleton candidate has incomplete Git provenance")
     path_policy = dict(target_node.payload.get("path_policy") or {})
-    _validate_skeleton_candidate_paths(changed_paths, path_policy)
+    _validate_skeleton_candidate_paths(
+        changed_paths,
+        path_policy,
+        manager_seeded_paths=manager_seeded_paths,
+    )
     candidate_key = _stable_json_hash(
         {
             "source_candidate_ref": str(source_candidate_ref.get("sha256") or ""),
@@ -1062,7 +1429,7 @@ def _transplant_skeleton_candidate(
         target_base = _git(target_worktree, "rev-parse", f"{existing}^").strip()
     else:
         if _git(target_worktree, "status", "--porcelain").strip():
-            raise RuntimeError("target worktree is dirty before candidate reuse")
+            raise RuntimeError("target worktree is dirty before exact Candidate carry-forward")
         completed = subprocess.run(
             [
                 "git",
@@ -1100,7 +1467,11 @@ def _transplant_skeleton_candidate(
             raise RuntimeError(applied.stderr.decode("utf-8", errors="replace") or "failed to apply reusable candidate")
         target_base = str(baseline.get("base_sha") or "")
         actual_paths = git_changed_paths(target_worktree, target_base)
-        _validate_skeleton_candidate_paths(actual_paths, path_policy)
+        _validate_skeleton_candidate_paths(
+            actual_paths,
+            path_policy,
+            manager_seeded_paths=manager_seeded_paths,
+        )
         _git(
             target_worktree,
             "-c",
@@ -1109,10 +1480,14 @@ def _transplant_skeleton_candidate(
             "user.email=minion@localhost",
             "commit",
             "-m",
-            f"minion reused candidate {target_node.aggregate_id}\n\nPal-Candidate-Key: {candidate_key}",
+            f"minion carried Candidate forward {target_node.aggregate_id}\n\nPal-Candidate-Key: {candidate_key}",
         )
         candidate_digest = _git(target_worktree, "rev-parse", "HEAD").strip()
         changed_paths = actual_paths
+    _validate_manager_seeded_paths(
+        target_worktree,
+        manager_seeded_corpus_hashes,
+    )
     candidate = {
         "schema_version": "1",
         "candidate_digest": candidate_digest,
@@ -1123,21 +1498,22 @@ def _transplant_skeleton_candidate(
         "environment_fingerprint": str(target_node.payload.get("environment_fingerprint") or ""),
         "workspace_fingerprint": workspace_content_fingerprint(target_worktree),
         "changed_paths": changed_paths,
+        "manager_seeded_paths": sorted(manager_seeded_paths),
         "candidate_key": candidate_key,
-        "reused_from_candidate": str(source_candidate_ref.get("sha256") or ""),
+        "carried_forward_from_candidate": str(source_candidate_ref.get("sha256") or ""),
     }
     ref = architecture.artifacts.put_json(
         candidate,
         artifact_type="CandidateSnapshotArtifact",
         child_refs=(
-            (str(source_candidate_ref["sha256"]), "reuses"),
+            (str(source_candidate_ref["sha256"]), "carries_forward"),
             (str(target_contract_ref["sha256"]), "module_contract"),
         ),
     )
-    return ref, candidate_digest, target_base
+    return ref, candidate_digest, target_base, manager_seeded_corpus_hashes
 
 
-def _candidate_reuse_signature(
+def _module_revision_signature(
     *,
     manifest: Mapping[str, Any],
     fragments: Mapping[str, Any],
@@ -1166,7 +1542,7 @@ def _candidate_reuse_signature(
         for item in list(fragments.get("cross_unit_contract") or [])
         if _mapping_mentions(item, {unit_id, *dependency_modules})
     ]
-    return candidate_reuse_fingerprint(
+    return module_revision_fingerprint(
         unit_contract_hash=str(contract_ref.get("sha256") or ""),
         relevant_requirements_hash=task_ledger_hash,
         relevant_evidence_hash=_stable_json_hash([]),
@@ -1215,13 +1591,87 @@ def _topological_module_order(dependencies: Mapping[str, list[str]]) -> list[str
     while pending:
         ready = sorted(unit_id for unit_id, values in pending.items() if not values)
         if not ready:
-            raise ValueError("candidate reuse requires an acyclic topology")
+            raise ValueError("module identity reconciliation requires an acyclic topology")
         for unit_id in ready:
             result.append(unit_id)
             pending.pop(unit_id)
         for values in pending.values():
             values.difference_update(ready)
     return result
+
+
+def _module_role_session_generations(
+    repository: MinionV2Repository,
+    *,
+    workflow_id: str,
+    source_epoch_id: str,
+    target_subjects: set[str],
+) -> dict[str, int]:
+    """Preserve a Module identity, or allocate a fresh generation after removal."""
+
+    source_epoch = str(source_epoch_id or "").strip()
+    source_generations: dict[str, int] = {}
+    historical_generations: dict[str, int] = {}
+    for snapshot in repository.list_workflow_snapshots(workflow_id):
+        if snapshot.aggregate_type != AggregateType.DAG_NODE_RUN:
+            continue
+        subject = str(
+            snapshot.payload.get("module_name")
+            or snapshot.payload.get("unit_id")
+            or ""
+        ).strip()
+        if not subject:
+            continue
+        generation = max(
+            0, int(snapshot.payload.get("role_session_generation") or 0)
+        )
+        historical_generations[subject] = max(
+            historical_generations.get(subject, 0),
+            generation,
+        )
+        if source_epoch and str(snapshot.payload.get("epoch_id") or "") == source_epoch:
+            source_generations[subject] = max(
+                source_generations.get(subject, 0),
+                generation,
+            )
+    return {
+        subject: (
+            source_generations[subject]
+            if subject in source_generations
+            else historical_generations[subject] + 1
+            if subject in historical_generations
+            else 0
+        )
+        for subject in target_subjects
+    }
+
+
+def _module_identity_delta(
+    repository: MinionV2Repository,
+    *,
+    workflow_id: str,
+    source_epoch_id: str,
+    target_module_names: set[str],
+) -> dict[str, list[str]]:
+    source_epoch = str(source_epoch_id or "").strip()
+    source_module_names = {
+        str(
+            snapshot.payload.get("module_name")
+            or snapshot.payload.get("unit_id")
+            or ""
+        )
+        for snapshot in repository.list_workflow_snapshots(workflow_id)
+        if source_epoch
+        and snapshot.aggregate_type == AggregateType.DAG_NODE_RUN
+        and str(snapshot.payload.get("epoch_id") or "") == source_epoch
+        and str(snapshot.payload.get("node_kind") or "") == "unit"
+    }
+    source_module_names.discard("")
+    return {
+        "preserved": sorted(source_module_names & target_module_names),
+        "added": sorted(target_module_names - source_module_names),
+        "deleted": sorted(source_module_names - target_module_names),
+    }
 
 
 def _contract_value(
@@ -1249,7 +1699,7 @@ def _mapping_mentions(value: Any, identifiers: set[str]) -> bool:
     return str(value) in identifiers
 
 
-def _import_reused_candidate(
+def _carry_forward_candidate(
     source_node: AggregateSnapshot,
     target_node: AggregateSnapshot,
     candidate_digest: str,
@@ -1258,8 +1708,8 @@ def _import_reused_candidate(
     target_git = Path(str(target_node.payload.get("common_git_dir") or ""))
     target_worktree = Path(str(target_node.payload.get("workspace_path") or ""))
     if not source_git.is_dir() or not target_git.is_dir() or not target_worktree.is_dir():
-        raise ValueError("candidate reuse worktree metadata is incomplete")
-    ref_name = f"refs/pal-minion-v2/reuse/{_safe_ref(target_node.aggregate_id)}"
+        raise ValueError("Candidate carry-forward worktree metadata is incomplete")
+    ref_name = f"refs/pal-minion-v2/carry-forward/{_safe_ref(target_node.aggregate_id)}"
     completed = subprocess.run(
         ["git", f"--git-dir={target_git}", "fetch", "--no-tags", str(source_git), f"{candidate_digest}:{ref_name}"],
         stdout=subprocess.PIPE,
@@ -1552,44 +2002,6 @@ class UnitWorkViewBuilder:
 
 
 @dataclass
-class NodeQuiescer:
-    repository: MinionV2Repository
-    process_controller: WorkerProcessController
-    worktree_locks: WorkspaceLockRegistry
-
-    def quiesce(
-        self,
-        *,
-        node_run_id: str,
-        worker_id: str,
-        lease_resource_key: str,
-        fencing_token: int,
-        worktree: Path,
-        timeout_seconds: float = 10.0,
-    ) -> QuiesceResult:
-        self.repository.assert_fencing_token(lease_resource_key, worker_id, fencing_token)
-        self.process_controller.revoke_tool_token(worker_id, fencing_token)
-        self.process_controller.request_cooperative_stop(worker_id)
-        if not self.process_controller.kill_and_reap_process_group(worker_id, timeout_seconds):
-            raise RuntimeError("worker process group did not stop before quiesce timeout")
-        if self.process_controller.has_live_processes_for_workspace(worktree):
-            raise RuntimeError("a live process still holds the candidate worktree")
-        lock_path = self.worktree_locks.acquire(node_run_id, worktree)
-        try:
-            fingerprint = workspace_content_fingerprint(worktree)
-            return QuiesceResult(
-                fencing_token=fencing_token,
-                process_group_reaped=True,
-                exclusive_workspace_lock=True,
-                workspace_fingerprint=fingerprint,
-                lock_path=lock_path,
-            )
-        except BaseException:
-            self.worktree_locks.release(node_run_id)
-            raise
-
-
-@dataclass
 class CandidateSnapshotService:
     repository: MinionV2Repository
     artifacts: ContentAddressedArtifactStore
@@ -1743,12 +2155,11 @@ def dependency_fingerprint(node: AggregateSnapshot, node_by_id: Mapping[str, Agg
     return hashlib.sha256(json.dumps(dependency_data, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def provision_epoch_worktrees(
+def provision_module_worktrees(
     runtime_root: Path,
     *,
     workflow_id: str,
     workflow_name: str,
-    epoch_id: str,
     unit_ids: list[str],
     workspace: Mapping[str, Any],
 ) -> dict[str, dict[str, str]]:
@@ -1765,8 +2176,12 @@ def provision_epoch_worktrees(
     )
     result: dict[str, dict[str, str]] = {}
     for unit_id in [*unit_ids, "integration"]:
-        worktree = layout.node_worktree(epoch_id, unit_id)
-        branch = layout.node_branch(epoch_id, unit_id)
+        if unit_id == "integration":
+            worktree = layout.integration_worktree
+            branch = layout.integration_branch
+        else:
+            worktree = layout.module_worktree(unit_id)
+            branch = layout.module_branch(unit_id)
         if not worktree.exists():
             worktree.parent.mkdir(parents=True, exist_ok=True)
             _add_branch_worktree(common_git_dir, worktree=worktree, branch=branch, start_sha=base_sha)
@@ -1786,13 +2201,12 @@ def provision_epoch_worktrees(
     return result
 
 
-def provision_skeleton_epoch_worktrees(
+def provision_skeleton_module_worktrees(
     runtime_root: Path,
     *,
     artifacts: ContentAddressedArtifactStore,
     workflow_id: str,
     workflow_name: str,
-    epoch_id: str,
     unit_ids: list[str],
     verification_unit_ids: set[str] | None = None,
     workspace: Mapping[str, Any] | None = None,
@@ -1835,8 +2249,12 @@ def provision_skeleton_epoch_worktrees(
     result: dict[str, dict[str, str]] = {}
     for unit_id in unit_ids:
         verification = unit_id in verification_names
-        worktree = layout.node_worktree(epoch_id, unit_id)
-        branch = layout.node_branch(epoch_id, unit_id, verification=verification)
+        if verification:
+            worktree = layout.integration_worktree
+            branch = layout.integration_branch
+        else:
+            worktree = layout.module_worktree(unit_id)
+            branch = layout.module_branch(unit_id)
         if not worktree.exists():
             worktree.parent.mkdir(parents=True, exist_ok=True)
             _add_branch_worktree(
@@ -1845,8 +2263,6 @@ def provision_skeleton_epoch_worktrees(
                 branch=branch,
                 start_sha=skeleton_sha,
             )
-        if _git(worktree, "rev-parse", "HEAD").strip() != skeleton_sha:
-            raise RuntimeError(f"node {unit_id} did not start from the accepted skeleton commit")
         result[unit_id] = {
             "workspace_path": str(worktree),
             "common_git_dir": str(common_git_dir),
@@ -1864,50 +2280,26 @@ def provision_skeleton_epoch_worktrees(
     return result
 
 
-def provision_verification_worktree(
+def provision_module_verification_workspace(
     runtime_root: Path,
     *,
     node: AggregateSnapshot,
     candidate_digest: str,
 ) -> tuple[Path, Path]:
     if not candidate_digest:
-        raise ValueError("verification worktree requires candidate_digest")
-    common_git_dir = Path(str(node.payload.get("common_git_dir") or ""))
-    if not common_git_dir.is_dir():
-        raise ValueError("verification worktree requires the epoch common Git directory")
-    review_root = (
+        raise ValueError("module verification requires candidate_digest")
+    worktree = Path(str(node.payload.get("workspace_path") or ""))
+    if not worktree.is_dir():
+        raise ValueError("module verification requires its Module worktree")
+    scratch = (
         verification_scratch_root(runtime_root)
-        / "reviews"
-        / _safe_ref(node.aggregate_id)
+        / "modules"
+        / _safe_ref(str(node.payload.get("module_name") or node.payload.get("unit_id") or "module"))
         / _safe_ref(candidate_digest)
     )
-    worktree = review_root / "worktree"
-    scratch = review_root / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)
-    if not worktree.exists():
-        worktree.parent.mkdir(parents=True, exist_ok=True)
-        completed = subprocess.run(
-            [
-                "git",
-                f"--git-dir={common_git_dir}",
-                "worktree",
-                "add",
-                "--detach",
-                str(worktree),
-                candidate_digest,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(completed.stderr or completed.stdout or "failed to provision verification worktree")
-    else:
-        _git(worktree, "reset", "--hard", candidate_digest)
-        _git(worktree, "clean", "-fdx")
     if _git(worktree, "rev-parse", "HEAD").strip() != candidate_digest:
-        raise RuntimeError("verification worktree is not bound to the candidate SHA")
+        raise RuntimeError("Module worktree is not bound to the Candidate SHA")
     return worktree, scratch
 
 
@@ -1921,7 +2313,12 @@ def prepare_node_dependency_baseline(
     if not workspace.is_dir():
         raise ValueError(f"node workspace does not exist: {workspace}")
     adapter = str(node.payload.get("execution_adapter") or SOFTWARE_GIT_ADAPTER)
-    if adapter == SOFTWARE_GIT_ADAPTER and apply_candidates and node.state == "BLOCKED_BY_DEPS":
+    if (
+        adapter == SOFTWARE_GIT_ADAPTER
+        and apply_candidates
+        and node.state == "BLOCKED_BY_DEPS"
+        and not bool(node.payload.get("module_replan_prepared"))
+    ):
         declared_base = str(node.payload.get("base_sha") or "")
         if not declared_base:
             raise ValueError("blocked node has no declared Git baseline")
@@ -2372,7 +2769,19 @@ def _topology_sinks(depends_on: Mapping[str, list[str]], node_ids: Mapping[str, 
 
 def _find_candidate_commit(worktree: Path, candidate_key: str) -> str:
     try:
-        output = _git(worktree, "log", "--all", "--format=%H%x00%B%x00", "--grep", f"Pal-Candidate-Key: {candidate_key}", "-n", "1")
+        # Candidate idempotency is worktree-local. A matching commit reachable
+        # only from another Candidate branch does not mean this worktree has
+        # applied it.
+        output = _git(
+            worktree,
+            "log",
+            "HEAD",
+            "--format=%H%x00%B%x00",
+            "--grep",
+            f"Pal-Candidate-Key: {candidate_key}",
+            "-n",
+            "1",
+        )
     except subprocess.CalledProcessError:
         return ""
     parts = output.split("\x00")
@@ -2521,7 +2930,11 @@ def _add_branch_worktree(
         check=False,
     )
     if completed.returncode != 0:
-        raise RuntimeError(completed.stderr or completed.stdout or f"failed to create node worktree {worktree}")
+        raise RuntimeError(
+            completed.stderr
+            or completed.stdout
+            or f"failed to create stable workflow worktree {worktree}"
+        )
 
 
 def _clone_bundle_repository(common_git_dir: Path, *, bundle_bytes: bytes) -> None:

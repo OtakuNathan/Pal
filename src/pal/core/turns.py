@@ -147,6 +147,7 @@ class TurnContinuation:
     turn_settings_snapshot: dict[str, Any] = field(default_factory=dict)
     tool_observations: list[ToolObservation] = field(default_factory=list)
     tool_protocol_messages: list[dict[str, Any]] = field(default_factory=list)
+    tool_delivery_records: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_tool_call_batch: list[CanonicalToolCall] = field(default_factory=list)
     pending_tool_results: list[CanonicalToolResult] = field(default_factory=list)
     pending_assistant_tool_text: str = ""

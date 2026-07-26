@@ -9,6 +9,10 @@ from typing import Any, Mapping
 from pal.execution.git_tool import GitTool, classify_git_command
 from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
 from pal.minion.v2.artifacts import ArtifactRef
+from pal.minion.v2.execution_state import (
+    ManagerLogicalExecutionState,
+    pager_read_to_dict,
+)
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
@@ -68,7 +72,117 @@ class RoleAssignmentGateway:
             return self._artifact_put(authenticated, payload)
         if method == "git_read":
             return self._git_read(authenticated, payload)
+        if method == "execution_context":
+            return {
+                "context": self._execution_state(
+                    authenticated, payload
+                ).context().to_dict()
+            }
+        if method == "execution_begin_input":
+            return {
+                "context": self._execution_state(
+                    authenticated, payload
+                ).begin_input(
+                    input_id=str(payload.get("input_id") or ""),
+                    retention_user_turns=int(
+                        payload.get("retention_user_turns") or 5
+                    ),
+                ).to_dict()
+            }
+        if method == "execution_reconcile_projection":
+            return {
+                "context": self._execution_state(
+                    authenticated, payload
+                ).reconcile_projection(
+                    projection=tuple(
+                        str(item)
+                        for item in list(payload.get("projection") or ())
+                    ),
+                    deliveries=tuple(
+                        dict(item)
+                        for item in list(payload.get("deliveries") or ())
+                        if isinstance(item, Mapping)
+                    ),
+                ).to_dict()
+            }
+        if method == "execution_store_pager":
+            from pal.execution.session_state import PagerHandleManifest
+
+            state = self._execution_state(authenticated, payload)
+            manifest = PagerHandleManifest.from_dict(
+                dict(payload.get("manifest") or {})
+            )
+            stored = state.store_pager(manifest)
+            return {"manifest": stored.to_dict(include_payload=False)}
+        if method == "execution_read_pager":
+            state = self._execution_state(authenticated, payload)
+            return pager_read_to_dict(
+                state.read_pager(
+                    result_ref=str(payload.get("result_ref") or ""),
+                    page=int(payload.get("page") or 1),
+                    page_size=(
+                        int(payload["page_size"])
+                        if payload.get("page_size") is not None
+                        else None
+                    ),
+                    anchor=str(payload.get("anchor") or "head"),
+                )
+            )
+        if method == "execution_file_grant":
+            grant = self._execution_state(
+                authenticated, payload
+            ).file_grant(
+                file_key=str(payload.get("file_key") or ""),
+                digest=str(payload.get("digest") or ""),
+            )
+            return {
+                "grant": (
+                    {
+                        "file_key": grant.file_key,
+                        "digest": grant.digest,
+                        "total_lines": grant.total_lines,
+                        "covered_ranges": [
+                            list(item) for item in grant.covered_ranges
+                        ],
+                        "empty_file": grant.empty_file,
+                        "line_fragments": [
+                            list(item) for item in grant.line_fragments
+                        ],
+                    }
+                    if grant is not None
+                    else None
+                )
+            }
+        if method == "execution_set_file_full":
+            self._execution_state(authenticated, payload).set_file_full(
+                file_key=str(payload.get("file_key") or ""),
+                digest=str(payload.get("digest") or ""),
+                total_lines=int(payload.get("total_lines") or 0),
+            )
+            return {"ok": True}
+        if method == "execution_invalidate_file":
+            self._execution_state(authenticated, payload).invalidate_file(
+                file_key=str(payload.get("file_key") or "")
+            )
+            return {"ok": True}
+        if method == "execution_retire":
+            self._execution_state(authenticated, payload).retire()
+            return {"ok": True}
         raise ValueError(f"role gateway method is not allowed: {method}")
+
+    def _execution_state(
+        self,
+        authenticated: Mapping[str, Any],
+        params: Mapping[str, Any],
+    ) -> ManagerLogicalExecutionState:
+        assignment = dict(authenticated["assignment"])
+        session_id = str(assignment.get("session_id") or "")
+        requested = str(params.get("logical_session_id") or session_id)
+        if not session_id or requested != session_id:
+            raise ValueError(
+                "logical execution state does not match the authenticated role session"
+            )
+        return ManagerLogicalExecutionState(self.service, session_id)
 
     def _submission_status(
         self,

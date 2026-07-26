@@ -28,7 +28,11 @@ from pal.minion.v2.capabilities import (
 )
 from pal.minion.v2.contract_builder import ARCHITECT_BUILDER_CAPABILITIES
 from pal.minion.v2.execution import WorkspaceProcessHolder
-from pal.minion.v2.orchestration import MinionV2OutboxProcessor, reconcile_control_requests
+from pal.minion.v2.orchestration import (
+    MinionV2OutboxProcessor,
+    _execution_epoch_id,
+    reconcile_control_requests,
+)
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
 from pal.minion.v2.sessions import (
@@ -549,6 +553,30 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
+
+    def test_execution_epoch_identity_is_semantic_not_effect_scoped(self) -> None:
+        first = _execution_epoch_id(
+            workflow_id="workflow",
+            manifest_sha="manifest",
+        )
+        replay = _execution_epoch_id(
+            workflow_id="workflow",
+            manifest_sha="manifest",
+        )
+        replacement = _execution_epoch_id(
+            workflow_id="workflow",
+            manifest_sha="manifest",
+            source_epoch_id="prior-epoch",
+        )
+        repair = _execution_epoch_id(
+            workflow_id="workflow",
+            manifest_sha="manifest",
+            repair_bill_sha="repair-bill",
+        )
+
+        self.assertEqual(first, replay)
+        self.assertNotEqual(first, replacement)
+        self.assertNotEqual(first, repair)
 
     def _create_role_scope(
         self,
@@ -1327,6 +1355,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 )
 
             stale = create_assignment("stale-recovery-owner", "old-input")
+            service.repository.cancel_role_assignments(
+                workflow_id="workflow-recovery-owner",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-recovery-owner",
+                reason="superseded before the next logical assignment",
+            )
             current = create_assignment("current-recovery-owner", "new-input")
             worker = SemanticOrchestrator(service)
             worker._assignment_ids_by_effect["effect-key-recovery-owner"] = str(
@@ -1352,7 +1386,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             )
             self.assertEqual(
                 service.repository.read_role_assignment(stale["assignment_id"])["state"],
-                RoleAssignmentState.QUEUED.value,
+                RoleAssignmentState.CANCELLED.value,
             )
             release.set()
             await task
@@ -1508,6 +1542,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             )
 
         stale = create_assignment("stale-explicit-settlement", "old-input")
+        service.repository.cancel_role_assignments(
+            workflow_id="workflow-explicit-settlement",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-explicit-settlement",
+            reason="superseded before the next logical assignment",
+        )
         completed = create_assignment("completed-explicit-settlement", "new-input")
         attempt = service.repository.claim_role_assignment(str(completed["assignment_id"]))
         lease_resource = f"assignment:{completed['assignment_id']}"
@@ -1903,7 +1943,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         (run_dir / "session-continuation-999.json").write_text(
             json.dumps(
                 {
-                    "schema_version": "2",
+                    "schema_version": "3",
                     "session_id": "inv-session-checkpoint",
                     "scope_kind": "wrong",
                     "subject_key": "wrong",
@@ -2012,22 +2052,63 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "reload at safe point"):
             asyncio.run(runner._raise_if_restart_requested())
 
-    def test_runner_does_not_append_original_assignment_after_triage_retry(self) -> None:
+    def test_runner_keys_new_session_inputs_by_assignment_not_repeated_text(self) -> None:
         restored = {
             "initial_instruction": "implement the bound module",
+            "response_keys": ["assignment-produce"],
             "tool_protocol_messages": [
                 {"role": "assistant", "content": "implementation is ready"},
             ],
         }
 
-        self.assertFalse(
-            MinionRunner._is_new_session_response(restored, "implement the bound module")
-        )
-        self.assertTrue(
-            MinionRunner._is_new_session_response(
+        self.assertEqual(
+            MinionRunner._new_session_response_message(
                 restored,
-                "The user selected the bounded compatibility option.",
-            )
+                response_key="assignment-produce",
+                response_text="implement the bound module",
+            ),
+            "",
+        )
+        repair = MinionRunner._new_session_response_message(
+            restored,
+            response_key="assignment-repair-1",
+            response_text=(
+                "# Contract Invocation\n\n"
+                "## Assignment\n"
+                "Repair only the bound RepairBill.\n\n"
+                "## Immutable Inputs\n"
+                "- reference:repair_bill: path=/pal/references/repair_bill-1.json"
+            ),
+        )
+        self.assertIn("# New Manager-Bound Role Input", repair)
+        self.assertIn("reference:repair_bill", repair)
+        self.assertIn("/pal/references/repair_bill-1.json", repair)
+
+        repeated_instruction_new_bill = MinionRunner._new_session_response_message(
+            {
+                **restored,
+                "response_keys": ["assignment-produce", "assignment-repair-1"],
+            },
+            response_key="assignment-repair-2",
+            response_text=(
+                "# Contract Invocation\n\n"
+                "## Assignment\n"
+                "Repair only the bound RepairBill.\n\n"
+                "## Immutable Inputs\n"
+                "- reference:repair_bill: path=/pal/references/repair_bill-2.json"
+            ),
+        )
+        self.assertIn(
+            "/pal/references/repair_bill-2.json",
+            repeated_instruction_new_bill,
+        )
+        self.assertEqual(
+            MinionRunner._new_session_response_message(
+                restored,
+                response_key="",
+                response_text="The user selected the bounded compatibility option.",
+            ),
+            "",
         )
 
     def test_effect_retry_reuses_same_durable_role_assignment(self) -> None:
@@ -2222,21 +2303,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
 
         self.assertIn("was rejected and is not accepted", instruction)
-        self.assertIn("declaration-only", instruction)
-        self.assertIn("design the whole system at module level", instruction)
-        self.assertIn("never at function or algorithm implementation level", instruction)
-        self.assertIn("lifecycle, ownership, invariants, and state machines", instruction)
-        self.assertIn("never implement algorithms, business logic, private helpers", instruction)
-        self.assertIn("do not compile, build, link, test, or execute the skeleton", instruction)
-        self.assertIn("Use the user-specified language", instruction)
-        self.assertIn("Do not design a build system or create a build_system module", instruction)
-        self.assertIn("runtime entrypoint or composition root", instruction)
-        self.assertIn("leave the minimum sufficient compile/test method to Coder and Verifier", instruction)
-        self.assertIn("declare only that path as an implementation scope", instruction)
-        self.assertIn("multiple existing build conventions", instruction)
-        self.assertIn("exactly one owner for every state and resource", instruction)
-        self.assertIn("closed lifecycle transitions and composition joins", instruction)
-        self.assertIn("explicit deferral of every implementation detail", instruction)
+        self.assertIn("Author the current Architecture Skeleton", instruction)
+        self.assertIn("strictly module-level declaration", instruction)
+        self.assertIn("never implement product behavior", instruction)
+        self.assertLess(len(instruction), 2_000)
         rendered_input = render_minion_task_prompt(
             MinionInvocationPack(
                 invocation_id="inv-architect-boundary",
@@ -2245,7 +2315,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             )
         )
         self.assertIn("## Assignment", rendered_input)
-        self.assertIn("This invocation is declaration-only", rendered_input)
+        self.assertIn("strictly module-level declaration", rendered_input)
         self.assertIn("Read revision_finding before any other work", instruction)
         self.assertIn("package/__init__.py", instruction)
         self.assertIn("Do not report the earlier submit as completion", instruction)
@@ -2458,8 +2528,11 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
         )
 
-        session_id = module_verifier_session_id("wf-verifier-session", "router")
-        expected = [session_id, session_id]
+        verifier_id = module_verifier_session_id(
+            "wf-verifier-session",
+            "router",
+        )
+        expected = [verifier_id, verifier_id]
         self.assertEqual(claims, expected)
         self.assertEqual(
             [item.payload["active_worker_id"] for item in actions],
@@ -2621,7 +2694,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
         workspace = self.runtime_root / "review-restart"
         workspace.mkdir()
-        verifier_id = module_verifier_session_id("wf-review-restart", "router")
+        verifier_id = module_verifier_session_id(
+            "wf-review-restart",
+            "router",
+        )
         node = SimpleNamespace(
             workflow_id="wf-review-restart",
             aggregate_id="node-review-restart",
@@ -2630,6 +2706,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             version=5,
             payload={
                 "module_name": "router",
+                "candidate_cycle": 1,
                 "active_worker_id": verifier_id,
                 "lease_resource_key": "node:node-review-restart:review",
                 "fencing_token": 6,
@@ -3347,9 +3424,13 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         identity = lambda pack, **_kwargs: pack
 
-        def capture_prompt_pack(pack, **_kwargs):
+        def capture_sandbox_pack(_runtime_root, pack, **_kwargs):
             captured["control_route"] = dict(
                 dict(pack.metadata.get("minion_v2") or {}).get("control_route") or {}
+            )
+            captured["response_key"] = str(
+                dict(pack.metadata.get("agent_session") or {}).get("response_key")
+                or ""
             )
             return pack
 
@@ -3376,11 +3457,11 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             patch("pal.minion.v2.semantic_orchestration.orchestrator.resolve_pinned_minion_pack", lambda pack, **_kwargs: pack),
             patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_role_capability_policy", identity),
             patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_research_capability_policy", identity),
+            patch("pal.minion.v2.semantic_orchestration.orchestrator.sanitize_runner_session_pack", identity),
             patch(
-                "pal.minion.v2.semantic_orchestration.orchestrator.sanitize_runner_session_pack",
-                capture_prompt_pack,
+                "pal.minion.v2.semantic_orchestration.orchestrator.with_minion_sandbox_metadata",
+                capture_sandbox_pack,
             ),
-            patch("pal.minion.v2.semantic_orchestration.orchestrator.with_minion_sandbox_metadata", lambda _root, pack, **_kwargs: pack),
         ):
             with self.assertRaisesRegex(RuntimeError, "stop-after-invocation-record"):
                 asyncio.run(
@@ -3410,6 +3491,14 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "reply_target": {"connection_id": "client-1"},
                 "control_scope_key": "socket:client-1",
             },
+        )
+        assignments = worker.repository.list_role_assignments(
+            workflow_id="wf-lease-owner"
+        )
+        self.assertEqual(len(assignments), 1)
+        self.assertEqual(
+            captured["response_key"],
+            assignments[0]["assignment_id"],
         )
 
     def _create_task(self, service: MinionV2WorkflowService, suffix: str) -> str:
@@ -3849,7 +3938,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "workflow_id": "wf_internal",
                 "state": "CANCEL_REQUESTED",
                 "architecture_review": "required",
-                "candidate_reuse": False,
+                "module_identity_reuse": False,
             }
         )
 
@@ -3869,7 +3958,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(submitted[0]["workflow_id"], "wf_internal")
         self.assertEqual(submitted[0]["actor"], "nathan")
         self.assertEqual(submitted[0]["source_channel"], "socket:test")
-        self.assertFalse(result.structured["candidate_reuse"])
+        self.assertFalse(result.structured["module_identity_reuse"])
         self.assertNotIn("workflow_id", result.structured)
 
     def test_execution_restart_creates_fresh_review_workflow_after_old_workflow_settles(self) -> None:

@@ -357,6 +357,15 @@ class _ExecutionOverlay:
             runtime_root=getattr(delegate, "runtime_root", None),
             sync_executor=getattr(delegate, "sync_executor", None),
         )
+        # The overlay changes only the immutable registry view. Pager handles,
+        # file delivery grants, and the user-turn clock belong to the same
+        # logical role session as the delegate runtime.
+        delegate_pager = getattr(delegate, "tool_result_pager", None)
+        delegate_state = getattr(delegate, "logical_state", None)
+        if delegate_pager is not None:
+            self.runtime.tool_result_pager = delegate_pager
+        if delegate_state is not None:
+            self.runtime.logical_state = delegate_state
         self._mount_allowed_generation(
             allowed_capabilities,
             guidance_overrides=guidance_overrides,
@@ -583,6 +592,14 @@ class MinionScopedExecutionRuntime:
 
     def read_tool_result_page(self, **kwargs: Any) -> Any:
         return self.base_runtime.read_tool_result_page(**kwargs)
+
+    def reconcile_tool_context(self, **kwargs: Any) -> Any:
+        reconcile = getattr(
+            self._original_runtime,
+            "reconcile_tool_context",
+            None,
+        )
+        return reconcile(**kwargs) if callable(reconcile) else None
 
     def resolve_capability_address(self, name: object) -> str:
         return self.base_runtime.resolve_capability_address(name)

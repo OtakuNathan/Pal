@@ -850,7 +850,7 @@ def no_progress_detected(history: Sequence[Mapping[str, Any]]) -> bool:
     return len(fingerprints) == 1 and "" not in fingerprints and len(tree_hashes) == 1 and "" not in tree_hashes
 
 
-def candidate_reuse_fingerprint(
+def module_revision_fingerprint(
     *,
     unit_contract_hash: str,
     relevant_requirements_hash: str,
@@ -876,7 +876,7 @@ def candidate_reuse_fingerprint(
         "environment_policy_hash": environment_policy_hash,
     }
     if any(not str(value) for value in payload.values()):
-        raise ValueError("candidate reuse fingerprint requires every contract and environment hash")
+        raise ValueError("module revision fingerprint requires every contract and environment hash")
     return _normalized_hash(payload)
 
 

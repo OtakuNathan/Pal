@@ -250,7 +250,7 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
                 RoleSessionAction.ACTIVATE,
             )
 
-    def test_module_verifier_session_lives_until_workflow_terminal(self) -> None:
+    def test_module_verifier_session_suspends_until_module_or_workflow_terminal(self) -> None:
         session_id = "session-router-candidate-a"
         self.repository.ensure_role_session(
             session_id=session_id,
@@ -299,26 +299,90 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             assignment_id=assignment["assignment_id"],
             submission_payload_hash=payload_hash,
         )
-        with self.assertRaisesRegex(ValueError, "lives for the workflow"):
+        with self.assertRaisesRegex(ValueError, "lives for its Module identity"):
             self.repository.complete_role_session(session_id)
+        self.assertEqual(
+            self.repository.read_role_session(session_id)["status"],
+            RoleSessionState.SUSPENDED.value,
+        )
         workflow = self.repository.read_snapshot(
             AggregateType.WORKFLOW,
             "workflow-router",
         )
+        assert workflow is not None
         self.repository.dispatch(
             ActionEnvelope(
-                action_type="REJECT_WORKFLOW",
+                action_type="MARK_COMPLETED",
                 workflow_id="workflow-router",
                 aggregate_type=AggregateType.WORKFLOW,
                 aggregate_id="workflow-router",
                 actor="test",
                 expected_version=workflow.version,
+                payload={"result_artifact_ref": self.submission_ref.to_dict()},
             )
         )
-        self.assertTrue(self.repository.complete_role_session(session_id))
+        completed_sessions = self.repository.complete_workflow_role_sessions(
+            "workflow-router"
+        )
+        self.assertIn(session_id, completed_sessions)
         self.assertEqual(
             self.repository.read_role_session(session_id)["status"],
             RoleSessionState.COMPLETED.value,
+        )
+
+    def test_deleted_module_can_retire_its_logical_session(self) -> None:
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_EXECUTION_EPOCH",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.EXECUTION_EPOCH,
+                aggregate_id="epoch-after-router",
+                actor="test",
+                expected_version=0,
+                payload={
+                    "architecture_manifest_ref": {"sha256": "manifest-next"},
+                    "topology_ref": {"sha256": "topology-next"},
+                },
+            )
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="START_EXECUTION",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.EXECUTION_EPOCH,
+                aggregate_id="epoch-after-router",
+                actor="test",
+                expected_version=1,
+            )
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-other",
+                actor="test",
+                expected_version=0,
+                payload={
+                    "epoch_id": "epoch-after-router",
+                    "module_name": "other",
+                    "unit_contract_ref": {"sha256": "contract-other"},
+                },
+            )
+        )
+
+        self.assertTrue(
+            self.repository.complete_role_session(
+                "session-router",
+                status="cancelled",
+            )
+        )
+        self.assertEqual(
+            self.repository.read_role_session("session-router")["status"],
+            RoleSessionState.CANCELLED.value,
+        )
+        self.assertTrue(
+            self.repository.read_role_execution_state("session-router")["retired"]
         )
 
     def test_role_session_scope_is_immutable(self) -> None:
@@ -388,7 +452,7 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             subject_key="router",
         )
 
-    def test_v19_cutover_triages_only_active_work_and_preserves_completed_history(self) -> None:
+    def test_latest_cutover_archives_active_work_and_preserves_completed_history(self) -> None:
         completed_ref = self.artifacts.put_json(
             {"status": "complete"},
             artifact_type="PublishedBranchArtifact",
@@ -437,9 +501,10 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             "workflow-completed",
         )
         assert active is not None and node is not None and completed is not None
-        self.assertEqual(active.state, "TRIAGE_REQUIRED")
-        self.assertEqual(active.payload["blocker"]["kind"], "orchestration_contract_changed")
-        self.assertEqual(node.state, "TRIAGE_REQUIRED")
+        self.assertEqual(active.state, "CANCELLED")
+        self.assertTrue(active.payload["archived"])
+        self.assertEqual(active.payload["required_orchestration_contract_version"], "5")
+        self.assertEqual(node.state, "CANCELLED")
         self.assertEqual(
             self.repository.read_role_session("session-router")["status"],
             "cancelled",
@@ -447,6 +512,110 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
         self.assertEqual(completed.state, "COMPLETED")
         self.assertEqual(completed.payload["history_marker"], "keep")
         self.assertNotIn("blocker", completed.payload)
+
+    def test_v22_cutover_retires_candidate_scoped_role_work(self) -> None:
+        assignment = self.repository.create_role_assignment(
+            self.request(key="pre-v20-candidate")
+        )
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE minion_v2_aggregate_snapshots
+                SET state = 'TRIAGE_REQUIRED',
+                    payload_json = json_set(
+                        payload_json,
+                        '$.triage_resume_state',
+                        'ACTIVE'
+                    )
+                WHERE aggregate_type = 'workflow'
+                  AND aggregate_id = 'workflow-router'
+                """
+            )
+            connection.execute(
+                """
+                UPDATE minion_v2_aggregate_snapshots
+                SET state = 'TRIAGE_REQUIRED',
+                    payload_json = json_set(
+                        payload_json,
+                        '$.triage_resume_state',
+                        'BLOCKED_BY_DEPS'
+                    )
+                WHERE aggregate_type = 'dag_node_run'
+                  AND aggregate_id = 'node-router'
+                """
+            )
+            connection.execute(
+                "UPDATE minion_v2_schema_meta SET schema_value = '19' "
+                "WHERE schema_key = 'schema_version'"
+            )
+
+        self.repository.ensure_schema()
+
+        workflow = self.repository.read_snapshot(
+            AggregateType.WORKFLOW,
+            "workflow-router",
+        )
+        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, "node-router")
+        assert workflow is not None and node is not None
+        self.assertEqual(workflow.state, "CANCELLED")
+        self.assertTrue(workflow.payload["archived"])
+        self.assertEqual(node.state, "CANCELLED")
+        self.assertIn(
+            "workflow-owned Module identities",
+            workflow.payload["archive_reason"],
+        )
+        self.assertEqual(
+            self.repository.read_role_assignment(assignment["assignment_id"])[
+                "state"
+            ],
+            RoleAssignmentState.CANCELLED.value,
+        )
+        self.assertEqual(
+            self.repository.read_role_session("session-router")["status"],
+            RoleSessionState.CANCELLED.value,
+        )
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            version = connection.execute(
+                "SELECT schema_value FROM minion_v2_schema_meta "
+                "WHERE schema_key = 'schema_version'"
+            ).fetchone()[0]
+            indexes = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA index_list(minion_v2_role_assignments)"
+                )
+            }
+        self.assertEqual(version, "22")
+        self.assertIn("minion_v2_role_assignments_one_open", indexes)
+
+    def test_v22_cutover_keeps_v5_workflow_active(self) -> None:
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE minion_v2_aggregate_snapshots
+                SET payload_json = json_set(
+                    payload_json,
+                    '$.orchestration_contract_version',
+                    '5'
+                )
+                WHERE aggregate_type = 'workflow'
+                  AND aggregate_id = 'workflow-router'
+                """
+            )
+            connection.execute(
+                "UPDATE minion_v2_schema_meta SET schema_value = '21' "
+                "WHERE schema_key = 'schema_version'"
+            )
+
+        self.repository.ensure_schema()
+
+        workflow = self.repository.read_snapshot(
+            AggregateType.WORKFLOW,
+            "workflow-router",
+        )
+        assert workflow is not None
+        self.assertEqual(workflow.state, "ACTIVE")
+        self.assertFalse(bool(workflow.payload.get("archived")))
 
     def test_v18_renames_legacy_protocol_tables_without_a_compatibility_view(self) -> None:
         with sqlite3.connect(str(self.repository.db_path)) as connection:
@@ -713,7 +882,7 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             self.repository.read_role_attempt(attempt["attempt_id"])["status"],
             "failed",
         )
-        with self.assertRaisesRegex(ValueError, "lives for the workflow"):
+        with self.assertRaisesRegex(ValueError, "lives for its Module identity"):
             self.repository.complete_role_session("session-router")
 
         self.repository.dispatch(
@@ -865,6 +1034,12 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
         produce = self.repository.create_role_assignment(
             self.request(key="router-produce")
         )
+        self.repository.cancel_role_assignments(
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-router",
+            reason="produce assignment settled before repair",
+        )
         self.repository.ensure_role_session(
             session_id="session-router",
             workflow_id="workflow-router",
@@ -937,7 +1112,7 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             self.repository.read_role_session("session-router")["status"],
             "suspended",
         )
-        with self.assertRaisesRegex(ValueError, "lives for the workflow"):
+        with self.assertRaisesRegex(ValueError, "lives for its Module identity"):
             self.repository.complete_role_session("session-router")
 
         self.repository.dispatch(
@@ -1043,26 +1218,13 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             "parent state superseded this result",
         )
 
-    def test_assignment_cancellation_can_preserve_reused_submission(self) -> None:
+    def test_role_session_rejects_a_second_open_assignment(self) -> None:
         preserved = self.repository.create_role_assignment(self.request(key="preserved"))
-        other = self.repository.create_role_assignment(self.request(key="other"))
-
-        cancelled = self.repository.cancel_role_assignments(
-            workflow_id="workflow-router",
-            aggregate_type=AggregateType.DAG_NODE_RUN,
-            aggregate_id="node-router",
-            reason="superseded by preserved receipt",
-            exclude_assignment_id=preserved["assignment_id"],
-        )
-
-        self.assertEqual([item["assignment_id"] for item in cancelled], [other["assignment_id"]])
+        with self.assertRaisesRegex(ValueError, "already has an open assignment"):
+            self.repository.create_role_assignment(self.request(key="other"))
         self.assertEqual(
             self.repository.read_role_assignment(preserved["assignment_id"])["state"],
             "queued",
-        )
-        self.assertEqual(
-            self.repository.read_role_assignment(other["assignment_id"])["state"],
-            "cancelled",
         )
 
     def test_business_action_and_submission_settlement_commit_atomically(self) -> None:

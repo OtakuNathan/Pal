@@ -260,12 +260,14 @@ def _replan_batch_ready_reducer(
     return updated
 
 
-def _replacement_epoch_started_reducer(
+def _successor_epoch_started_reducer(
     payload: Mapping[str, Any],
     action: ActionEnvelope,
 ) -> Mapping[str, Any]:
     updated = dict(_merge_payload(payload, action))
-    updated["replacement_execution_epoch_id"] = str(action.payload.get("replacement_execution_epoch_id") or "")
+    updated["successor_execution_epoch_id"] = str(
+        action.payload.get("successor_execution_epoch_id") or ""
+    )
     return updated
 
 
@@ -303,12 +305,34 @@ def _architecture_review_reopened_reducer(
     return updated
 
 
-def _architecture_snapshotted_reducer(
+def _architecture_submission_reducer(
     payload: Mapping[str, Any],
     action: ActionEnvelope,
 ) -> Mapping[str, Any]:
     updated = dict(_merge_payload(payload, action))
+    updated["architecture_submission_cycle"] = (
+        int(payload.get("architecture_submission_cycle") or 0) + 1
+    )
+    return updated
+
+
+def _architecture_snapshotted_reducer(
+    payload: Mapping[str, Any],
+    action: ActionEnvelope,
+) -> Mapping[str, Any]:
+    updated = dict(_architecture_submission_reducer(payload, action))
     updated.pop("architecture_repair_baseline_ref", None)
+    return updated
+
+
+def _system_verification_prepared_reducer(
+    payload: Mapping[str, Any],
+    action: ActionEnvelope,
+) -> Mapping[str, Any]:
+    updated = dict(_merge_payload(payload, action))
+    updated["system_verification_cycle"] = (
+        int(payload.get("system_verification_cycle") or 0) + 1
+    )
     return updated
 
 
@@ -351,10 +375,6 @@ def _architecture_resume_cleanup_reducer(
     action: ActionEnvelope,
 ) -> Mapping[str, Any]:
     updated = dict(_resume_cleanup_reducer(payload, action))
-    if action.action_type == "RESOLVE_TRIAGE":
-        updated["architect_session_generation"] = int(
-            payload.get("architect_session_generation") or 0
-        ) + 1
     updated.pop("failure_artifact_ref", None)
     source_field = "triage_resume_state" if action.action_type == "RESOLVE_TRIAGE" else "resume_state"
     source = str(payload.get(source_field) or "")
@@ -772,6 +792,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             "DATA_ARCHITECT_COMPLETED",
             S.REVIEW_QUEUED,
             guard=_required("requirements_ref", "architecture_manifest_ref"),
+            reducer=_architecture_submission_reducer,
             effects=_effect("run_reviewer_role", role_mode="architecture"),
         ),
         _spec(
@@ -1083,10 +1104,10 @@ def _execution_transitions() -> list[TransitionSpec]:
         _spec(
             kind,
             S.REPLAN_REQUIRED,
-            "REPLACEMENT_EPOCH_STARTED",
+            "SUCCESSOR_EPOCH_STARTED",
             S.SUPERSEDED,
-            guard=_required("replacement_execution_epoch_id"),
-            reducer=_replacement_epoch_started_reducer,
+            guard=_required("successor_execution_epoch_id"),
+            reducer=_successor_epoch_started_reducer,
         ),
         _spec(kind, S.PAUSE_REQUESTED, "NODES_PAUSED", S.PAUSED),
         _spec(
@@ -1180,14 +1201,32 @@ def _node_transitions() -> list[TransitionSpec]:
         _spec(
             kind,
             S.BLOCKED_BY_DEPS,
-            "REUSE_ACCEPTED_CANDIDATE",
+            "CARRY_FORWARD_MODULE",
             S.ACCEPTED,
             guard=_all(
                 _node_kind("unit"),
-                _required("candidate_ref", "candidate_digest", "verification_artifact_ref", "reuse_fingerprint"),
+                _required(
+                    "candidate_ref",
+                    "candidate_digest",
+                    "verification_artifact_ref",
+                    "module_revision_fingerprint",
+                ),
                 _ready_dependencies,
             ),
             effects=_effects("notify_node_accepted", "publish_accepted_memory_candidate"),
+        ),
+        _spec(
+            kind,
+            S.BLOCKED_BY_DEPS,
+            "PRESERVE_MODULE_WORKTREE",
+            S.BLOCKED_BY_DEPS,
+            guard=_all(
+                _node_kind("unit"),
+                _required(
+                    "preserved_from_node_run_id",
+                    "parent_candidate_digest",
+                ),
+            ),
         ),
         _spec(kind, S.BLOCKED_BY_DEPS, "DEPENDENCIES_ACCEPTED", S.QUEUED, guard=_all(_node_kind("unit"), _ready_dependencies), effects=_effect("admit_implementation_role", role_mode="produce")),
         _spec(
@@ -1273,6 +1312,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 "system_commit_sha",
                 "verification_workspace_fingerprint",
             ),
+            reducer=_system_verification_prepared_reducer,
             effects=_effect("admit_verifier_role", role_mode="system"),
         ),
         _spec(kind, S.VERIFY_PREPARING, "REBIND_VERIFICATION_PREPARER", S.VERIFY_PREPARING),

@@ -58,6 +58,14 @@ from pal.execution.tool_result_pager import (
     ToolResultPage,
     ToolResultPagerStore,
 )
+from pal.execution.session_state import (
+    FileDeliveryManifest,
+    FileDeliverySpan,
+    InMemoryLogicalExecutionState,
+    LogicalExecutionContext,
+    LogicalExecutionStateBackend,
+    projection_hash,
+)
 from pal.shared import (
     BoundCapabilityAction,
     MountedSubtreeHandle,
@@ -75,6 +83,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
     provider_registry: dict[str, Any] = field(default_factory=dict)
     l3_plugin_registry: L3PluginRegistry = field(default_factory=L3PluginRegistry)
     runtime_root: Path | None = None
+    logical_state: LogicalExecutionStateBackend = field(
+        default_factory=InMemoryLogicalExecutionState
+    )
     tool_result_pager: ToolResultPagerStore = field(default_factory=ToolResultPagerStore)
     lifecycle_controller: Any | None = None
     sync_executor_max_workers: int = 4
@@ -90,6 +101,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     )
 
     def __post_init__(self) -> None:
+        self.tool_result_pager.state_backend = self.logical_state
         default_l3 = NullL3Plugin()
         self.provider_registry.setdefault(default_l3.provider_id, default_l3)
         if self.l3_plugin_registry.get(default_l3.provider_id) is None:
@@ -197,12 +209,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
         turn_id: str,
         scope_key: str = "",
         retention_user_turns: int = DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS,
-    ) -> None:
-        self.tool_result_pager.begin_turn(
+        input_id: str = "",
+    ) -> LogicalExecutionContext:
+        return self.tool_result_pager.begin_turn(
             runtime_root=self.runtime_root,
             turn_id=turn_id,
             scope_key=scope_key,
             retention_user_turns=retention_user_turns,
+            input_id=input_id,
         )
 
     def read_tool_result_page(
@@ -212,8 +226,112 @@ class ExecutionRuntime(ExecutionRuntimePort):
         page: int = 1,
         page_size: int | None = None,
         anchor: str = "head",
+        turn_id: str | None = None,
+        logical_session_id: str = "",
     ) -> ToolResultPage | None:
-        return self.tool_result_pager.read_page(result_ref, page=page, page_size=page_size, anchor=anchor)
+        return self.tool_result_pager.read_page(
+            result_ref,
+            page=page,
+            page_size=page_size,
+            anchor=anchor,
+            turn_id=turn_id,
+            logical_session_id=logical_session_id,
+        )
+
+    def logical_context_for_turn(self, turn_id: str | None) -> LogicalExecutionContext:
+        return self.tool_result_pager.context_for_turn(turn_id)
+
+    def reconcile_tool_context(
+        self,
+        *,
+        turn_id: str | None,
+        original_messages: list[dict[str, Any]],
+        projected_messages: list[dict[str, Any]],
+        delivery_records: dict[str, dict[str, Any]],
+    ) -> LogicalExecutionContext:
+        context = self.logical_context_for_turn(turn_id)
+        original_by_call = {
+            str(message.get("tool_call_id") or ""): str(message.get("content") or "")
+            for message in original_messages
+            if str(message.get("role") or "") == "tool"
+        }
+        projection: list[str] = []
+        deliveries: list[dict[str, Any]] = []
+        for message in projected_messages:
+            if str(message.get("role") or "") != "tool":
+                continue
+            call_id = str(message.get("tool_call_id") or "")
+            content = str(message.get("content") or "")
+            projection.append(projection_hash(call_id, content))
+            manifest = FileDeliveryManifest.from_dict(delivery_records.get(call_id))
+            source = original_by_call.get(call_id, "")
+            if manifest is None or not source:
+                continue
+            raw_ranges = message.get("_pal_visible_source_ranges")
+            source_ranges = (
+                tuple(
+                    (max(0, int(item[0])), max(0, int(item[1])))
+                    for item in list(raw_ranges or ())
+                    if isinstance(item, (list, tuple)) and len(item) == 2
+                )
+                if raw_ranges is not None
+                else ((0, len(source)),)
+            )
+            visible_spans_list: list[FileDeliverySpan] = []
+            for span in manifest.spans:
+                for range_start, range_end in source_ranges:
+                    visible_start = max(span.start_offset, range_start)
+                    visible_end = min(span.end_offset, range_end)
+                    if visible_end <= visible_start:
+                        continue
+                    visible_spans_list.append(
+                        FileDeliverySpan(
+                            start_offset=visible_start,
+                            end_offset=visible_end,
+                            start_line=span.start_line,
+                            end_line=span.end_line,
+                            visible_start_in_line=(
+                                span.visible_start_in_line
+                                + visible_start
+                                - span.start_offset
+                            ),
+                            visible_end_in_line=(
+                                span.visible_start_in_line
+                                + visible_end
+                                - span.start_offset
+                            ),
+                            line_length=span.line_length,
+                        )
+                    )
+            visible_spans = tuple(visible_spans_list)
+            empty_visible = (
+                manifest.empty_file
+                and any(
+                    range_start <= source.find(manifest.empty_marker)
+                    and range_end
+                    >= source.find(manifest.empty_marker)
+                    + len(manifest.empty_marker)
+                    for range_start, range_end in source_ranges
+                )
+                and manifest.empty_marker in source
+            )
+            if not visible_spans and not empty_visible:
+                continue
+            deliveries.append(
+                FileDeliveryManifest(
+                    file_key=manifest.file_key,
+                    digest=manifest.digest,
+                    total_lines=manifest.total_lines,
+                    spans=visible_spans,
+                    empty_file=empty_visible,
+                    empty_marker=manifest.empty_marker,
+                ).to_dict()
+            )
+        return self.logical_state.reconcile_projection(
+            logical_session_id=context.logical_session_id,
+            projection=tuple(projection),
+            deliveries=tuple(deliveries),
+        )
 
     def list_tool_specs(self) -> list[dict[str, Any]]:
         generation = self._registry_generation
@@ -458,7 +576,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
         lifecycle = self._maybe_handle_lifecycle_action(record.binding.descriptor)
         try:
             raw = lifecycle if lifecycle is not None else self._call_record_sync(record, call, validated, turn_id, budget, allow_tools)
-            return self._normalize_invocation_result(record, call, raw, budget=budget)
+            return self._normalize_invocation_result(
+                record,
+                call,
+                raw,
+                budget=budget,
+                turn_id=turn_id,
+            )
         except ToolRejectedError as exc:
             return self._rejected_error_result(exc)
         except Exception as exc:
@@ -503,7 +627,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
             raw = lifecycle if lifecycle is not None else await self._call_record_async(
                 record, call, validated, turn_id, budget, allow_tools
             )
-            return self._normalize_invocation_result(record, call, raw, budget=budget)
+            return self._normalize_invocation_result(
+                record,
+                call,
+                raw,
+                budget=budget,
+                turn_id=turn_id,
+            )
         except ToolRejectedError as exc:
             return self._rejected_error_result(exc)
         except Exception as exc:
@@ -626,7 +756,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 turn_id=turn_id,
             )
         if record.alias == "read_tool_result":
-            return self._read_tool_result_builtin(record, call, args)
+            return self._read_tool_result_builtin(
+                record,
+                call,
+                args,
+                turn_id=turn_id,
+            )
         return None
 
     async def _invoke_facade_builtin_async(
@@ -667,7 +802,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 turn_id=turn_id,
             )
         if record.alias == "read_tool_result":
-            return self._read_tool_result_builtin(record, call, args)
+            return self._read_tool_result_builtin(
+                record,
+                call,
+                args,
+                turn_id=turn_id,
+            )
         return None
 
     def _read_tool_result_builtin(
@@ -675,9 +815,19 @@ class ExecutionRuntime(ExecutionRuntimePort):
         record: CompiledToolRecord,
         call: CanonicalToolCall,
         args: dict[str, Any],
+        *,
+        turn_id: str | None,
     ) -> ToolInvocationResult:
         raw = record.binding.callable(
-            CapabilityCall(name=record.canonical_path, args=args, meta={"tool_call": call})
+            CapabilityCall(
+                name=record.canonical_path,
+                args=args,
+                meta={
+                    "tool_call": call,
+                    "turn_id": str(turn_id or ""),
+                    "execution_runtime": self,
+                },
+            )
         )
         if not isinstance(raw, CapabilityResult):
             return FailedResult(
@@ -688,20 +838,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 llm_text="read_tool_result returned an invalid internal result",
             )
         if raw.status != RuntimeStatus.OK:
+            details = dict(raw.structured or {})
+            reason = str(details.get("reason") or "expired_handle")
+            affordances = self._pager_recovery_affordances(details)
             return FailedResult(
-                error_code=str((raw.structured or {}).get("reason") or "result_handle_expired"),
+                error_code=reason,
                 error=raw.text,
                 effect=EffectOutcome.NONE,
                 retry=RetryDirective.DO_NOT_RETRY,
                 llm_text=raw.llm_text,
-                details=dict(raw.structured or {}),
-                affordances=[
-                    ToolAffordance(
-                        tool="search_tools",
-                        arguments={"query": "original tool"},
-                        reason="The handle is expired; rediscover and rerun the original tool if its retry semantics permit.",
-                    )
-                ],
+                details=details,
+                affordances=affordances,
             )
         output = {**dict(raw.structured or {}), "page_text": raw.text}
         affordances: list[ToolAffordance] = []
@@ -731,7 +878,52 @@ class ExecutionRuntime(ExecutionRuntimePort):
             output,
             llm_text=raw.llm_text,
             affordances=affordances,
+            context_delivery=raw.context_delivery,
         )
+
+    def _pager_recovery_affordances(
+        self,
+        details: dict[str, Any],
+    ) -> list[ToolAffordance]:
+        origin = dict(details.get("origin") or {})
+        alias = str(origin.get("alias") or "")
+        arguments = dict(origin.get("arguments") or {})
+        invocation_mode = str(origin.get("invocation_mode") or "")
+        execution = dict(origin.get("execution") or {})
+        retry_policy = str(execution.get("retry_policy") or "")
+        idempotency = str(execution.get("idempotency") or "")
+        current = self.registry_generation.record_for_alias(alias) if alias else None
+        if (
+            current is not None
+            and retry_policy == "automatic"
+            and idempotency == "idempotent"
+        ):
+            if invocation_mode == InvocationMode.INDIRECT.value:
+                return [
+                    ToolAffordance(
+                        tool="call_tool",
+                        arguments={"name": alias, "args": arguments},
+                        reason="The materialized result expired; rerun the original idempotent read.",
+                    )
+                ]
+            return [
+                ToolAffordance(
+                    tool=alias,
+                    arguments=arguments,
+                    reason="The materialized result expired; rerun the original idempotent read.",
+                )
+            ]
+        query = str(origin.get("search_text") or alias or "original tool")
+        return [
+            ToolAffordance(
+                tool="search_tools",
+                arguments={"query": query},
+                reason=(
+                    "The handle expired. Rediscover the current tool and inspect its retry semantics; "
+                    "do not automatically repeat an effectful or non-idempotent call."
+                ),
+            )
+        ]
 
     @staticmethod
     def _search_generation(generation: ToolRegistryGeneration, args: dict[str, Any]) -> dict[str, Any]:
@@ -837,6 +1029,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         llm_text: str = "",
         affordances: list[ToolAffordance] | None = None,
+        context_delivery: dict[str, Any] | None = None,
     ) -> ToolInvocationResult:
         try:
             if record.output_model is None:
@@ -857,6 +1050,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
             effect=EffectOutcome.NONE if record.execution.effect_kind is EffectKind.NONE else EffectOutcome.APPLIED,
             llm_text=llm_text.strip() or json.dumps(validated, ensure_ascii=False, sort_keys=True),
             affordances=list(affordances or ()),
+            context_delivery=(
+                dict(context_delivery)
+                if isinstance(context_delivery, dict)
+                else None
+            ),
         )
 
     def _call_record_sync(
@@ -942,12 +1140,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
         raw: Any,
         *,
         budget: ToolCallBudget | None,
+        turn_id: str | None,
     ) -> ToolInvocationResult:
         if isinstance(raw, (CompleteResult, PagedResult, RejectedResult, FailedResult)):
             return raw
         receipt: EffectReceipt | None = None
         affordances: list[ToolAffordance] = []
         llm_text = ""
+        context_delivery: dict[str, Any] | None = None
         if isinstance(raw, ToolHandlerResult):
             candidate = raw.output
             receipt = raw.effect_receipt
@@ -961,6 +1161,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
             raw_structured = getattr(raw, "structured", None)
             raw_text = str(getattr(raw, "text", "") or "")
             raw_receipt = getattr(raw, "effect_receipt", None)
+            raw_delivery = getattr(raw, "context_delivery", None)
+            if isinstance(raw_delivery, dict):
+                context_delivery = dict(raw_delivery)
             if isinstance(raw_receipt, EffectReceipt):
                 receipt = raw_receipt
             if raw_status != RuntimeStatus.OK:
@@ -1026,7 +1229,16 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 details={"output_schema": record.output_schema},
             )
         rendered = llm_text.strip() or json.dumps(output, ensure_ascii=False, sort_keys=True)
-        paged = self._page_validated_output(record, call, output, rendered, outcome, budget)
+        paged = self._page_validated_output(
+            record,
+            call,
+            output,
+            rendered,
+            outcome,
+            budget,
+            turn_id=turn_id,
+            context_delivery=context_delivery,
+        )
         if paged is not None:
             return paged
         return CompleteResult(
@@ -1034,6 +1246,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             effect=outcome,
             llm_text=rendered,
             affordances=affordances,
+            context_delivery=context_delivery,
         )
 
     def _page_validated_output(
@@ -1044,6 +1257,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
         rendered: str,
         outcome: EffectOutcome,
         budget: ToolCallBudget | None,
+        *,
+        turn_id: str | None,
+        context_delivery: dict[str, Any] | None,
     ) -> PagedResult | None:
         if budget is None or record.execution.paging is PagingMode.NEVER:
             return None
@@ -1055,16 +1271,30 @@ class ExecutionRuntime(ExecutionRuntimePort):
         page_size = min(max(256, int(budget.preview_chars or 1000)), char_limit)
         handle = self.tool_result_pager.store(
             runtime_root=self.runtime_root,
-            turn_id=str(budget.artifact_bucket_id or result_ref),
+            turn_id=str(turn_id or budget.artifact_bucket_id or result_ref),
             result_ref=result_ref,
             tool_name=record.alias,
             status=RuntimeStatus.OK,
             ok=True,
-            rendered=serialized,
+            rendered=rendered,
             page_size=page_size,
+            output_json=serialized,
+            origin={
+                "alias": record.alias,
+                "arguments": dict(call.args or {}),
+                "invocation_mode": record.execution.invocation_mode.value,
+                "search_text": record.search_text,
+                "execution": record.execution.model_dump(mode="json"),
+                "effect": outcome.value,
+            },
+            context_delivery=context_delivery,
         )
-        page = self.tool_result_pager.read_page(result_ref, page=1)
-        page_text = page.content if page is not None else serialized[:page_size]
+        page = self.tool_result_pager.read_page(
+            result_ref,
+            page=1,
+            turn_id=turn_id,
+        )
+        page_text = page.content if page is not None else rendered[:page_size]
         affordances: list[ToolAffordance] = []
         if handle.page_count > 1:
             affordances.append(
@@ -1080,11 +1310,18 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 "page_size": handle.page_size,
                 "original_size": handle.original_size,
                 "page_count": handle.page_count,
+                "created_user_turn": handle.created_user_turn,
+                "expires_at_user_turn": handle.expires_at_user_turn,
             },
             page_text=page_text,
             effect=outcome,
             llm_text=page_text,
             affordances=affordances,
+            context_delivery=(
+                dict(page.context_delivery)
+                if page is not None and page.context_delivery
+                else None
+            ),
         )
 
     @staticmethod
@@ -1146,6 +1383,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 llm_text=rendered,
                 status=RuntimeStatus.OK,
                 invocation_result=result,
+                context_delivery=(
+                    dict(result.context_delivery)
+                    if isinstance(result.context_delivery, dict)
+                    else None
+                ),
             )
         payload = result.model_dump(mode="json")
         return CanonicalToolResult(
@@ -1157,11 +1399,23 @@ class ExecutionRuntime(ExecutionRuntimePort):
             llm_text=rendered,
             status=result.error_code if isinstance(result, (RejectedResult, FailedResult)) else "paged",
             invocation_result=result,
+            context_delivery=(
+                dict(result.context_delivery)
+                if isinstance(result, PagedResult)
+                and isinstance(result.context_delivery, dict)
+                else None
+            ),
         )
 
     @staticmethod
     def _render_invocation_for_llm(result: ToolInvocationResult) -> str:
-        base = str(result.llm_text or "").strip()
+        preserves_delivery_offsets = isinstance(
+            getattr(result, "context_delivery", None),
+            dict,
+        )
+        base = str(result.llm_text or "")
+        if not preserves_delivery_offsets:
+            base = base.strip()
         metadata: dict[str, Any] = {
             "kind": result.kind,
             "effect": result.effect.value,
@@ -1180,7 +1434,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if metadata == {"kind": "complete", "effect": EffectOutcome.NONE.value}:
             return base
         rendered_metadata = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
-        return f"{base}\n\nTool result metadata: {rendered_metadata}".strip()
+        rendered = f"{base}\n\nTool result metadata: {rendered_metadata}"
+        return rendered.rstrip() if preserves_delivery_offsets else rendered.strip()
 
     def execute_tool(
         self,
@@ -1415,12 +1670,25 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def execute(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            result = self.call_registered(call)
+            result = self.call_registered(
+                CapabilityCall(
+                    name=call.name,
+                    args=dict(call.args),
+                    meta={
+                        **dict(call.meta),
+                        "direct_context_id": (
+                            str(call.meta.get("direct_context_id") or "")
+                            or f"runtime:{id(self)}"
+                        ),
+                    },
+                )
+            )
             return CapabilityResult(
                 status=result.status,
                 text=result.text,
                 structured=result.structured,
                 llm_text=getattr(result, "llm_text", ""),
+                context_delivery=getattr(result, "context_delivery", None),
             )
         except Exception as exc:
             return CapabilityResult(
@@ -1432,12 +1700,25 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     async def execute_async(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            result = await self.call_registered_async(call)
+            result = await self.call_registered_async(
+                CapabilityCall(
+                    name=call.name,
+                    args=dict(call.args),
+                    meta={
+                        **dict(call.meta),
+                        "direct_context_id": (
+                            str(call.meta.get("direct_context_id") or "")
+                            or f"runtime:{id(self)}"
+                        ),
+                    },
+                )
+            )
             return CapabilityResult(
                 status=result.status,
                 text=result.text,
                 structured=result.structured,
                 llm_text=getattr(result, "llm_text", ""),
+                context_delivery=getattr(result, "context_delivery", None),
             )
         except Exception as exc:
             return CapabilityResult(

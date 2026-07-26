@@ -1684,7 +1684,7 @@ MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput = _strict_m
     'MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput',
     {
         'name': (str, Field(..., min_length=1)),
-        'obligation': (Literal['focused_tests', 'warning_clean', 'consumer_probe', 'public_surface_dogfood', 'lsp', 'historical_regressions', 'platform_probe'], Field(...)),
+        'obligation': (Literal['focused_tests', 'warning_clean', 'consumer_probe', 'public_surface_dogfood', 'lsp', 'historical_regressions', 'platform_probe', 'candidate_delta_review'], Field(...)),
         'reason': (str, Field(..., min_length=1)),
         'path': (str, Field(None)),
     },

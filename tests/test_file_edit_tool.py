@@ -66,7 +66,7 @@ class NotReadErrorTests(_TempFileMixin, unittest.TestCase):
         })
         self.assertIn("not been read", result.text.lower())
 
-    def test_sandboxed_continuation_retry_rebuilds_missing_read_snapshot(self) -> None:
+    def test_sandboxed_continuation_retry_does_not_bypass_missing_read_snapshot(self) -> None:
         path = self._write_tmp("retry.txt", "hello world")
 
         with patch.dict(
@@ -85,8 +85,8 @@ class NotReadErrorTests(_TempFileMixin, unittest.TestCase):
                 }
             )
 
-        self.assertEqual(result.status, RuntimeStatus.OK)
-        self.assertEqual(path.read_text(encoding="utf-8"), "goodbye world")
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(path.read_text(encoding="utf-8"), "hello world")
 
 
 class StaleFileErrorTests(_TempFileMixin, unittest.TestCase):

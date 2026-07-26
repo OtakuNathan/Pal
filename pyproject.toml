@@ -20,6 +20,7 @@ dependencies = [
     "jsonschema>=4.23,<5",
     "prompt-toolkit>=3.0,<4",
     "python-telegram-bot>=20.7,<22",
+    "rich>=13,<15",
     "sqlite-vec>=0.1.6,<1",
     "telegramify-markdown>=0.4,<1",
 ]

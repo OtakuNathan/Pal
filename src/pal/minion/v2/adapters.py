@@ -113,9 +113,31 @@ def prepare_v2_role_workspace(
             raise ValueError(f"role workspace source is not a directory: {source_path}")
         if (source_path / ".git").exists():
             if not target.exists():
+                source_head = subprocess.run(
+                    ["git", "-C", str(source_path), "rev-parse", "--verify", "HEAD"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                if source_head.returncode != 0 or not source_head.stdout.strip():
+                    raise RuntimeError(
+                        source_head.stderr
+                        or source_head.stdout
+                        or "failed to resolve role workspace source HEAD"
+                    )
+                source_head_sha = source_head.stdout.strip()
                 target.parent.mkdir(parents=True, exist_ok=True)
                 completed = subprocess.run(
-                    ["git", "clone", "--no-hardlinks", "--shared", str(source_path), str(target)],
+                    [
+                        "git",
+                        "clone",
+                        "--no-hardlinks",
+                        "--shared",
+                        "--no-checkout",
+                        str(source_path),
+                        str(target),
+                    ],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -123,6 +145,27 @@ def prepare_v2_role_workspace(
                 )
                 if completed.returncode != 0:
                     raise RuntimeError(completed.stderr or completed.stdout or "failed to clone role workspace")
+                checked_out = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(target),
+                        "checkout",
+                        "--detach",
+                        "--force",
+                        source_head_sha,
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                if checked_out.returncode != 0:
+                    raise RuntimeError(
+                        checked_out.stderr
+                        or checked_out.stdout
+                        or "failed to bind role workspace to source HEAD"
+                    )
         else:
             if not target.exists():
                 shutil.copytree(source_path, target)

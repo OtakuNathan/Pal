@@ -4,7 +4,7 @@ import json
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 19
+MINION_V2_SCHEMA_VERSION = 22
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -217,6 +217,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             subject_key TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'active',
             continuation_ref_json TEXT NOT NULL DEFAULT '{}',
+            execution_state_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -429,6 +430,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "minion_v2_role_invocations", "authoring_contract_version", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "minion_v2_role_sessions", "scope_kind", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "minion_v2_role_sessions", "subject_key", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_role_sessions", "execution_state_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(connection, "minion_v2_role_turns", "tool_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_role_turns", "wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_submission_drafts", "submitted_artifact_ref_json", "TEXT NOT NULL DEFAULT '{}'")
@@ -461,6 +463,19 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
         _migrate_role_protocol_v18(connection)
     if previous_version < 19:
         _quiesce_pre_scope_workflows_v19(connection)
+    elif previous_version < 20:
+        _quiesce_candidate_scoped_verifiers_v20(connection)
+    if previous_version < 22:
+        _archive_pre_module_identity_workflows_v22(connection)
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS minion_v2_role_assignments_one_open
+        ON minion_v2_role_assignments(session_id)
+        WHERE state IN (
+            'queued', 'claimed', 'running', 'retry_queued', 'result_recorded'
+        )
+        """
+    )
     connection.execute(
         """
         INSERT INTO minion_v2_schema_meta(schema_key, schema_value)
@@ -519,10 +534,171 @@ def _quiesce_pre_scope_workflows_v19(connection: sqlite3.Connection) -> None:
     into the architecture-cycle/module/system session model.
     """
 
-    terminal = {"COMPLETED", "REJECTED", "CANCELLED"}
-    workflow_rows = connection.execute(
+    _quiesce_active_workflows_for_role_contract(
+        connection,
+        reason=(
+            "workflow was active before role sessions became architecture-cycle, "
+            "module, and workflow-scoped; restart it explicitly"
+        ),
+        orchestration_contract_version="3",
+    )
+
+
+def _quiesce_candidate_scoped_verifiers_v20(
+    connection: sqlite3.Connection,
+) -> None:
+    """Fence active work before module/workflow verifier sessions become durable."""
+
+    _quiesce_active_workflows_for_role_contract(
+        connection,
+        reason=(
+            "workflow was active before module and system verifier sessions became "
+            "workflow-lifetime logical coroutines; restart it explicitly"
+        ),
+        orchestration_contract_version="4",
+    )
+
+
+def _archive_pre_module_identity_workflows_v22(
+    connection: sqlite3.Connection,
+) -> None:
+    """Retire active v4 work instead of guessing it into Module ownership."""
+
+    rows = connection.execute(
         """
         SELECT aggregate_id, payload_json
+        FROM minion_v2_aggregate_snapshots
+        WHERE aggregate_type = 'workflow'
+          AND state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')
+          AND COALESCE(
+              json_extract(payload_json, '$.orchestration_contract_version'),
+              '4'
+          ) != '5'
+        """
+    ).fetchall()
+    workflow_ids = [str(row[0]) for row in rows]
+    if not workflow_ids:
+        return
+    reason = (
+        "archived during orchestration v5 cutover; restart as a fresh workflow "
+        "with workflow-owned Module identities"
+    )
+    for workflow_id, payload_json in rows:
+        payload = json.loads(str(payload_json or "{}"))
+        payload.update(
+            {
+                "archived": True,
+                "archive_reason": reason,
+                "cancel_reason": reason,
+                "retired_orchestration_contract_version": str(
+                    payload.get("orchestration_contract_version") or "4"
+                ),
+                "required_orchestration_contract_version": "5",
+            }
+        )
+        payload.pop("blocker", None)
+        connection.execute(
+            """
+            UPDATE minion_v2_aggregate_snapshots
+            SET state = 'CANCELLED', version = version + 1,
+                payload_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE aggregate_type = 'workflow' AND aggregate_id = ?
+            """,
+            (
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                workflow_id,
+            ),
+        )
+    placeholders = ", ".join("?" for _ in workflow_ids)
+    connection.execute(
+        f"""
+        UPDATE minion_v2_aggregate_snapshots
+        SET state = 'CANCELLED', version = version + 1,
+            payload_json = json_set(
+                payload_json,
+                '$.cancel_reason',
+                ?,
+                '$.required_orchestration_contract_version',
+                '5'
+            ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE workflow_id IN ({placeholders})
+          AND aggregate_type != 'workflow'
+          AND state NOT IN (
+              'ACCEPTED', 'REJECTED', 'SUPERSEDED', 'COMPLETED', 'CANCELLED'
+          )
+        """,
+        (reason, *workflow_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_outbox
+        SET status = 'failed', locked_by = '', locked_until = '',
+            last_error = 'orchestration_v5_cutover',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE workflow_id IN ({placeholders})
+          AND status IN ('pending', 'processing', 'retry')
+        """,
+        tuple(workflow_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_role_assignments
+        SET state = 'cancelled', active_attempt_id = '',
+            last_error = 'orchestration_v5_cutover',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE workflow_id IN ({placeholders})
+          AND state NOT IN ('settled', 'cancelled')
+        """,
+        tuple(workflow_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_role_attempts
+        SET status = 'cancelled',
+            error_kind = 'orchestration_v5_cutover',
+            error_text = ?,
+            finished_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE assignment_id IN (
+            SELECT assignment_id FROM minion_v2_role_assignments
+            WHERE workflow_id IN ({placeholders})
+        )
+          AND status NOT IN ('completed', 'failed', 'lost', 'cancelled')
+        """,
+        (reason, *workflow_ids),
+    )
+    for table in ("minion_v2_role_sessions", "minion_v2_role_invocations"):
+        connection.execute(
+            f"""
+            UPDATE {table}
+            SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+            WHERE workflow_id IN ({placeholders})
+              AND status NOT IN ('completed', 'cancelled')
+            """,
+            tuple(workflow_ids),
+        )
+    connection.execute(
+        f"""
+        DELETE FROM minion_v2_leases
+        WHERE owner_id IN (
+            SELECT session_id FROM minion_v2_role_sessions
+            WHERE workflow_id IN ({placeholders})
+        )
+        """,
+        tuple(workflow_ids),
+    )
+
+
+def _quiesce_active_workflows_for_role_contract(
+    connection: sqlite3.Connection,
+    *,
+    reason: str,
+    orchestration_contract_version: str,
+) -> None:
+    workflow_rows = connection.execute(
+        """
+        SELECT aggregate_id, state, payload_json
         FROM minion_v2_aggregate_snapshots
         WHERE aggregate_type = 'workflow'
           AND state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')
@@ -533,17 +709,15 @@ def _quiesce_pre_scope_workflows_v19(connection: sqlite3.Connection) -> None:
         return
     blocker = {
         "kind": "orchestration_contract_changed",
-        "reason": (
-            "workflow was active before role sessions became architecture-cycle, "
-            "module, and workflow-scoped; restart it explicitly"
-        ),
+        "reason": reason,
         "required_action": "restart_workflow",
-        "orchestration_contract_version": "3",
+        "orchestration_contract_version": orchestration_contract_version,
     }
-    for workflow_id, payload_json in workflow_rows:
+    for workflow_id, workflow_state, payload_json in workflow_rows:
         payload = json.loads(str(payload_json or "{}"))
         payload["blocker"] = blocker
-        payload["orchestration_contract_version"] = "3"
+        payload["orchestration_contract_version"] = orchestration_contract_version
+        payload.setdefault("triage_resume_state", str(workflow_state))
         connection.execute(
             """
             UPDATE minion_v2_aggregate_snapshots
@@ -573,7 +747,12 @@ def _quiesce_pre_scope_workflows_v19(connection: sqlite3.Connection) -> None:
                 '$.blocker',
                 json(?),
                 '$.orchestration_contract_version',
-                '3'
+                ?,
+                '$.triage_resume_state',
+                COALESCE(
+                    NULLIF(json_extract(payload_json, '$.triage_resume_state'), ''),
+                    state
+                )
             ),
             updated_at = CURRENT_TIMESTAMP
         WHERE workflow_id IN ({placeholders})
@@ -582,6 +761,7 @@ def _quiesce_pre_scope_workflows_v19(connection: sqlite3.Connection) -> None:
         """,
         (
             json.dumps(blocker, ensure_ascii=False, sort_keys=True),
+            orchestration_contract_version,
             *workflow_ids,
             *child_types,
         ),

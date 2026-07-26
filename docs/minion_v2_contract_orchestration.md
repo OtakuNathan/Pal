@@ -1,10 +1,13 @@
 # Minion V2 Contract-Driven Orchestration
 
-Status: active implementation as of 2026-07-21.
+Status: active implementation as of 2026-07-26.
 
 Minion V2 is a clean workflow cutover. V1 plans, milestones, cursors,
 checkpoints, write RPCs, and workflow resume paths are not accepted by V2.
 Legacy tables remain readable for diagnosis and archive tooling only.
+Orchestration contract v5 also archives nonterminal v4 workflows instead of
+guessing old epoch-scoped worktrees and role sessions into Module ownership;
+new work starts as a fresh workflow.
 
 ## Business Aggregates
 
@@ -30,15 +33,26 @@ ACKs once that assignment exists. The DAG Node Run is the sole owner of module
 business lifecycle: coding, verification, repair, acceptance, stale propagation,
 pause, cancellation, and triage are Node transitions, never assignment states.
 
-Each Node generation owns one canonical Implementation role session for the
-complete module run. `produce` and `repair` are modes of that same role. Each immutable
-Candidate or verification-scenario fingerprint owns a separate Verifier role
-session. A retry of the same Candidate resumes that session, while a new
-Candidate starts a fresh Verifier with no inherited dialogue or tool state.
-Historical failures cross Candidate boundaries only through Manager-owned
-RepairBills and verification obligations. Node `ACCEPTED` or `CANCELLED` closes
-the Coder session; a Verifier session closes after its verdict receipt is
-settled. Reopening an accepted Node creates a new role-session generation.
+Each workflow-owned Module identity owns one canonical Implementation role
+session and one canonical Module Verifier role session. `produce` and `repair` are assignments
+of the same Implementation session; every new Candidate is an assignment of
+the same Module Verifier session. The workflow owns one System Verifier
+session across Candidate Union repairs. A physical attempt still releases its
+process, lease, LSP process, and worktree locks when it settles, while the
+logical session preserves its bounded continuation. Only an explicit operator
+reset advances the role-session generation.
+
+Exactly one assignment may be open in a role session. Endpoint retries reuse
+the same assignment and continuation; a later Candidate or RepairBill starts a
+new assignment only after the previous receipt is settled. Assignment-local
+input fingerprints isolate current evidence from prior Candidates. Historical
+failures cross Candidate boundaries through Manager-owned RepairBills and
+durable verification corpora, not by treating an earlier verdict as current.
+Node acceptance suspends its Coder and Verifier sessions. Replan, repair,
+triage, retry, and native-process restart do not replace them. They close only
+when the Module key is deleted, the workflow terminates, or an operator
+explicitly resets that Module identity. Deleting and later re-adding the same
+key allocates a new generation rather than resurrecting the retired session.
 
 A `RoleAssignment` binds one immutable role/input/effect activation and uses
 one explicit receipt protocol:
@@ -105,7 +119,7 @@ Architect receives the in-place user-question IO and no-argument architecture
 submit in addition to ordinary workspace tools. `ask_question` suspends until
 Manager has appended the exact question and answer to the ledger; Architect then
 continues directly and has no task-ledger write capability. The Draft uses
-schema version 4.
+authoring schema version 8.
 
 `requirements` is a compact mapping index. Each entry has one claim, one
 module-or-scenario owner, and an ordered public semantic `contract_path`; it does
@@ -273,22 +287,22 @@ architecture; human review displays its ordered revision history.
 
 ## Execution and Verification
 
-An accepted manifest compiles to an immutable execution epoch. Contract
+An accepted manifest compiles to an immutable execution epoch for audit and
+scheduling. The epoch and its Node records do not own worktrees or logical role
+sessions. Contract
 dependencies express protocol/data/ownership consumption and must be acyclic,
 but they are not Coder start barriers: every implementation Coder starts from
 the same Accepted Skeleton and all implementation nodes may compete for slots
 immediately. Contract dependency order is retained for semantic handoff,
-candidate reuse, impact analysis, and deterministic final union.
+exact Candidate carry-forward, impact analysis, and deterministic final union.
 
-Each declared end-to-end scenario compiles to a separate Verification Node. It
-waits until exactly the implementation Candidates in its dependency closure are
-`ACCEPTED`, assembles their deterministic union, then verifies the declared real
-entrypoint, environment, and observable behavior. A scenario owns no product
-source. No universal final join is required; a whole-system scenario exists only
-when the product has a real whole-system entrypoint. Final publication requires
-all required implementation nodes and all declared scenario nodes to be
-`ACCEPTED`, with each scenario result matching its current combination
-fingerprint.
+One workflow-level System Verifier consumes the complete accepted Candidate
+Union and the complete scenario catalog. It owns system and delivery testing as
+one logical coroutine, uses real entrypoints (including a PTY or equivalent
+when the delivery surface is interactive), and may keep durable harness assets
+across repairs. A scenario owns no product source and does not spawn another
+role session. Final publication requires every implementation Module and this
+single system-delivery node to be `ACCEPTED` for the current union fingerprint.
 
 Coder and Verifier receive the same immutable task ledger plus the accepted
 local module skeleton, path policy, semantic contract dependencies, assumptions,
@@ -321,16 +335,22 @@ fingerprints, creates the candidate commit, and publishes a candidate artifact.
 
 Coder may add durable TDD/regression cases only under the Manager-derived
 `tests/<module_name>/developer` corpus and reads the Verifier corpus without
-write authority. Module Verifier runs with product code and the developer
-corpus read-only and writes only `tests/<module_name>/verification`. Scenario
-Verifier receives a read-only
-Manager-assembled Candidate union and writes executable probes/tests only to a
-durable review-scratch Artifact. Both derive adversarial cases from contracts,
+write authority. Module Verifier reads the same stable Module worktree at the
+exact Candidate commit, with product code and the developer corpus read-only,
+and writes probes only to Candidate-scoped durable scratch. Manager alone
+promotes accepted cases into `tests/<module_name>/verification`. System
+Verifier receives a read-only Manager-assembled Candidate union and writes
+executable probes/tests only to durable review scratch. Both derive adversarial cases from contracts,
 lifecycle, state, ownership, invariants, and the diff, write real regression
 tests, and execute them in an isolated review workspace. Their terminal
 tools carry a semantic outcome while every defect is recorded through the same
 structured `add_finding` contract; Manager records tool
 receipts, snapshots the test delta, computes fingerprints, and owns routing.
+Every verifier assignment has two ordered gates: first record every bound
+current or historical regression, then inspect the current Candidate delta and
+record a `candidate_delta_review` diff-risk case for newly introduced defects.
+A failing regression blocks PASS but never skips the delta audit. No terminal
+outcome may reuse either phase from an earlier assignment.
 Submission follows an explicit durable boundary:
 
 ```text
@@ -358,19 +378,31 @@ one immutable `ArchitectureFindingBatchArtifact`. Equal finding fingerprints are
 grouped while retaining every RepairBill/reproducer; different findings of the
 same defect kind remain separate. The epoch then enters `REPLAN_REQUIRED` and is
 the sole owner allowed to create one deterministic Architecture Revision for
-that replan generation. The accepted replacement epoch marks its predecessor
-`SUPERSEDED`. Three identical findings with no candidate-tree change enter
-triage.
+that replan generation. The newly compiled audit epoch marks its predecessor
+`SUPERSEDED`; surviving Modules themselves are not replaced. Three identical
+findings with no candidate-tree change enter triage.
 
 UNKNOWN is nonblocking only with an allowed architecture policy, a complete
 assumption reference, and a valid human waiver for hard/security/permission/
 public-API semantics.
 
-After architecture replan, accepted module candidates are reused only when the
-full contract/environment fingerprint matches: module contract, immutable task
-sources, global constraints, owned area, dependency set, dependency
-interfaces and outputs, environment policy, and epoch baseline. Reused commits
-are imported by the manager; partial matches rerun.
+After architecture replan, Manager mechanically compares the old and new
+`architecture.yaml.modules` map keys. Intersection preserves the Module's
+stable worktree, branch, Coder/Verifier sessions, bounded continuation, and
+test assets; the existing actors receive a new assignment against the revised
+contract. Additions create those resources. Deletions first require the old
+native process group to be fully reaped, then retire the logical sessions and
+remove the Module worktree. Responsibility continuity is semantic Reviewer
+work: if a responsibility truly changes identity, Architect must delete the
+old key and add a new one.
+
+The full contract/environment fingerprint is only a zero-call optimization. An
+exact match carries the already verified Candidate forward as accepted. A
+partial match never discards the Module: Manager rebases its prior Candidate
+delta onto the new Accepted Skeleton, leaves allowed conflicts in that same
+worktree for its Coder, and rejects conflicts in Manager-owned or non-writable
+paths. Epoch and fencing fields remain audit, scheduling, liveness, and late-IPC
+guards; they are not ownership identities.
 
 ## Sidecar-Owned Profile Catalog
 
@@ -458,11 +490,14 @@ input inside that attempt directory. The runner never scans older run files for
 a checkpoint; it writes one explicit output path, which the Manager validates
 against session scope, subject, and fencing before publication.
 
-Software repositories live under `data/minion/repos/<project>/`, where the
+Software workflows always use a Manager-owned Git repository under
+`data/minion/repos/<project>/`, where the
 directory name comes from the explicit project name or source repository name.
 Different workflows for one project share `project.git`. Each workflow owns a
-readable `minion/<workflow>/main` staging branch; Architect revisions and code
-nodes use separate branches and worktrees beneath that workflow namespace.
+readable `minion/<workflow>/main` staging branch, one stable integration
+worktree, and one stable `minion/<workflow>/module/<module_name>` branch and
+worktree per current Module key. Architect submissions remain
+submission-scoped worktrees.
 Only the manager advances the workflow branch after accepted verification.
 The source repository and its target branch are not modified until a separate
 explicit publish decision. Architecture review uses a temporary detached

@@ -101,20 +101,30 @@ class ProjectGitLayout:
     def architecture_branch(self, revision_name: str) -> str:
         return f"{self.branch_namespace}/architecture/{_short_key(revision_name, prefix='revision')}"
 
-    def node_worktree(self, epoch_id: str, node_name: str) -> Path:
+    def module_worktree(self, module_name: str) -> Path:
+        """Return the workflow-lifetime worktree owned by one Module identity."""
+
         return (
             self.workflow_worktree_root
-            / "execution"
-            / _short_key(epoch_id, prefix="epoch")
-            / _path_component(node_name, fallback="node")
+            / "modules"
+            / _path_component(module_name, fallback="module")
         )
 
-    def node_branch(self, epoch_id: str, node_name: str, *, verification: bool = False) -> str:
-        role = "verification" if verification else "node"
+    def module_branch(self, module_name: str) -> str:
+        """Return the workflow-lifetime branch owned by one Module identity."""
+
         return (
-            f"{self.branch_namespace}/{role}/"
-            f"{_ref_component(node_name, fallback=role)}-{_short_hash(epoch_id)}"
+            f"{self.branch_namespace}/module/"
+            f"{_ref_component(module_name, fallback='module')}"
         )
+
+    @property
+    def integration_worktree(self) -> Path:
+        return self.workflow_worktree_root / "integration"
+
+    @property
+    def integration_branch(self) -> str:
+        return f"{self.branch_namespace}/integration"
 
     @property
     def publish_worktree(self) -> Path:

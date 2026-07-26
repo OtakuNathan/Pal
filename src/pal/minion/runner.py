@@ -432,6 +432,14 @@ class _MinionExecutionRuntimeAdapter:
     def project_llm_value(self, value: Any) -> Any:
         return self._state.execution_runtime.project_llm_value(value)
 
+    def reconcile_tool_context(self, **kwargs: Any) -> Any:
+        reconcile = getattr(
+            self._state.execution_runtime,
+            "reconcile_tool_context",
+            None,
+        )
+        return reconcile(**kwargs) if callable(reconcile) else None
+
     async def execute_tool_async(
         self,
         call: CanonicalToolCall,
@@ -769,6 +777,11 @@ class MinionRunner:
         session_id = str(session_metadata.get("session_id") or "").strip()
         restored = self._load_agent_session_checkpoint(workspace, session_id=session_id)
         initial_instruction = str(restored.get("initial_instruction") or self.pack.instruction or self.pack.goal).strip()
+        current_channel_envelope = _minion_task_envelope(
+            self.pack,
+            minion_id=self.minion_id,
+            run_id=self.run_id,
+        )
         prompt_pack = self.pack
         if initial_instruction and initial_instruction != str(self.pack.instruction or ""):
             prompt_pack = MinionInvocationPack.from_dict(
@@ -783,8 +796,12 @@ class MinionRunner:
         response_keys = [str(item) for item in list(restored.get("response_keys") or []) if str(item)]
         response_key = str(session_metadata.get("response_key") or "").strip()
         if restored and response_key and response_key not in response_keys:
-            response_text = str(self.pack.instruction or self.pack.goal or "").strip()
-            if self._is_new_session_response(restored, response_text):
+            response_text = self._new_session_response_message(
+                restored,
+                response_key=response_key,
+                response_text=_minion_primary_input(current_channel_envelope),
+            )
+            if response_text:
                 tool_protocol_messages.append({"role": "user", "content": response_text})
             response_keys.append(response_key)
         elif not restored and response_key:
@@ -846,6 +863,13 @@ class MinionRunner:
             control_scope_key=f"minion:{self.run_id}",
             turn_settings_snapshot=_minion_turn_settings_snapshot(self.pack),
             tool_protocol_messages=state.tool_protocol_messages,
+            tool_delivery_records={
+                str(key): dict(value)
+                for key, value in dict(
+                    restored.get("tool_delivery_records") or {}
+                ).items()
+                if str(key) and isinstance(value, dict)
+            },
             tool_batch_count=max(0, int(restored.get("tool_batch_count") or 0)),
             preferred_llm_endpoint_id=str(restored.get("preferred_llm_endpoint_id") or "") or None,
             preferred_llm_model_id=str(restored.get("preferred_llm_model_id") or "") or None,
@@ -859,7 +883,11 @@ class MinionRunner:
         )
         begin_tool_results = getattr(state.execution_runtime, "begin_tool_result_turn", None)
         if callable(begin_tool_results):
-            begin_tool_results(turn_id=turn_id, scope_key=f"minion:{self.run_id}")
+            begin_tool_results(
+                turn_id=turn_id,
+                scope_key=session_id or f"minion:{self.run_id}",
+                input_id=response_key or turn_id,
+            )
         executor = self._build_minion_turn_executor(bundle, state, continuation)
         current: EffectResult | None = None
         while True:
@@ -918,23 +946,34 @@ class MinionRunner:
         return not continuation.pending_tool_call_batch and not continuation.pending_tool_results
 
     @staticmethod
-    def _is_new_session_response(restored: Mapping[str, Any], response_text: str) -> bool:
-        """Distinguish a new semantic response from a retry of the assignment.
+    def _new_session_response_message(
+        restored: Mapping[str, Any],
+        *,
+        response_key: str,
+        response_text: str,
+    ) -> str:
+        """Return one explicit user turn for a new Manager-bound semantic input.
 
-        Effect keys can change when triage is resolved even though the role
-        session and its semantic input did not.  Re-appending the original
-        assignment makes the model restart discovery.  A genuinely new answer
-        (for example, an architect clarification) still enters the protocol.
+        Instruction text is intentionally reusable across repair cycles.  The
+        durable assignment key, rather than text equality or an outbox effect
+        key, determines whether this input has already entered the session.
         """
 
+        key = str(response_key or "").strip()
+        seen = {
+            str(item)
+            for item in list(restored.get("response_keys") or [])
+            if str(item)
+        }
         text = str(response_text or "").strip()
-        if not text or text == str(restored.get("initial_instruction") or "").strip():
-            return False
-        return not any(
-            str(item.get("role") or "") == "user"
-            and str(item.get("content") or "").strip() == text
-            for item in list(restored.get("tool_protocol_messages") or [])
-            if isinstance(item, Mapping)
+        if not key or key in seen or not text:
+            return ""
+        return (
+            "# New Manager-Bound Role Input\n\n"
+            "This is a new semantic assignment for the durable role session. "
+            "Any earlier completion summary or submit action settled only an earlier input; "
+            "it does not complete this one.\n\n"
+            + text
         )
 
     def _load_agent_session_checkpoint(self, workspace: dict[str, Any], *, session_id: str) -> dict[str, Any]:
@@ -981,7 +1020,7 @@ class MinionRunner:
         if continuation.pending_tool_call_batch or continuation.pending_tool_results:
             return
         payload = {
-            "schema_version": "2",
+            "schema_version": "3",
             "session_id": session_id,
             "scope_kind": str(session_metadata.get("scope_kind") or ""),
             "subject_key": str(session_metadata.get("subject_key") or ""),
@@ -990,6 +1029,13 @@ class MinionRunner:
             "initial_instruction": str(initial_instruction),
             "response_keys": list(response_keys),
             "tool_protocol_messages": [dict(item) for item in continuation.tool_protocol_messages],
+            "tool_delivery_records": {
+                str(key): dict(value)
+                for key, value in dict(
+                    getattr(continuation, "tool_delivery_records", {}) or {}
+                ).items()
+                if str(key) and isinstance(value, dict)
+            },
             "llm_round_count": int(state.llm_round_count),
             "tool_call_count": int(state.tool_call_count),
             "tool_batch_count": int(continuation.tool_batch_count),
@@ -2221,13 +2267,14 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
     config = RuntimeConfig.load(Path(runtime_root))
     core = PalCore(config=config)
     core.context.execution_runtime.runtime_root = Path(runtime_root)
-    tool_result_root = str(
-        os.environ.get("PAL_MINION_TOOL_RESULT_ROOT") or ""
-    ).strip()
-    if tool_result_root:
-        core.context.execution_runtime.tool_result_pager.storage_root = Path(
-            tool_result_root
-        )
+    from pal.minion.v2.execution_state import RoleGatewayLogicalExecutionState
+    from pal.minion.v2.role_gateway import role_gateway_client_from_env
+
+    role_gateway_client = role_gateway_client_from_env(Path(runtime_root))
+    if role_gateway_client is not None:
+        logical_state = RoleGatewayLogicalExecutionState(role_gateway_client)
+        core.context.execution_runtime.logical_state = logical_state
+        core.context.execution_runtime.tool_result_pager.state_backend = logical_state
     artifact_service = ArtifactManager(runtime_root=Path(runtime_root), repository=ArtifactRepository())
     if os.environ.get("PAL_MINION_LLM_BROKER") == "1":
         llm_runtime = MinionBrokerLLMRuntime(runtime_root=Path(runtime_root), run_id=run_id)

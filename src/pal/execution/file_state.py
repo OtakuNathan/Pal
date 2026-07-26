@@ -9,30 +9,17 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
-import os
 from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
+from pal.execution.session_state import (
+    LogicalExecutionContext,
+    LogicalExecutionStateBackend,
+    content_digest,
+    count_text_lines,
+)
 from pal.shared import RuntimeStatus
-
-
-def minion_retry_allows_uncached_mutation() -> bool:
-    """Return whether a sandboxed continuation may rebuild lost read state.
-
-    File read snapshots are process-local.  A supervised Minion retry resumes
-    the durable model/tool transcript in a new process, so requiring the new
-    cache to observe every prior full read would add false NOT_READ turns.  The
-    bypass is limited to an OS-sandboxed continuation attempt; first attempts
-    and the host runtime retain normal read-before-mutate behavior.
-    """
-
-    return (
-        str(os.environ.get("PAL_MINION_SANDBOXED") or "").strip() == "1"
-        and str(os.environ.get("PAL_MINION_CONTINUATION_RETRY") or "").strip()
-        == "1"
-    )
-
 
 def resolve_file_path(file_path: str | Path) -> Path:
     """Return one filesystem identity for every accepted path spelling."""
@@ -182,6 +169,84 @@ class FileStateCache:
     def _evict_if_needed(self) -> None:
         while len(self._cache) > self._max:
             self._cache.popitem(last=False)
+
+
+@dataclass
+class SessionFileStateCache:
+    """Read-before-mutate view backed by one logical execution session."""
+
+    backend: LogicalExecutionStateBackend
+    context: LogicalExecutionContext
+
+    def mark_read(
+        self,
+        file_path: str | Path,
+        content: str,
+        *,
+        full_view: bool = True,
+    ) -> None:
+        if not full_view:
+            return
+        self.backend.set_file_full(
+            logical_session_id=self.context.logical_session_id,
+            file_key=file_cache_key(file_path),
+            digest=content_digest(content),
+            total_lines=count_text_lines(content),
+        )
+
+    def get_valid(self, file_path: str | Path) -> str | None:
+        state = self.get_valid_state(file_path)
+        return state.content if state is not None else None
+
+    def get_valid_full(self, file_path: str | Path) -> str | None:
+        state = self.get_valid_state(file_path)
+        if state is None or not state.full_view:
+            return None
+        return state.content
+
+    def get_valid_state(self, file_path: str | Path) -> FileState | None:
+        resolved = resolve_file_path(file_path)
+        try:
+            content = resolved.read_text(encoding="utf-8")
+            mtime_ns = resolved.stat().st_mtime_ns
+        except (OSError, UnicodeError):
+            return None
+        grant = self.backend.file_grant(
+            logical_session_id=self.context.logical_session_id,
+            file_key=file_cache_key(resolved),
+            digest=content_digest(content),
+        )
+        if grant is None:
+            return None
+        return FileState(
+            content=content,
+            mtime_ns=mtime_ns,
+            full_view=grant.complete,
+        )
+
+    def invalidate(self, file_path: str | Path) -> None:
+        self.backend.invalidate_file(
+            logical_session_id=self.context.logical_session_id,
+            file_key=file_cache_key(file_path),
+        )
+
+    def clear(self) -> None:
+        # Logical session state is retired by its lifecycle owner; a file tool
+        # cannot clear unrelated file grants.
+        return
+
+    def __len__(self) -> int:
+        return 0
+
+    def __contains__(self, file_path: str | Path) -> bool:
+        return (
+            self.backend.file_grant(
+                logical_session_id=self.context.logical_session_id,
+                file_key=file_cache_key(file_path),
+                digest="",
+            )
+            is not None
+        )
 
 
 @dataclass

@@ -729,7 +729,7 @@ class MinionV2OutboxProcessor:
             workflow_id=workflow.workflow_id,
             manifest_ref=manifest_ref,
             causation_key=f"reconcile:{revision.aggregate_id}:{manifest_ref.get('sha256')}",
-            reuse_from_epoch_id=str(revision.payload.get("source_execution_epoch_id") or ""),
+            source_epoch_id=str(revision.payload.get("source_execution_epoch_id") or ""),
         )
 
     def _complete_active_workflow(
@@ -764,7 +764,7 @@ class MinionV2OutboxProcessor:
                 workflow_id=snapshot.workflow_id,
                 manifest_ref=manifest_ref,
                 causation_key=str(effect["effect_key"]),
-                reuse_from_epoch_id=str(snapshot.payload.get("source_execution_epoch_id") or ""),
+                source_epoch_id=str(snapshot.payload.get("source_execution_epoch_id") or ""),
             )
         self.repository.dispatch(
             ActionEnvelope(
@@ -1155,7 +1155,7 @@ class MinionV2OutboxProcessor:
         workflow_id: str,
         manifest_ref: Mapping[str, Any],
         causation_key: str,
-        reuse_from_epoch_id: str = "",
+        source_epoch_id: str = "",
         initial_repair_bill_ref: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         record = self.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
@@ -1169,31 +1169,38 @@ class MinionV2OutboxProcessor:
             byte_size=int(record["byte_size"]),
             durable=True,
         )
-        epoch_id = _derived_id("epoch", causation_key)
+        epoch_id = _execution_epoch_id(
+            workflow_id=workflow_id,
+            manifest_sha=ref.sha256,
+            source_epoch_id=source_epoch_id,
+            repair_bill_sha=str(
+                dict(initial_repair_bill_ref or {}).get("sha256") or ""
+            ),
+        )
         compilation = ExecutionCompiler(self.repository, self.service.architecture).compile_epoch(
             workflow_id=workflow_id,
             epoch_id=epoch_id,
             manifest_ref=ref,
-            reuse_from_epoch_id=reuse_from_epoch_id,
+            source_epoch_id=source_epoch_id,
             initial_repair_bill_ref=initial_repair_bill_ref,
         )
         self._link_workflow(workflow_id, "LINK_EXECUTION_EPOCH", {"execution_epoch_id": epoch_id}, causation_key)
-        if reuse_from_epoch_id:
+        if source_epoch_id:
             previous = self.repository.read_snapshot(
                 AggregateType.EXECUTION_EPOCH,
-                reuse_from_epoch_id,
+                source_epoch_id,
             )
             if previous is not None and previous.state == "REPLAN_REQUIRED":
                 self.repository.dispatch(
                     ActionEnvelope(
-                        action_type="REPLACEMENT_EPOCH_STARTED",
+                        action_type="SUCCESSOR_EPOCH_STARTED",
                         workflow_id=workflow_id,
                         aggregate_type=AggregateType.EXECUTION_EPOCH,
-                        aggregate_id=reuse_from_epoch_id,
+                        aggregate_id=source_epoch_id,
                         actor="minion-v2-manager",
                         expected_version=previous.version,
-                        idempotency_key=f"replacement-epoch:{reuse_from_epoch_id}:{epoch_id}",
-                        payload={"replacement_execution_epoch_id": epoch_id},
+                        idempotency_key=f"successor-epoch:{source_epoch_id}:{epoch_id}",
+                        payload={"successor_execution_epoch_id": epoch_id},
                     )
                 )
         return {"epoch_id": epoch_id, "node_ids": list(compilation.node_run_ids)}
@@ -2109,3 +2116,24 @@ def _git_output(worktree: Path, *args: str) -> str:
 
 def _derived_id(prefix: str, effect_key: str) -> str:
     return f"{prefix}_{hashlib.sha256(effect_key.encode('utf-8')).hexdigest()[:24]}"
+
+
+def _execution_epoch_id(
+    *,
+    workflow_id: str,
+    manifest_sha: str,
+    source_epoch_id: str = "",
+    repair_bill_sha: str = "",
+) -> str:
+    semantic_identity = json.dumps(
+        {
+            "manifest_sha": str(manifest_sha),
+            "repair_bill_sha": str(repair_bill_sha),
+            "source_epoch_id": str(source_epoch_id),
+            "workflow_id": str(workflow_id),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return _derived_id("epoch", semantic_identity)

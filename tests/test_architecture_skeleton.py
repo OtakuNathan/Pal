@@ -3199,7 +3199,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
 
         self.assertFalse(expired.ok)
-        self.assertEqual(expired.structured["details"]["reason"], "result_handle_expired")
+        self.assertEqual(expired.structured["details"]["reason"], "expired_handle")
 
     def test_turn_runtime_recompacts_when_generate_requests_budget_for_fallback_endpoint(self) -> None:
         class FallbackBudgetLLMRuntime:

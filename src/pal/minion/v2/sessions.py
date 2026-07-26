@@ -4,7 +4,7 @@ import hashlib
 from typing import Any, Mapping
 
 
-ROLE_SESSION_CONTRACT_VERSION = "3"
+ROLE_SESSION_CONTRACT_VERSION = "4"
 
 
 def architecture_cycle_id(
@@ -51,12 +51,24 @@ def architecture_reviewer_session_id(
     architecture_revision_id: str,
     payload: Mapping[str, Any],
 ) -> str:
+    manifest = payload.get("architecture_manifest_ref")
+    manifest_sha = (
+        str(manifest.get("sha256") or "").strip()
+        if isinstance(manifest, Mapping)
+        else ""
+    )
+    submission_key = (
+        f"submission-{max(0, int(payload.get('architecture_submission_cycle') or 0))}:"
+        f"review-{max(0, int(payload.get('architecture_review_generation') or 0))}:"
+        f"{manifest_sha}"
+    )
     return _scoped_role_session_id(
         "architecture-reviewer",
         workflow_id,
         "architecture_cycle",
         architecture_cycle_id(architecture_revision_id, payload),
         max(0, int(payload.get("reviewer_session_generation") or 0)),
+        submission_key=submission_key,
     )
 
 
@@ -120,6 +132,8 @@ def _scoped_role_session_id(
     scope_kind: str,
     subject_key: str,
     generation: int,
+    *,
+    submission_key: str = "",
 ) -> str:
     subject = str(subject_key or "").strip()
     if not subject:
@@ -130,6 +144,9 @@ def _scoped_role_session_id(
     )
     if int(generation) > 0:
         owner += f":generation:{int(generation)}"
+    submission = str(submission_key or "").strip()
+    if submission:
+        owner += f":submission:{submission}"
     return _session_id(role, owner)
 
 

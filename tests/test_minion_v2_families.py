@@ -260,6 +260,15 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             "op_minion_verification_request_module_repair",
             software.allowed_capabilities,
         )
+        self.assertIn(
+            "op_minion_verification_run_diff_risk",
+            software.allowed_capabilities,
+        )
+        self.assertIn(
+            "op_minion_verification_run_historical_regression",
+            software.allowed_capabilities,
+        )
+        self.assertIn("op_file_read", software.allowed_capabilities)
         self.assertNotIn("op_minion_verification_submit", software.allowed_capabilities)
         self.assertIn("op_file_write", software.allowed_capabilities)
         self.assertNotIn(
@@ -771,12 +780,12 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
     def test_software_profiles_preserve_engineering_rules_and_lsp_surface(self) -> None:
         coder = self._pack("software_engineering.v2_coder")
         behavior = str(coder.resolved_profile["behavior_fragment"])
-        self.assertIn("test-only hacks", behavior)
-        self.assertIn("nonexistent API", behavior)
-        self.assertIn("host stub or test adapter", behavior)
+        self.assertIn("standard-library", behavior)
+        self.assertIn("hand-rolled infrastructure", behavior)
+        self.assertIn("fabricate an API", behavior)
+        self.assertIn("test adapter", behavior)
         self.assertIn("production backend", behavior)
-        self.assertIn("independent adversarial verification", behavior)
-        self.assertIn("not a completion or acceptance claim", behavior)
+        self.assertIn("independent verification", behavior)
         self.assertIn("test_debugging", coder.allowed_skills)
         architect = self._pack("software_engineering.v2_architect")
         self.assertIn("op_exec_shell", architect.allowed_capabilities)
@@ -862,8 +871,11 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 "behavior_fragment"
             ]
         )
-        self.assertIn("explicit production backend boundary", architecture_review_behavior)
-        self.assertIn("Never pass an unclassified", architecture_review_behavior)
+        self.assertIn(
+            "required production platform/API/backend must remain explicit",
+            architecture_review_behavior,
+        )
+        self.assertIn("classify an unfamiliar bound path", architecture_review_behavior)
         self.assertIn(
             "Do not pass an unclassified bound reference path",
             reviewer_overrides["op_file_read"]["do_not_use_when"],
@@ -995,6 +1007,11 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         architecture_review = str(
             self._pack("software_engineering.v2_reviewer").resolved_profile["behavior_fragment"]
         )
+        coder = str(
+            self._pack("software_engineering.v2_coder").resolved_profile[
+                "behavior_fragment"
+            ]
+        )
         verifier_profile = dict(
             self._pack("software_engineering.v2_verifier").resolved_profile
         )
@@ -1012,93 +1029,44 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         generic = str(self._pack("general.generic").resolved_profile["behavior_fragment"])
 
-        self.assertIn("single reference:task/task.yaml ledger is immutable and authoritative", architect)
-        self.assertIn("Before designing modules or writing the skeleton", architect)
-        self.assertIn("perform one bounded consistency pass", architect)
-        self.assertIn("newer revision takes precedence over conflicting earlier revisions", architect)
+        # Stable role philosophy remains explicit even though invocation-specific
+        # and mechanically enforced rules are no longer duplicated here.
+        self.assertIn("immutable task.yaml ledger as product truth", architect)
+        self.assertIn("one bounded consistency pass", architect)
+        self.assertIn("newer text wins only where meanings conflict", architect)
         self.assertIn("Mechanically verify examples", architect)
         self.assertIn("call ask_question and wait", architect)
-        self.assertIn("without any task-edit or task-submit action", architect)
-        self.assertIn("feasibility", architect)
-        self.assertIn("foundation, language/runtime bridge", architect)
-        self.assertIn("one candidate-review cycle", architect)
-        self.assertIn("Never reduce the core goal to a stub", architect)
-        self.assertIn("Maintain one acyclic semantic Contract Dependency Graph", architect)
-        self.assertIn("Do not invent a universal all-module scenario", architect)
-        self.assertIn("Declare one or more meaningful end-to-end Verification Scenarios", architect)
-        self.assertIn("Never include opaque IDs, handles, SHA values, milestones", architect)
-        self.assertIn("declaration-only module-level design", architect)
-        self.assertIn("Design modules and their interaction contracts", architect)
-        self.assertIn("never descend into function-level implementation", architect)
-        self.assertIn("Architect completion requires all five conditions", architect)
-        self.assertIn("exactly one owner", architect)
-        self.assertIn("implementation details are explicitly deferred", architect)
-        self.assertIn("Do not run a compiler, build, linker, test suite", architect)
-        self.assertIn("user-specified language", architect)
-        self.assertIn("external libraries, packages, runtimes", architect)
-        self.assertIn("Do not invent a build_system module", architect)
-        self.assertIn("compiler command, build file, test runner", architect)
-        self.assertIn("runtime entrypoint or composition root", architect)
-        self.assertIn("include only its existing or required path as an implementation scope", architect)
-        self.assertIn("declare no speculative build scope", architect)
-        self.assertIn("multiple active conventions", architect)
-        self.assertNotIn("Shared build/bootstrap or composition-root glue", architect)
-        coder = str(self._pack("software_engineering.v2_coder").resolved_profile["behavior_fragment"])
-        self.assertIn("Accepted Skeleton declarations, adjacent contract comments", coder)
-        self.assertIn("Do not search for task.yaml", coder)
-        self.assertIn("evidence and cannot silently redefine", coder)
-        self.assertIn("report the upstream contract/architecture defect", coder)
-        self.assertIn("Audit breadth-first in one pass", architecture_review)
-        self.assertIn("Read the same immutable task.yaml ledger", architecture_review)
-        self.assertIn("exact Manager-recorded user communications", architecture_review)
-        self.assertIn("investigate what its supplied path currently contains", architecture_review)
-        self.assertIn("Manager provides no semantic verdict", architecture_review)
-        self.assertIn("independently evaluate directional contracts", architecture_review)
-        self.assertIn("Submit exactly once", str(
-            self._pack("software_engineering.v2_reviewer").resolved_profile["output_contract_fragment"]
-        ))
-        self.assertIn("unique data/worker/object/resource ownership", architecture_review)
-        self.assertIn("one candidate-review cycle", architecture_review)
-        self.assertIn(
-            "Confirm all implementation modules can start independently",
-            architecture_review,
-        )
-        self.assertIn("semantic feasibility rehearsal", architecture_review)
-        self.assertIn("Architecture review is complete only when all five conditions hold", architecture_review)
-        self.assertIn("every key scenario can be traced to completion", architecture_review)
-        self.assertIn("every failure path reaches a declared legal terminal", architecture_review)
-        self.assertIn("every binding Requirement maps to a contract", architecture_review)
-        self.assertIn("no implementation, runtime, external-library, or resource dependency is undeclared", architecture_review)
-        self.assertIn("Compilation confirms only contract/protocol", architecture_review)
-        self.assertIn("direct compiler invocation for a small isolated module", architecture_review)
-        self.assertIn("Reject synthetic build_system modules", architecture_review)
-        self.assertIn("entrypoint/composition-root owner's writable implementation scope", architecture_review)
-        self.assertIn("Missing mandatory scope is an architecture_defect", architecture_review)
-        self.assertIn("Manager derives separate durable corpora", architecture_review)
-        self.assertIn("tests/<module_name>/developer", architecture_review)
-        self.assertIn("tests/<module_name>/verification", architecture_review)
-        self.assertIn("Architect must not create or", architecture_review)
-        self.assertIn("Never report a missing test scope", architecture_review)
-        self.assertIn("Tests are verification evidence, not product modules", architecture_review)
-        self.assertIn("review object is semantic contract composition", architecture_review)
-        self.assertIn("Starting from each scenario's concrete entrypoint", architecture_review)
-        self.assertIn("plausible future implementation proves only", architecture_review)
-        self.assertIn("do not demand private algorithms or function bodies", architecture_review)
-        self.assertIn("check every observable claim against a concrete semantic trace", architecture_review)
-        self.assertIn("explicit ambiguity audit", architecture_review)
-        self.assertIn("absent, null, empty, zero-length", architecture_review)
-        self.assertIn("whether prior output is committed or rolled back", architecture_review)
-        self.assertIn("copy, move, clone", architecture_review)
-        self.assertIn("Never introduce a value or operation in a compile", architecture_review)
-        self.assertIn("review_guarded writable private implementation seams", architecture_review)
-        self.assertIn("Implementation may choose", architecture_review)
-        self.assertIn("placeholder or stub function bodies", architecture_review)
+        self.assertIn("Design the smallest complete system at module level", architect)
+        self.assertIn("every state, worker, object, and resource has exactly one owner", architect)
+        self.assertIn("lifecycle transitions and composition joins close", architect)
+        self.assertIn("private implementation is explicitly deferred", architect)
+        self.assertIn("one acyclic Contract Dependency Graph", architect)
+        self.assertIn("A composition root or runtime entrypoint is a product module", architect)
+        self.assertIn("Build commands, manifests, test runners", architect)
+        self.assertIn("meaningful end-to-end scenarios", architect)
+        self.assertIn("established project or language/runtime primitives", architect)
         self.assertIn("object-address side table", architecture_review)
-        self.assertIn("syntax or compilation as semantic proof", str(
-            self._pack("software_engineering.v2_reviewer").resolved_profile["output_contract_fragment"]
-        ))
-        self.assertIn("manually simulating the data/state flow", architecture_review)
-        self.assertIn("verify a local repair without reopening unchanged architecture", architecture_review)
+        self.assertIn("Audit requirement preservation", architecture_review)
+        self.assertIn("Review semantic composition, not private implementation", architecture_review)
+        self.assertIn("Every state, worker, object, and resource needs one owner", architecture_review)
+        self.assertIn("Perform an ambiguity audit", architecture_review)
+        self.assertIn("partial output followed by error", architecture_review)
+        self.assertIn("copy/move/share/reset/reuse", architecture_review)
+        self.assertIn("Compilation and LSP support", architecture_review)
+        self.assertIn("Tests remain verification evidence", architecture_review)
+        self.assertIn("On revision, regress the prior finding", architecture_review)
+
+        self.assertIn("Accepted Skeleton declarations", coder)
+        self.assertIn("dependency's public contract as an axiom", coder)
+        self.assertIn("Work depth-first inside the owned module", coder)
+        self.assertIn("standard-library", coder)
+        self.assertIn("hand-rolled infrastructure", coder)
+        self.assertIn("Functional Core / Imperative Shell", coder)
+        self.assertIn("process-global registry", coder)
+        self.assertIn("make illegal states or malformed data hard to represent", coder)
+        self.assertIn("update_checklist as a micro-plan, not proof", coder)
+        self.assertIn("submit immediately for independent verification", coder)
+
         self.assertIn("complete adjudication scope", verifier)
         self.assertIn("dependency public contract as an axiom", verifier)
         self.assertIn("Never inspect, audit, or infer", verifier)
@@ -1112,25 +1080,20 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("first public boundary", system_verifier)
         self.assertIn("successful real-boundary evidence", system_verifier)
         self.assertIn("do not invent facts", generic)
-        self.assertIn("Perform only the local implementation research", coder)
-        self.assertIn(
-            "review_guarded contract_paths, implementation_scopes, and developer test scope",
-            coder,
-        )
-        self.assertIn("tests/<module_name>/verification remain read-only", coder)
-        self.assertIn("Use the minimum sufficient build path", coder)
-        self.assertIn("direct compiler/interpreter commands", coder)
-        self.assertIn("owns the assembly code", coder)
-        self.assertIn("As soon as the owned contract, edit path", coder)
-        self.assertIn("avoid speculative", coder)
-        self.assertIn("call candidate_submit immediately", coder)
-        self.assertIn("update_checklist", coder)
-        self.assertIn("never proves correctness", coder)
         self.assertIn("never acceptance evidence", verifier)
         self.assertIn("minimum sufficient focused build/test path", verifier)
-        self.assertIn("missing state, ownership, dependency-injection, or cleanup seam", coder)
         self.assertNotIn("owned_impl", coder)
         self.assertNotIn("owned_test", coder)
+
+        # Prompt budgets prevent mechanical policy from creeping back into every
+        # role while leaving the semantic philosophy readable in one place.
+        self.assertLess(len(architect), 7_000)
+        self.assertLess(len(architecture_review), 7_000)
+        self.assertLess(len(coder), 5_500)
+        for behavior in (architect, architecture_review, coder):
+            self.assertNotIn("Do not run git commit", behavior)
+            self.assertNotIn("tests/<module_name>/developer", behavior)
+            self.assertNotIn("tests/<module_name>/verification", behavior)
 
     def test_every_architect_profile_gates_design_on_source_consistency(self) -> None:
         for profile in (

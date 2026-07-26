@@ -141,6 +141,85 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
             with self.subTest(method=method), self.assertRaisesRegex(ValueError, "not allowed"):
                 self.call(method, name="module_work_view")
 
+    def test_gateway_persists_execution_clock_and_pager_by_role_session(
+        self,
+    ) -> None:
+        first = self.call(
+            "execution_begin_input",
+            logical_session_id="session-router",
+            input_id="assignment-router",
+            retention_user_turns=5,
+        )
+        replay = self.call(
+            "execution_begin_input",
+            logical_session_id="session-router",
+            input_id="assignment-router",
+            retention_user_turns=5,
+        )
+        self.assertEqual(first["context"]["current_user_turn"], 1)
+        self.assertEqual(replay["context"]["current_user_turn"], 1)
+
+        stored = self.call(
+            "execution_store_pager",
+            manifest={
+                "result_ref": "result-router",
+                "logical_session_id": "session-router",
+                "tool_name": "read_file",
+                "status": "ok",
+                "ok": True,
+                "page_size": 256,
+                "original_size": 11,
+                "page_count": 1,
+                "created_user_turn": 999,
+                "expires_at_user_turn": 999,
+                "output_json": '{"value":1}',
+                "rendered": "hello world",
+            },
+        )
+        self.assertEqual(stored["manifest"]["created_user_turn"], 1)
+        self.assertEqual(stored["manifest"]["expires_at_user_turn"], 6)
+        page = self.call(
+            "execution_read_pager",
+            logical_session_id="session-router",
+            result_ref="result-router",
+            page=1,
+            anchor="head",
+        )
+        self.assertEqual(page["state"], "ok")
+        self.assertEqual(page["content"], "hello world")
+
+        session = self.service.repository.read_role_session("session-router")
+        self.assertIn("result-router", session["execution_state"]["handles"])
+        payload_ref = session["execution_state"]["handles"]["result-router"][
+            "payload_ref"
+        ]
+        self.assertEqual(
+            self.service.artifacts.read_json(payload_ref)["rendered"],
+            "hello world",
+        )
+        for index in range(2, 7):
+            self.call(
+                "execution_begin_input",
+                logical_session_id="session-router",
+                input_id=f"assignment-router-{index}",
+                retention_user_turns=5,
+            )
+        expired = self.call(
+            "execution_read_pager",
+            logical_session_id="session-router",
+            result_ref="result-router",
+            page=1,
+            anchor="head",
+        )
+        self.assertEqual(expired["state"], "expired_handle")
+
+    def test_gateway_rejects_cross_session_execution_state_access(self) -> None:
+        with self.assertRaisesRegex(ValueError, "authenticated role session"):
+            self.call(
+                "execution_context",
+                logical_session_id="some-other-session",
+            )
+
     def test_gateway_owns_draft_cas_artifact_publish_and_submission_receipt(self) -> None:
         first = self.call("draft_read", context=self.context, seed={"checks": []})
         self.assertEqual(first["snapshot"]["version"], 0)

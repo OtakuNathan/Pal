@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -157,6 +158,81 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
         self.assertNotEqual(first.workspace["artifact_dir"], second.workspace["artifact_dir"])
         self.assertIn("attempts/fence-1", first.workspace["artifact_stage_dir"])
         self.assertIn("attempts/fence-2", second.workspace["artifact_stage_dir"])
+
+    def test_role_workspace_clones_exact_linked_worktree_head(self) -> None:
+        repository = self.root / "linked-source-repository"
+        repository.mkdir()
+        subprocess.run(["git", "init", "-q", str(repository)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repository), "config", "user.email", "pal@example.invalid"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repository), "config", "user.name", "Pal Tests"],
+            check=True,
+        )
+        (repository / "value.txt").write_text("default branch\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repository), "add", "value.txt"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repository), "commit", "-qm", "default branch"],
+            check=True,
+        )
+        linked_worktree = self.root / "candidate-worktree"
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "candidate",
+                str(linked_worktree),
+            ],
+            check=True,
+        )
+        (linked_worktree / "value.txt").write_text("candidate branch\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(linked_worktree), "add", "value.txt"], check=True)
+        subprocess.run(
+            ["git", "-C", str(linked_worktree), "commit", "-qm", "candidate"],
+            check=True,
+        )
+        source_head = subprocess.check_output(
+            ["git", "-C", str(linked_worktree), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        pack = MinionInvocationPack(
+            invocation_id="inv-linked-role-workspace",
+            workspace={"repo_path": str(linked_worktree)},
+        )
+
+        prepared = prepare_v2_role_workspace(
+            self.root,
+            pack,
+            run_id="run-linked-role-workspace",
+            attempt_key="fence-1",
+        )
+
+        role_workspace = Path(prepared.workspace["repo_path"])
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(role_workspace), "rev-parse", "HEAD"],
+                text=True,
+            ).strip(),
+            source_head,
+        )
+        self.assertEqual(
+            (role_workspace / "value.txt").read_text(encoding="utf-8"),
+            "candidate branch\n",
+        )
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(role_workspace), "status", "--porcelain"],
+                text=True,
+            ),
+            "",
+        )
 
     def test_project_layout_uses_repo_name_and_disambiguates_same_named_sources(self) -> None:
         first_source = self.root / "one" / "shared-project"

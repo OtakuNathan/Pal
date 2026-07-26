@@ -11,12 +11,15 @@ VARIABLES
     state,
     session,
     generation,
+    regressionGeneration,
+    deltaReviewGeneration,
     harnessCases,
     realDeliveryEvidence,
     workflowState
 
 vars == <<
-    state, session, generation, harnessCases,
+    state, session, generation, regressionGeneration, deltaReviewGeneration,
+    harnessCases,
     realDeliveryEvidence, workflowState
 >>
 
@@ -24,6 +27,8 @@ Init ==
     /\ state = "Blocked"
     /\ session = "Suspended"
     /\ generation = 1
+    /\ regressionGeneration = 0
+    /\ deltaReviewGeneration = 0
     /\ harnessCases = 0
     /\ realDeliveryEvidence = FALSE
     /\ workflowState = "Running"
@@ -32,7 +37,8 @@ ModulesAccepted ==
     /\ workflowState = "Running"
     /\ state \in {"Blocked", "Repairing"}
     /\ state' = "Ready"
-    /\ UNCHANGED <<session, generation, harnessCases,
+    /\ UNCHANGED <<session, generation, regressionGeneration,
+        deltaReviewGeneration, harnessCases,
         realDeliveryEvidence, workflowState>>
 
 StartSystemVerifier ==
@@ -40,15 +46,32 @@ StartSystemVerifier ==
     /\ state = "Ready"
     /\ state' = "Running"
     /\ session' = "Active"
-    /\ UNCHANGED <<generation, harnessCases,
+    /\ UNCHANGED <<generation, regressionGeneration, deltaReviewGeneration,
+        harnessCases,
         realDeliveryEvidence, workflowState>>
+
+ReplayRegressions ==
+    /\ state = "Running"
+    /\ session = "Active"
+    /\ regressionGeneration' = generation
+    /\ UNCHANGED <<state, session, generation, deltaReviewGeneration,
+        harnessCases, realDeliveryEvidence, workflowState>>
+
+ReviewCandidateDelta ==
+    /\ state = "Running"
+    /\ session = "Active"
+    /\ regressionGeneration = generation
+    /\ deltaReviewGeneration' = generation
+    /\ UNCHANGED <<state, session, generation, regressionGeneration,
+        harnessCases, realDeliveryEvidence, workflowState>>
 
 AddHarnessCase ==
     /\ state = "Running"
     /\ session = "Active"
     /\ harnessCases < MaxCases
     /\ harnessCases' = harnessCases + 1
-    /\ UNCHANGED <<state, session, generation,
+    /\ UNCHANGED <<state, session, generation, regressionGeneration,
+        deltaReviewGeneration,
         realDeliveryEvidence, workflowState>>
 
 RecordRealDeliveryEvidence ==
@@ -56,16 +79,20 @@ RecordRealDeliveryEvidence ==
     /\ session = "Active"
     /\ harnessCases > 0
     /\ realDeliveryEvidence' = TRUE
-    /\ UNCHANGED <<state, session, generation, harnessCases, workflowState>>
+    /\ UNCHANGED <<state, session, generation, regressionGeneration,
+        deltaReviewGeneration, harnessCases, workflowState>>
 
 Pass ==
     /\ state = "Running"
     /\ session = "Active"
     /\ harnessCases > 0
     /\ realDeliveryEvidence
+    /\ regressionGeneration = generation
+    /\ deltaReviewGeneration = generation
     /\ state' = "Accepted"
     /\ session' = "Suspended"
-    /\ UNCHANGED <<generation, harnessCases,
+    /\ UNCHANGED <<generation, regressionGeneration, deltaReviewGeneration,
+        harnessCases,
         realDeliveryEvidence, workflowState>>
 
 FindModuleDefect ==
@@ -73,29 +100,36 @@ FindModuleDefect ==
     /\ session = "Active"
     /\ harnessCases > 0
     /\ generation < MaxGeneration
+    /\ regressionGeneration = generation
+    /\ deltaReviewGeneration = generation
     /\ state' = "Repairing"
     /\ session' = "Suspended"
     /\ generation' = generation + 1
     /\ realDeliveryEvidence' = FALSE
-    /\ UNCHANGED <<harnessCases, workflowState>>
+    /\ UNCHANGED <<regressionGeneration, deltaReviewGeneration,
+        harnessCases, workflowState>>
 
 CompleteWorkflow ==
     /\ state = "Accepted"
     /\ workflowState = "Running"
     /\ workflowState' = "Completed"
     /\ session' = "Completed"
-    /\ UNCHANGED <<state, generation, harnessCases, realDeliveryEvidence>>
+    /\ UNCHANGED <<state, generation, regressionGeneration,
+        deltaReviewGeneration, harnessCases, realDeliveryEvidence>>
 
 CancelWorkflow ==
     /\ workflowState = "Running"
     /\ workflowState' = "Cancelled"
     /\ state' = "Cancelled"
     /\ session' = "Cancelled"
-    /\ UNCHANGED <<generation, harnessCases, realDeliveryEvidence>>
+    /\ UNCHANGED <<generation, regressionGeneration, deltaReviewGeneration,
+        harnessCases, realDeliveryEvidence>>
 
 Next ==
     \/ ModulesAccepted
     \/ StartSystemVerifier
+    \/ ReplayRegressions
+    \/ ReviewCandidateDelta
     \/ AddHarnessCase
     \/ RecordRealDeliveryEvidence
     \/ Pass
@@ -109,6 +143,8 @@ TypeOK ==
     /\ state \in States
     /\ session \in SessionStates
     /\ generation \in 1..MaxGeneration
+    /\ regressionGeneration \in 0..MaxGeneration
+    /\ deltaReviewGeneration \in 0..MaxGeneration
     /\ harnessCases \in 0..MaxCases
     /\ realDeliveryEvidence \in BOOLEAN
     /\ workflowState \in WorkflowStates
@@ -123,5 +159,13 @@ RepairPreservesHarness ==
 
 WorkflowOwnsSessionLifetime ==
     workflowState = "Running" => session \notin {"Completed", "Cancelled"}
+
+AcceptedCoversCurrentGeneration ==
+    state = "Accepted" =>
+        /\ regressionGeneration = generation
+        /\ deltaReviewGeneration = generation
+
+DeltaReviewFollowsRegression ==
+    deltaReviewGeneration <= regressionGeneration
 
 =============================================================================

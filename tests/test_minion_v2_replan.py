@@ -150,8 +150,8 @@ class MinionV2ReplanTests(unittest.TestCase):
         self._dispatch(
             AggregateType.EXECUTION_EPOCH,
             self.epoch_id,
-            "REPLACEMENT_EPOCH_STARTED",
-            {"replacement_execution_epoch_id": "epoch_replacement"},
+            "SUCCESSOR_EPOCH_STARTED",
+            {"successor_execution_epoch_id": "epoch_successor"},
         )
         self.assertEqual(
             self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, self.epoch_id).state,

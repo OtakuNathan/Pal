@@ -425,7 +425,7 @@ class MinionV2WorkflowService:
                     "active_channel": source_channel,
                     "control_route": dict(data.get("control_route") or {}),
                     "desired_state": "ACTIVE",
-                    "orchestration_contract_version": "3",
+                    "orchestration_contract_version": "5",
                 },
             )
         )
@@ -873,7 +873,7 @@ class MinionV2WorkflowService:
             "state": result.snapshot.state,
             "reason": summary,
             "architecture_review": "required",
-            "candidate_reuse": False,
+            "module_identity_reuse": False,
             "next_action": "settle current workflow and create replacement workflow",
         }
 

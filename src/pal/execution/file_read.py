@@ -20,6 +20,12 @@ from uuid import uuid4
 from pal.execution.contracts import CapabilityResult
 from pal.execution.file_state import FileStateCache, file_cache_key, resolve_file_path
 from pal.execution.file_tool_contracts import DEFAULT_FILE_READ_LIMIT
+from pal.execution.session_state import (
+    FileDeliveryManifest,
+    FileDeliverySpan,
+    LogicalExecutionContext,
+    LogicalExecutionStateBackend,
+)
 from pal.shared import RuntimeStatus
 
 
@@ -142,12 +148,51 @@ class FileVisibilityCache:
 
 
 @dataclass
+class SessionFileVisibilityCache:
+    backend: LogicalExecutionStateBackend
+    context: LogicalExecutionContext
+
+    def covers(
+        self,
+        scope: str,
+        file_path: str | Path,
+        *,
+        version: str,
+        start_line: int,
+        end_line: int,
+    ) -> bool:
+        _ = scope
+        grant = self.backend.file_grant(
+            logical_session_id=self.context.logical_session_id,
+            file_key=file_cache_key(file_path),
+            digest=version,
+        )
+        if grant is None:
+            return False
+        if grant.total_lines == 0:
+            return grant.empty_file
+        return any(
+            covered_start <= start_line and covered_end >= end_line
+            for covered_start, covered_end in grant.covered_ranges
+        )
+
+    def mark_visible(self, *args: Any, **kwargs: Any) -> None:
+        # Runtime delivery is committed only after the result enters the
+        # provider-visible tool protocol.
+        _ = args, kwargs
+
+    def clear_scope(self, scope: str) -> None:
+        _ = scope
+
+
+@dataclass
 class FileReadTool:
     """Business handler for validated file reads and shared state caching."""
 
     cache: FileStateCache = field(default_factory=FileStateCache)
     visibility_cache: FileVisibilityCache = field(default_factory=FileVisibilityCache)
     visibility_scope: str = field(default_factory=lambda: f"file-reader:{uuid4().hex}")
+    defer_delivery: bool = False
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         file_path = str(args.get("file_path") or args.get("path") or "").strip()
@@ -224,7 +269,8 @@ class FileReadTool:
 
         # The state cache stores the complete bytes for stale detection, but
         # only a complete visible read grants permission to mutate the file.
-        self.cache.mark_read(str(resolved), raw, full_view=full_view)
+        if not self.defer_delivery:
+            self.cache.mark_read(str(resolved), raw, full_view=full_view)
 
         if already_visible:
             return _result(
@@ -241,6 +287,12 @@ class FileReadTool:
             )
 
         if total_lines == 0:
+            manifest = FileDeliveryManifest(
+                file_key=file_cache_key(resolved),
+                digest=version,
+                total_lines=0,
+                empty_file=True,
+            )
             return _result(
                 RuntimeStatus.OK,
                 "(empty file)",
@@ -252,6 +304,8 @@ class FileReadTool:
                 full_view=True,
                 unchanged=False,
                 encoding="utf-8",
+                content="",
+                _context_delivery=manifest.to_dict(),
             )
 
         # Offset beyond file: return informative message instead of empty content.
@@ -269,20 +323,36 @@ class FileReadTool:
             }
             return _result(RuntimeStatus.OK, msg, **structured)
 
-        self.visibility_cache.mark_visible(
-            self.visibility_scope,
-            resolved,
-            version=version,
-            start_line=start,
-            end_line=end,
-        )
+        if not self.defer_delivery:
+            self.visibility_cache.mark_visible(
+                self.visibility_scope,
+                resolved,
+                version=version,
+                start_line=start,
+                end_line=end,
+            )
 
         truncated = end < total_lines
 
         selected = lines[start - 1 : end]
         numbered: list[str] = []
+        spans: list[FileDeliverySpan] = []
+        cursor = 0
         for i, line in enumerate(selected, start=start):
-            numbered.append(f"{i:>6}\t{line.rstrip(chr(10)).rstrip(chr(13))}")
+            rendered_line = f"{i:>6}\t{line.rstrip(chr(10)).rstrip(chr(13))}"
+            numbered.append(rendered_line)
+            spans.append(
+                FileDeliverySpan(
+                    start_offset=cursor,
+                    end_offset=cursor + len(rendered_line),
+                    start_line=i,
+                    end_line=i,
+                    visible_start_in_line=0,
+                    visible_end_in_line=len(rendered_line),
+                    line_length=len(rendered_line),
+                )
+            )
+            cursor += len(rendered_line) + 1
 
         content = "\n".join(numbered)
         if truncated:
@@ -297,9 +367,21 @@ class FileReadTool:
             "full_view": full_view,
             "unchanged": False,
             "encoding": "utf-8",
+            "content": content,
         }
+        manifest = FileDeliveryManifest(
+            file_key=file_cache_key(resolved),
+            digest=version,
+            total_lines=total_lines,
+            spans=tuple(spans),
+        )
 
-        return _result(RuntimeStatus.OK, content, **structured)
+        return _result(
+            RuntimeStatus.OK,
+            content,
+            _context_delivery=manifest.to_dict(),
+            **structured,
+        )
 
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
         _ = kwargs
@@ -321,4 +403,11 @@ def _positive_int(value: Any, *, default: int) -> int | None:
 
 
 def _result(status: str, text: str, **structured: Any) -> CapabilityResult:
-    return CapabilityResult(status=status, llm_text=text, text=text, structured=structured)
+    delivery = structured.pop("_context_delivery", None)
+    return CapabilityResult(
+        status=status,
+        llm_text=text,
+        text=text,
+        structured=structured,
+        context_delivery=dict(delivery) if isinstance(delivery, dict) else None,
+    )

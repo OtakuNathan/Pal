@@ -20,6 +20,8 @@ models=(
     SystemVerificationLifecycle
     DurableEffects
     RoleAssignmentRecovery
+    WorkerProcessLifecycle
+    ReplanReuseLifecycle
     ImplementationTopology
 )
 

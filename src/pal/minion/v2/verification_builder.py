@@ -54,6 +54,7 @@ from pal.shared import RuntimeStatus
 
 _RUN_TO_KIND_TAG = {
     "op_minion_verification_run_historical_regression": ("historical_regression", "historical_regressions"),
+    "op_minion_verification_run_diff_risk": ("diff_risk", "candidate_delta_review"),
     "op_minion_verification_run_adversarial_case": ("contract_adversarial", "focused_tests"),
     "op_minion_verification_run_focused_test": ("unit", "focused_tests"),
     "op_minion_verification_run_compile_check": ("compile", "compile"),
@@ -67,6 +68,7 @@ _COMMON_VERIFICATION_CAPABILITIES = frozenset(
     {
         "op_minion_verification_scratch_write",
         "op_minion_verification_run_historical_regression",
+        "op_minion_verification_run_diff_risk",
         "op_minion_verification_run_adversarial_case",
         "op_minion_verification_run_focused_test",
         "op_minion_verification_run_compile_check",
@@ -100,8 +102,21 @@ VERIFICATION_BUILDER_CAPABILITIES = (
     "op_minion_verification_remove_finding",
     "op_minion_verification_submit",
 )
+VERIFICATION_EVIDENCE_CAPABILITIES = (
+    *(
+        capability
+        for capability in _EXECUTION_CAPABILITIES
+        if capability != "op_minion_verification_scratch_write"
+    ),
+    "op_minion_verification_draft_status",
+    "op_minion_verification_remove_case",
+)
 STANDALONE_REVIEW_BUILDER_CAPABILITIES = (
-    *_EXECUTION_CAPABILITIES,
+    *(
+        capability
+        for capability in _EXECUTION_CAPABILITIES
+        if capability != "op_minion_verification_run_diff_risk"
+    ),
     *_FINDING_CAPABILITIES,
     "op_minion_verification_draft_status",
     "op_minion_verification_remove_case",
@@ -111,92 +126,6 @@ STANDALONE_REVIEW_BUILDER_CAPABILITIES = (
     "op_minion_standalone_review_submit",
 )
 VERIFICATION_TOOL_CAPABILITIES = tuple(dict.fromkeys((*VERIFICATION_BUILDER_CAPABILITIES, *STANDALONE_REVIEW_BUILDER_CAPABILITIES)))
-
-_RUN_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "command": {"type": "string", "minLength": 1},
-        "description": {"type": "string"},
-        "expected_exit_codes": {"type": "array", "items": {"type": "integer"}},
-        "timeout_seconds": {"type": "integer", "minimum": 1},
-        "path": {"type": "string"},
-        "symbol": {"type": "string"},
-        "contract_section": {"type": "string"},
-        "invariants": {"type": "array", "items": {"type": "string"}},
-        "probe_path": {"type": "string"},
-    },
-    "required": ["name", "command"],
-    "additionalProperties": False,
-}
-_LSP_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "file": {"type": "string", "minLength": 1},
-        "description": {"type": "string"},
-    },
-    "required": ["name", "file"],
-    "additionalProperties": False,
-}
-_SCRATCH_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "path": {"type": "string", "minLength": 1},
-        "content": {"type": "string"},
-    },
-    "required": ["path", "content"],
-    "additionalProperties": False,
-}
-_UNAVAILABLE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "obligation": {
-            "type": "string",
-            "enum": ["focused_tests", "warning_clean", "consumer_probe", "public_surface_dogfood", "lsp", "historical_regressions", "platform_probe"],
-        },
-        "reason": {"type": "string", "minLength": 1},
-        "path": {"type": "string"},
-    },
-    "required": ["name", "obligation", "reason"],
-    "additionalProperties": False,
-}
-_SUMMARY_SCHEMA = {
-    "type": "object",
-    "properties": {"summary": {"type": "string", "minLength": 1}},
-    "required": ["summary"],
-    "additionalProperties": False,
-}
-_SURFACE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "kind": {"type": "string", "enum": ["reviewed", "test_gap", "unreviewed", "residual_risk"]},
-        "text": {"type": "string", "minLength": 1},
-    },
-    "required": ["kind", "text"],
-    "additionalProperties": False,
-}
-_CONCLUSION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "verdict": {"type": "string", "enum": ["approved", "changes_requested", "blocked"]},
-        "summary": {"type": "string", "minLength": 1},
-        "scope": {"type": "string"},
-    },
-    "required": ["verdict", "summary"],
-    "additionalProperties": False,
-}
-_NO_ARGS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
-_NAMED_CASE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "reason": {"type": "string", "minLength": 1},
-    },
-    "required": ["name", "reason"],
-    "additionalProperties": False,
-}
 
 _DEFECT_PRECEDENCE = {
     "verification_defect": -1,
@@ -241,7 +170,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_check_unavailable": {
         "alias": "verification_check_unavailable",
-        "description": "Record focused_tests, warning_clean, consumer_probe, public_surface_dogfood, lsp, historical_regressions, or platform_probe as UNKNOWN with a concrete environmental reason. This never manufactures PASS evidence.",
+        "description": "Record focused_tests, warning_clean, consumer_probe, public_surface_dogfood, lsp, historical_regressions, platform_probe, or candidate_delta_review as UNKNOWN with a concrete environmental reason. This never manufactures PASS evidence.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput,
     },
     "op_minion_verification_set_summary": {
@@ -315,6 +244,8 @@ def effective_verification_policy(
         "lsp",
         "warning_clean",
     }
+    if not standalone:
+        allowed_obligations.add("candidate_delta_review")
     if historical_regressions:
         allowed_obligations.add("historical_regressions")
     if mode == "module" or require_consumer_probe:
@@ -335,6 +266,7 @@ def effective_verification_policy(
         "require_consumer_probe": require_consumer_probe,
         "require_public_surface_dogfood": require_dogfood,
         "require_platform_probe": require_platform_probe,
+        "require_candidate_delta_review": not standalone,
         # Historical regression is node-local. An empty RepairBill ledger has
         # no case to replay and must not become an UNKNOWN obligation.
         "require_historical_regressions": bool(historical_regressions),
@@ -416,6 +348,8 @@ def compile_verification_invocation_tool_contract(
         if standalone
         else _COMMON_VERIFICATION_CAPABILITIES
     )
+    if standalone:
+        allowed_capabilities.discard("op_minion_verification_run_diff_risk")
     if "consumer_probe" in set(policy["allowed_obligations"]):
         allowed_capabilities.add("op_minion_verification_run_consumer_probe")
     if "public_surface_dogfood" in set(policy["allowed_obligations"]):
@@ -467,6 +401,20 @@ def compile_verification_invocation_tool_contract(
             "consumes a verifier scratch file so exact evidence reuse is invalidated only by that file. "
             f"Bound verification context: {boundary_text}."
         )}
+    if not standalone:
+        overrides["op_minion_verification_run_diff_risk"] = {
+            "use_when": (
+                "After replaying every bound historical/current RepairBill regression, inspect the current "
+                "Candidate diff and its semantic neighborhood, then run one targeted check for newly introduced "
+                "defects. Cite the changed path, symbol or contract section and relevant invariants. This evidence "
+                "is Candidate-specific and must be rerun for every assignment; a prior Candidate result cannot "
+                "settle the current one."
+            ),
+            "do_not_use_when": (
+                "Do not use before every required historical RepairBill case has been recorded for this assignment, "
+                "and do not use it as a substitute for focused corpus tests or historical regressions."
+            ),
+        }
     overrides["op_minion_verification_check_unavailable"] = {"use_when": (
         "Record UNKNOWN only for an allowed obligation that is genuinely required but unavailable in this environment. "
         "Do not create an UNKNOWN case for an absent or non-applicable obligation. In particular, an empty historical "
@@ -478,8 +426,9 @@ def compile_verification_invocation_tool_contract(
         overrides["op_minion_verification_run_historical_regression"] = {"use_when": (
             "Replay one Manager-bound historical RepairBill case before new adversarial or diff-risk exploration. "
             "Use an exact case name from the checklist and a command that executes its preserved reproducer or promoted project regression. "
-            "Every listed case must be recorded before verification_submit; all must PASS before new risk exploration or acceptance. "
-            "A repeated FAIL may be submitted immediately with a structured finding. Required historical regressions: "
+            "Every listed case must be recorded before new risk exploration and before verification_submit. A repeated "
+            "FAIL blocks PASS but must not skip the current Candidate diff-risk audit; finish that audit, batch all "
+            "findings, and then submit one outcome. Required historical regressions: "
             + json.dumps(historical_regressions, ensure_ascii=False, sort_keys=True)
         )}
     overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
@@ -657,6 +606,7 @@ def _draft_status(
             ("require_public_surface_dogfood", "public_surface_dogfood"),
             ("require_platform_probe", "platform_probe"),
             ("require_historical_regressions", "historical_regressions"),
+            ("require_candidate_delta_review", "candidate_delta_review"),
         )
         if bool(policy.get(key, False))
     }
@@ -960,9 +910,9 @@ def validate_semantic_verification_plan_shape(value: Mapping[str, Any], *, stand
         raise ValueError("standalone verdict is invalid")
 
 
-def _preflight_verification_submission(
+def _verification_submission_errors(
     value: Mapping[str, Any], workspace: Mapping[str, Any]
-) -> tuple[str, ...]:
+) -> tuple[list[str], tuple[str, ...]]:
     errors: list[str] = []
     reference_warnings: tuple[str, ...] = ()
     work_view = bound_reference_payload(workspace, "module_work_view", required=False)
@@ -998,8 +948,7 @@ def _preflight_verification_submission(
             )
     policy = bound_reference_payload(workspace, "verification_policy", required=False)
     if not policy:
-        raise_submission_errors(errors, owner="verification_submit")
-        return reference_warnings
+        return errors, reference_warnings
     tags = {str(tag) for item in list(value.get("recorded_results") or []) for tag in list(dict(item).get("obligation_tags") or [])}
     exceptions = dict(value.get("policy_exceptions") or {})
     obligations = (
@@ -1008,6 +957,7 @@ def _preflight_verification_submission(
         ("require_consumer_probe", "consumer_probe"),
         ("require_public_surface_dogfood", "public_surface_dogfood"),
         ("require_platform_probe", "platform_probe"),
+        ("require_candidate_delta_review", "candidate_delta_review"),
     )
     for policy_key, tag in obligations:
         if bool(policy.get(policy_key, False)) and tag not in tags and not str(exceptions.get(tag) or "").strip():
@@ -1035,6 +985,31 @@ def _preflight_verification_submission(
             "FAIL evidence requires at least one add_finding call: "
             + ", ".join(sorted(failed_cases))
         )
+    return errors, reference_warnings
+
+
+def semantic_verification_draft_errors(
+    payload: Mapping[str, Any],
+    workspace: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return policy errors for the current assignment-local verifier Draft."""
+
+    cases = recorded_cases(payload)
+    errors, _warnings = _verification_submission_errors(
+        {
+            "recorded_results": cases,
+            "findings": structured_findings(payload),
+            "policy_exceptions": _policy_exceptions(cases),
+        },
+        workspace,
+    )
+    return tuple(dict.fromkeys(errors))
+
+
+def _preflight_verification_submission(
+    value: Mapping[str, Any], workspace: Mapping[str, Any]
+) -> tuple[str, ...]:
+    errors, reference_warnings = _verification_submission_errors(value, workspace)
     raise_submission_errors(errors, owner="verification_submit")
     return reference_warnings
 
@@ -1068,12 +1043,12 @@ def _preflight_verification_case_execution(
         incomplete = [
             str(item["case"])
             for item in required_historical
-            if historical_status.get(str(item["case"])) != "PASS"
+            if str(item["case"]) not in historical_status
         ]
         if not incomplete:
             return
         raise ValueError(
-            "run every historical RepairBill regression as PASS before adversarial or diff-risk cases: "
+            "record every historical RepairBill regression before adversarial or diff-risk cases: "
             + ", ".join(incomplete)
         )
     if any(

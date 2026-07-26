@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 import subprocess
@@ -65,6 +66,7 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftStore,
 )
 from pal.minion.v2.semantic_orchestration import SemanticOrchestrator
+from pal.minion.v2.sessions import coder_session_id, module_verifier_session_id
 
 
 def _git(root: Path, *args: str) -> str:
@@ -919,7 +921,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         assert node is not None
         self.assertEqual(Path(node.payload["common_git_dir"]), workspace.common_git_dir)
         self.assertEqual(node.payload["workflow_branch"], workspace.workflow_branch)
-        self.assertIn("/node/router-", node.payload["worktree_branch"])
+        self.assertTrue(node.payload["worktree_branch"].endswith("/module/router"))
         self.assertEqual(
             _git(workspace.worktree, "rev-parse", workspace.workflow_branch).strip(),
             skeleton["skeleton_commit_sha"],
@@ -2309,7 +2311,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 }
             )
 
-    def test_candidate_reuse_transplants_module_diff_and_stops_when_contract_changes(self) -> None:
+    def test_exact_module_carry_forward_stops_when_contract_changes(self) -> None:
         workspace = self._provision_complete_workspace("reuse", "initial")
         initial_ref = self.service.snapshot_architect_result(
             workflow_name="reuse",
@@ -2336,7 +2338,25 @@ class MinionV2SkeletonTests(unittest.TestCase):
         (source_worktree / "src" / "router.cpp").write_text(
             "int route_rule() { return 1; }\n", encoding="utf-8"
         )
-        _git(source_worktree, "add", "src/router.cpp")
+        verification_path = (
+            source_worktree
+            / "tests"
+            / "router"
+            / "verification"
+            / "test_route_contract.py"
+        )
+        verification_path.parent.mkdir(parents=True, exist_ok=True)
+        verification_path.write_text(
+            "def test_route_contract():\\n    assert True\\n",
+            encoding="utf-8",
+        )
+        verification_hash = hashlib.sha256(verification_path.read_bytes()).hexdigest()
+        _git(
+            source_worktree,
+            "add",
+            "src/router.cpp",
+            "tests/router/verification/test_route_contract.py",
+        )
         _git(
             source_worktree,
             "-c",
@@ -2352,7 +2372,13 @@ class MinionV2SkeletonTests(unittest.TestCase):
             {
                 "base_sha": source_node.payload["base_sha"],
                 "candidate_digest": source_candidate_digest,
-                "changed_paths": ["src/router.cpp"],
+                "changed_paths": [
+                    "src/router.cpp",
+                    "tests/router/verification/test_route_contract.py",
+                ],
+                "manager_seeded_paths": [
+                    "tests/router/verification/test_route_contract.py",
+                ],
             },
             artifact_type="CandidateSnapshotArtifact",
         )
@@ -2364,13 +2390,16 @@ class MinionV2SkeletonTests(unittest.TestCase):
             candidate_ref=candidate_ref.to_dict(),
             candidate_digest=source_candidate_digest,
             verification_ref=verification_ref.to_dict(),
+            manager_seeded_corpus_hashes={
+                "tests/router/verification/test_route_contract.py": verification_hash,
+            },
         )
 
         reused = compiler.compile_epoch(
             workflow_id="reuse",
             epoch_id="reuse-target",
             manifest_ref=initial_ref,
-            reuse_from_epoch_id="reuse-source",
+            source_epoch_id="reuse-source",
         )
         reused_node = self.repository.read_snapshot(
             AggregateType.DAG_NODE_RUN, reused.unit_node_ids["router"]
@@ -2378,7 +2407,52 @@ class MinionV2SkeletonTests(unittest.TestCase):
         assert reused_node is not None
         self.assertEqual(reused_node.state, "ACCEPTED")
         self.assertTrue((Path(reused_node.payload["workspace_path"]) / "src" / "router.cpp").is_file())
+        self.assertTrue(
+            (
+                Path(reused_node.payload["workspace_path"])
+                / "tests"
+                / "router"
+                / "verification"
+                / "test_route_contract.py"
+            ).is_file()
+        )
+        self.assertEqual(
+            reused_node.payload["manager_seeded_corpus_hashes"],
+            {
+                "tests/router/verification/test_route_contract.py": verification_hash,
+            },
+        )
         self.assertNotEqual(reused_node.payload["candidate_digest"], source_candidate_digest)
+
+        second_reuse = compiler.compile_epoch(
+            workflow_id="reuse",
+            epoch_id="reuse-target-second-worktree",
+            manifest_ref=initial_ref,
+            source_epoch_id="reuse-source",
+        )
+        second_reused_node = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            second_reuse.unit_node_ids["router"],
+        )
+        assert second_reused_node is not None
+        second_reused_worktree = Path(second_reused_node.payload["workspace_path"])
+        self.assertEqual(second_reused_node.state, "ACCEPTED")
+        self.assertTrue((second_reused_worktree / "src" / "router.cpp").is_file())
+        self.assertTrue(
+            (
+                second_reused_worktree
+                / "tests"
+                / "router"
+                / "verification"
+                / "test_route_contract.py"
+            ).is_file()
+        )
+        self.assertEqual(
+            second_reused_node.payload["manager_seeded_corpus_hashes"],
+            {
+                "tests/router/verification/test_route_contract.py": verification_hash,
+            },
+        )
 
         initial = self.artifacts.read_json(initial_ref)
         changed_workspace = self.service.provision_architecture_workspace(
@@ -2406,13 +2480,508 @@ class MinionV2SkeletonTests(unittest.TestCase):
             workflow_id="reuse",
             epoch_id="reuse-changed",
             manifest_ref=changed_ref,
-            reuse_from_epoch_id="reuse-source",
+            source_epoch_id="reuse-source",
         )
         changed_node = self.repository.read_snapshot(
             AggregateType.DAG_NODE_RUN, changed.unit_node_ids["router"]
         )
         assert changed_node is not None
         self.assertEqual(changed_node.state, "BLOCKED_BY_DEPS")
+
+    def test_module_reconciliation_ignores_contract_only_dependencies_without_execution_nodes(self) -> None:
+        (self.repo / "include").mkdir()
+        (self.repo / "include" / "router.h").write_text(
+            _contract("router"), encoding="utf-8"
+        )
+        (self.repo / "include" / "route_types.h").write_text(
+            _contract("route_types").replace("class RuleRouter;", "struct RouteInput;"),
+            encoding="utf-8",
+        )
+        submission = self._submission()
+        route_types = json.loads(json.dumps(submission["modules"]["router"]))
+        route_types["module_kind"] = "contract_only"
+        route_types["responsibility"] = "define the immutable route data shape"
+        route_types["paths"] = {
+            "contract_mode": "file_frozen",
+            "contract_paths": ["include/route_types.h"],
+            "implementation_scopes": [],
+            "reference_only": [],
+        }
+        submission["modules"]["route_types"] = route_types
+        submission["modules"]["router"]["dependencies"] = {
+            "route_types": {
+                "consumes": ["route_result"],
+                "purpose": "reuse the accepted route result shape",
+                "handoff": "return the shared route result",
+            }
+        }
+        workspace = self.service.provision_architecture_workspace(
+            workflow_id="reuse-contract-only",
+            revision_name="initial",
+            workspace={"repo_path": str(self.repo)},
+            requirements_ref=self.requirements_ref,
+        )
+        (workspace.worktree / "include").mkdir(exist_ok=True)
+        (workspace.worktree / "include" / "router.h").write_text(
+            _contract("router"), encoding="utf-8"
+        )
+        (workspace.worktree / "include" / "route_types.h").write_text(
+            _contract("route_types").replace("class RuleRouter;", "struct RouteInput;"),
+            encoding="utf-8",
+        )
+        manifest_ref = self.service.snapshot_architect_result(
+            workflow_name="reuse-contract-only",
+            revision_name="initial",
+            architecture_workspace=workspace,
+            submission=submission,
+            requirements_ref=self.requirements_ref,
+        )
+        compiler = ExecutionCompiler(
+            self.repository,
+            ArchitectureArtifactService(self.artifacts, self.repository),
+        )
+        source = compiler.compile_epoch(
+            workflow_id="reuse-contract-only",
+            epoch_id="reuse-contract-only-source",
+            manifest_ref=manifest_ref,
+        )
+        target = compiler.compile_epoch(
+            workflow_id="reuse-contract-only",
+            epoch_id="reuse-contract-only-target",
+            manifest_ref=manifest_ref,
+            source_epoch_id=source.epoch_id,
+        )
+
+        self.assertEqual(set(target.unit_node_ids), {"router"})
+        target_node = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            target.unit_node_ids["router"],
+        )
+        assert target_node is not None
+        self.assertEqual(target_node.state, "BLOCKED_BY_DEPS")
+
+    def test_replacement_reuses_interface_stable_dependents_and_role_sessions(self) -> None:
+        submission = self._submission()
+        transport = json.loads(json.dumps(submission["modules"]["router"]))
+        transport["responsibility"] = "provide the stable transport boundary"
+        transport["paths"] = {
+            "contract_mode": "file_frozen",
+            "contract_paths": ["include/transport.h"],
+            "implementation_scopes": [
+                {"kind": "file", "path": "src/transport.cpp"}
+            ],
+            "reference_only": [],
+        }
+        submission["modules"]["transport"] = transport
+        submission["modules"]["router"]["dependencies"] = {
+            "transport": {
+                "consumes": ["route_result"],
+                "purpose": "send the selected route over the stable transport",
+                "handoff": "pass the immutable route result",
+            }
+        }
+        submission["scenarios"]["router_end_to_end"]["modules"] = [
+            "transport",
+            "router",
+        ]
+        workspace = self.service.provision_architecture_workspace(
+            workflow_id="reuse-dependent",
+            revision_name="initial",
+            workspace={"repo_path": str(self.repo)},
+            requirements_ref=self.requirements_ref,
+        )
+        (workspace.worktree / "include").mkdir(exist_ok=True)
+        (workspace.worktree / "include" / "router.h").write_text(
+            _contract("router"),
+            encoding="utf-8",
+        )
+        (workspace.worktree / "include" / "transport.h").write_text(
+            _contract("transport"),
+            encoding="utf-8",
+        )
+        manifest_ref = self.service.snapshot_architect_result(
+            workflow_name="reuse-dependent",
+            revision_name="initial",
+            architecture_workspace=workspace,
+            submission=submission,
+            requirements_ref=self.requirements_ref,
+        )
+        compiler = ExecutionCompiler(
+            self.repository,
+            ArchitectureArtifactService(self.artifacts, self.repository),
+        )
+        source = compiler.compile_epoch(
+            workflow_id="reuse-dependent",
+            epoch_id="reuse-dependent-source",
+            manifest_ref=manifest_ref,
+        )
+        DagScheduler(self.repository).schedule_ready_nodes(
+            workflow_id="reuse-dependent",
+            epoch_id=source.epoch_id,
+            max_new_nodes=2,
+        )
+
+        router_node = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            source.unit_node_ids["router"],
+        )
+        assert router_node is not None
+        triaged = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="ENTER_TRIAGE",
+                workflow_id=router_node.workflow_id,
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=router_node.aggregate_id,
+                actor="test",
+                expected_version=router_node.version,
+                idempotency_key="reuse-dependent:router:triage",
+                payload={"blocker": {"kind": "transient_worker_failure"}},
+            )
+        ).snapshot
+        router_node = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="RESOLVE_TRIAGE",
+                workflow_id=triaged.workflow_id,
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=triaged.aggregate_id,
+                actor="test",
+                expected_version=triaged.version,
+                idempotency_key="reuse-dependent:router:resume",
+            )
+        ).snapshot
+        self.assertEqual(router_node.payload["role_session_generation"], 0)
+
+        verification_ref = self.artifacts.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+        for module_name in ("transport", "router"):
+            node = self.repository.read_snapshot(
+                AggregateType.DAG_NODE_RUN,
+                source.unit_node_ids[module_name],
+            )
+            assert node is not None
+            source_path = Path(node.payload["workspace_path"]) / "src" / f"{module_name}.cpp"
+            source_path.parent.mkdir(exist_ok=True)
+            source_path.write_text(
+                f"int {module_name}_candidate() {{ return 1; }}\n",
+                encoding="utf-8",
+            )
+            _git(Path(node.payload["workspace_path"]), "add", str(source_path.relative_to(node.payload["workspace_path"])))
+            _git(
+                Path(node.payload["workspace_path"]),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                f"{module_name} candidate",
+            )
+            candidate_digest = _git(
+                Path(node.payload["workspace_path"]),
+                "rev-parse",
+                "HEAD",
+            ).strip()
+            candidate_ref = self.artifacts.put_json(
+                {
+                    "base_sha": node.payload["base_sha"],
+                    "candidate_digest": candidate_digest,
+                    "changed_paths": [f"src/{module_name}.cpp"],
+                },
+                artifact_type="CandidateSnapshotArtifact",
+            )
+            self._accept_candidate(
+                node.aggregate_id,
+                candidate_ref=candidate_ref.to_dict(),
+                candidate_digest=candidate_digest,
+                verification_ref=verification_ref.to_dict(),
+                output_hashes=(
+                    {}
+                    if module_name == "transport"
+                    else {"public_surface": "router-v1"}
+                ),
+            )
+
+        target = compiler.compile_epoch(
+            workflow_id="reuse-dependent",
+            epoch_id="reuse-dependent-target",
+            manifest_ref=manifest_ref,
+            source_epoch_id=source.epoch_id,
+        )
+        target_router = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            target.unit_node_ids["router"],
+        )
+        target_transport = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            target.unit_node_ids["transport"],
+        )
+        assert target_router is not None
+        assert target_transport is not None
+        self.assertEqual(target_transport.state, "ACCEPTED")
+        self.assertEqual(target_router.state, "ACCEPTED")
+        self.assertEqual(target_router.payload["role_session_generation"], 0)
+        self.assertEqual(
+            target_router.payload["accepted_dependency_node_ids"],
+            [],
+        )
+
+    def test_replan_preserves_changed_module_worktree_and_role_session(self) -> None:
+        workflow_id = "preserve-changed-module"
+        source_workspace = self._provision_complete_workspace(workflow_id, "initial")
+        source_manifest = self.service.snapshot_architect_result(
+            workflow_name=workflow_id,
+            revision_name="initial",
+            architecture_workspace=source_workspace,
+            submission=self._submission(),
+            requirements_ref=self.requirements_ref,
+        )
+        compiler = ExecutionCompiler(
+            self.repository,
+            ArchitectureArtifactService(self.artifacts, self.repository),
+        )
+        source = compiler.compile_epoch(
+            workflow_id=workflow_id,
+            epoch_id="preserve-source",
+            manifest_ref=source_manifest,
+        )
+        DagScheduler(self.repository).schedule_ready_nodes(
+            workflow_id=workflow_id,
+            epoch_id=source.epoch_id,
+            max_new_nodes=1,
+        )
+        source_node = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            source.unit_node_ids["router"],
+        )
+        assert source_node is not None
+        module_worktree = Path(source_node.payload["workspace_path"])
+        implementation = module_worktree / "src" / "router.cpp"
+        implementation.write_text("int route() { return 7; }\n", encoding="utf-8")
+        _git(module_worktree, "add", "src/router.cpp")
+        _git(
+            module_worktree,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "router candidate",
+        )
+        candidate_digest = _git(module_worktree, "rev-parse", "HEAD").strip()
+        candidate_ref = self.artifacts.put_json(
+            {
+                "base_sha": source_node.payload["base_sha"],
+                "candidate_digest": candidate_digest,
+                "changed_paths": ["src/router.cpp"],
+            },
+            artifact_type="CandidateSnapshotArtifact",
+        )
+        verification_ref = self.artifacts.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+        self._accept_candidate(
+            source_node.aggregate_id,
+            candidate_ref=candidate_ref.to_dict(),
+            candidate_digest=candidate_digest,
+            verification_ref=verification_ref.to_dict(),
+        )
+
+        revised_submission = self._submission()
+        revised_submission["modules"]["router"]["responsibility"] = (
+            "select one deterministic route and expose deterministic diagnostics"
+        )
+        revised_workspace = self.service.provision_architecture_workspace(
+            workflow_id=workflow_id,
+            revision_name="revised",
+            workspace={"repo_path": str(self.repo)},
+            requirements_ref=self.requirements_ref,
+        )
+        (revised_workspace.worktree / "include").mkdir(exist_ok=True)
+        (revised_workspace.worktree / "include" / "router.h").write_text(
+            _contract("router"),
+            encoding="utf-8",
+        )
+        revised_manifest = self.service.snapshot_architect_result(
+            workflow_name=workflow_id,
+            revision_name="revised",
+            architecture_workspace=revised_workspace,
+            submission=revised_submission,
+            requirements_ref=self.requirements_ref,
+        )
+        target = compiler.compile_epoch(
+            workflow_id=workflow_id,
+            epoch_id="preserve-target",
+            manifest_ref=revised_manifest,
+            source_epoch_id=source.epoch_id,
+        )
+        target_node = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            target.unit_node_ids["router"],
+        )
+        target_epoch = self.repository.read_snapshot(
+            AggregateType.EXECUTION_EPOCH,
+            target.epoch_id,
+        )
+        assert target_node is not None
+        assert target_epoch is not None
+        self.assertEqual(target_node.state, "BLOCKED_BY_DEPS")
+        self.assertTrue(target_node.payload["module_replan_prepared"])
+        self.assertEqual(target_node.payload["workspace_path"], str(module_worktree))
+        self.assertEqual(
+            target_node.payload["worktree_branch"],
+            source_node.payload["worktree_branch"],
+        )
+        self.assertEqual(target_node.payload["role_session_generation"], 0)
+        self.assertEqual(
+            coder_session_id(workflow_id, "router", source_node.payload["role_session_generation"]),
+            coder_session_id(workflow_id, "router", target_node.payload["role_session_generation"]),
+        )
+        self.assertEqual(
+            module_verifier_session_id(
+                workflow_id,
+                "router",
+                source_node.payload["role_session_generation"],
+            ),
+            module_verifier_session_id(
+                workflow_id,
+                "router",
+                target_node.payload["role_session_generation"],
+            ),
+        )
+        self.assertEqual(implementation.read_text(encoding="utf-8"), "int route() { return 7; }\n")
+        self.assertIn("src/router.cpp", _git(module_worktree, "status", "--porcelain"))
+        self.assertEqual(
+            target_epoch.payload["module_identity_delta"],
+            {"preserved": ["router"], "added": [], "deleted": []},
+        )
+        scheduled = DagScheduler(self.repository).schedule_ready_nodes(
+            workflow_id=workflow_id,
+            epoch_id=target.epoch_id,
+            max_new_nodes=1,
+        )
+        self.assertEqual(scheduled, (target_node.aggregate_id,))
+        self.assertEqual(implementation.read_text(encoding="utf-8"), "int route() { return 7; }\n")
+
+    def test_replan_deletes_and_readds_module_as_a_new_identity(self) -> None:
+        workflow_id = "delete-readd-module"
+        source_submission = self._submission()
+        transport = json.loads(json.dumps(source_submission["modules"]["router"]))
+        transport["responsibility"] = "provide a transport boundary"
+        transport["paths"] = {
+            "contract_mode": "file_frozen",
+            "contract_paths": ["include/transport.h"],
+            "implementation_scopes": [
+                {"kind": "file", "path": "src/transport.cpp"}
+            ],
+            "reference_only": [],
+        }
+        source_submission["modules"]["transport"] = transport
+        source_submission["scenarios"]["router_end_to_end"]["modules"] = [
+            "router",
+            "transport",
+        ]
+        source_workspace = self.service.provision_architecture_workspace(
+            workflow_id=workflow_id,
+            revision_name="source",
+            workspace={"repo_path": str(self.repo)},
+            requirements_ref=self.requirements_ref,
+        )
+        (source_workspace.worktree / "include").mkdir(exist_ok=True)
+        for name in ("router", "transport"):
+            (source_workspace.worktree / "include" / f"{name}.h").write_text(
+                _contract(name),
+                encoding="utf-8",
+            )
+        source_manifest = self.service.snapshot_architect_result(
+            workflow_name=workflow_id,
+            revision_name="source",
+            architecture_workspace=source_workspace,
+            submission=source_submission,
+            requirements_ref=self.requirements_ref,
+        )
+        compiler = ExecutionCompiler(
+            self.repository,
+            ArchitectureArtifactService(self.artifacts, self.repository),
+        )
+        source = compiler.compile_epoch(
+            workflow_id=workflow_id,
+            epoch_id="delete-readd-source",
+            manifest_ref=source_manifest,
+        )
+        source_transport = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            source.unit_node_ids["transport"],
+        )
+        assert source_transport is not None
+        retired_worktree = Path(source_transport.payload["workspace_path"])
+        retired_branch = source_transport.payload["worktree_branch"]
+
+        without_transport = self._submission()
+        revised_workspace = self._provision_complete_workspace(workflow_id, "without-transport")
+        revised_manifest = self.service.snapshot_architect_result(
+            workflow_name=workflow_id,
+            revision_name="without-transport",
+            architecture_workspace=revised_workspace,
+            submission=without_transport,
+            requirements_ref=self.requirements_ref,
+        )
+        target = compiler.compile_epoch(
+            workflow_id=workflow_id,
+            epoch_id="delete-readd-target",
+            manifest_ref=revised_manifest,
+            source_epoch_id=source.epoch_id,
+        )
+        target_epoch = self.repository.read_snapshot(
+            AggregateType.EXECUTION_EPOCH,
+            target.epoch_id,
+        )
+        assert target_epoch is not None
+        self.assertFalse(retired_worktree.exists())
+        self.assertNotIn(
+            retired_branch,
+            _git(Path(source_transport.payload["common_git_dir"]), "branch", "--format=%(refname:short)"),
+        )
+        self.assertEqual(
+            target_epoch.payload["module_identity_delta"],
+            {"preserved": ["router"], "added": [], "deleted": ["transport"]},
+        )
+
+        readd_workspace = self.service.provision_architecture_workspace(
+            workflow_id=workflow_id,
+            revision_name="readd-transport",
+            workspace={"repo_path": str(self.repo)},
+            requirements_ref=self.requirements_ref,
+        )
+        (readd_workspace.worktree / "include").mkdir(exist_ok=True)
+        for name in ("router", "transport"):
+            (readd_workspace.worktree / "include" / f"{name}.h").write_text(
+                _contract(name),
+                encoding="utf-8",
+            )
+        readd_manifest = self.service.snapshot_architect_result(
+            workflow_name=workflow_id,
+            revision_name="readd-transport",
+            architecture_workspace=readd_workspace,
+            submission=source_submission,
+            requirements_ref=self.requirements_ref,
+        )
+        readded = compiler.compile_epoch(
+            workflow_id=workflow_id,
+            epoch_id="delete-readd-final",
+            manifest_ref=readd_manifest,
+            source_epoch_id=target.epoch_id,
+        )
+        readded_transport = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            readded.unit_node_ids["transport"],
+        )
+        assert readded_transport is not None
+        self.assertTrue(Path(readded_transport.payload["workspace_path"]).is_dir())
+        self.assertEqual(readded_transport.payload["role_session_generation"], 1)
 
     def test_human_review_publish_persists_and_reuses_the_card(self) -> None:
         workspace = self._provision_complete_workspace("human-card", "initial")
@@ -2588,6 +3157,8 @@ class MinionV2SkeletonTests(unittest.TestCase):
         candidate_ref: dict[str, object],
         candidate_digest: str,
         verification_ref: dict[str, object],
+        manager_seeded_corpus_hashes: dict[str, str] | None = None,
+        output_hashes: dict[str, str] | None = None,
     ) -> None:
         sequence = [
             ("START_PRODUCING", {"fencing_token": 1}),
@@ -2607,6 +3178,15 @@ class MinionV2SkeletonTests(unittest.TestCase):
                     "candidate_ref": candidate_ref,
                     "candidate_digest": candidate_digest,
                     "workspace_fingerprint": "tree",
+                    **(
+                        {
+                            "manager_seeded_corpus_hashes": dict(
+                                manager_seeded_corpus_hashes
+                            )
+                        }
+                        if manager_seeded_corpus_hashes
+                        else {}
+                    ),
                 },
             ),
             ("START_REVIEW", {"fencing_token": 2}),
@@ -2627,7 +3207,11 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "REVIEW_PASSED",
                 {
                     "verification_artifact_ref": verification_ref,
-                    "output_hashes": {"public_surface": "router-v1"},
+                    "output_hashes": (
+                        {"public_surface": "router-v1"}
+                        if output_hashes is None
+                        else dict(output_hashes)
+                    ),
                 },
             ),
         ]

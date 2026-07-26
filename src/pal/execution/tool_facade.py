@@ -182,6 +182,7 @@ class CompleteResult(StrictToolModel, Generic[T]):
     effect: EffectOutcome
     llm_text: str
     affordances: list[ToolAffordance] = Field(default_factory=list)
+    context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
 
 
 class PagedResult(StrictToolModel):
@@ -191,6 +192,7 @@ class PagedResult(StrictToolModel):
     effect: EffectOutcome
     llm_text: str
     affordances: list[ToolAffordance]
+    context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
 
 
 class RejectedResult(StrictToolModel):

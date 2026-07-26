@@ -265,6 +265,12 @@ SingleLiveAssignmentOwner ==
             /\ effectAssignment = a
             /\ assignmentState[a] \in ActiveStates
 
+OneOpenAssignmentPerSession ==
+    legacyDuplicate \/
+        Cardinality(
+            {a \in Assignments : assignmentState[a] \in RecoverableStates}
+        ) <= 1
+
 WorkerOwnsEffectProjection ==
     workerAssignment \in Assignments =>
         /\ effectAssignment = workerAssignment

@@ -1049,6 +1049,7 @@ class PalCore:
         begin(
             turn_id=continuation.turn_id,
             scope_key=continuation.control_scope_key,
+            input_id=continuation.turn_id,
             retention_user_turns=getattr(self.config, "tool_result_pager_retention_user_turns", 5),
         )
 

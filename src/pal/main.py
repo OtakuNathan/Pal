@@ -30,7 +30,15 @@ def _build_parser() -> argparse.ArgumentParser:
     client_parser.add_argument("--runtime-root", type=Path, required=True)
     client_parser.add_argument("--message", required=True)
 
-    tty_parser = subparsers.add_parser("tty", help="Open an interactive socket TTY session")
+    tty_parser = subparsers.add_parser(
+        "tty",
+        help="Open an async Prompt Toolkit session with Rich Markdown output",
+        description=(
+            "Open an interactive TTY against a running Pal instance. Input uses "
+            "Prompt Toolkit and assistant replies render as Rich Markdown. Use "
+            "/exit or /quit (or Ctrl-D) to quit; Ctrl-C clears the current input."
+        ),
+    )
     tty_parser.add_argument("--runtime-root", type=Path, required=True)
 
     # -- browser-service -----------------------------------------------------

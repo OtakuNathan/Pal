@@ -20,36 +20,26 @@ from pal.minion.v2.execution import (
     ExecutionCompiler,
     NodeRunJournal,
     UnitWorkViewBuilder,
-    NodeQuiescer,
     WorkspaceLockRegistry,
     prepare_node_dependency_baseline,
-    provision_verification_worktree,
+    provision_module_verification_workspace,
     format_workspace_process_holders,
     terminate_process_group,
     workspace_process_holders,
+    workspace_content_fingerprint,
     _validate_manager_seeded_paths,
     _validate_skeleton_candidate_paths,
 )
 from pal.minion.v2.task_ledger import TaskLedgerService
 
 
-class _StoppedProcessController:
-    def __init__(self) -> None:
-        self.revoked: list[tuple[str, int]] = []
-
-    def revoke_tool_token(self, worker_id: str, fencing_token: int) -> None:
-        self.revoked.append((worker_id, fencing_token))
-
-    def request_cooperative_stop(self, worker_id: str) -> None:
-        _ = worker_id
-
-    def kill_and_reap_process_group(self, worker_id: str, timeout_seconds: float) -> bool:
-        _ = worker_id, timeout_seconds
-        return True
-
-    def has_live_processes_for_workspace(self, worktree: Path) -> bool:
-        _ = worktree
-        return False
+def _lock_candidate_workspace(
+    locks: WorkspaceLockRegistry,
+    node_run_id: str,
+    worktree: Path,
+) -> str:
+    locks.acquire(node_run_id, worktree)
+    return workspace_content_fingerprint(worktree)
 
 
 def _budget() -> dict[str, int]:
@@ -545,7 +535,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             workflow_id="wf_reuse",
             epoch_id="epoch_reuse_2",
             manifest_ref=manifest,
-            reuse_from_epoch_id=first.epoch_id,
+            source_epoch_id=first.epoch_id,
         )
         first_a = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, first.unit_node_ids["a"])
         second_a = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, second.unit_node_ids["a"])
@@ -556,7 +546,9 @@ class MinionV2ExecutionTests(unittest.TestCase):
             reused = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, second.unit_node_ids[unit_id])
             self.assertEqual(reused.state, "ACCEPTED")
             self.assertEqual(reused.payload["candidate_digest"], source.payload["candidate_digest"])
-            self.assertEqual(reused.payload["reused_from_epoch_id"], first.epoch_id)
+            self.assertEqual(reused.payload["carried_forward_from_epoch_id"], first.epoch_id)
+            self.assertEqual(reused.payload["workspace_path"], source.payload["workspace_path"])
+            self.assertEqual(reused.payload["worktree_branch"], source.payload["worktree_branch"])
 
         changed_payload = self.store.read_json(manifest)
         changed_constraints = self.architecture.publish_fragment(
@@ -569,7 +561,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             workflow_id="wf_reuse",
             epoch_id="epoch_reuse_3",
             manifest_ref=changed_manifest,
-            reuse_from_epoch_id=first.epoch_id,
+            source_epoch_id=first.epoch_id,
         )
         self.assertEqual(
             self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, third.unit_node_ids["a"]).state,
@@ -591,7 +583,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         self.assertEqual(view["unit_contract"]["name"], "a")
         self.assertNotIn("unit_id", view["unit_contract"])
 
-    def test_verification_uses_disposable_detached_worktree(self) -> None:
+    def test_verification_reuses_module_worktree_with_candidate_scoped_scratch(self) -> None:
         manifest = self._manifest()
         compilation = ExecutionCompiler(self.repository, self.architecture).compile_epoch(
             workflow_id="wf_review_tree",
@@ -611,21 +603,21 @@ class MinionV2ExecutionTests(unittest.TestCase):
         candidate_digest = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=candidate_worktree, text=True
         ).strip()
-        review_worktree, scratch = provision_verification_worktree(
+        review_worktree, scratch = provision_module_verification_workspace(
             self.runtime_root,
             node=node,
             candidate_digest=candidate_digest,
         )
-        (review_worktree / "review-only.txt").write_text("probe\n", encoding="utf-8")
         (scratch / "adversarial_test.py").write_text("assert True\n", encoding="utf-8")
-        self.assertFalse((candidate_worktree / "review-only.txt").exists())
-        same_worktree, _ = provision_verification_worktree(
+        self.assertEqual(review_worktree, candidate_worktree)
+        same_worktree, same_scratch = provision_module_verification_workspace(
             self.runtime_root,
             node=node,
             candidate_digest=candidate_digest,
         )
         self.assertEqual(same_worktree, review_worktree)
-        self.assertFalse((review_worktree / "review-only.txt").exists())
+        self.assertEqual(same_scratch, scratch)
+        self.assertTrue((same_scratch / "adversarial_test.py").is_file())
 
     def test_journal_is_mutable_but_lease_fenced(self) -> None:
         lease = self.repository.claim_lease("node:journal", "worker_journal", ttl_seconds=60)
@@ -700,13 +692,10 @@ class MinionV2ExecutionTests(unittest.TestCase):
 
         lease = self.repository.claim_lease("worktree:node_candidate", "worker_candidate", ttl_seconds=60)
         locks = WorkspaceLockRegistry()
-        controller = _StoppedProcessController()
-        quiesced = NodeQuiescer(self.repository, controller, locks).quiesce(
-            node_run_id="node_candidate",
-            worker_id=lease.owner_id,
-            lease_resource_key=lease.resource_key,
-            fencing_token=lease.fencing_token,
-            worktree=worktree,
+        workspace_fingerprint = _lock_candidate_workspace(
+            locks,
+            "node_candidate",
+            worktree,
         )
         self.assertTrue(locks.is_held("node_candidate"))
         candidate_ref, candidate_digest = CandidateSnapshotService(self.repository, self.store, locks).create_candidate(
@@ -715,7 +704,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
             worktree=worktree,
-            expected_workspace_fingerprint=quiesced.workspace_fingerprint,
+            expected_workspace_fingerprint=workspace_fingerprint,
             reference_only_paths=["references/**"],
             base_sha=base_sha,
             candidate_baseline_sha=base_sha,
@@ -728,6 +717,18 @@ class MinionV2ExecutionTests(unittest.TestCase):
         self.assertEqual(self.store.read_json(candidate_ref)["changed_paths"], ["src/a.txt"])
         message = subprocess.check_output(["git", "log", "-1", "--format=%B"], cwd=worktree, text=True)
         self.assertIn("Pal-Candidate-Key:", message)
+
+    def test_workspace_lock_identity_is_the_canonical_worktree(self) -> None:
+        worktree = self.runtime_root / "canonical_lock_workspace"
+        worktree.mkdir()
+        locks = WorkspaceLockRegistry()
+        locks.acquire("old-node-run", worktree)
+        with self.assertRaisesRegex(BlockingIOError, "workspace lock is already held"):
+            locks.acquire("new-node-run", worktree / ".")
+        locks.release("old-node-run")
+        locks.acquire("new-node-run", worktree)
+        self.assertTrue(locks.is_held("new-node-run"))
+        locks.release("new-node-run")
 
     def test_repair_candidate_is_a_cumulative_delta_from_the_fixed_node_baseline(self) -> None:
         worktree = self.runtime_root / "cumulative_candidate_repo"
@@ -771,14 +772,10 @@ class MinionV2ExecutionTests(unittest.TestCase):
         snapshotter = CandidateSnapshotService(self.repository, self.store, locks)
 
         def snapshot(*, current_head: str, parent_candidate: str = ""):
-            quiesced = NodeQuiescer(
-                self.repository, _StoppedProcessController(), locks
-            ).quiesce(
-                node_run_id=node_id,
-                worker_id=lease.owner_id,
-                lease_resource_key=lease.resource_key,
-                fencing_token=lease.fencing_token,
-                worktree=worktree,
+            workspace_fingerprint = _lock_candidate_workspace(
+                locks,
+                node_id,
+                worktree,
             )
             return snapshotter.create_candidate(
                 node_run_id=node_id,
@@ -786,7 +783,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 lease_resource_key=lease.resource_key,
                 fencing_token=lease.fencing_token,
                 worktree=worktree,
-                expected_workspace_fingerprint=quiesced.workspace_fingerprint,
+                expected_workspace_fingerprint=workspace_fingerprint,
                 reference_only_paths=[],
                 path_policy={
                     "contract_paths": [],
@@ -872,16 +869,10 @@ class MinionV2ExecutionTests(unittest.TestCase):
         service = CandidateSnapshotService(self.repository, self.store, locks)
 
         def snapshot(*, contract_hash: str) -> None:
-            quiesced = NodeQuiescer(
-                self.repository,
-                _StoppedProcessController(),
+            workspace_fingerprint = _lock_candidate_workspace(
                 locks,
-            ).quiesce(
-                node_run_id="node_reject_candidate",
-                worker_id=lease.owner_id,
-                lease_resource_key=lease.resource_key,
-                fencing_token=lease.fencing_token,
-                worktree=worktree,
+                "node_reject_candidate",
+                worktree,
             )
             service.create_candidate(
                 node_run_id="node_reject_candidate",
@@ -889,7 +880,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 lease_resource_key=lease.resource_key,
                 fencing_token=lease.fencing_token,
                 worktree=worktree,
-                expected_workspace_fingerprint=quiesced.workspace_fingerprint,
+                expected_workspace_fingerprint=workspace_fingerprint,
                 reference_only_paths=["references/**"],
                 base_sha=base_sha,
                 candidate_baseline_sha=base_sha,
@@ -964,14 +955,10 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 )
                 lease = self.repository.claim_lease(f"worktree:{node_id}", f"worker_{index}", ttl_seconds=60)
                 locks = WorkspaceLockRegistry()
-                quiesced = NodeQuiescer(
-                    self.repository, _StoppedProcessController(), locks
-                ).quiesce(
-                    node_run_id=node_id,
-                    worker_id=lease.owner_id,
-                    lease_resource_key=lease.resource_key,
-                    fencing_token=lease.fencing_token,
-                    worktree=worktree,
+                workspace_fingerprint = _lock_candidate_workspace(
+                    locks,
+                    node_id,
+                    worktree,
                 )
                 with self.assertRaisesRegex(ValueError, error):
                     CandidateSnapshotService(self.repository, self.store, locks).create_candidate(
@@ -980,7 +967,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
                         lease_resource_key=lease.resource_key,
                         fencing_token=lease.fencing_token,
                         worktree=worktree,
-                        expected_workspace_fingerprint=quiesced.workspace_fingerprint,
+                        expected_workspace_fingerprint=workspace_fingerprint,
                         reference_only_paths=[],
                         path_policy={
                             "contract_paths": ["include/contract.h"],

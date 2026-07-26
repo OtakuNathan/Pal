@@ -1,17 +1,21 @@
 from __future__ import annotations
 
-import contextlib
 import json
-import math
 import re
-import shutil
 import threading
 from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
 from typing import Any
 
-from pal.llm.contracts import ToolResultHandle
+from pal.execution.session_state import (
+    FileDeliveryManifest,
+    InMemoryLogicalExecutionState,
+    LogicalExecutionContext,
+    LogicalExecutionStateBackend,
+    PagerHandleManifest,
+    page_count_for,
+)
 
 
 DEFAULT_TOOL_RESULT_PAGE_SIZE = 4_000
@@ -37,20 +41,22 @@ class ToolResultPage:
     tool_name: str = ""
     status: str = ""
     ok: bool = True
+    state: str = "ok"
+    origin: dict[str, Any] = field(default_factory=dict)
+    expires_at_user_turn: int = 0
+    current_user_turn: int = 0
+    context_delivery: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class ToolResultPagerStore:
     retention_user_turns: int = DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS
     storage_root: Path | None = None
-    _handles: dict[str, ToolResultHandle] = field(default_factory=dict)
-    _tool_names: dict[str, str] = field(default_factory=dict)
-    _statuses: dict[str, str] = field(default_factory=dict)
-    _ok: dict[str, bool] = field(default_factory=dict)
-    _rendered: dict[str, str] = field(default_factory=dict)
-    _turn_indices: dict[str, int] = field(default_factory=dict)
-    _current_user_turn_index: int = 0
-    _initialized_roots: set[str] = field(default_factory=set)
+    state_backend: LogicalExecutionStateBackend = field(
+        default_factory=InMemoryLogicalExecutionState
+    )
+    _turn_contexts: dict[str, LogicalExecutionContext] = field(default_factory=dict)
+    _last_context: LogicalExecutionContext | None = None
     _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def begin_turn(
@@ -60,19 +66,39 @@ class ToolResultPagerStore:
         turn_id: str,
         scope_key: str = "",
         retention_user_turns: int | None = None,
-    ) -> None:
-        _ = scope_key
+        input_id: str = "",
+    ) -> LogicalExecutionContext:
         if retention_user_turns is not None:
             self.retention_user_turns = max(1, int(retention_user_turns))
+        normalized_turn_id = str(turn_id or "").strip()
+        session_id = str(scope_key or "").strip() or "local:default"
+        semantic_input = str(input_id or "").strip() or normalized_turn_id or "input:default"
+        context = self.state_backend.begin_input(
+            logical_session_id=session_id,
+            input_id=semantic_input,
+            retention_user_turns=self.retention_user_turns,
+        )
         with self._lock:
-            self._current_user_turn_index += 1
-            normalized_turn_id = str(turn_id or "").strip()
             if normalized_turn_id:
-                self._turn_indices[normalized_turn_id] = self._current_user_turn_index
-            root = self._ephemeral_root(runtime_root)
-            if root is not None:
-                self._cleanup_stale_root_once(root)
-            self.prune(runtime_root=runtime_root)
+                self._turn_contexts[normalized_turn_id] = context
+            self._last_context = context
+        _ = runtime_root
+        return context
+
+    def context_for_turn(self, turn_id: str | None) -> LogicalExecutionContext:
+        normalized = str(turn_id or "").strip()
+        with self._lock:
+            context = self._turn_contexts.get(normalized) if normalized else None
+            if context is None:
+                context = self._last_context
+        if context is not None:
+            return self.state_backend.context(context.logical_session_id)
+        return self.begin_turn(
+            runtime_root=None,
+            turn_id=normalized or "local:default",
+            scope_key="local:default",
+            input_id=normalized or "input:default",
+        )
 
     def store(
         self,
@@ -85,42 +111,42 @@ class ToolResultPagerStore:
         ok: bool,
         rendered: str,
         page_size: int,
-    ) -> ToolResultHandle:
+        output_json: str = "",
+        origin: dict[str, Any] | None = None,
+        context_delivery: dict[str, Any] | None = None,
+    ) -> PagerHandleManifest:
         normalized_ref = str(result_ref or "").strip()
         if not normalized_ref:
             raise ValueError("result_ref is required")
         normalized_turn_id = str(turn_id or "").strip() or "unknown_turn"
-        safe_file = _safe_file_name(normalized_ref)
+        context = self.context_for_turn(normalized_turn_id)
+        rendered_text = str(rendered or "")
+        resolved_page_size = max(256, int(page_size or DEFAULT_TOOL_RESULT_PAGE_SIZE))
+        path: Path | None = None
         root = self._ephemeral_root(runtime_root)
-        with self._lock:
-            path: Path | None = None
-            rendered_text = str(rendered or "")
-            if root is not None:
-                self._cleanup_stale_root_once(root)
-                turn_dir = root / _safe_file_name(normalized_turn_id)
-                turn_dir.mkdir(parents=True, exist_ok=True)
-                path = turn_dir / f"{safe_file}.txt"
-                path.write_text(rendered_text, encoding="utf-8")
-            else:
-                self._rendered[normalized_ref] = rendered_text
-            resolved_page_size = max(256, int(page_size or DEFAULT_TOOL_RESULT_PAGE_SIZE))
-            original_size = len(rendered_text)
-            page_count = max(1, math.ceil(original_size / resolved_page_size))
-            turn_index = self._turn_indices.get(normalized_turn_id, self._current_user_turn_index)
-            handle = ToolResultHandle(
-                result_ref=normalized_ref,
-                turn_id=normalized_turn_id,
-                backing_path=str(path) if path is not None else "",
-                page_size=resolved_page_size,
-                original_size=original_size,
-                page_count=page_count,
-                created_user_turn_index=turn_index,
-            )
-            self._handles[normalized_ref] = handle
-            self._tool_names[normalized_ref] = str(tool_name or "")
-            self._statuses[normalized_ref] = str(status or "")
-            self._ok[normalized_ref] = bool(ok)
-            return handle
+        if root is not None and isinstance(self.state_backend, InMemoryLogicalExecutionState):
+            turn_dir = root / _safe_file_name(context.logical_session_id)
+            turn_dir.mkdir(parents=True, exist_ok=True)
+            path = turn_dir / f"{_safe_file_name(normalized_ref)}.txt"
+            path.write_text(rendered_text, encoding="utf-8")
+        manifest = PagerHandleManifest(
+            result_ref=normalized_ref,
+            logical_session_id=context.logical_session_id,
+            tool_name=str(tool_name or ""),
+            status=str(status or ""),
+            ok=bool(ok),
+            page_size=resolved_page_size,
+            original_size=len(rendered_text),
+            page_count=page_count_for(rendered_text, resolved_page_size),
+            created_user_turn=context.current_user_turn,
+            expires_at_user_turn=context.current_user_turn + self.retention_user_turns,
+            output_json=str(output_json or ""),
+            rendered=rendered_text,
+            origin=dict(origin or {}),
+            delivery_manifest=dict(context_delivery or {}),
+            backing_path=str(path) if path is not None else "",
+        )
+        return self.state_backend.store_pager(manifest)
 
     def read_page(
         self,
@@ -129,117 +155,59 @@ class ToolResultPagerStore:
         page: int = 1,
         page_size: int | None = None,
         anchor: str = "head",
+        turn_id: str | None = None,
+        logical_session_id: str = "",
     ) -> ToolResultPage | None:
         normalized_ref = str(result_ref or "").strip()
         if not normalized_ref:
             return None
         normalized_anchor = _normalize_anchor(anchor)
-        with self._lock:
-            handle = self._handles.get(normalized_ref)
-            if handle is None:
-                return None
-            if handle.backing_path:
-                path = Path(handle.backing_path)
-                if not path.is_file():
-                    self._drop_handle(normalized_ref)
-                    return None
-                text = path.read_text(encoding="utf-8")
-            else:
-                text = self._rendered.get(normalized_ref)
-                if text is None:
-                    self._drop_handle(normalized_ref)
-                    return None
-            resolved_page_size = max(256, int(page_size or handle.page_size or DEFAULT_TOOL_RESULT_PAGE_SIZE))
-            page_count = max(1, math.ceil(len(text) / resolved_page_size))
-            requested_page = max(1, int(page or 1))
-            anchor_page = requested_page
-            absolute_page = requested_page
-            if normalized_anchor == "tail":
-                absolute_page = page_count - requested_page + 1
-            if absolute_page < 1 or absolute_page > page_count:
-                return ToolResultPage(
-                    result_ref=normalized_ref,
-                    content="",
-                    page=absolute_page,
-                    page_count=page_count,
-                    has_more=False,
-                    original_size=len(text),
-                    page_size=resolved_page_size,
-                    anchor=normalized_anchor,
-                    anchor_page=anchor_page,
-                    has_more_before=False,
-                    has_more_after=False,
-                    tool_name=self._tool_names.get(normalized_ref, ""),
-                    status=self._statuses.get(normalized_ref, ""),
-                    ok=self._ok.get(normalized_ref, True),
-                )
-            start = (absolute_page - 1) * resolved_page_size
-            end = min(start + resolved_page_size, len(text))
-            return ToolResultPage(
-                result_ref=normalized_ref,
-                content=text[start:end],
-                page=absolute_page,
-                page_count=page_count,
-                has_more=absolute_page < page_count,
-                original_size=len(text),
-                page_size=resolved_page_size,
-                anchor=normalized_anchor,
-                anchor_page=anchor_page,
-                has_more_before=absolute_page > 1,
-                has_more_after=absolute_page < page_count,
-                start_offset=start,
-                end_offset=end,
-                tool_name=self._tool_names.get(normalized_ref, ""),
-                status=self._statuses.get(normalized_ref, ""),
-                ok=self._ok.get(normalized_ref, True),
-            )
+        context = (
+            self.state_backend.context(str(logical_session_id))
+            if str(logical_session_id or "").strip()
+            else self.context_for_turn(turn_id)
+        )
+        result = self.state_backend.read_pager(
+            logical_session_id=context.logical_session_id,
+            result_ref=normalized_ref,
+            page=page,
+            page_size=page_size,
+            anchor=normalized_anchor,
+        )
+        manifest = result.manifest
+        if result.state == "unknown_handle":
+            return None
+        return ToolResultPage(
+            result_ref=normalized_ref,
+            content=result.content,
+            page=result.page,
+            page_count=result.page_count,
+            has_more=result.page < result.page_count,
+            original_size=manifest.original_size if manifest is not None else 0,
+            page_size=result.page_size,
+            anchor=result.anchor,
+            anchor_page=result.anchor_page,
+            has_more_before=result.page > 1 and result.state == "ok",
+            has_more_after=result.page < result.page_count and result.state == "ok",
+            start_offset=result.start_offset,
+            end_offset=result.end_offset,
+            tool_name=manifest.tool_name if manifest is not None else "",
+            status=manifest.status if manifest is not None else "",
+            ok=manifest.ok if manifest is not None else False,
+            state=result.state,
+            origin=dict(manifest.origin) if manifest is not None else {},
+            expires_at_user_turn=(
+                manifest.expires_at_user_turn if manifest is not None else 0
+            ),
+            current_user_turn=context.current_user_turn,
+            context_delivery=dict(result.delivery_manifest),
+        )
 
     def prune(self, *, runtime_root: Path | None = None) -> None:
-        threshold = self._current_user_turn_index - max(1, self.retention_user_turns)
-        expired_refs = [
-            result_ref
-            for result_ref, handle in self._handles.items()
-            if handle.created_user_turn_index and handle.created_user_turn_index <= threshold
-        ]
-        for result_ref in expired_refs:
-            self.delete(result_ref)
-        root = self._ephemeral_root(runtime_root)
-        if root is None:
-            return
-        live_turns = {handle.turn_id for handle in self._handles.values()}
-        for turn_dir in root.iterdir() if root.exists() else ():
-            if turn_dir.is_dir() and turn_dir.name not in {_safe_file_name(turn_id) for turn_id in live_turns}:
-                shutil.rmtree(turn_dir, ignore_errors=True)
+        _ = runtime_root
 
     def delete(self, result_ref: str) -> None:
-        normalized_ref = str(result_ref or "").strip()
-        if not normalized_ref:
-            return
-        handle = self._handles.get(normalized_ref)
-        self._drop_handle(normalized_ref)
-        if handle is not None and handle.backing_path:
-            path = Path(handle.backing_path)
-            with contextlib.suppress(OSError):
-                path.unlink()
-            parent = path.parent
-            with contextlib.suppress(OSError):
-                if parent.exists() and not any(parent.iterdir()):
-                    parent.rmdir()
-
-    def _drop_handle(self, result_ref: str) -> None:
-        self._handles.pop(result_ref, None)
-        self._tool_names.pop(result_ref, None)
-        self._statuses.pop(result_ref, None)
-        self._ok.pop(result_ref, None)
-        self._rendered.pop(result_ref, None)
-
-    def _cleanup_stale_root_once(self, root: Path) -> None:
-        key = str(root)
-        if key in self._initialized_roots:
-            return
-        shutil.rmtree(root, ignore_errors=True)
-        root.mkdir(parents=True, exist_ok=True)
-        self._initialized_roots.add(key)
+        _ = result_ref
 
     def _ephemeral_root(self, runtime_root: Path | None) -> Path | None:
         if self.storage_root is not None:

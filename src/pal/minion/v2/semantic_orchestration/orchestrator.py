@@ -68,7 +68,7 @@ from pal.minion.v2.execution import (
     UnitWorkViewBuilder,
     WorkspaceLockRegistry,
     git_changed_paths,
-    provision_verification_worktree,
+    provision_module_verification_workspace,
     format_workspace_process_holders,
     terminate_process_group,
     workspace_content_fingerprint,
@@ -127,6 +127,7 @@ from pal.minion.v2.paths import (
     verification_scratch_root,
 )
 from pal.minion.v2.projections import PlanRevisionProjectionStore
+from pal.minion.v2.process_lifecycle import WorkerProcessOwner
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.machines import machine_spec_for
 from pal.minion.v2.review_findings import structured_findings
@@ -149,10 +150,12 @@ from pal.minion.v2.verification import (
     repair_bill_semantic_view,
     repair_checklist_items,
     semantic_finding_payload,
+    validate_verification_case_order,
 )
 from pal.minion.v2.verification_builder import (
     STANDALONE_REVIEW_BUILDER_CAPABILITIES,
     VERIFICATION_BUILDER_CAPABILITIES,
+    VERIFICATION_EVIDENCE_CAPABILITIES,
     VERIFICATION_TOOL_CAPABILITIES,
     compile_verification_invocation_tool_contract,
     dominant_verification_defect_kind,
@@ -187,7 +190,7 @@ from pal.shared import MinionInvocationPack
 HumanReviewPublisher = Callable[[Mapping[str, Any]], Awaitable[None]]
 WorkerEventPublisher = Callable[[Mapping[str, Any]], Awaitable[None]]
 BrokerRunRegistrar = Callable[[str, str, MinionInvocationPack, asyncio.subprocess.Process], None]
-BrokerRunUnregistrar = Callable[[str], None]
+BrokerRunUnregistrar = Callable[[str, bool], None]
 
 
 EPHEMERAL_ROLE_INPUT_NAMES = frozenset({"workspace_preparation"})
@@ -586,6 +589,7 @@ class SemanticOrchestrator:
     register_broker_run: BrokerRunRegistrar | None = None
     unregister_broker_run: BrokerRunUnregistrar | None = None
     _processes: dict[str, asyncio.subprocess.Process] = field(default_factory=dict, init=False)
+    _process_owners: dict[str, WorkerProcessOwner] = field(default_factory=dict, init=False)
     _run_to_invocation: dict[str, str] = field(default_factory=dict, init=False)
     _worktree_locks: WorkspaceLockRegistry = field(default_factory=WorkspaceLockRegistry, init=False)
     _revoked_tokens: set[tuple[str, int]] = field(default_factory=set, init=False)
@@ -624,19 +628,38 @@ class SemanticOrchestrator:
     async def stop_background_workers(self, *, timeout_seconds: float = 10.0) -> None:
         self.request_stop()
         tracked = tuple(self._background_workers.items())
-        if not tracked:
-            return
-        tasks = tuple(task for _effect_key, task in tracked)
-        _done, pending = await asyncio.wait(
-            tasks,
-            timeout=max(0.0, float(timeout_seconds)),
-        )
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        if tracked:
+            tasks = tuple(task for _effect_key, task in tracked)
+            _done, pending = await asyncio.wait(
+                tasks,
+                timeout=max(0.0, float(timeout_seconds)),
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         for effect_key, _task in tracked:
             self._queue_interrupted_assignment_retry(effect_key)
+        # A process owner is removed only after its complete process group has
+        # exited and broker accounting has been finalized.  This also retries a
+        # cleanup that was interrupted after the leader exited.
+        owners = tuple(self._process_owners.values())
+        if owners:
+            results = await asyncio.gather(
+                *(owner.close() for owner in owners),
+                return_exceptions=True,
+            )
+            failures = [
+                result
+                for result in results
+                if isinstance(result, BaseException)
+            ]
+            if failures:
+                raise RuntimeError(
+                    "worker supervisor stopped before every process group was reaped"
+                ) from failures[0]
+        if self._process_owners or self._processes or self._run_to_invocation:
+            raise RuntimeError("worker supervisor retained live process accounting")
 
     async def _release_managed_lsp_workspace(self, workspace: Path) -> Mapping[str, Any]:
         try:
@@ -1920,7 +1943,7 @@ class SemanticOrchestrator:
         node_workspace = Path(node_workspace_text) if node_workspace_text else review_workspace
         if not node_workspace.is_dir():
             raise SubmissionInvariantError(
-                "verifier test promotion requires the durable node worktree"
+                "verifier test promotion requires the durable Module worktree"
             )
         if node_workspace.resolve() == review_workspace.resolve():
             return
@@ -1928,13 +1951,13 @@ class SemanticOrchestrator:
         lock_key = f"verification-promotion:{node.aggregate_id}"
         _raise_if_workspace_held(
             node_workspace,
-            "a live process still holds the node worktree during verifier test promotion",
+            "a live process still holds the Module worktree during verifier test promotion",
         )
         lock_path = self._worktree_locks.acquire(lock_key, node_workspace)
         try:
             _raise_if_workspace_held(
                 node_workspace,
-                "a process reached the node worktree during verifier test promotion",
+                "a process reached the Module worktree during verifier test promotion",
                 manager_snapshot_lock=lock_path,
             )
             head = subprocess.run(
@@ -1946,7 +1969,7 @@ class SemanticOrchestrator:
             ).stdout.strip()
             if head not in {candidate_digest, promoted_digest}:
                 raise SubmissionInvariantError(
-                    "node worktree moved away from the verified Candidate before test promotion"
+                    "Module worktree moved away from the verified Candidate before test promotion"
                 )
             dirty = subprocess.run(
                 ["git", "-C", str(node_workspace), "status", "--porcelain"],
@@ -1957,7 +1980,7 @@ class SemanticOrchestrator:
             ).stdout.strip()
             if dirty:
                 raise SubmissionInvariantError(
-                    "node worktree changed before verifier test promotion"
+                    "Module worktree changed before verifier test promotion"
                 )
             fetched = subprocess.run(
                 [
@@ -2191,16 +2214,19 @@ class SemanticOrchestrator:
             )
             references["repair_bill"] = semantic_repair_ref
         instruction = (
-            "Repair only the defects in the bound RepairBill. Regress the reviewer reproducer first, add the relevant regression "
-            "case from the read-only module corpus, and make the smallest contract-preserving product change. Do not edit tests or revisit unrelated code."
+            "This is a fresh repair cycle. Read the bound RepairBill, reproduce it, make the smallest contract-preserving repair, "
+            "run the affected regressions, and submit a new Candidate. An earlier submission does not settle this cycle."
             if repair
-            else "Implement the bound UnitWorkView from its approved evidence and contract. Treat the repository module corpus as read-only verifier-owned regression coverage, and stay inside owned_area."
+            else "Implement the current bound UnitWorkView, complete its compact checklist and focused checks, then submit the Candidate."
         )
         if self._is_skeleton_manifest(node.payload.get("architecture_manifest_ref")):
             instruction = (
-                "Repair only the bound RepairBill against the accepted code skeleton; run its preinstalled read-only corpus reproducer first and change only the module's compiled product write paths. Keep file_frozen contracts unchanged and preserve accepted semantics in review_guarded contracts."
+                "This is a fresh repair cycle against the Accepted Skeleton. Read and reproduce the bound RepairBill, make the smallest "
+                "local contract-preserving repair, run the affected durable regressions, and submit a new Candidate. An earlier submission "
+                "does not settle this cycle."
                 if repair
-                else "Implement only the bound Module Protocol from the accepted code skeleton. Treat every bound dependency public contract as an axiom and never inspect dependency private implementation. Keep file_frozen contracts unchanged, preserve accepted semantics in review_guarded contracts, write durable TDD/regression cases only under tests/<module_name>/developer, treat tests/<module_name>/verification as read-only Verifier evidence, and change only compiled module scopes. Do not search for the global task or unrelated scenarios. Once the local protocol and evidence are sufficient, implement and run focused checks instead of repeatedly re-investigating settled contracts."
+                else "Implement the current bound Module Protocol from the Accepted Skeleton. Complete the compact checklist and minimum "
+                "focused checks, then submit the Candidate."
             )
         path_policy = dict(node.payload.get("path_policy") or {})
         developer_test_path = str(
@@ -2382,8 +2408,11 @@ class SemanticOrchestrator:
         metadata = dict(lease.get("metadata") or {})
         process = self._processes.get(invocation_id)
         process_group = int(metadata.get("process_group_id") or (process.pid if process is not None else 0))
-        if process_group > 0 and not await terminate_process_group(process_group, timeout_seconds=5.0):
-            raise RuntimeError("worker process group did not quiesce")
+        await self._close_owned_process(
+            invocation_id,
+            process_group=process_group,
+            worker_label="node worker",
+        )
         workspace = Path(str(node.payload.get("workspace_path") or ""))
         await self._release_managed_lsp_workspace(workspace)
         _raise_if_workspace_held(workspace, "a live process still holds the candidate workspace")
@@ -2576,7 +2605,7 @@ class SemanticOrchestrator:
             )
             review_scratch.mkdir(parents=True, exist_ok=True)
         elif adapter == SOFTWARE_GIT_ADAPTER:
-            review_workspace, review_scratch = provision_verification_worktree(
+            review_workspace, review_scratch = provision_module_verification_workspace(
                 self.service.runtime_root,
                 node=node,
                 candidate_digest=candidate_digest,
@@ -2713,9 +2742,15 @@ class SemanticOrchestrator:
                 RoleMode.SYSTEM if system_mode else RoleMode.MODULE,
             ),
             instruction=(
-                "Act as the single System Verifier for the complete Candidate Union. Execute every bound scenario as a system test and delivery test. Launch each task-mandated public surface through the real user boundary: use a PTY/tmux/expect-style driver for an interactive TTY, invoke the real executable for a CLI, start the real server and use its client for a service, or compile and run a real consumer for a library. Unit tests, source inspection, LSP, and compile-only probes are supporting evidence and never substitute for delivery evidence. Keep all harness code in the bound durable verification scratch; the product workspace is read-only. Reuse the accumulated scenario corpus after repairs, record all material findings in one pass, and route each failure to the first public contract boundary that is violated. Assume each module only through its declared public contract while localizing the failure."
+                "This is the next Candidate Union assignment in your existing workflow-level verification session. First replay the "
+                "bound durable system corpus and every bound current or historical finding reproducer. Then inspect the current union "
+                "diff and affected contract graph and run a diff-risk check for newly introduced defects. Submit one outcome bound to "
+                "this union; no earlier verdict settles it."
                 if system_mode
-                else "Verify only this module against its own source contract, comments, Candidate diff, and durable developer/verification corpora. Treat every dependency public contract as an axiom; inspect only the exact dependency contract edges this module consumes and never inspect dependency private implementation. If this module violates its own contract, file a module finding. If the consumed contract is contradictory, incomplete, or impossible to implement, file a contract finding. Do not use the global task or unrelated scenarios to widen scope. Reuse existing cases before adding missing adversarial cases, then submit one semantic outcome."
+                else "This is the next Candidate assignment in your existing module verification session. First replay the bound "
+                "developer and verification corpora plus every bound current or historical RepairBill reproducer. Then inspect the "
+                "current Candidate diff and semantic neighborhood and run a diff-risk check for newly introduced defects. Submit one "
+                "outcome bound to this Candidate; no earlier verdict settles it."
             ),
             reference_refs=verifier_references,
             workspace_override={
@@ -2827,6 +2862,48 @@ class SemanticOrchestrator:
             errors.append(f"{outcome.upper()} requires an empty finding list")
         if outcome == "unknown" and not reason:
             errors.append("UNKNOWN requires an environmental reason")
+        recorded_results = [
+            dict(item)
+            for item in list(submission.get("recorded_results") or [])
+            if isinstance(item, Mapping)
+        ]
+        try:
+            validate_verification_case_order(
+                [
+                    str(item.get("case_kind") or "")
+                    for item in recorded_results
+                ],
+                historical_required=bool(
+                    historical_repair_checklist_items(work_view)
+                ),
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+        required_historical = historical_repair_checklist_items(work_view)
+        historical_names = {
+            str(item.get("name") or "")
+            for item in recorded_results
+            if str(item.get("case_kind") or "") == "historical_regression"
+        }
+        missing_historical = [
+            str(item["case"])
+            for item in required_historical
+            if str(item["case"]) not in historical_names
+        ]
+        if missing_historical:
+            errors.append(
+                "verification must replay every historical RepairBill case before submit: "
+                + ", ".join(missing_historical)
+            )
+        evidence_tags = {
+            str(tag)
+            for item in recorded_results
+            for tag in list(item.get("obligation_tags") or [])
+        }
+        if "candidate_delta_review" not in evidence_tags:
+            errors.append(
+                "verification requires a current-Candidate diff-risk check after regressions"
+            )
         scratch_only = system_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
         changed_paths = (
             _verification_scratch_paths(review_scratch)
@@ -3059,11 +3136,11 @@ class SemanticOrchestrator:
         process_group = int(
             dict((lease or {}).get("metadata") or {}).get("process_group_id") or 0
         )
-        if process_group and not await terminate_process_group(
-            process_group,
-            timeout_seconds=5.0,
-        ):
-            raise RuntimeError("verifier process group did not quiesce")
+        await self._close_owned_process(
+            invocation_id,
+            process_group=process_group,
+            worker_label="verifier",
+        )
         review_workspace = Path(str(pending.get("review_workspace") or ""))
         await self._release_managed_lsp_workspace(review_workspace)
         _raise_if_workspace_held(
@@ -3547,8 +3624,11 @@ class SemanticOrchestrator:
         lease = self.repository.read_lease(lease_resource) if lease_resource else None
         process = self._processes.get(invocation_id)
         process_group = int(dict((lease or {}).get("metadata") or {}).get("process_group_id") or (process.pid if process else 0))
-        if process_group and not await terminate_process_group(process_group, timeout_seconds=5.0):
-            raise RuntimeError("node worker process group did not stop")
+        await self._close_owned_process(
+            invocation_id,
+            process_group=process_group,
+            worker_label="node worker",
+        )
         worktree_text = str(node.payload.get("workspace_path") or "")
         if worktree_text:
             workspace = Path(worktree_text)
@@ -3625,8 +3705,11 @@ class SemanticOrchestrator:
         lease = self.repository.read_lease(lease_resource) if lease_resource else None
         process = self._processes.get(invocation_id)
         process_group = int(dict((lease or {}).get("metadata") or {}).get("process_group_id") or (process.pid if process else 0))
-        if process_group and not await terminate_process_group(process_group, timeout_seconds=5.0):
-            raise RuntimeError("aggregate worker process group did not stop")
+        await self._close_owned_process(
+            invocation_id,
+            process_group=process_group,
+            worker_label="aggregate worker",
+        )
         architecture_workspace_text = str(snapshot.payload.get("architecture_workspace_path") or "")
         if architecture_workspace_text:
             architecture_workspace = Path(architecture_workspace_text)
@@ -4881,8 +4964,11 @@ class SemanticOrchestrator:
         metadata = dict((lease or {}).get("metadata") or {})
         process = self._processes.get(invocation_id)
         process_group = int(metadata.get("process_group_id") or (process.pid if process else 0))
-        if process_group and not await terminate_process_group(process_group, timeout_seconds=5.0):
-            raise RuntimeError("architect process group did not quiesce")
+        await self._close_owned_process(
+            invocation_id,
+            process_group=process_group,
+            worker_label="architect",
+        )
         workspace = Path(str(revision.payload.get("architecture_workspace_path") or ""))
         await self._release_managed_lsp_workspace(workspace)
         _raise_if_workspace_held(workspace, "a live process still holds the architecture worktree")
@@ -5240,8 +5326,9 @@ class SemanticOrchestrator:
                         audience="reviewer",
                     )
                 prompt += (
-                    " This is a scoped revision review. Check the repaired semantic target against revision_finding, every item in the original replan_finding_batch, and the compact semantic contract view. "
-                    "The manager already compared unchanged fragments. Every FAIL finding names a semantic target; hidden revision identity is Manager-owned."
+                    " The Architect has submitted a new revision. The previous verdict applies only to the previous submission and cannot settle this review. "
+                    "Treat revision_finding and every item in the original replan_finding_batch as mandatory regression obligations: re-check each one against the current contract before reviewing the changed semantic surface for regressions or new defects. "
+                    "The manager already compared unchanged fragments. Every FAIL finding names a semantic target; hidden revision identity is Manager-owned. Submit a fresh verdict for this bound revision even when the verdict is unchanged."
                 )
             workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, revision.workflow_id)
             request = workflow_request_from_snapshot(self.service, workflow)
@@ -5285,6 +5372,7 @@ class SemanticOrchestrator:
                 tool_summary_ref=review_ref.to_dict(),
                 **_recorded_role_metrics(terminal),
             )
+            self.repository.complete_role_session(invocation_id)
             return {"provider_request_id": invocation_id, "result_artifact_ref": review_ref.to_dict()}
         finally:
             try:
@@ -5403,10 +5491,15 @@ class SemanticOrchestrator:
                 revision,
             )
             finding_value = architecture_revision_finding_value(revision.payload)
+            prior_finding_guidance = ""
             if finding_value:
                 references["prior_finding"] = self._publish_architecture_finding_view(
                     finding_value,
                     audience="reviewer",
+                )
+                prior_finding_guidance = (
+                    "The Architect has submitted a new revision. The previous verdict applies only to the previous submission and cannot settle this review. "
+                    "Treat every item in prior_finding as a mandatory regression obligation: re-check it against the current architecture before looking for regressions or new material defects, and submit a fresh verdict for this bound revision even when the verdict is unchanged. "
                 )
             root_batch_value = revision.payload.get("replan_finding_batch_ref")
             if root_batch_value:
@@ -5433,21 +5526,15 @@ class SemanticOrchestrator:
                 profile=self._profile_for_role(revision.workflow_id, "reviewer"),
                 activation=RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
                 instruction=(
-                "Review the candidate code skeleton against the exact same pinned task.yaml ledger used for the Architect result. "
-                    "Read task.yaml as one ordered, read-only ledger before recording a requirements_defect: revisions are exact Manager-recorded user communications, later revisions take precedence over conflicting earlier revisions and original text, and every unrelated earlier obligation remains binding. Do not edit or reinterpret the ledger. "
-                    "Inspect the module DAG, complete skeleton diff, declarations and comments, ownership, lifecycle, state, invariants, dependencies, and end-to-end contract. "
-                    "For each implementation module, the Manager derives separate tests/<module_name>/developer and tests/<module_name>/verification corpora after architecture acceptance; the Architect is forbidden to declare test paths or synthetic test modules, and tests are verification evidence rather than product scenarios. Do not report missing test scopes, test sources, test scenarios, or Architect-owned test registration merely because they are absent from contract_paths or implementation_scopes. A requirement remains reachable through the Verifier even when it has no CLI entrypoint. Reject only a missing product semantic seam or a missing task-mandated product build/delivery asset owned by a real product module. "
-                    "Your completion conditions are: contracts compile and compose; key scenarios complete along the contract graph; every failure path has a legal terminal or recovery state; every binding Requirement maps to a contract and scenario; and no dependency is undeclared. "
-                    "Treat the requirement mapping as an audit index, not as proof. Confirm each claim preserves the exact task source and its contract_path reaches a declared observable scenario outcome. For every module, review responsibility, dependency handoffs, inputs, outputs, errors, invariants, ownership, lifecycle, and optional state machine. Reject missing or contradictory semantics and disagreement between architecture.yaml and declaration comments as architecture defects. "
-                    "Review semantic contract composition rather than implementation: from each concrete scenario entrypoint, trace declared interface inputs, dependency handoffs, state transitions where declared, errors, cleanup, and outputs through contract_flow to both the required observable behavior and a legal failure endpoint. API presence, compatible signatures, compilation, or a plausible future implementation are not semantic proof; do not assume unspecified behavior, and do not require private algorithms or function bodies when the declared semantics already close the path. "
-                    "Before PASS, audit every public input domain, state owner, and materially distinct call sequence for ambiguity. A contract is incomplete when two conforming implementations could choose observably different behavior that a caller, downstream module, or Verifier must know. In particular, require declared semantics for absent/null/empty/zero-length and size-coupled inputs; partial output followed by failure, including commitment, consumption, ordering, post-error state, and retry; and copying, moving, cloning, sharing, resetting, or reusing public stateful values in initial, partial, and failed states, or explicit prohibition. Record a finding instead of choosing an interpretation. Compile probes may exercise only operations whose legality the contract establishes; review_guarded private implementation freedom cannot supply missing public behavior. "
-                    "Run only focused compile-only declaration or protocol-consumer probes. Compilation confirms contract/protocol consistency, never product behavior; do not require implementation bodies or a linked product executable. "
-                    "Reject new placeholder implementations, stub function bodies, TODO pseudocode control flow, or product source added merely to make the Architecture Skeleton compile. "
-                    "The Manager performs no semantic coverage or contract validation; independently review every hard Requirement and module in the bound scope. "
-                    "Record only material defects as findings; do not write positive audit rows. "
-                    "For a replan, explicitly audit every item in replan_finding_batch and do not PASS while any item remains unresolved. "
+                    "Submit a fresh independent verdict for this candidate Architecture Skeleton. Review the complete architecture_index, "
+                    "architecture_diff, declarations, and the same ordered read-only task ledger used by the Architect. Audit every binding "
+                    "requirement and Module Protocol breadth-first, then trace success and material failure semantics through every scenario. "
+                    "The Manager's derived test/path policy in architecture_index is a control-plane fact, not a missing product contract. "
+                    "Use only the minimum focused declaration or protocol-consumer probes needed to test composition. Record all material "
+                    "defects in one pass and no positive audit rows. For a replan, regress every item in replan_finding_batch before PASS. "
+                    + prior_finding_guidance
                     + edit_instruction_guidance
-                    + "Report all material architecture defects in one pass without designing implementation details."
+                    + "Do not design private implementation while reporting defects."
                 ),
                 reference_refs=references,
                 workspace_override={
@@ -5490,6 +5577,7 @@ class SemanticOrchestrator:
                 tool_summary_ref=review_ref.to_dict(),
                 **_recorded_role_metrics(terminal),
             )
+            self.repository.complete_role_session(invocation_id)
             return {"provider_request_id": invocation_id, "result_artifact_ref": review_ref.to_dict()}
         finally:
             if review_workspace is not None:
@@ -5778,13 +5866,9 @@ class SemanticOrchestrator:
                 audience="architect",
             )
         instruction = (
-            "Produce an implementation DAG from the single read-only reference:task/task.yaml ledger. Start from original and apply exact Manager-recorded user revisions in sequence; later revisions take precedence over conflicting earlier text while every unrelated earlier obligation remains binding. Do not edit the ledger or create normalized Requirement records. Inspect local files and "
-            "user references only to understand feasibility and architectural boundaries; do not build an evidence catalog or research private "
-            "implementation details. Design high-level units, directional "
-            "contracts, dataflow, ownership, lifecycle/state/invariants, work-start dependencies, and end-to-end integration. Existing user-provided "
-            "module boundaries are authoritative inputs but not presumed complete: add necessary foundation, bridge, or integration units. Do not design "
-            "private helpers, algorithms, SDK call sequences, milestones, implementation checklists, evidence catalogs, or test matrices. Submit only "
-            "the architecture contract through the bound builder."
+            "Author the current module-level architecture contract from the ordered read-only task ledger and bound references. Resolve "
+            "only architecture-feasibility questions, declare the smallest complete directional contract DAG and end-to-end integration, "
+            "and defer private implementation. Submit through the bound architecture builder."
         )
         if scoped_revision:
             instruction += (
@@ -6182,6 +6266,7 @@ class SemanticOrchestrator:
         elif activation.role == OrchestrationRole.VERIFIER:
             invocation_acceptance = [
                 "For module verification, read and run both durable corpora; extend only tests/<module_name>/verification and only for a demonstrated coverage gap, while tests/<module_name>/developer remains read-only. For scenario verification, reuse or extend probes only in durable review scratch. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
+                "For this assignment, first record every required current/historical regression, then record a current-Candidate diff-risk check for newly introduced defects. A failing regression blocks PASS but never skips the diff-risk phase.",
                 "Call exactly one semantic verification outcome tool; do not construct a VerificationPlan or evidence JSON.",
             ]
         elif activation.role == OrchestrationRole.IMPLEMENTATION:
@@ -6261,7 +6346,7 @@ class SemanticOrchestrator:
                 },
                 "agent_session": {
                     "session_id": invocation_id,
-                    "response_key": str(effect.get("effect_key") or effect.get("effect_id") or ""),
+                    "response_key": input_fingerprint,
                     "fencing_token": int(fencing_token),
                 },
                 "requirements_brief": {
@@ -6679,7 +6764,10 @@ class SemanticOrchestrator:
         metadata["minion_v2"] = minion_v2
         metadata["agent_session"] = {
             "session_id": invocation_id,
-            "response_key": str(effect.get("effect_key") or effect.get("effect_id") or ""),
+            # A retry reuses the same durable assignment while a new
+            # RepairBill receives a new assignment.  This is the semantic turn
+            # identity used by the persistent role session.
+            "response_key": str(assignment["assignment_id"]),
             "fencing_token": assignment_lease.fencing_token,
             "scope_kind": session_scope_kind,
             "subject_key": session_subject_key,
@@ -6755,67 +6843,100 @@ class SemanticOrchestrator:
             argv=argv,
             env=runner_env,
         )
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            stdin=asyncio.subprocess.PIPE,
-            env=env,
-            start_new_session=True,
-        )
-        self.repository.update_role_attempt_process_group(
-            assignment_id=str(assignment["assignment_id"]),
-            attempt_id_value=str(attempt["attempt_id"]),
-            fencing_token=assignment_lease.fencing_token,
-            process_group_id=process.pid,
-        )
-        self.repository.update_lease_metadata(
-            assignment_lease_resource,
-            str(attempt["attempt_id"]),
-            assignment_lease.fencing_token,
-            {
+
+        def process_started(owner: WorkerProcessOwner) -> None:
+            process = owner.process
+            if process is None:
+                raise RuntimeError("worker process owner started without a process")
+            process_metadata = {
                 "workflow_id": snapshot.workflow_id,
                 "aggregate_type": snapshot.aggregate_type.value,
                 "aggregate_id": snapshot.aggregate_id,
-                "role": role,
-                "process_group_id": process.pid,
+                "process_group_id": owner.process_group_id,
                 "workspace_path": str(pack.workspace.get("repo_path") or ""),
                 "run_id": run_id,
-            },
-        )
-        self.repository.update_lease_metadata(
-            lease_resource,
-            invocation_id,
-            fencing_token,
-            {
-                "workflow_id": snapshot.workflow_id,
-                "aggregate_type": snapshot.aggregate_type.value,
-                "aggregate_id": snapshot.aggregate_id,
-                "process_group_id": process.pid,
-                "workspace_path": str(pack.workspace.get("repo_path") or ""),
-                "run_id": run_id,
-            },
-        )
-        self._processes[invocation_id] = process
-        self._run_to_invocation[run_id] = invocation_id
-        if self.register_broker_run is not None:
-            self.register_broker_run(run_id, invocation_id, pack, process)
-        lease_heartbeat = asyncio.create_task(
-            self._lease_heartbeat(lease_resource, invocation_id, fencing_token),
-            name=f"minion-v2-lease-{invocation_id}",
-        )
-        assignment_heartbeat = asyncio.create_task(
-            self._lease_heartbeat(
+            }
+            self.repository.update_role_attempt_process_group(
+                assignment_id=str(assignment["assignment_id"]),
+                attempt_id_value=str(attempt["attempt_id"]),
+                fencing_token=assignment_lease.fencing_token,
+                process_group_id=owner.process_group_id,
+            )
+            self.repository.update_lease_metadata(
                 assignment_lease_resource,
                 str(attempt["attempt_id"]),
                 assignment_lease.fencing_token,
+                {**process_metadata, "role": role},
+            )
+            self.repository.update_lease_metadata(
+                lease_resource,
+                invocation_id,
+                fencing_token,
+                process_metadata,
+            )
+
+        def register_process(owner: WorkerProcessOwner) -> None:
+            process = owner.process
+            if process is None:
+                raise RuntimeError("worker process owner registered without a process")
+            if invocation_id in self._process_owners or run_id in self._run_to_invocation:
+                raise RuntimeError(
+                    f"logical worker {invocation_id} already owns a process"
+                )
+            self._process_owners[invocation_id] = owner
+            self._processes[invocation_id] = process
+            self._run_to_invocation[run_id] = invocation_id
+            if self.register_broker_run is not None:
+                self.register_broker_run(run_id, invocation_id, pack, process)
+
+        def unregister_process(owner: WorkerProcessOwner) -> None:
+            if not owner.process_group_reaped:
+                raise RuntimeError(
+                    "worker process accounting cannot close before process-group reap"
+                )
+            owns_registration = self._process_owners.get(invocation_id) is owner
+            if owns_registration and self.unregister_broker_run is not None:
+                self.unregister_broker_run(run_id, True)
+            if owns_registration:
+                self._process_owners.pop(invocation_id, None)
+                self._processes.pop(invocation_id, None)
+            if (
+                owns_registration
+                and self._run_to_invocation.get(run_id) == invocation_id
+            ):
+                self._run_to_invocation.pop(run_id, None)
+
+        workspace_path = str(pack.workspace.get("repo_path") or "").strip()
+        owner = WorkerProcessOwner(
+            argv=tuple(argv),
+            env=env,
+            invocation_id=invocation_id,
+            run_id=run_id,
+            workspace=Path(workspace_path) if workspace_path else None,
+            workspace_locks=self._worktree_locks,
+            on_started=process_started,
+            on_registered=register_process,
+            on_unregistered=unregister_process,
+            heartbeat_factories=(
+                lambda: self._lease_heartbeat(
+                    lease_resource,
+                    invocation_id,
+                    fencing_token,
+                ),
+                lambda: self._lease_heartbeat(
+                    assignment_lease_resource,
+                    str(attempt["attempt_id"]),
+                    assignment_lease.fencing_token,
+                ),
             ),
-            name=f"minion-v2-assignment-lease-{attempt['attempt_id']}",
+            reap_timeout_seconds=5.0,
         )
-        try:
-            stderr_task = asyncio.create_task(process.stderr.read())
-            events: list[dict[str, Any]] = []
-            worker_error = ""
+        events: list[dict[str, Any]] = []
+        worker_error = ""
+        async with owner:
+            process = owner.process
+            if process is None or process.stdout is None:
+                raise RuntimeError("worker process has no stdout pipe")
             while True:
                 raw_line = await process.stdout.readline()
                 if not raw_line:
@@ -6832,26 +6953,10 @@ class SemanticOrchestrator:
                 elif str(item.get("kind") or "") == "worker_error":
                     worker_error = str(item.get("error") or "")
             await process.wait()
-            stderr = await stderr_task
-        finally:
-            lease_heartbeat.cancel()
-            assignment_heartbeat.cancel()
-            try:
-                await lease_heartbeat
-            except asyncio.CancelledError:
-                pass
-            try:
-                await assignment_heartbeat
-            except asyncio.CancelledError:
-                pass
-            if process.returncode is None:
-                await terminate_process_group(process.pid, timeout_seconds=2.0)
-                with contextlib.suppress(Exception):
-                    await process.wait()
-            self._processes.pop(invocation_id, None)
-            self._run_to_invocation.pop(run_id, None)
-            if self.unregister_broker_run is not None:
-                self.unregister_broker_run(run_id)
+        process = owner.process
+        if process is None:
+            raise RuntimeError("worker process owner lost its process")
+        stderr = owner.stderr
         assignment_after_process = self.repository.read_role_assignment(
             str(assignment["assignment_id"])
         )
@@ -7214,9 +7319,12 @@ class SemanticOrchestrator:
             raise RuntimeError("role session continuation has the wrong subject")
         restored.update(
             {
-                "schema_version": "2",
+                "schema_version": "3",
                 "scope_kind": scope_kind,
                 "subject_key": subject_key,
+                "tool_delivery_records": dict(
+                    restored.get("tool_delivery_records") or {}
+                ),
             }
         )
         temporary = restore_path.parent / f".{restore_path.name}.{os.getpid()}.tmp"
@@ -7241,7 +7349,7 @@ class SemanticOrchestrator:
             raise RuntimeError("worker checkpoint output is unreadable") from exc
         if not isinstance(payload, dict) or str(payload.get("session_id") or "") != invocation_id:
             raise RuntimeError("worker checkpoint output has the wrong session identity")
-        if str(payload.get("schema_version") or "") != "2":
+        if str(payload.get("schema_version") or "") != "3":
             raise RuntimeError("worker checkpoint output has an unsupported schema version")
         if int(payload.get("fencing_token") or 0) != int(fencing_token):
             raise RuntimeError("worker checkpoint output has a stale fencing token")
@@ -7305,12 +7413,31 @@ class SemanticOrchestrator:
 
     async def send_worker_control(self, run_id: str, message: Mapping[str, Any]) -> bool:
         invocation_id = self._run_to_invocation.get(str(run_id))
-        process = self._processes.get(invocation_id or "")
-        if process is None or process.returncode is not None or process.stdin is None:
+        owner = self._process_owners.get(invocation_id or "")
+        if owner is None:
             return False
-        process.stdin.write((json.dumps(dict(message), ensure_ascii=False) + "\n").encode("utf-8"))
-        await process.stdin.drain()
-        return True
+        return await owner.write_control(
+            (json.dumps(dict(message), ensure_ascii=False) + "\n").encode("utf-8")
+        )
+
+    async def _close_owned_process(
+        self,
+        invocation_id: str,
+        *,
+        process_group: int,
+        worker_label: str,
+    ) -> None:
+        owner = self._process_owners.get(str(invocation_id))
+        if owner is not None:
+            await owner.close()
+            return
+        if process_group and not await terminate_process_group(
+            process_group,
+            timeout_seconds=5.0,
+        ):
+            raise RuntimeError(
+                f"{worker_label} process group could not be reaped"
+            )
 
     async def _reuse_or_retire_effect_lease(
         self,
@@ -7324,8 +7451,9 @@ class SemanticOrchestrator:
 
         try:
             self.repository.assert_fencing_token(resource_key, owner_id, fencing_token)
-            process = self._processes.get(owner_id)
-            if process is not None and process.returncode is None:
+            # Ownership ends when the RAII owner unregisters, never when only
+            # its leader process happens to acquire a return code.
+            if owner_id in self._process_owners:
                 raise LeaseConflict(f"{worker_label} is already active in this manager")
             lease = self.repository.read_lease(resource_key)
             process_group = int(dict((lease or {}).get("metadata") or {}).get("process_group_id") or 0)
@@ -7720,26 +7848,12 @@ def _skeleton_architect_instruction(
     has_revision_scope: bool,
 ) -> str:
     instruction = (
-        "Design the requested software architecture in the bound writable worktree. The single read-only task.yaml ledger is product truth: start from original, apply exact Manager-recorded revisions in sequence, let newer revisions win only where meanings conflict, and preserve every unrelated earlier obligation. Never edit or restate the ledger. "
-        "This invocation is declaration-only: design the whole system at module level, never at function or algorithm implementation level. "
-        "Design modules and their interaction contracts; declare boundaries, responsibilities, directional dependencies, public interfaces, "
-        "lifecycle, ownership, invariants, and state machines only when stateful behavior requires them. Build the overall skeleton and express "
-        "the design, but never implement algorithms, business logic, private helpers, concrete adapters or backends, test bodies, or production control flow. "
-        "Do not create product implementation translation units, stub or placeholder function bodies, TODO pseudocode control flow, or complete build implementations, and do not compile, build, link, test, or execute the skeleton. "
-        "Use the user-specified language. Select external libraries or runtimes only where contract feasibility requires them. Do not design a build system or create a build_system module, build contract, target/link plan, package plan, or test-discovery plan. "
-        "A runtime entrypoint or composition root is an ordinary product module that owns assembly behavior; build files and compiler commands are implementation or verification assets. Unless the task or established repository mandates build tooling, leave the minimum sufficient compile/test method to Coder and Verifier. "
-        "When the task or established repository does mandate a formal build, packaging, or delivery file, declare only that path as an implementation scope of the real entrypoint/composition-root owner; do not create it or design its contents. If multiple existing build conventions make that path materially ambiguous, ask the user instead of choosing a migration. "
-        "Completion requires declared boundaries and responsibilities, exactly one owner for every state and resource, defined interaction contracts, closed lifecycle transitions and composition joins, and explicit deferral of every implementation detail to its owning module. "
-        "Write contract-level code skeletons, an acyclic semantic Contract Dependency Graph, and one or more meaningful end-to-end scenarios. "
-        "All implementation Coders may start from the accepted protocols; contract dependencies describe semantic consumption, not scheduling barriers. "
-        "A scenario names the exact implementation modules, real entrypoint, observable behavior, and environment it verifies, but owns no product source. "
-        "A universal all-module scenario is forbidden unless a real product entrypoint requires that exact combination."
-        " Maintain the complete semantic graph in the Manager-preseeded architecture.yaml named in this invocation. "
-        "Before declaring modules, map every binding Requirement to one semantic claim, exactly one module-or-scenario owner, and the ordered public contract path that makes it observable. This is a compact mapping index, not a substitute for module semantics. "
-        "Every module definition must close as a protocol: state one responsibility; declare behavior kind; name each provider dependency and the exact provider outputs consumed; define inputs, outputs, errors, and invariants; assign ownership; close creation, operation, shutdown, failure, and cleanup; and declare a reachable state machine only when stateful behavior needs one. Ensure declaration comments express the same symbol-level contract. "
-        "Every scenario must name its requirement mappings and implementation modules, then state its real entrypoint, ordered contract_flow, observable success behavior, legal failure behavior, and environment. "
-        "The file has fixed schema_version, requirements, modules, and scenarios fields; all three collections are dynamic snake_case maps. "
-        "Use ordinary file tools to add, edit, or delete map entries, and call architecture_submit with no arguments only after the file and declaration skeleton agree."
+        "Author the current Architecture Skeleton in the bound worktree. Read the ordered read-only task ledger, perform the required "
+        "consistency pass, then fill the Manager-preseeded architecture.yaml and matching public declarations. This work is strictly "
+        "module-level declaration: define boundaries, contracts, ownership, lifecycle, invariants, optional state machines, and scenario "
+        "composition; never implement product behavior, private algorithms, test bodies, or build machinery. Use the task-selected language. "
+        "Ask the user only for an unresolved requirement or scope-changing decision. Call architecture_submit after the complete YAML and "
+        "declaration skeleton agree."
     )
     if has_base_manifest:
         instruction += (
@@ -8172,6 +8286,7 @@ def apply_v2_role_capability_policy(
             OrchestrationRole.VERIFIER: (
                 {
                     *SWE_VERIFICATION_CAPABILITIES,
+                    *VERIFICATION_EVIDENCE_CAPABILITIES,
                     *(
                         {"op_minion_verification_scratch_write"}
                         if activation.mode == RoleMode.SYSTEM
@@ -8977,6 +9092,7 @@ def _validate_verification_policy(
         ("require_consumer_probe", "consumer_probe"),
         ("require_public_surface_dogfood", "public_surface_dogfood"),
         ("require_platform_probe", "platform_probe"),
+        ("require_candidate_delta_review", "candidate_delta_review"),
     )
     for policy_key, obligation_tag in obligations:
         if not bool(policy.get(policy_key, False)) or obligation_tag in tags:

@@ -95,6 +95,8 @@ class MinionRunState:
     last_event_at: str = ""
     pending_approval: dict[str, Any] = field(default_factory=dict)
     pending_clarification: dict[str, Any] = field(default_factory=dict)
+    pending_terminal_status: str = ""
+    process_group_reaped: bool = False
 
     def summary(self) -> dict[str, Any]:
         active = self.status not in _TERMINAL_RUN_STATUSES
@@ -115,6 +117,8 @@ class MinionRunState:
             "last_event": dict(self.last_event),
             "pending_approval": dict(self.pending_approval),
             "pending_clarification": dict(self.pending_clarification),
+            "pending_terminal_status": self.pending_terminal_status,
+            "process_group_reaped": self.process_group_reaped,
         }
 
     def detail(self) -> dict[str, Any]:
@@ -465,8 +469,17 @@ class MinionManager:
                 state.pending_clarification = payload
                 state.status = "clarification_pending"
             elif kind == "terminal":
-                state.status = str(payload.get("status") or "completed")
-                state.ended_at = utc_now()
+                # A terminal IPC receipt means the worker has finished its
+                # logical work, not that its process group is gone.  Keep the
+                # run active until the RAII process owner confirms reap.
+                terminal_status = str(payload.get("status") or "completed")
+                if state.process_group_reaped:
+                    state.status = terminal_status
+                    state.pending_terminal_status = ""
+                    state.ended_at = state.ended_at or utc_now()
+                else:
+                    state.pending_terminal_status = terminal_status
+                    state.status = "exiting"
             state.last_event = item
             state.last_event_at = str(item.get("created_at") or utc_now())
         self.v2_service.repository.record_worker_event(item)
@@ -481,10 +494,25 @@ class MinionManager:
     ) -> None:
         self.runs[run_id] = MinionRunState(minion_id=minion_id, run_id=run_id, pack=pack, process=process)
 
-    def _unregister_v2_broker_run(self, run_id: str) -> None:
+    def _unregister_v2_broker_run(
+        self,
+        run_id: str,
+        process_group_reaped: bool,
+    ) -> None:
+        if not process_group_reaped:
+            raise RuntimeError(
+                "cannot unregister worker before its process group is reaped"
+            )
         state = self.runs.get(run_id)
-        if state is not None and state.status not in _TERMINAL_RUN_STATUSES:
-            state.status = "completed" if state.process is None or state.process.returncode in {None, 0} else "failed"
+        if state is not None:
+            state.process_group_reaped = True
+            state.status = (
+                state.pending_terminal_status
+                # A clean OS exit without a terminal IPC receipt is still a
+                # worker protocol failure.
+                or "failed"
+            )
+            state.pending_terminal_status = ""
             state.ended_at = utc_now()
 
     async def send_decision(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -532,6 +560,16 @@ class MinionManager:
         )
         if task_revision:
             clarification["task_revision"] = task_revision
+        agent_session = dict(
+            dict(state.pack.metadata or {}).get("agent_session") or {}
+        )
+        logical_session_id = str(agent_session.get("session_id") or "").strip()
+        if logical_session_id:
+            await asyncio.to_thread(
+                self.v2_service.repository.begin_role_execution_input,
+                logical_session_id,
+                input_id=f"clarification:{clarification_id}",
+            )
         if not await self.v2_semantic_orchestrator.send_worker_control(
             state.run_id,
             {"type": "clarification", "clarification": clarification},
@@ -903,18 +941,26 @@ class MinionManager:
         self._shutdown_event.set()
 
     async def close_all(self) -> None:
-        for state in list(self.runs.values()):
-            process = state.process
-            if process is not None and process.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    process.terminate()
-        waiters = [state.process.wait() for state in self.runs.values() if state.process is not None and state.process.returncode is None]
-        if waiters:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(asyncio.gather(*waiters), timeout=self.graceful_shutdown_timeout_seconds)
+        # The semantic orchestrator owns worker processes.  Cancelling its
+        # logical tasks enters each process owner's RAII close path, which
+        # reaps the complete process group before unregistering the run.
         await self.v2_semantic_orchestrator.stop_background_workers(
             timeout_seconds=self.graceful_shutdown_timeout_seconds,
         )
+        active = [
+            state.run_id
+            for state in self.runs.values()
+            if state.status not in _TERMINAL_RUN_STATUSES
+            or (
+                state.process is not None
+                and state.process.returncode is None
+            )
+        ]
+        if active:
+            raise RuntimeError(
+                "manager shutdown retained active worker accounting: "
+                + ", ".join(sorted(active))
+            )
         if self._host_broker_bundle is not None:
             close = getattr(self._host_broker_bundle, "close", None)
             if callable(close):

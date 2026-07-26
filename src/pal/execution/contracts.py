@@ -65,6 +65,7 @@ class CapabilityResult:
     text: str = ""
     structured: dict[str, Any] | None = None
     effect_receipt: EffectReceipt | None = None
+    context_delivery: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not str(self.llm_text or "").strip():
