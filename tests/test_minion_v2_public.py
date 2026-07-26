@@ -3662,13 +3662,19 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "decision_token",
             ):
                 self.assertNotIn(f'"{forbidden}"', schemas)
-            start_schema = next(
-                descriptor.InputModel.model_json_schema(mode="validation")
+            start_descriptor = next(
+                descriptor
                 for descriptor in core.context.capability_registry.descriptors.values()
                 if descriptor.canonical_path == "op_minion_start_workflow"
             )
+            start_schema = start_descriptor.InputModel.model_json_schema(mode="validation")
             self.assertIn("task_spec", start_schema["properties"])
             self.assertNotIn("source_files", start_schema["properties"])
+            self.assertIn("search active Pal skills", start_descriptor.description)
+            self.assertIn("ask the user whether to inject them", start_descriptor.description)
+            self.assertIn("call skill_inject for every approved skill", start_descriptor.description)
+            self.assertIn("Never infer consent", start_descriptor.description)
+            self.assertIn("Never inspect or implement the target in the foreground first", start_descriptor.description)
             decision_schema = next(
                 descriptor.InputModel.model_json_schema(mode="validation")
                 for descriptor in core.context.capability_registry.descriptors.values()

@@ -390,7 +390,10 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="start_workflow",
         description=(
-            "Start one durable Minion workflow and bind it to the current actor/channel. For a new Task, supply its canonical profile, short goal, workspace, and complete structured task_spec. "
+            "Start one durable Minion workflow and bind it to the current actor/channel. Before calling this action, search active Pal skills for an operation manual relevant to the requested work. "
+            "If one or more relevant skills are found and have not already been injected into the current Pal turn, ask the user whether to inject them and wait for the answer. "
+            "When the user agrees, call skill_inject for every approved skill and use those manuals when compiling task_spec; when the user declines, proceed without them. Never infer consent or inject skills into the Minion role context. "
+            "For a new Task, supply its canonical profile, short goal, workspace, and complete structured task_spec. "
             "The Manager stores task_spec as original in one immutable append-only task.yaml ledger, "
             "derives the problem-domain Family from the profile, pins the full FamilyBinding for the Task, and creates all internal identities. Use "
             "review_then_execute with artifact for a named external architecture, execute_trusted only for a Manager-trusted named artifact, "
