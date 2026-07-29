@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
+from dataclasses import dataclass
 from typing import Any
 
 from pal.foundation import utc_now
@@ -27,6 +29,166 @@ _MINION_MANAGEMENT_KEYS = frozenset({
     "task_id",
     "unit_id",
 })
+
+
+@dataclass(frozen=True)
+class MinionMemoryCompactionPolicy:
+    """Mechanical Minion compaction plugged into the shared MemoryService."""
+
+    def build_source_text(
+        self,
+        memory_service: Any,
+        *,
+        target_input_budget: int,
+    ) -> str:
+        items = getattr(getattr(memory_service, "l1_store", None), "items", [])
+        return build_minion_prior_user_inputs_source_text(
+            items,
+            target_input_budget=target_input_budget,
+        )
+
+    def build_payload(
+        self,
+        memory_service: Any,
+        *,
+        target_input_budget: int,
+        reserved_output_tokens: int,
+    ) -> dict[str, Any]:
+        _ = reserved_output_tokens
+        items = getattr(getattr(memory_service, "l1_store", None), "items", [])
+        return build_minion_prior_user_inputs_compaction_payload(
+            items,
+            target_input_budget=target_input_budget,
+        )
+
+    def compact(
+        self,
+        memory_service: Any,
+        request: MemoryCompactRequest,
+    ) -> MemoryCompactResult:
+        return compact_minion_memory_service(memory_service, request)
+
+
+def project_minion_tool_protocol(
+    messages: list[dict[str, Any]],
+    max_chars: int,
+) -> list[dict[str, Any]]:
+    """Bound a Minion protocol without inventing partial business outputs.
+
+    Closed successful batches may leave the active prompt. Failed, rejected,
+    or unknown-effect batches remain verbatim so recovery stays possible. The
+    complete raw protocol is owned by the durable journal, not this projection.
+    """
+
+    source = [dict(message) for message in messages if isinstance(message, dict)]
+    budget = max(4_096, int(max_chars or 0))
+    if _protocol_chars(source) <= budget:
+        return source
+    batches = _protocol_batches(source)
+    retained: set[int] = set()
+    dropped: list[str] = []
+    used = 0
+    for indices in reversed(batches):
+        batch = [source[index] for index in indices]
+        batch_chars = _protocol_chars(batch)
+        must_keep = _batch_requires_recovery(batch)
+        if must_keep or used + batch_chars <= int(budget * 0.70):
+            retained.update(indices)
+            used += batch_chars
+            continue
+        dropped.append(_batch_continuity_line(batch))
+
+    result = [
+        dict(message)
+        for index, message in enumerate(source)
+        if index in retained or not _belongs_to_tool_batch(index, batches)
+    ]
+    if dropped:
+        continuity = list(reversed(dropped))[-32:]
+        omitted = max(0, len(dropped) - len(continuity))
+        lines = [
+            '<minion_tool_continuity authority="journal_projection">',
+            (
+                f"{len(dropped)} closed successful tool batch(es) left the active prompt. "
+                "Their full validated protocol remains in the durable role-session journal."
+            ),
+        ]
+        if omitted:
+            lines.append(f"{omitted} older continuity entries omitted from this bounded projection.")
+        lines.extend(f"- {line}" for line in continuity)
+        lines.append("</minion_tool_continuity>")
+        result.insert(0, {"role": "user", "content": "\n".join(lines)})
+    return result
+
+
+def _protocol_batches(messages: list[dict[str, Any]]) -> list[list[int]]:
+    batches: list[list[int]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        role = str(message.get("role") or "").strip()
+        if role == "assistant" and message.get("tool_calls"):
+            batch = [index]
+            cursor = index + 1
+            while cursor < len(messages) and str(messages[cursor].get("role") or "").strip() == "tool":
+                batch.append(cursor)
+                cursor += 1
+            batches.append(batch)
+            index = cursor
+            continue
+        if role == "tool":
+            batches.append([index])
+        index += 1
+    return batches
+
+
+def _belongs_to_tool_batch(index: int, batches: list[list[int]]) -> bool:
+    return any(index in batch for batch in batches)
+
+
+def _batch_requires_recovery(batch: list[dict[str, Any]]) -> bool:
+    for message in batch:
+        if str(message.get("role") or "").strip() != "tool":
+            continue
+        state = dict(message.get("_pal_result_state") or {})
+        if state:
+            if not bool(state.get("ok")):
+                return True
+            if str(state.get("kind") or "") in {"failed", "rejected"}:
+                return True
+            if str(state.get("effect") or "") == "unknown":
+                return True
+    return False
+
+
+def _batch_continuity_line(batch: list[dict[str, Any]]) -> str:
+    assistant = next(
+        (message for message in batch if str(message.get("role") or "") == "assistant"),
+        {},
+    )
+    names = [
+        str(dict(item.get("function") or {}).get("name") or "").strip()
+        for item in list(assistant.get("tool_calls") or ())
+        if isinstance(item, dict)
+    ]
+    observations = [
+        " ".join(str(message.get("content") or "").split())[:180]
+        for message in batch
+        if str(message.get("role") or "") == "tool"
+    ]
+    digest = hashlib.sha256(
+        json.dumps(batch, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:12]
+    tools = ", ".join(name for name in names if name) or "tool"
+    outcome = "; ".join(item for item in observations if item) or "completed"
+    return f"{tools}: {outcome} [journal:{digest}]"
+
+
+def _protocol_chars(messages: list[dict[str, Any]]) -> int:
+    return sum(
+        len(json.dumps(message, ensure_ascii=False, sort_keys=True, default=str))
+        for message in messages
+    )
 
 
 def build_minion_prior_user_inputs_source_text(

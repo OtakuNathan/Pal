@@ -3,9 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import threading
-import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,7 +70,6 @@ class MinionCatalogService:
 
     runtime_root: Path
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
-    _last_migration: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.runtime_root = Path(self.runtime_root)
@@ -82,8 +79,6 @@ class MinionCatalogService:
             root = minion_catalog_root(self.runtime_root)
             profile_override_root(self.runtime_root).mkdir(parents=True, exist_ok=True)
             family_override_root(self.runtime_root).mkdir(parents=True, exist_ok=True)
-            migration = self._migrate_legacy_runtime_catalog()
-            self._last_migration = migration
             self._validate_effective_catalog()
             snapshot = self._snapshot(include_definitions=False)
             self._append_audit(
@@ -91,10 +86,9 @@ class MinionCatalogService:
                     "action": "catalog_bootstrap",
                     "actor": "minion_sidecar",
                     "generation": snapshot["generation"],
-                    "migration": migration,
                 }
             )
-            return {**snapshot, "catalog_root": str(root), "migration": migration}
+            return {**snapshot, "catalog_root": str(root)}
 
     def snapshot(
         self,
@@ -121,13 +115,10 @@ class MinionCatalogService:
                             for item in payload[key]
                             if needle in json.dumps(item, ensure_ascii=False, sort_keys=True).casefold()
                         ]
-            payload["migration"] = dict(self._last_migration)
             return payload
 
     def refresh(self, *, actor: str = "pal") -> dict[str, Any]:
         with self._lock:
-            migration = self._migrate_legacy_runtime_catalog()
-            self._last_migration = migration
             self._validate_effective_catalog()
             payload = self._snapshot(include_definitions=False)
             self._append_audit(
@@ -135,10 +126,9 @@ class MinionCatalogService:
                     "action": "catalog_refresh",
                     "actor": actor,
                     "generation": payload["generation"],
-                    "migration": migration,
                 }
             )
-            return {**payload, "migration": migration}
+            return payload
 
     def set_profile_override(
         self,
@@ -364,81 +354,6 @@ class MinionCatalogService:
             "family_count": len(families),
         }
 
-    def _migrate_legacy_runtime_catalog(self) -> dict[str, Any]:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-        archive_root = minion_catalog_root(self.runtime_root) / "legacy_seeds" / stamp
-        migrated_profiles = self._migrate_legacy_tree(
-            source_root=self.runtime_root / "plugins" / "minion" / "profiles",
-            archive_root=archive_root / "profiles",
-            kind="profile",
-        )
-        migrated_families = self._migrate_legacy_tree(
-            source_root=self.runtime_root / "plugins" / "minion" / "families",
-            archive_root=archive_root / "families",
-            kind="family",
-        )
-        if not migrated_profiles and not migrated_families:
-            shutil.rmtree(archive_root, ignore_errors=True)
-        return {
-            "profiles": migrated_profiles,
-            "families": migrated_families,
-            "archive_root": str(archive_root) if archive_root.exists() else "",
-        }
-
-    def _migrate_legacy_tree(
-        self,
-        *,
-        source_root: Path,
-        archive_root: Path,
-        kind: str,
-    ) -> list[dict[str, Any]]:
-        if not source_root.exists():
-            return []
-        result: list[dict[str, Any]] = []
-        for source in sorted(source_root.rglob("*.toml")):
-            relative = source.relative_to(source_root)
-            status = "builtin_seed_archived"
-            try:
-                payload = tomllib.loads(source.read_text(encoding="utf-8"))
-                metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-                if metadata.get("builtin") is not True:
-                    if kind == "profile":
-                        if not str(payload.get("profile_group") or "").strip() and str(relative.parent) != ".":
-                            payload["profile_group"] = str(relative.parent).replace("/", ".")
-                        model = MinionProfile.from_dict(payload)
-                        target = profile_override_path(self.runtime_root, model.profile_group, model.profile_id)
-                        if not target.exists():
-                            migrated = self._profile_payload(model)
-                            migrated_metadata = dict(migrated.get("metadata") or {})
-                            migrated_metadata["builtin"] = False
-                            migrated_metadata["managed_by"] = "minion_sidecar"
-                            migrated["metadata"] = migrated_metadata
-                            atomic_write_json(target, migrated)
-                            status = "custom_override_migrated"
-                        else:
-                            status = "custom_override_already_present"
-                    else:
-                        model = MinionFamilyManifest.from_dict(payload)
-                        target = family_override_path(self.runtime_root, model.family_id)
-                        if not target.exists():
-                            migrated = self._family_payload(model)
-                            migrated_metadata = dict(migrated.get("metadata") or {})
-                            migrated_metadata["builtin"] = False
-                            migrated_metadata["managed_by"] = "minion_sidecar"
-                            migrated["metadata"] = migrated_metadata
-                            atomic_write_json(target, migrated)
-                            status = "custom_override_migrated"
-                        else:
-                            status = "custom_override_already_present"
-            except Exception as exc:
-                status = f"invalid_legacy_file_archived:{exc.__class__.__name__}"
-            archive = archive_root / relative
-            archive.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, archive)
-            source.unlink()
-            result.append({"path": str(relative), "status": status})
-        self._remove_empty_tree(source_root)
-        return result
 
     def _validate_profile(self, profile: MinionProfile) -> None:
         family_registry = MinionFamilyRegistry(runtime_root=self.runtime_root)
@@ -554,21 +469,6 @@ class MinionCatalogService:
             stream.write((json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
             stream.flush()
             os.fsync(stream.fileno())
-
-    @staticmethod
-    def _remove_empty_tree(root: Path) -> None:
-        if not root.exists():
-            return
-        for path in sorted((item for item in root.rglob("*") if item.is_dir()), reverse=True):
-            try:
-                path.rmdir()
-            except OSError:
-                pass
-        try:
-            root.rmdir()
-        except OSError:
-            pass
-
 
 def _merge_patch(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(base)

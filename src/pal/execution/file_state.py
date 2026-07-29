@@ -187,11 +187,12 @@ class SessionFileStateCache:
     ) -> None:
         if not full_view:
             return
-        self.backend.set_file_full(
+        self.backend.set_file_snapshot(
             logical_session_id=self.context.logical_session_id,
             file_key=file_cache_key(file_path),
             digest=content_digest(content),
             total_lines=count_text_lines(content),
+            complete=bool(full_view),
         )
 
     def get_valid(self, file_path: str | Path) -> str | None:
@@ -211,17 +212,17 @@ class SessionFileStateCache:
             mtime_ns = resolved.stat().st_mtime_ns
         except (OSError, UnicodeError):
             return None
-        grant = self.backend.file_grant(
+        snapshot = self.backend.file_snapshot(
             logical_session_id=self.context.logical_session_id,
             file_key=file_cache_key(resolved),
             digest=content_digest(content),
         )
-        if grant is None:
+        if snapshot is None:
             return None
         return FileState(
             content=content,
             mtime_ns=mtime_ns,
-            full_view=grant.complete,
+            full_view=snapshot.complete,
         )
 
     def invalidate(self, file_path: str | Path) -> None:
@@ -240,7 +241,7 @@ class SessionFileStateCache:
 
     def __contains__(self, file_path: str | Path) -> bool:
         return (
-            self.backend.file_grant(
+            self.backend.file_snapshot(
                 logical_session_id=self.context.logical_session_id,
                 file_key=file_cache_key(file_path),
                 digest="",

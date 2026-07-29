@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-import re
-from dataclasses import dataclass, field
 from enum import Enum
-from types import MappingProxyType
+from functools import lru_cache
 from typing import Annotated, Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 
 class StrictToolModel(BaseModel):
@@ -24,10 +22,10 @@ class EmptyToolOutput(StrictToolModel):
     pass
 
 
-class OpaqueToolOutput(RootModel[dict[str, Any]]):
-    """Explicit dictionary output for capabilities without a narrower shape."""
+class ProviderPayloadOutput(StrictToolModel):
+    """Stable boundary for provider-defined payloads without a local schema."""
 
-    model_config = ConfigDict(strict=True)
+    payload: dict[str, Any]
 
 
 class McpToolOutput(StrictToolModel):
@@ -36,6 +34,13 @@ class McpToolOutput(StrictToolModel):
     content: list[dict[str, Any]] = Field(default_factory=list)
     structured_content: dict[str, Any] | None = None
     is_error: bool = False
+
+
+@lru_cache(maxsize=None)
+def model_validation_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """Compile each immutable Pydantic tool contract once per process."""
+
+    return model.model_json_schema(mode="validation")
 
 
 class InvocationMode(str, Enum):
@@ -224,61 +229,6 @@ ToolInvocationResult = Annotated[
 TOOL_INVOCATION_RESULT_ADAPTER = TypeAdapter(ToolInvocationResult)
 
 
-@dataclass(frozen=True)
-class Tool:
-    """One immutable Pal-owned tool specification.
-
-    Registration consumes this value as a whole.  Contracts, prose, execution
-    semantics, examples, and the callable therefore cannot drift independently.
-    """
-
-    alias: str
-    canonical_path: str
-    InputModel: type[BaseModel]
-    OutputModel: type[BaseModel]
-    guidance: ToolGuidance
-    execution: ToolExecutionSemantics
-    search_text: str
-    handler: Any
-    examples: tuple[dict[str, Any], ...] = ()
-    module_id: str = ""
-    family: str = "general"
-    source: str = "internal"
-    target_id: str = "__singleton__"
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        alias = str(self.alias or "").strip()
-        canonical_path = str(self.canonical_path or "").strip()
-        if not alias:
-            raise ValueError("tool alias is required")
-        if not canonical_path:
-            raise ValueError("tool canonical_path is required")
-        if alias == canonical_path:
-            raise ValueError("tool alias must not expose canonical_path")
-        if len(alias) > 64 or re.fullmatch(r"[A-Za-z0-9_-]+", alias) is None:
-            raise ValueError("invalid tool alias; expected 1-64 characters from [A-Za-z0-9_-]")
-        if alias.startswith(("op_", "intro_")):
-            raise ValueError("tool alias must not use the reserved canonical-path namespace")
-        _validate_model_class("InputModel", self.InputModel)
-        _validate_model_class("OutputModel", self.OutputModel)
-        _validate_model_defaults(self.InputModel)
-        _validate_model_defaults(self.OutputModel)
-        schema = self.InputModel.model_json_schema(mode="validation")
-        if schema.get("properties") and not self.examples:
-            raise ValueError(f"non-empty InputModel for {alias!r} requires at least one example")
-        for example in self.examples:
-            self.InputModel.model_validate(example, strict=True)
-        object.__setattr__(self, "alias", alias)
-        object.__setattr__(self, "canonical_path", canonical_path)
-        object.__setattr__(
-            self,
-            "examples",
-            tuple(MappingProxyType(_freeze_plain_dict(item)) for item in self.examples),
-        )
-        object.__setattr__(self, "metadata", MappingProxyType(_freeze_plain_dict(self.metadata)))
-
-
 def validate_output(model: type[BaseModel], value: Any) -> BaseModel:
     """Use one adapter for Pydantic instances, dictionaries, and JSON strings."""
 
@@ -376,19 +326,6 @@ def validation_error_details(exc: ValidationError) -> dict[str, Any]:
     return {"validation_errors": exc.errors(include_url=False, include_input=False)}
 
 
-def _validate_model_class(label: str, model: type[BaseModel]) -> None:
-    if not isinstance(model, type) or not issubclass(model, BaseModel):
-        raise TypeError(f"{label} must be a Pydantic v2 BaseModel subclass")
-
-
-def _validate_model_defaults(model: type[BaseModel]) -> None:
-    config = model.model_config
-    if config.get("strict") is not True:
-        raise ValueError(f"{model.__name__} must set strict=True")
-    if not issubclass(model, RootModel) and config.get("extra") != "forbid":
-        raise ValueError(f"{model.__name__} must set extra='forbid'")
-
-
 def _schema_enum_values(schema: Any, path: str = "$") -> list[tuple[str, list[Any]]]:
     values: list[tuple[str, list[Any]]] = []
     if isinstance(schema, dict):
@@ -406,20 +343,6 @@ def _schema_enum_values(schema: Any, path: str = "$") -> list[tuple[str, list[An
     return values
 
 
-def _freeze_plain_dict(value: dict[str, Any]) -> dict[str, Any]:
-    return {key: _freeze_plain_value(item) for key, item in dict(value or {}).items()}
-
-
-def _freeze_plain_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return MappingProxyType(_freeze_plain_dict(value))
-    if isinstance(value, list | tuple):
-        return tuple(_freeze_plain_value(item) for item in value)
-    if isinstance(value, set | frozenset):
-        return frozenset(_freeze_plain_value(item) for item in value)
-    return value
-
-
 __all__ = [
     "CompleteResult",
     "EffectKind",
@@ -431,14 +354,13 @@ __all__ = [
     "Idempotency",
     "InvocationMode",
     "McpToolOutput",
-    "OpaqueToolOutput",
+    "ProviderPayloadOutput",
     "PagedResult",
     "PagingMode",
     "RejectedResult",
     "RetryDirective",
     "RetryPolicy",
     "StrictToolModel",
-    "Tool",
     "ToolAffordance",
     "ToolExecutionSemantics",
     "ToolGuidance",
@@ -448,6 +370,7 @@ __all__ = [
     "ToolInvocationResult",
     "compile_tool_description",
     "derive_retry_directive",
+    "model_validation_schema",
     "rejection",
     "validate_output",
 ]

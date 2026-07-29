@@ -532,6 +532,8 @@ def _project_failure_evidence(value: object) -> dict[str, Any]:
 def _project_tool_structured_summary(value: object) -> dict[str, Any]:
     if not isinstance(value, dict) or not value:
         return {}
+    if set(value) == {"payload"} and isinstance(value.get("payload"), dict):
+        return _project_tool_structured_summary(value["payload"])
     if isinstance(value.get("capability"), dict):
         capability = dict(value.get("capability") or {})
         return {

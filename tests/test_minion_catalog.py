@@ -35,7 +35,7 @@ class MinionCatalogTests(unittest.TestCase):
         self.assertEqual(software["source"], "builtin")
         self.assertIn("v2_candidate_builder", generic["capability_groups"])
 
-    def test_sidecar_bootstrap_archives_builtin_seeds_and_migrates_explicit_custom_profiles(self) -> None:
+    def test_sidecar_bootstrap_ignores_legacy_plugin_seed_catalog(self) -> None:
         legacy_root = self.root / "plugins" / "minion" / "profiles"
         builtin = legacy_root / "generic.toml"
         builtin.parent.mkdir(parents=True)
@@ -52,16 +52,12 @@ class MinionCatalogTests(unittest.TestCase):
 
         snapshot = MinionCatalogService(self.root).bootstrap()
 
-        self.assertFalse(builtin.exists())
-        self.assertFalse(custom.exists())
-        archive_root = Path(snapshot["migration"]["archive_root"])
-        self.assertTrue((archive_root / "profiles" / "generic.toml").is_file())
-        self.assertTrue((archive_root / "profiles" / "general" / "custom_writer.toml").is_file())
+        self.assertTrue(builtin.exists())
+        self.assertTrue(custom.exists())
+        self.assertNotIn("migration", snapshot)
         self.assertNotEqual(MinionProfileRegistry(runtime_root=self.root).get("generic").display_name, "Old Seed")
-        migrated = MinionProfileRegistry(runtime_root=self.root).get("custom_writer")
-        self.assertIsNotNone(migrated)
-        self.assertEqual(migrated.display_name, "Custom Writer")
-        self.assertTrue(profile_override_path(self.root, "general", "custom_writer").is_file())
+        self.assertIsNone(MinionProfileRegistry(runtime_root=self.root).get("custom_writer"))
+        self.assertFalse(profile_override_path(self.root, "general", "custom_writer").is_file())
 
     def test_profile_override_is_atomic_versioned_and_resettable(self) -> None:
         service = MinionCatalogService(self.root)
@@ -164,7 +160,7 @@ class MinionCatalogTests(unittest.TestCase):
         self.assertEqual(updated["definition"]["display_name"], "Manager Owned")
         self.assertEqual(manager.health()["catalog_generation"], after["generation"])
 
-    def test_plugin_attach_starts_sidecar_that_reconciles_legacy_catalog(self) -> None:
+    def test_plugin_attach_starts_sidecar_without_importing_legacy_catalog(self) -> None:
         legacy = self.root / "plugins" / "minion" / "profiles" / "generic.toml"
         legacy.parent.mkdir(parents=True)
         legacy.write_text(
@@ -179,7 +175,7 @@ class MinionCatalogTests(unittest.TestCase):
             provider.detach_manager()
 
         self.assertTrue(health["ok"])
-        self.assertFalse(legacy.exists())
+        self.assertTrue(legacy.exists())
         generic = next(item for item in snapshot["profiles"] if item["name"] == "generic")
         self.assertEqual(generic["source"], "builtin")
         self.assertEqual(generic["display_name"], "Generic Minion")

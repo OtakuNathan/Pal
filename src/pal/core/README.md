@@ -9,6 +9,8 @@ Owns:
 - module lifecycle governance
 - registry ownership for visibility and mount policy
 - prompt fragment registry and prompt assembly seam
+- the shared `AgentTurnRuntime` prompt/turn-execution kernel used by Pal and
+  Minion hosts
 - stagnation guard orchestration
 
 Does not own:
@@ -25,10 +27,13 @@ Exposes:
 - `EventDispatcher`
 - event and handler registries
 - `PromptFragmentRegistry`
+- `AgentTurnRuntime`
 - mailbox and turn-effect contracts
 
 Interaction rule:
 - `PalCore` is the only governance center
+- Pal and Minion supply host policy and ports to the same `AgentTurnRuntime`;
+  they do not maintain separate prompt compilers or turn executors
 - `Execution` is the only official invocation plane
 - `Pal` should call capabilities through `PalCore -> Execution`
 - turn computations yield effect requests and are resumed by `PalCore`

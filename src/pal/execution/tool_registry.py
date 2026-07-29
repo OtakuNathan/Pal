@@ -16,10 +16,10 @@ from pal.execution.tool_facade import (
     EffectKind,
     InvocationMode,
     McpToolOutput,
-    Tool,
     ToolExecutionSemantics,
     ToolGuidance,
     compile_tool_description,
+    model_validation_schema,
 )
 from pal.shared.capability_forest import BoundCapabilityAction, MountedSubtreeHandle, SINGLETON_TARGET
 
@@ -74,7 +74,6 @@ class CompiledToolRecord:
     output_schema: dict[str, Any]
     example: dict[str, Any] | None
     binding: BoundCapabilityAction
-    facade_tool: Tool | None = None
     is_mcp: bool = False
     requires_effect_receipt: bool = False
 
@@ -162,14 +161,12 @@ class ToolRegistryGeneration:
     search_records: MappingProxyType
     provider_specs: MappingProxyType
     mounted_subtrees: MappingProxyType
-    tool_implementations: MappingProxyType
 
     @classmethod
     def empty(cls) -> "ToolRegistryGeneration":
         return compile_registry_generation(
             generation_id=0,
             mounted_subtrees={},
-            tool_implementations={},
         )
 
     def record_for_alias(self, alias: str) -> CompiledToolRecord | None:
@@ -189,7 +186,6 @@ def compile_registry_generation(
     *,
     generation_id: int,
     mounted_subtrees: dict[str, MountedSubtreeHandle],
-    tool_implementations: dict[str, Any],
 ) -> ToolRegistryGeneration:
     nodes: dict[str, Any] = {}
     forest_by_module: dict[str, list[str]] = {}
@@ -208,7 +204,16 @@ def compile_registry_generation(
         for descriptor in subtree.descriptors:
             existing = descriptors.get(descriptor.name)
             if existing is not None and existing != descriptor:
-                raise ValueError(f"capability descriptor name already registered: {descriptor.name}")
+                shared_aliases = set(existing.aliases) & set(descriptor.aliases)
+                if shared_aliases:
+                    alias = sorted(shared_aliases)[0]
+                    raise ValueError(
+                        f"tool alias conflict in generation: {alias} -> "
+                        f"{existing.canonical_path}, {descriptor.canonical_path}"
+                    )
+                raise ValueError(
+                    f"capability descriptor name already registered: {descriptor.name}"
+                )
             descriptors[descriptor.name] = descriptor
             descriptor_by_module.setdefault(descriptor.module_id, []).append(descriptor.name)
             canonical_path = str(descriptor.canonical_path or descriptor.name).strip()
@@ -232,8 +237,7 @@ def compile_registry_generation(
         binding = bindings.get((canonical_path, target_id))
         if binding is None:
             raise ValueError(f"missing canonical binding: {canonical_path} target={target_id}")
-        implementation = tool_implementations.get(canonical_path)
-        record = _compile_record(descriptor, binding, implementation)
+        record = _compile_record(descriptor, binding)
         alias = record.alias
         if alias in alias_to_canonical:
             raise ValueError(
@@ -376,69 +380,20 @@ def compile_registry_generation(
         search_records=_freeze_mapping(search_records),
         provider_specs=_freeze_mapping(provider_specs),
         mounted_subtrees=_freeze_mapping(immutable_subtrees),
-        tool_implementations=_freeze_mapping(tool_implementations),
     )
-
-
-def subtree_for_tool(tool: Tool) -> MountedSubtreeHandle:
-    descriptor = CapabilityDescriptor(
-        name=tool.alias,
-        canonical_path=tool.canonical_path,
-        family=tool.family,
-        description=tool.guidance.purpose,
-        source=tool.source,
-        display_name=tool.alias,
-        aliases=(tool.alias,),
-        target_id=tool.target_id,
-        InputModel=tool.InputModel,
-        OutputModel=tool.OutputModel,
-        guidance=tool.guidance,
-        execution=tool.execution,
-        search_text=tool.search_text,
-        examples=tuple(dict(item) for item in tool.examples),
-        metadata={
-            **dict(tool.metadata),
-            "alias": tool.alias,
-            "facade_tool": True,
-        },
-        module_id=tool.module_id or "standalone_tools",
-    )
-
-    def call_facade(call: CapabilityCall) -> CapabilityResult:
-        validated = tool.InputModel.model_validate(call.args, strict=True)
-        return tool.handler(validated)
-
-    action = BoundCapabilityAction(
-        canonical_path=tool.canonical_path,
-        target_id=tool.target_id,
-        descriptor=descriptor,
-        callable=call_facade,
-    )
-    subtree = MountedSubtreeHandle(module_id=descriptor.module_id)
-    subtree.descriptors.append(descriptor)
-    subtree.bound_actions.append(action)
-    subtree.bound_action_keys.append((action.canonical_path, action.target_id))
-    subtree.search_record_ids.append(descriptor.name)
-    return subtree
 
 
 def _compile_record(
     descriptor: CapabilityDescriptor,
     binding: BoundCapabilityAction,
-    implementation: Any,
 ) -> CompiledToolRecord:
     metadata = dict(descriptor.metadata or {})
-    facade_tool = implementation if isinstance(implementation, Tool) else None
     declared_aliases = tuple(str(value or "").strip() for value in descriptor.aliases)
     if len(declared_aliases) != 1 or not declared_aliases[0]:
         raise ValueError(
             f"tool {descriptor.canonical_path or descriptor.name!r} must declare exactly one non-empty alias"
         )
     alias = declared_aliases[0]
-    if facade_tool is not None and facade_tool.alias != alias:
-        raise ValueError(
-            f"tool {descriptor.canonical_path!r} alias mismatch: descriptor={alias!r}, facade={facade_tool.alias!r}"
-        )
     if len(alias) > 64 or re.fullmatch(r"[A-Za-z0-9_-]+", alias) is None:
         raise ValueError(f"invalid tool alias {alias!r}; expected 1-64 characters from [A-Za-z0-9_-]")
     if alias.startswith(("op_", "intro_")):
@@ -449,20 +404,11 @@ def _compile_record(
         and metadata["mcp"].get("kind") in {"tool", "prompt_render"}
     )
 
-    if facade_tool is not None:
-        input_model = facade_tool.InputModel
-        output_model = facade_tool.OutputModel
-        input_schema = input_model.model_json_schema(mode="validation")
-        output_schema = output_model.model_json_schema(mode="validation")
-        examples = tuple(_deep_thaw(item) for item in facade_tool.examples)
-        guidance = facade_tool.guidance
-        execution = facade_tool.execution
-        search_text = facade_tool.search_text
-    elif is_mcp:
+    if is_mcp:
         input_model = None
         output_model = None
         input_schema = dict(descriptor.mcp_input_schema or {"type": "object", "properties": {}})
-        output_schema = dict(descriptor.mcp_output_schema or McpToolOutput.model_json_schema(mode="validation"))
+        output_schema = dict(descriptor.mcp_output_schema or model_validation_schema(McpToolOutput))
         Draft202012Validator.check_schema(input_schema)
         Draft202012Validator.check_schema(output_schema)
         examples = ()
@@ -476,12 +422,14 @@ def _compile_record(
         output_model = descriptor.OutputModel
         if input_model is None or output_model is None:
             raise TypeError(f"internal capability {alias!r} requires InputModel and OutputModel")
-        input_schema = input_model.model_json_schema(mode="validation")
-        output_schema = output_model.model_json_schema(mode="validation")
+        input_schema = model_validation_schema(input_model)
+        output_schema = model_validation_schema(output_model)
         configured_examples = descriptor.examples
         examples = tuple(dict(item) for item in configured_examples if isinstance(item, dict))
         if input_schema.get("properties") and not examples:
-            examples = (_example_from_schema(input_schema),)
+            raise ValueError(
+                f"non-empty InputModel for {alias!r} requires at least one example"
+            )
         if descriptor.guidance is None or descriptor.execution is None:
             raise TypeError(f"internal capability {alias!r} requires guidance and execution semantics")
         guidance = descriptor.guidance
@@ -522,7 +470,6 @@ def _compile_record(
         output_schema=output_schema,
         example=example,
         binding=binding,
-        facade_tool=facade_tool,
         is_mcp=is_mcp,
         requires_effect_receipt=execution.effect_kind is not EffectKind.NONE,
     )
@@ -744,6 +691,8 @@ def _project_llm_text(
 ) -> str:
     rendered = str(value or "")
     for alias, canonical in translations:
+        if canonical not in rendered:
+            continue
         rendered = re.sub(
             rf"(?<![A-Za-z0-9_]){re.escape(canonical)}(?![A-Za-z0-9_])",
             alias,
@@ -805,5 +754,4 @@ __all__ = [
     "FrozenCapabilityRegistry",
     "ToolRegistryGeneration",
     "compile_registry_generation",
-    "subtree_for_tool",
 ]

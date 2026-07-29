@@ -72,6 +72,8 @@ class TurnExecutor:
         render_failure_feedback_text: Callable[[Any], str],
         should_enter_failure_flow_for_tool_result: Callable[[Any], bool],
         handle_llm_provider_errors: bool = True,
+        tool_protocol_projector: Callable[[list[dict[str, Any]], int], list[dict[str, Any]]] | None = None,
+        execute_tool_async: Callable[..., Awaitable[Any]] | None = None,
         config: RuntimeConfig | None = None,
     ) -> None:
         self.context = context
@@ -88,6 +90,8 @@ class TurnExecutor:
         self._render_failure_feedback_text = render_failure_feedback_text
         self._should_enter_failure_flow_for_tool_result = should_enter_failure_flow_for_tool_result
         self._handle_llm_provider_errors = handle_llm_provider_errors
+        self._tool_protocol_projector = tool_protocol_projector
+        self._execute_tool_async = execute_tool_async
 
         self._stream_accumulators = {
             LLMStreamEventKind.TEXT_DELTA: self._accumulate_text_delta,
@@ -236,7 +240,11 @@ class TurnExecutor:
             messages=list(prompt.messages),
             max_output_tokens=prompt.max_output_tokens,
             model_hint=prompt.model_hint,
-            temperature=self.select_turn_temperature(continuation.last_response_mode),
+            temperature=(
+                prompt.temperature
+                if prompt.temperature is not None
+                else self.select_turn_temperature(continuation.last_response_mode)
+            ),
             tools=tools,
             metadata=dict(prompt.metadata),
         )
@@ -330,15 +338,23 @@ class TurnExecutor:
             "tool_name": execution_call.name,
         })
         try:
-            tool_result = await self._call_port_async(
-                self.context.execution_runtime,
-                "execute_tool_async",
-                "execute_tool",
-                execution_call,
-                allow_tools=not continuation.finalization_only,
-                budget=tool_budget,
-                turn_id=continuation.turn_id,
-            )
+            if self._execute_tool_async is not None:
+                tool_result = await self._execute_tool_async(
+                    execution_call,
+                    allow_tools=not continuation.finalization_only,
+                    budget=tool_budget,
+                    turn_id=continuation.turn_id,
+                )
+            else:
+                tool_result = await self._call_port_async(
+                    self.context.execution_runtime,
+                    "execute_tool_async",
+                    "execute_tool",
+                    execution_call,
+                    allow_tools=not continuation.finalization_only,
+                    budget=tool_budget,
+                    turn_id=continuation.turn_id,
+                )
         except Exception as exc:
             self._log_tool_call_exception(continuation, execution_call, exc)
             raise
@@ -684,7 +700,7 @@ class TurnExecutor:
             model_hint=continuation.preferred_llm_model_id,
         )
         base_messages = list(prompt.messages)
-        prepared_tool_protocol = self._prepare_tool_protocol_for_prompt(continuation.tool_protocol_messages)
+        prepared_tool_protocol = self.project_tool_protocol_for_prompt(continuation.tool_protocol_messages)
         reconcile = getattr(
             self.context.execution_runtime,
             "reconcile_tool_context",
@@ -703,7 +719,7 @@ class TurnExecutor:
             {
                 key: value
                 for key, value in message.items()
-                if key != "_pal_visible_source_ranges"
+                if not str(key).startswith("_pal_")
             }
             for message in prepared_tool_protocol
         ]
@@ -861,6 +877,17 @@ class TurnExecutor:
                 if isinstance(result, int) and result > 0:
                     return result
         return self._config.fallback_max_output_tokens
+
+    def project_tool_protocol_for_prompt(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        projected = (
+            self._tool_protocol_projector(
+                [dict(message) for message in messages],
+                self._config.max_tool_results_per_message_chars,
+            )
+            if self._tool_protocol_projector is not None
+            else [dict(message) for message in messages]
+        )
+        return self._prepare_tool_protocol_for_prompt(projected)
 
     def _prepare_tool_protocol_for_prompt(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = [
@@ -1068,6 +1095,28 @@ class TurnExecutor:
             tool_results=continuation.pending_tool_results,
             render_tool_result_content=self._render_tool_result_content,
         )
+        result_by_call_id = {
+            str(getattr(result, "call_id", "") or ""): result
+            for result in continuation.pending_tool_results
+            if str(getattr(result, "call_id", "") or "").strip()
+        }
+        for message in reversed(continuation.tool_protocol_messages):
+            if str(message.get("role") or "").strip() != "tool":
+                if str(message.get("role") or "").strip() == "assistant":
+                    break
+                continue
+            call_id = str(message.get("tool_call_id") or "").strip()
+            result = result_by_call_id.get(call_id)
+            if result is None:
+                continue
+            invocation_result = getattr(result, "invocation_result", None)
+            effect = getattr(invocation_result, "effect", None)
+            message["_pal_result_state"] = {
+                "ok": bool(getattr(result, "ok", False)),
+                "status": str(getattr(result, "status", "") or ""),
+                "kind": str(getattr(invocation_result, "kind", "") or ""),
+                "effect": str(getattr(effect, "value", effect) or ""),
+            }
         for result in continuation.pending_tool_results:
             call_id = str(getattr(result, "call_id", "") or "").strip()
             delivery = getattr(result, "context_delivery", None)
@@ -1231,7 +1280,11 @@ class TurnExecutor:
         llm_runtime = self.context.port_registry.get("llm:llm")
         if llm_runtime is None:
             return ""
-        source_text = self.build_compaction_source_text(memory_service, target_input_budget=target_input_budget)
+        source_text = self.build_compaction_source_text(
+            memory_service,
+            target_input_budget=target_input_budget,
+            profile=profile,
+        )
         if not source_text:
             return ""
         async_method = getattr(llm_runtime, "asummarize_compaction", None)
@@ -1285,7 +1338,11 @@ class TurnExecutor:
             return {"structured_compaction": mechanical_payload}
         if not _profile_uses_llm_compaction(profile):
             return {"semantic_summary": _empty_compaction_summary(profile)}
-        source_text = self.build_compaction_source_text(memory_service, target_input_budget=target_input_budget)
+        source_text = self.build_compaction_source_text(
+            memory_service,
+            target_input_budget=target_input_budget,
+            profile=profile,
+        )
         if not source_text:
             return {"semantic_summary": _empty_compaction_summary(profile)}
         attempts = max(1, min(5, int(retry_attempts or 1)))
@@ -1314,12 +1371,31 @@ class TurnExecutor:
                 await asyncio.sleep(0)
         return {}
 
-    def build_compaction_source_text(self, memory_service, *, target_input_budget: int) -> str:
+    def build_compaction_source_text(
+        self,
+        memory_service,
+        *,
+        target_input_budget: int,
+        profile: CompactionProfile = CompactionProfile.PAL,
+    ) -> str:
         builder = getattr(memory_service, "build_compaction_source_text", None)
         if not callable(builder):
             return ""
         try:
-            return str(builder(target_input_budget=target_input_budget) or "").strip()
+            return str(
+                builder(
+                    target_input_budget=target_input_budget,
+                    profile=profile,
+                )
+                or ""
+            ).strip()
+        except TypeError:
+            try:
+                return str(
+                    builder(target_input_budget=target_input_budget) or ""
+                ).strip()
+            except Exception:
+                return ""
         except Exception:
             return ""
 
@@ -1364,7 +1440,11 @@ class TurnExecutor:
         llm_runtime = self.context.port_registry.get("llm:llm")
         if llm_runtime is None:
             return {}
-        source_text = self.build_compaction_source_text(memory_service, target_input_budget=target_input_budget)
+        source_text = self.build_compaction_source_text(
+            memory_service,
+            target_input_budget=target_input_budget,
+            profile=profile,
+        )
         if not source_text:
             return {}
         async_method = getattr(llm_runtime, "acompact_memory_structured", None)

@@ -18,6 +18,7 @@ from pal.execution.tool_facade import (
     RetryPolicy,
     ToolExecutionSemantics,
     ToolGuidance,
+    model_validation_schema,
 )
 from pal.shared import (
     BoundCapabilityAction,
@@ -90,6 +91,11 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                     node_blueprint=node_blueprint,
                 )
                 descriptor_name = _bound_alias(action_blueprint, target)
+                input_model = _bound_input_model(
+                    action_blueprint,
+                    target,
+                    descriptor_name,
+                )
                 descriptor = CapabilityDescriptor(
                     name=descriptor_name,
                     canonical_path=canonical_path,
@@ -101,12 +107,16 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                     target_kind=node.target_kind,
                     target_id=target.target_id,
                     target_label=target.target_label,
-                    InputModel=_bound_input_model(action_blueprint, target, descriptor_name),
+                    InputModel=input_model,
                     OutputModel=action_blueprint.OutputModel,
                     guidance=action_blueprint.guidance or _default_guidance(action_blueprint, module_id),
                     execution=action_blueprint.execution or _default_execution(action_blueprint),
                     search_text=action_blueprint.search_text,
-                    examples=_bound_examples(action_blueprint, target),
+                    examples=_bound_examples(
+                        action_blueprint,
+                        target,
+                        input_model=input_model,
+                    ),
                     metadata={
                         "namespace": action_blueprint.namespace,
                         "scope": node_blueprint.scope,
@@ -272,10 +282,23 @@ def _bound_input_model(
 def _bound_examples(
     action_blueprint: CapabilityActionBlueprint,
     target: HydrationTarget,
+    *,
+    input_model: type[BaseModel],
 ) -> tuple[dict[str, Any], ...]:
-    if target.target_id == SINGLETON_TARGET:
-        return tuple(dict(item) for item in action_blueprint.examples)
-    return tuple({**dict(item), "target_id": target.target_id} for item in action_blueprint.examples)
+    examples = tuple(dict(item) for item in action_blueprint.examples)
+    if target.target_id != SINGLETON_TARGET:
+        examples = tuple(
+            {**item, "target_id": target.target_id}
+            for item in examples
+        )
+    if examples:
+        return examples
+    schema = model_validation_schema(input_model)
+    if not schema.get("properties"):
+        return ()
+    from pal.execution.tool_registry import _example_from_schema
+
+    return (_example_from_schema(schema),)
 
 
 def _default_guidance(action_blueprint: CapabilityActionBlueprint, module_id: str) -> ToolGuidance:

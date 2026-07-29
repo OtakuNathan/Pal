@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from pal.execution.runtime import ExecutionRuntime
 from pydantic import Field, create_model
+from pal.execution.contracts import CapabilityCall, CapabilityDescriptor
 from pal.execution.tool_facade import (
     CompleteResult,
     EffectKind,
@@ -31,7 +32,6 @@ from pal.execution.tool_facade import (
     RejectedResult,
     RetryPolicy,
     StrictToolModel,
-    Tool,
     ToolExecutionSemantics,
     ToolGuidance,
     ToolHandlerResult,
@@ -83,8 +83,10 @@ from pal.minion.v2.verification_builder import (
 )
 from pal.minion.workspace_tools import _append_unique_artifact, _workspace_tool_result
 from pal.shared import (
+    BoundCapabilityAction,
     MountedSubtreeHandle,
     RuntimeStatus,
+    SINGLETON_TARGET,
     default_tool_result_text,
 )
 
@@ -216,13 +218,13 @@ def _scoped_workspace_tool_spec(
     return value
 
 
-def _immutable_workflow_tool(
+def _workflow_capability(
     *,
     name: str,
     spec: dict[str, Any],
     handler: Any,
     guidance_patch: dict[str, str] | None = None,
-) -> Tool:
+) -> tuple[CapabilityDescriptor, BoundCapabilityAction]:
     input_model = spec.get("InputModel")
     if not isinstance(input_model, type) or not issubclass(input_model, StrictToolModel):
         raise TypeError(f"workflow tool {name!r} requires a strict Pydantic InputModel")
@@ -230,7 +232,7 @@ def _immutable_workflow_tool(
     if not alias:
         raise ValueError(f"workflow tool {name!r} must declare exactly one non-empty alias")
     purpose = str(spec.get("description") or name).strip()
-    effect_kind = _workflow_effect_kind(name)
+    effect_kind = _WORKFLOW_EFFECTS[name]
     mutating = effect_kind in {EffectKind.LOCAL_WRITE, EffectKind.EXTERNAL_WRITE, EffectKind.CONTROL}
     idempotency = Idempotency(
         str(
@@ -245,14 +247,15 @@ def _immutable_workflow_tool(
         )
     )
 
-    async def invoke(value: Any, **kwargs: Any) -> ToolHandlerResult | ToolInvocationResult:
-        args = value.model_dump(mode="python", exclude_none=True)
-        call = CanonicalToolCall(
+    async def invoke(call: CapabilityCall) -> ToolHandlerResult | ToolInvocationResult:
+        meta = dict(call.meta)
+        provider_call = meta.get("tool_call")
+        tool_call = CanonicalToolCall(
             name=name,
-            args=args,
-            call_id=getattr(kwargs.get("tool_call"), "call_id", None),
+            args=dict(call.args),
+            call_id=str(getattr(provider_call, "call_id", "") or "") or None,
         )
-        result = handler(call, kwargs)
+        result = handler(tool_call, meta)
         if inspect.isawaitable(result):
             result = await result
         if isinstance(result, CanonicalToolResult):
@@ -285,16 +288,27 @@ def _immutable_workflow_tool(
         do_not_use_when="Do not use outside your current assigned task and role.",
         failure_next_steps="Correct invalid input; for execution failures inspect the recovery affordance before retrying.",
     )
-    return Tool(
-        alias=alias,
+    guidance = minion_tool_guidance(
+        name,
+        base_guidance,
+        guidance_patch,
+    )
+    examples = (
+        tuple(dict(item) for item in list(spec.get("examples") or []))
+        or (
+            (_example_from_schema(input_model.model_json_schema(mode="validation")),)
+            if input_model.model_json_schema(mode="validation").get("properties")
+            else ()
+        )
+    )
+    descriptor = CapabilityDescriptor(
+        name=alias,
         canonical_path=name,
+        aliases=(alias,),
+        description=guidance.purpose,
         InputModel=input_model,
         OutputModel=_WorkflowToolOutput,
-        guidance=minion_tool_guidance(
-            name,
-            base_guidance,
-            guidance_patch,
-        ),
+        guidance=guidance,
         execution=ToolExecutionSemantics(
             invocation_mode=InvocationMode.DIRECT,
             effect_kind=effect_kind,
@@ -303,45 +317,44 @@ def _immutable_workflow_tool(
             paging=PagingMode.SUPPORTED,
         ),
         search_text=f"{alias} {purpose}",
-        handler=invoke,
-        examples=(
-            tuple(dict(item) for item in list(spec.get("examples") or []))
-            or (
-                (_example_from_schema(input_model.model_json_schema(mode="validation")),)
-                if input_model.model_json_schema(mode="validation").get("properties")
-                else ()
-            )
-        ),
+        examples=examples,
         module_id="workflow_scoped",
         family="workflow",
         source="workflow:scoped-worker",
+        target_id=SINGLETON_TARGET,
+        metadata={"namespace": "operation", "scope": "workflow"},
     )
+    action = BoundCapabilityAction(
+        canonical_path=name,
+        target_id=SINGLETON_TARGET,
+        descriptor=descriptor,
+        callable=invoke,
+        async_callable=invoke,
+    )
+    return descriptor, action
 
 
-def _workflow_effect_kind(name: str) -> EffectKind:
-    lowered = name.lower()
-    if any(
-        token in lowered
-        for token in (
-            "_add_",
-            "_write",
-            "_edit",
-            "_commit",
-            "_submit",
-            "_delete",
-            "_update",
-            "_remove_",
-            "_record_",
-            "_report_",
-            "_set_",
-        )
-    ):
-        return EffectKind.LOCAL_WRITE
-    if any(token in lowered for token in ("_ask_question", "_cancel", "_approve")):
-        return EffectKind.CONTROL
-    if lowered in {"op_web_search", "op_web_read", "op_memory_recall"}:
-        return EffectKind.EXTERNAL_READ
-    return EffectKind.LOCAL_READ
+_WORKFLOW_READ_CAPABILITIES = frozenset(
+    {
+        "op_minion_verification_draft_status",
+        "op_minion_review_surface",
+    }
+)
+_WORKFLOW_CONTROL_CAPABILITIES = frozenset(
+    {
+        "op_minion_ask_question",
+    }
+)
+_WORKFLOW_EFFECTS = {
+    name: (
+        EffectKind.LOCAL_READ
+        if name in _WORKFLOW_READ_CAPABILITIES
+        else EffectKind.CONTROL
+        if name in _WORKFLOW_CONTROL_CAPABILITIES
+        else EffectKind.LOCAL_WRITE
+    )
+    for name in _WORKSPACE_TOOL_SPECS
+}
 
 
 class _ExecutionOverlay:
@@ -382,35 +395,14 @@ class _ExecutionOverlay:
             return
         allowed = set(allowed_capabilities)
         subtree = MountedSubtreeHandle(module_id="minion_allowed")
-        registered_tools: set[str] = set()
         for record in (*generation.direct_aliases.values(), *generation.indirect_aliases.values()):
             if record.canonical_path not in allowed:
                 continue
             # Role-native tools deliberately replace the main runtime
             # implementation with a workflow-aware handler.  Do not
             # also copy the inherited descriptor into this generation: the
-            # immutable replacement is registered below as one whole Tool.
+            # immutable replacement is compiled below as one registry record.
             if record.canonical_path in _WORKSPACE_TOOL_SPECS:
-                continue
-            if record.facade_tool is not None:
-                if record.canonical_path not in registered_tools:
-                    facade_tool = record.facade_tool
-                    self.runtime.register_tool(
-                        replace(
-                            facade_tool,
-                            InputModel=(
-                                MinionScopedExecutionShellInput
-                                if record.canonical_path == "op_exec_shell"
-                                else facade_tool.InputModel
-                            ),
-                            guidance=minion_tool_guidance(
-                                record.canonical_path,
-                                facade_tool.guidance,
-                                guidance_overrides.get(record.canonical_path),
-                            ),
-                        )
-                    )
-                    registered_tools.add(record.canonical_path)
                 continue
             descriptor = _scope_descriptor(
                 record.binding.descriptor,
@@ -423,11 +415,6 @@ class _ExecutionOverlay:
             subtree.search_record_ids.append(record.binding.descriptor.name)
         if subtree.descriptors:
             self.runtime.mount_subtree(SimpleNamespace(mounted_subtree=subtree))
-
-    def register_tool(self, tool: Any) -> None:
-        if not isinstance(tool, Tool):
-            raise TypeError("scoped execution accepts only immutable Tool registrations")
-        self.runtime.register_tool(tool)
 
     def resolve_capability_address(self, name: object) -> str:
         raw = str(name or "")
@@ -508,24 +495,31 @@ class MinionScopedExecutionRuntime:
             guidance_overrides=self.capability_guidance_overrides,
         )
         self._original_adapter = _OriginalAdapter(self)
-        self._register_tools()
+        self._mount_scoped_generation()
 
-    def _register_tools(self) -> None:
+    def _mount_scoped_generation(self) -> None:
         allowed = set(self.allowed_capabilities)
+        subtree = MountedSubtreeHandle(module_id="workflow_scoped")
         for name, raw_spec in _WORKSPACE_TOOL_SPECS.items():
             if name not in allowed or is_minion_capability_denied(name):
                 continue
             spec = _scoped_workspace_tool_spec(name, raw_spec, workspace=self.workspace)
             handler = self._handler(name)
             if handler is not None:
-                self.base_runtime.register_tool(
-                    _immutable_workflow_tool(
-                        name=name,
-                        spec=spec,
-                        handler=handler,
-                        guidance_patch=self.capability_guidance_overrides.get(name),
-                    )
+                descriptor, action = _workflow_capability(
+                    name=name,
+                    spec=spec,
+                    handler=handler,
+                    guidance_patch=self.capability_guidance_overrides.get(name),
                 )
+                subtree.descriptors.append(descriptor)
+                subtree.bound_actions.append(action)
+                subtree.bound_action_keys.append((action.canonical_path, action.target_id))
+                subtree.search_record_ids.append(descriptor.name)
+        if subtree.descriptors:
+            self.base_runtime.runtime.mount_subtree(
+                SimpleNamespace(mounted_subtree=subtree)
+            )
 
     @property
     def registry_generation(self):

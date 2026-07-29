@@ -8,6 +8,7 @@ from pal.execution.session_state import (
     DEFAULT_RESULT_RETENTION_USER_TURNS,
     FileDeliveryManifest,
     FileGrant,
+    FileSnapshot,
     LogicalExecutionContext,
     PagerHandleManifest,
     PagerRead,
@@ -220,27 +221,51 @@ class ManagerLogicalExecutionState:
             return None
         return _file_grant_from_dict(value)
 
-    def set_file_full(
+    def file_snapshot(self, *, file_key: str, digest: str) -> FileSnapshot | None:
+        state = self.repository.read_role_execution_state(self.logical_session_id)
+        if bool(state.get("retired")):
+            return None
+        value = dict(
+            dict(state.get("snapshots") or {}).get(str(file_key)) or {}
+        )
+        if not value:
+            return None
+        snapshot = FileSnapshot.from_dict(value)
+        if int(state.get("current_user_turn") or 0) >= snapshot.expires_at_user_turn:
+            return None
+        if str(digest) and snapshot.digest != str(digest):
+            return None
+        return snapshot
+
+    def set_file_snapshot(
         self,
         *,
         file_key: str,
         digest: str,
         total_lines: int,
+        complete: bool,
     ) -> None:
         def mutate(state: dict[str, Any]) -> tuple[dict[str, Any], None]:
             _ensure_active(state)
-            epoch = max(1, int(state.get("context_epoch") or 1))
             total = max(0, int(total_lines))
-            grants = dict(state.get("grants") or {})
-            grants[_grant_key(epoch, file_key)] = {
+            current_turn = max(0, int(state.get("current_user_turn") or 0))
+            retention = max(
+                1,
+                int(
+                    state.get("retention_user_turns")
+                    or DEFAULT_RESULT_RETENTION_USER_TURNS
+                ),
+            )
+            snapshots = dict(state.get("snapshots") or {})
+            snapshots[str(file_key)] = {
                 "file_key": str(file_key),
                 "digest": str(digest),
                 "total_lines": total,
-                "covered_ranges": [[1, total]] if total else [],
-                "empty_file": total == 0,
-                "line_fragments": [],
+                "complete": bool(complete),
+                "created_user_turn": current_turn,
+                "expires_at_user_turn": current_turn + retention,
             }
-            state["grants"] = grants
+            state["snapshots"] = snapshots
             return state, None
 
         self.repository.mutate_role_execution_state(
@@ -249,6 +274,9 @@ class ManagerLogicalExecutionState:
 
     def invalidate_file(self, *, file_key: str) -> None:
         def mutate(state: dict[str, Any]) -> tuple[dict[str, Any], None]:
+            snapshots = dict(state.get("snapshots") or {})
+            snapshots.pop(str(file_key), None)
+            state["snapshots"] = snapshots
             grants = {
                 key: value
                 for key, value in dict(state.get("grants") or {}).items()
@@ -385,21 +413,45 @@ class RoleGatewayLogicalExecutionState:
             else None
         )
 
-    def set_file_full(
+    def file_snapshot(
+        self,
+        *,
+        logical_session_id: str,
+        file_key: str,
+        digest: str,
+    ) -> FileSnapshot | None:
+        value = self.client.request_sync(
+            "execution_file_snapshot",
+            {
+                "logical_session_id": str(logical_session_id),
+                "file_key": str(file_key),
+                "digest": str(digest),
+            },
+        )
+        snapshot = value.get("snapshot")
+        return (
+            FileSnapshot.from_dict(dict(snapshot))
+            if isinstance(snapshot, Mapping)
+            else None
+        )
+
+    def set_file_snapshot(
         self,
         *,
         logical_session_id: str,
         file_key: str,
         digest: str,
         total_lines: int,
+        complete: bool,
     ) -> None:
         self.client.request_sync(
-            "execution_set_file_full",
+            "execution_set_file_snapshot",
             {
                 "logical_session_id": str(logical_session_id),
                 "file_key": str(file_key),
                 "digest": str(digest),
                 "total_lines": int(total_lines),
+                "complete": bool(complete),
             },
         )
 
@@ -530,6 +582,35 @@ def _apply_delivery(state: dict[str, Any], delivery: dict[str, Any]) -> None:
         "line_fragments": [list(item) for item in merged_fragments],
     }
     state["grants"] = grants
+    current_turn = max(0, int(state.get("current_user_turn") or 0))
+    retention = max(
+        1,
+        int(
+            state.get("retention_user_turns")
+            or DEFAULT_RESULT_RETENTION_USER_TURNS
+        ),
+    )
+    snapshots = dict(state.get("snapshots") or {})
+    previous_snapshot = FileSnapshot.from_dict(
+        dict(snapshots.get(manifest.file_key) or {})
+    ) if snapshots.get(manifest.file_key) else None
+    delivered = _file_grant_from_dict(grants[key])
+    snapshots[manifest.file_key] = FileSnapshot(
+        file_key=manifest.file_key,
+        digest=manifest.digest,
+        total_lines=manifest.total_lines,
+        complete=(
+            delivered.complete
+            or bool(
+                previous_snapshot is not None
+                and previous_snapshot.digest == manifest.digest
+                and previous_snapshot.complete
+            )
+        ),
+        created_user_turn=current_turn,
+        expires_at_user_turn=current_turn + retention,
+    ).to_dict()
+    state["snapshots"] = snapshots
 
 
 def _merge_ranges(

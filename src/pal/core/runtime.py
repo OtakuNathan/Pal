@@ -13,6 +13,7 @@ from uuid import uuid4
 from pal.control import interactions as control_interactions
 from pal.control.contracts import ControlAction, ControlDelivery, ControlRoute
 from pal.control.routing import derive_control_scope_key, route_from_channel_envelope
+from pal.core.agent_turn_runtime import AgentTurnRuntime
 from pal.core.contracts import CoreRuntimeState
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.dispatcher import EventDispatcher
@@ -746,6 +747,7 @@ class PalCore:
     prompt_compiler: PromptCompiler = field(init=False)
     tool_surface: ToolSurface = field(init=False)
     failure_orchestrator: FailureOrchestrator = field(init=False)
+    agent_turn_runtime: AgentTurnRuntime = field(init=False)
     turn_executor: TurnExecutor = field(init=False)
     module_lifecycle: ModuleLifecycle = field(init=False)
 
@@ -756,7 +758,6 @@ class PalCore:
             guard=ToolStagnationGuardProcess.from_config(self.config),
             config=self.config,
         )
-        self.prompt_compiler = PromptCompiler(self.context)
         self.tool_surface = ToolSurface(self.context)
         self.module_lifecycle = ModuleLifecycle(self.context, self.state)
         self.context.execution_runtime.lifecycle_controller = self
@@ -767,12 +768,10 @@ class PalCore:
             debug_log_prompt=self._debug_log_prompt,
             tool_surface=self.tool_surface,
         )
-        self.turn_executor = TurnExecutor(
-            self.context,
-            self.state,
-            self.turn_manager,
+        self.agent_turn_runtime = AgentTurnRuntime.build(
+            context=self.context,
+            config=self.config,
             call_port_async=self._call_port_async,
-            build_canonical_prompt=self.build_canonical_prompt,
             debug_log_prompt=self._debug_log_prompt,
             debug_log_outcome=self._debug_log_outcome,
             debug_log_reply=self._debug_log_reply,
@@ -780,8 +779,11 @@ class PalCore:
             handle_failure_async=self.handle_failure_async,
             render_failure_feedback_text=self._render_failure_feedback_text,
             should_enter_failure_flow_for_tool_result=self._should_enter_failure_flow_for_tool_result,
-            config=self.config,
+            state=self.state,
+            guard_host=self.turn_manager,
         )
+        self.prompt_compiler = self.agent_turn_runtime.prompt_compiler
+        self.turn_executor = self.agent_turn_runtime.executor
         self.context.execution_runtime.register_provider_ref("core:turn_io", CoreTurnIOPort(core=self))
 
     def event_loop(self) -> MainLoop:

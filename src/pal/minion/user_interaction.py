@@ -56,12 +56,14 @@ class MinionUserInteractionPort:
                 "metadata": event_metadata,
             },
         )
-        timeout = float((approval_policy or {}).get("decision_timeout_seconds") or 300)
-        response = await self.read_response(timeout)
+        # Approval belongs to the durable logical role session. Wall-clock
+        # expiry would terminate a live coroutine merely because the user
+        # answered later; cancellation/supersession is handled by Manager.
+        response = await self.read_response(None)
         decision = str(((response or {}).get("decision") or {}).get("decision") or "").strip().lower()
         if decision == "accept_all":
             self.auto_accept_approvals = True
-        await self.emit_event("decision_received", {"approval_id": approval_id, "decision": decision or "timeout"})
+        await self.emit_event("decision_received", {"approval_id": approval_id, "decision": decision or "cancelled"})
         return "accept" if decision == "accept_all" else decision
 
     async def request_clarification(

@@ -4,7 +4,11 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
+from pal.core.turn_executor import TurnExecutor
+from pal.execution.tool_facade import EffectOutcome, FailedResult, RetryDirective
+from pal.llm import CanonicalToolCall, CanonicalToolResult
 from pal.memory import (
     CompactionProfile,
     L3ProviderSelector,
@@ -20,6 +24,7 @@ from pal.memory.prompt import MemoryPromptFragmentProvider
 from pal.minion.compact import (
     build_minion_prior_user_inputs_compaction_payload,
     compact_minion_memory_service,
+    project_minion_tool_protocol,
 )
 from pal.minion.runner import MinionRunner
 from pal.plugins.l3 import MockL3Plugin
@@ -230,6 +235,107 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
 
         self.assertNotIn("Unreviewed candidate", rendered)
         self.assertNotIn("This candidate has not been accepted", rendered)
+
+    def test_tool_protocol_projection_retires_only_closed_successful_batches(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-read",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-read",
+                "content": "x" * 5_000,
+                "_pal_result_state": {
+                    "ok": True,
+                    "kind": "complete",
+                    "effect": "none",
+                },
+            },
+            {"role": "assistant", "content": "continue from the validated read"},
+        ]
+
+        projected = project_minion_tool_protocol(messages, max_chars=4_096)
+
+        self.assertEqual(projected[-1], messages[-1])
+        self.assertIn("<minion_tool_continuity", projected[0]["content"])
+        self.assertIn("read_file", projected[0]["content"])
+        self.assertFalse(any(item.get("role") == "tool" for item in projected))
+
+    def test_tool_protocol_projection_keeps_recovery_batches_verbatim(self) -> None:
+        failed_batch = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-edit",
+                        "type": "function",
+                        "function": {"name": "edit_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-edit",
+                "content": "validation failed" + ("!" * 5_000),
+                "_pal_result_state": {
+                    "ok": False,
+                    "kind": "failed",
+                    "effect": "unknown",
+                },
+            },
+        ]
+
+        projected = project_minion_tool_protocol(failed_batch, max_chars=4_096)
+
+        self.assertEqual(projected, failed_batch)
+
+    def test_turn_executor_records_unknown_effect_as_enum_value(self) -> None:
+        executor = object.__new__(TurnExecutor)
+        call = CanonicalToolCall(name="edit_file", args={}, call_id="call-edit")
+        invocation = FailedResult(
+            error_code="handler_exception",
+            error="write outcome unavailable",
+            effect=EffectOutcome.UNKNOWN,
+            retry=RetryDirective.RECONCILE_FIRST,
+            llm_text="write outcome unavailable",
+        )
+        result = CanonicalToolResult(
+            name="edit_file",
+            ok=False,
+            llm_text="write outcome unavailable",
+            call_id="call-edit",
+            status="handler_exception",
+            invocation_result=invocation,
+        )
+        continuation = SimpleNamespace(
+            pending_tool_call_batch=[call],
+            pending_tool_results=[result],
+            pending_assistant_tool_text="",
+            pending_assistant_provider_specific_fields={},
+            tool_protocol_messages=[],
+            tool_delivery_records={},
+        )
+
+        executor._flush_tool_protocol_messages(continuation)
+
+        tool_message = continuation.tool_protocol_messages[-1]
+        self.assertEqual(tool_message["_pal_result_state"]["effect"], "unknown")
+        self.assertEqual(
+            project_minion_tool_protocol(
+                continuation.tool_protocol_messages,
+                max_chars=4_096,
+            ),
+            continuation.tool_protocol_messages,
+        )
 
 
 if __name__ == "__main__":

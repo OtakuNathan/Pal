@@ -7,11 +7,9 @@ from pydantic import BaseModel
 
 from pal.execution.tool_facade import (
     EffectReceipt,
-    EmptyToolInput,
-    OpaqueToolOutput,
-    Tool,
     ToolExecutionSemantics,
     ToolGuidance,
+    model_validation_schema,
 )
 
 
@@ -29,8 +27,8 @@ class CapabilityDescriptor:
     target_kind: str = ""
     target_id: str = ""
     target_label: str = ""
-    InputModel: type[BaseModel] | None = EmptyToolInput
-    OutputModel: type[BaseModel] | None = OpaqueToolOutput
+    InputModel: type[BaseModel] | None = None
+    OutputModel: type[BaseModel] | None = None
     guidance: ToolGuidance | None = None
     execution: ToolExecutionSemantics | None = None
     search_text: str = ""
@@ -49,6 +47,34 @@ class CapabilityDescriptor:
                 f"capability descriptor {self.canonical_path or self.name!r} must declare exactly one non-empty alias"
             )
         object.__setattr__(self, "aliases", declared)
+        is_mcp = isinstance(self.metadata.get("mcp"), dict)
+        if is_mcp:
+            if self.InputModel is not None or self.OutputModel is not None:
+                raise TypeError(
+                    f"MCP capability {self.canonical_path or self.name!r} "
+                    "must retain its server JSON Schema instead of Pydantic models"
+                )
+            return
+        for label, model in (
+            ("InputModel", self.InputModel),
+            ("OutputModel", self.OutputModel),
+        ):
+            if not isinstance(model, type) or not issubclass(model, BaseModel):
+                raise TypeError(
+                    f"internal capability {self.canonical_path or self.name!r} "
+                    f"requires a Pydantic {label}"
+                )
+            if model.model_config.get("strict") is not True:
+                raise ValueError(f"{model.__name__} must set strict=True")
+            if model.model_config.get("extra") != "forbid":
+                raise ValueError(f"{model.__name__} must set extra='forbid'")
+        input_schema = model_validation_schema(self.InputModel)
+        if input_schema.get("properties") and not self.examples:
+            raise ValueError(
+                f"non-empty InputModel for {declared[0]!r} requires at least one example"
+            )
+        for example in self.examples:
+            self.InputModel.model_validate(example, strict=True)
 
 
 @dataclass(frozen=True)
@@ -97,12 +123,6 @@ class ExecutionRuntimePort(Protocol):
         ...
 
     def unregister_provider_ref(self, provider_id: str) -> None:
-        ...
-
-    def register_tool(self, tool: Tool) -> None:
-        ...
-
-    def unregister_tool(self, name: str) -> None:
         ...
 
     def has_registered_capability(self, name: str) -> bool:

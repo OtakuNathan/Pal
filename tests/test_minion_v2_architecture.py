@@ -201,7 +201,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stale or already consumed"):
             self.service.submit_human_decision(card, decision="accept")
 
-    def test_issued_human_decision_survives_legacy_wall_clock_expiry(self) -> None:
+    def test_issued_human_decision_ignores_legacy_wall_clock_expiry_field(self) -> None:
         requirements, _evidence, manifest = self._publish_contract()
         workflow_id = "wf_durable_human_review"
         revision_id = "arch_durable_human_review"
@@ -220,30 +220,10 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                 """,
                 (workflow_id,),
             )
-            connection.execute(
-                """
-                UPDATE minion_v2_schema_meta
-                SET schema_value = '22'
-                WHERE schema_key = 'schema_version'
-                """
-            )
-            connection.execute(
-                """
-                UPDATE minion_v2_aggregate_snapshots
-                SET payload_json = json_set(
-                    payload_json,
-                    '$.orchestration_contract_version',
-                    '6'
-                )
-                WHERE workflow_id = ?
-                """,
-                (workflow_id,),
-            )
 
-        self.repository.ensure_schema()
         record = self.repository.inspect_human_decision_token(card.decision_token)
         assert record is not None
-        self.assertEqual(record["expires_at"], "")
+        self.assertEqual(record["expires_at"], "2000-01-01T00:00:00+00:00")
         self.assertEqual(record["status"], "issued")
 
         result = self.service.submit_human_decision(card, decision="accept")

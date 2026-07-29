@@ -2052,7 +2052,9 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_workflow_wrapper_preserves_embedded_rejected_result(self) -> None:
         from pal.execution.runtime import ExecutionRuntime
-        from pal.minion.scoped_execution import _immutable_workflow_tool
+        from pal.minion.scoped_execution import _workflow_capability
+        from pal.shared import MountedSubtreeHandle
+        from types import SimpleNamespace
 
         runtime = ExecutionRuntime(runtime_root=self.runtime_root)
         rejected = rejection(
@@ -2072,15 +2074,19 @@ class MinionV2VerificationTests(unittest.TestCase):
                 invocation_result=rejected,
             )
 
-        runtime.register_tool(
-            _immutable_workflow_tool(
-                name="op_minion_candidate_submit",
-                spec=CANDIDATE_BUILDER_TOOL_SPECS[
-                    "op_minion_candidate_submit"
-                ],
-                handler=handler,
-            )
+        descriptor, action = _workflow_capability(
+            name="op_minion_candidate_submit",
+            spec=CANDIDATE_BUILDER_TOOL_SPECS[
+                "op_minion_candidate_submit"
+            ],
+            handler=handler,
         )
+        subtree = MountedSubtreeHandle(module_id="workflow_scoped")
+        subtree.descriptors.append(descriptor)
+        subtree.bound_actions.append(action)
+        subtree.bound_action_keys.append((action.canonical_path, action.target_id))
+        subtree.search_record_ids.append(descriptor.name)
+        runtime.mount_subtree(SimpleNamespace(mounted_subtree=subtree))
         try:
             result = asyncio.run(
                 runtime.execute_tool_async(

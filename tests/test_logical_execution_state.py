@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
 from pal.core import PalCore
 from pal.execution import register_with_core as register_execution_with_core
@@ -13,7 +12,6 @@ from pal.execution.session_state import (
     InMemoryLogicalExecutionState,
     PagerHandleManifest,
 )
-from pal.minion.runner import _MinionExecutionRuntimeAdapter
 from pal.minion.scoped_execution import MinionScopedExecutionRuntime
 from pal.llm.contracts import CanonicalToolCall
 
@@ -270,29 +268,106 @@ class LogicalExecutionStateTests(unittest.TestCase):
         self.assertIsNotNone(complete)
         self.assertTrue(complete.complete)
 
-    def test_empty_digest_can_detect_a_stale_prior_grant(self) -> None:
-        self.backend.set_file_full(
+    def test_empty_digest_can_detect_a_stale_prior_snapshot(self) -> None:
+        self.backend.set_file_snapshot(
             logical_session_id="session-a",
             file_key="/workspace/input.txt",
             digest="old-digest",
             total_lines=2,
+            complete=True,
         )
         self.assertIsNotNone(
-            self.backend.file_grant(
+            self.backend.file_snapshot(
                 logical_session_id="session-a",
                 file_key="/workspace/input.txt",
                 digest="",
             )
         )
         self.assertIsNone(
-            self.backend.file_grant(
+            self.backend.file_snapshot(
                 logical_session_id="session-a",
                 file_key="/workspace/input.txt",
                 digest="new-digest",
             )
         )
 
-    def test_minion_execution_adapters_forward_context_reconciliation(
+    def test_projection_revocation_preserves_read_before_mutate_snapshot(
+        self,
+    ) -> None:
+        delivery = FileDeliveryManifest(
+            file_key="/workspace/input.txt",
+            digest="digest-a",
+            total_lines=1,
+            spans=(
+                FileDeliverySpan(
+                    start_offset=0,
+                    end_offset=5,
+                    start_line=1,
+                    end_line=1,
+                    visible_end_in_line=5,
+                    line_length=5,
+                ),
+            ),
+        )
+        self.backend.reconcile_projection(
+            logical_session_id="session-a",
+            projection=("visible",),
+            deliveries=(delivery.to_dict(),),
+        )
+        self.backend.reconcile_projection(
+            logical_session_id="session-a",
+            projection=(),
+            deliveries=(),
+        )
+
+        self.assertIsNone(
+            self.backend.file_grant(
+                logical_session_id="session-a",
+                file_key="/workspace/input.txt",
+                digest="digest-a",
+            )
+        )
+        snapshot = self.backend.file_snapshot(
+            logical_session_id="session-a",
+            file_key="/workspace/input.txt",
+            digest="digest-a",
+        )
+        self.assertIsNotNone(snapshot)
+        self.assertTrue(snapshot.complete)
+
+    def test_file_snapshot_expires_after_five_new_semantic_inputs(self) -> None:
+        self.backend.set_file_snapshot(
+            logical_session_id="session-a",
+            file_key="/workspace/input.txt",
+            digest="digest-a",
+            total_lines=1,
+            complete=True,
+        )
+        for index in range(2, 6):
+            self.backend.begin_input(
+                logical_session_id="session-a",
+                input_id=f"assignment-{index}",
+            )
+            self.assertIsNotNone(
+                self.backend.file_snapshot(
+                    logical_session_id="session-a",
+                    file_key="/workspace/input.txt",
+                    digest="digest-a",
+                )
+            )
+        self.backend.begin_input(
+            logical_session_id="session-a",
+            input_id="assignment-6",
+        )
+        self.assertIsNone(
+            self.backend.file_snapshot(
+                logical_session_id="session-a",
+                file_key="/workspace/input.txt",
+                digest="digest-a",
+            )
+        )
+
+    def test_minion_scoped_execution_forwards_context_reconciliation(
         self,
     ) -> None:
         base = PalCore().context.execution_runtime
@@ -310,14 +385,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             scoped.base_runtime.runtime.logical_state,
             base.logical_state,
         )
-        state = SimpleNamespace(execution_runtime=scoped)
-        adapter = _MinionExecutionRuntimeAdapter(
-            SimpleNamespace(),
-            state,
-            SimpleNamespace(),
-        )
-
-        result = adapter.reconcile_tool_context(
+        result = scoped.reconcile_tool_context(
             turn_id="turn-1",
             original_messages=[],
             projected_messages=[],

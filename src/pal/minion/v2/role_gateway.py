@@ -153,11 +153,24 @@ class RoleAssignmentGateway:
                     else None
                 )
             }
-        if method == "execution_set_file_full":
-            self._execution_state(authenticated, payload).set_file_full(
+        if method == "execution_file_snapshot":
+            snapshot = self._execution_state(
+                authenticated, payload
+            ).file_snapshot(
+                file_key=str(payload.get("file_key") or ""),
+                digest=str(payload.get("digest") or ""),
+            )
+            return {
+                "snapshot": (
+                    snapshot.to_dict() if snapshot is not None else None
+                )
+            }
+        if method == "execution_set_file_snapshot":
+            self._execution_state(authenticated, payload).set_file_snapshot(
                 file_key=str(payload.get("file_key") or ""),
                 digest=str(payload.get("digest") or ""),
                 total_lines=int(payload.get("total_lines") or 0),
+                complete=bool(payload.get("complete")),
             )
             return {"ok": True}
         if method == "execution_invalidate_file":

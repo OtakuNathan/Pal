@@ -3811,6 +3811,11 @@ def _decode_role_execution_state(value: str) -> dict[str, Any]:
             for key, item in dict(state.get("handles") or {}).items()
             if str(key) and isinstance(item, Mapping)
         },
+        "snapshots": {
+            str(key): dict(item)
+            for key, item in dict(state.get("snapshots") or {}).items()
+            if str(key) and isinstance(item, Mapping)
+        },
         "grants": {
             str(key): dict(item)
             for key, item in dict(state.get("grants") or {}).items()

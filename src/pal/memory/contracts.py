@@ -252,7 +252,12 @@ class MemoryServicePort(Protocol):
     async def abuild_pack(self, request: MemoryPackRequest) -> MemoryPack:
         ...
 
-    def build_compaction_source_text(self, *, target_input_budget: int) -> str:
+    def build_compaction_source_text(
+        self,
+        *,
+        target_input_budget: int,
+        profile: CompactionProfile = CompactionProfile.PAL,
+    ) -> str:
         ...
 
     def project_l2_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = True) -> None:
@@ -265,4 +270,32 @@ class MemoryServicePort(Protocol):
         ...
 
     async def asoft_reset(self) -> None:
+        ...
+
+
+class MemoryCompactionPolicy(Protocol):
+    """Agent-specific compaction mechanics injected into the shared service."""
+
+    def build_source_text(
+        self,
+        memory_service: Any,
+        *,
+        target_input_budget: int,
+    ) -> str:
+        ...
+
+    def build_payload(
+        self,
+        memory_service: Any,
+        *,
+        target_input_budget: int,
+        reserved_output_tokens: int,
+    ) -> dict[str, Any]:
+        ...
+
+    def compact(
+        self,
+        memory_service: Any,
+        request: MemoryCompactRequest,
+    ) -> MemoryCompactResult:
         ...

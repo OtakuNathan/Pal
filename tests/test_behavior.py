@@ -40,6 +40,8 @@ from pal.behavior.tools import (
 from pal.channel import ChannelEnvelope, ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityDescriptor, register_with_core as register_execution_with_core
+from pal.execution.tool_facade import EmptyToolInput, ProviderPayloadOutput, ToolGuidance
+from pal.execution.tool_semantics import INDIRECT_NONE
 from pal.foundation import EventEnvelope, HeatLevel, HeatPolicy, HeatStateMachine, HeatStateRegistry, PalV2Database
 from pal.lsp.plugin import LspManagerPluginProvider
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
@@ -1579,22 +1581,42 @@ class BehaviorSubsystemTests(unittest.TestCase):
             descriptors=[
                 CapabilityDescriptor(
                     name="demo_show",
-                    canonical_path="demo_show",
+                    canonical_path="intro_demo_show",
                     family="introspection",
                     description="Show demo module state",
                     source="builtin:demo",
                     display_name="demo show",
                     aliases=("demo_show",),
+                    InputModel=EmptyToolInput,
+                    OutputModel=ProviderPayloadOutput,
+                    guidance=ToolGuidance(
+                        purpose="Show demo module state.",
+                        use_when="Demo module state is needed.",
+                        do_not_use_when="The task does not concern the demo module.",
+                        failure_next_steps="Inspect the returned failure.",
+                    ),
+                    execution=INDIRECT_NONE,
+                    search_text="demo module show state",
                     module_id="demo",
                 ),
                 CapabilityDescriptor(
                     name="demo_run",
-                    canonical_path="demo_run",
+                    canonical_path="op_demo_run",
                     family="demo",
                     description="Run demo operation",
                     source="builtin:demo",
                     display_name="demo run",
                     aliases=("demo_run",),
+                    InputModel=EmptyToolInput,
+                    OutputModel=ProviderPayloadOutput,
+                    guidance=ToolGuidance(
+                        purpose="Run the demo operation.",
+                        use_when="The demo operation is requested.",
+                        do_not_use_when="Only demo state inspection is needed.",
+                        failure_next_steps="Inspect the returned failure.",
+                    ),
+                    execution=INDIRECT_NONE,
+                    search_text="demo module run operation",
                     module_id="demo",
                 ),
             ],

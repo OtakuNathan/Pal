@@ -390,7 +390,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         )
         self.assertIsNotNone(restore_path)
         restored = json.loads(Path(restore_path).read_text(encoding="utf-8"))
-        self.assertEqual(restored["schema_version"], "3")
+        self.assertEqual(restored["schema_version"], "4")
         self.assertEqual(restored["scope_kind"], "architecture_revision")
         self.assertEqual(restored["subject_key"], "arch-session")
         self.assertFalse(checkpoint_path.exists())

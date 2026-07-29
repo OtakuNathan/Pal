@@ -26,8 +26,10 @@ from pal.memory.contracts import (
     MAX_RENEWAL_COUNT,
     MemoryCommitRequest,
     MemoryCommitResult,
+    MemoryCompactionPolicy,
     MemoryCompactRequest,
     MemoryCompactResult,
+    CompactionProfile,
     MemoryPack,
     MemoryPackRequest,
     MemoryServicePort,
@@ -234,12 +236,18 @@ class MemoryService(MemoryServicePort):
     l3_selector: L3ProviderSelector | None = None
     failed_commits: list[MemoryCommitRequest] = field(default_factory=list)
     failed_retirements: list[L2Entry] = field(default_factory=list)
+    compaction_policies: dict[CompactionProfile, MemoryCompactionPolicy] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         if self.l3_selector is None:
             self.l3_selector = L3ProviderSelector(resolver=lambda provider_id: DetachedL3Provider(provider_id=provider_id))
 
     def compact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
+        policy = self.compaction_policies.get(request.profile)
+        if policy is not None:
+            return policy.compact(self, request)
         if not request.metadata.get("structured_compaction") and not str(request.metadata.get("semantic_summary") or "").strip():
             raise ValueError("memory compact requires structured_compaction or semantic_summary")
         payload = coerce_structured_compaction_payload(
@@ -326,8 +334,35 @@ class MemoryService(MemoryServicePort):
     async def abuild_pack(self, request: MemoryPackRequest) -> MemoryPack:
         return self.build_pack(request)
 
-    def build_compaction_source_text(self, *, target_input_budget: int) -> str:
+    def build_compaction_source_text(
+        self,
+        *,
+        target_input_budget: int,
+        profile: CompactionProfile = CompactionProfile.PAL,
+    ) -> str:
+        policy = self.compaction_policies.get(profile)
+        if policy is not None:
+            return policy.build_source_text(
+                self,
+                target_input_budget=target_input_budget,
+            )
         return build_pal_compaction_source_text(self.l1_store.items, target_input_budget=target_input_budget)
+
+    def build_compaction_payload(
+        self,
+        *,
+        target_input_budget: int,
+        reserved_output_tokens: int = 0,
+        profile: CompactionProfile = CompactionProfile.PAL,
+    ) -> dict[str, Any]:
+        policy = self.compaction_policies.get(profile)
+        if policy is None:
+            return {}
+        return policy.build_payload(
+            self,
+            target_input_budget=target_input_budget,
+            reserved_output_tokens=reserved_output_tokens,
+        )
 
     def project_l3_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = True) -> None:
         self.project_l2_entries(entries, touch=touch, top_of_mind=top_of_mind)

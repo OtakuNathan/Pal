@@ -39,15 +39,15 @@ from pal.execution.tool_facade import (
     EffectKind,
     Idempotency,
     InvocationMode,
-    OpaqueToolOutput,
     PagingMode,
+    ProviderPayloadOutput,
     RetryPolicy,
     StrictToolModel,
-    Tool,
     ToolExecutionSemantics,
     ToolGuidance,
     ToolHandlerResult,
 )
+from tests.capability_fixture import mount_test_capability
 from pal.failure import (
     FAILURE_VERIFICATION_FAILED,
     FAILURE_VERIFICATION_OK,
@@ -238,12 +238,12 @@ def register_test_tool(runtime, tool) -> str:
             )
         return result
 
-    runtime.register_tool(
-        Tool(
+    mount_test_capability(
+        runtime,
             alias=alias,
             canonical_path=canonical_path,
             InputModel=FixtureToolInput,
-            OutputModel=OpaqueToolOutput,
+            OutputModel=ProviderPayloadOutput,
             guidance=ToolGuidance(
                 purpose=str(tool.description),
                 use_when="running this focused runtime test",
@@ -260,7 +260,6 @@ def register_test_tool(runtime, tool) -> str:
             search_text=f"{alias} {tool.description}",
             handler=invoke,
             examples=({},),
-        )
     )
     return canonical_path
 
@@ -582,21 +581,25 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(recall_result.hits, [{"document_id": "fact:1", "title": "Redis"}])
 
     def test_execution_calls_registered_capabilities_from_pal_core(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
-        register_execution_with_core(core.context)
-        register_minion_with_core(core.context)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            core = PalCore()
+            register_core_with_core(core)
+            register_execution_with_core(core.context)
+            register_minion_with_core(
+                core.context,
+                runtime_root=Path(temp_dir),
+            )
 
-        core.publish_module_capabilities("core")
-        core.publish_module_capabilities("execution")
-        core.publish_module_capabilities("minion")
+            core.publish_module_capabilities("core")
+            core.publish_module_capabilities("execution")
+            core.publish_module_capabilities("minion")
 
-        result = core.context.execution_runtime.execute(
-            CapabilityCall(name="minion_workflow_status", args={})
-        )
+            result = core.context.execution_runtime.execute(
+                CapabilityCall(name="minion_workflow_status", args={})
+            )
 
-        self.assertEqual(result.status, RuntimeStatus.INVALID)
-        self.assertIn("No Minion workflow", result.llm_text)
+            self.assertEqual(result.status, RuntimeStatus.INVALID)
+            self.assertIn("No Minion workflow", result.llm_text)
 
     def test_execution_compiles_one_facade_generation_without_legacy_tool_registrations(self) -> None:
         core = PalCore()
@@ -605,7 +608,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         generation = core.context.execution_runtime.registry_generation
-        self.assertEqual(dict(core.context.execution_runtime.tools), {})
         for alias in ("run_shell", "search_tools", "read_tool", "read_tool_result", "read_file", "edit_file", "write_file"):
             self.assertIn(alias, generation.direct_aliases)
         self.assertIn("delete_path", generation.indirect_aliases)
@@ -3675,7 +3677,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
         self.assertTrue(result.ok)
-        self.assertEqual(result.structured["hit_count"], 10)
+        self.assertEqual(result.structured["payload"]["hit_count"], 10)
         self.assertLess(len(str(result.llm_text)), 12_000)
 
     def test_minimal_operating_rules_prompt_omits_route_specific_tools(self) -> None:

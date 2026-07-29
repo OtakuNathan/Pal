@@ -382,7 +382,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                     )
                 )
                 self.assertEqual(call.status, "ok")
-                self.assertEqual(call.structured["active_endpoint_id"], "beta")
+                self.assertEqual(call.structured["payload"]["active_endpoint_id"], "beta")
                 self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "beta")
             finally:
                 asyncio.run(handle.stop_async())

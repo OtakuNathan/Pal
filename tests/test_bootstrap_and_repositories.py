@@ -715,6 +715,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             credential_ref="openai-prod:api-key",
             priority=0,
             enabled=True,
+            supports_reasoning=True,
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="openai-prod", account="api-key"), "openai-token")
@@ -868,6 +869,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             credential_ref="openai-prod:api-key",
             priority=0,
             enabled=True,
+            supports_reasoning=True,
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="openai-prod", account="api-key"), "openai-token")

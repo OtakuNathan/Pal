@@ -7072,7 +7072,7 @@ class SemanticOrchestrator:
             raise RuntimeError("role session continuation has the wrong subject")
         restored.update(
             {
-                "schema_version": "3",
+                "schema_version": "4",
                 "scope_kind": scope_kind,
                 "subject_key": subject_key,
                 "tool_delivery_records": dict(
@@ -7102,7 +7102,7 @@ class SemanticOrchestrator:
             raise RuntimeError("worker checkpoint output is unreadable") from exc
         if not isinstance(payload, dict) or str(payload.get("session_id") or "") != invocation_id:
             raise RuntimeError("worker checkpoint output has the wrong session identity")
-        if str(payload.get("schema_version") or "") != "3":
+        if str(payload.get("schema_version") or "") != "4":
             raise RuntimeError("worker checkpoint output has an unsupported schema version")
         if int(payload.get("fencing_token") or 0) != int(fencing_token):
             raise RuntimeError("worker checkpoint output has a stale fencing token")

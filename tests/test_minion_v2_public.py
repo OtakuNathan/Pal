@@ -75,6 +75,7 @@ from pal.minion.v2.contracts import (
 from pal.minion.manager import MinionManager, MinionRunState
 from pal.minion.prompt_adapter import render_minion_task_prompt
 from pal.minion.runner import MinionAgentLoopState, MinionRunner
+from pal.memory import MemoryService
 from pal.shared import IntrospectionCall, LLMFinishReason, MinionInvocationPack, RuntimeStatus
 
 
@@ -1932,7 +1933,12 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             write_event=lambda _event: None,
             read_decision=lambda: None,
         )
-        state = SimpleNamespace(llm_round_count=8, tool_call_count=21)
+        state = SimpleNamespace(
+            llm_round_count=8,
+            tool_call_count=21,
+            execution_runtime=SimpleNamespace(registry_generation=None),
+            memory_service=MemoryService(),
+        )
         continuation = SimpleNamespace(
             pending_tool_call_batch=[],
             pending_tool_results=[],
@@ -1940,13 +1946,18 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             tool_batch_count=6,
             preferred_llm_endpoint_id="glm",
             preferred_llm_model_id="glm-5.2",
+            turn_settings_snapshot={},
         )
         first._persist_agent_session_checkpoint(
             first_pack.workspace,
             state,
             continuation,
+            executor=SimpleNamespace(
+                project_tool_protocol_for_prompt=lambda messages: list(messages)
+            ),
             initial_instruction="initial assignment",
             response_keys=["effect-1"],
+            max_output_tokens=65_536,
         )
         (run_dir / "session-continuation-999.json").write_text(
             json.dumps(

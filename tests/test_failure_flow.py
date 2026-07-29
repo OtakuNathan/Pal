@@ -8,13 +8,14 @@ from unittest.mock import patch
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.turns import _render_failure_primary_input
 from pal.execution import CapabilityResult
-from pal.execution.tool_facade import EmptyToolInput, OpaqueToolOutput, Tool, ToolGuidance
+from pal.execution.tool_facade import EmptyToolInput, ProviderPayloadOutput, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_NONE
 from pal.failure import FAILURE_VERIFICATION_FAILED, FailureDraft, FailureSignal
 from pal.failure.handler import FailureEventHandler
 from pal.foundation import EventEnvelope
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall
 from pal.shared import EventKind, RuntimeStatus, SourceKind
+from tests.capability_fixture import mount_test_capability
 
 
 class _RecordingFailureLLM:
@@ -299,14 +300,14 @@ class FailureFlowTests(unittest.TestCase):
                 },
             )
 
-        core.context.execution_runtime.register_tool(
-            Tool(
+        mount_test_capability(
+            core.context.execution_runtime,
                 alias="safe_probe",
                 canonical_path="op_test_safe_probe",
                 family="failure_test",
                 source="test",
                 InputModel=EmptyToolInput,
-                OutputModel=OpaqueToolOutput,
+                OutputModel=ProviderPayloadOutput,
                 guidance=ToolGuidance(
                     purpose="Inspect a deterministic safe-mode probe.",
                     use_when="the failure flow needs a side-effect-free diagnostic",
@@ -316,7 +317,6 @@ class FailureFlowTests(unittest.TestCase):
                 execution=DIRECT_NONE,
                 search_text="safe mode deterministic diagnostic probe",
                 handler=safe_probe,
-            )
         )
         draft = core.failure_orchestrator.failure_runtime().begin_draft(
             FailureSignal(

@@ -4,12 +4,12 @@ from typing import Any, Literal
 
 from pydantic import Field, create_model
 
-from pal.execution.tool_facade import OpaqueToolOutput, StrictToolModel
+from pal.execution.tool_facade import ProviderPayloadOutput, StrictToolModel
 
 
 def _strict_model(name: str, fields: dict[str, tuple[Any, Any]]):
     if not fields and name.endswith("Output"):
-        return OpaqueToolOutput
+        return ProviderPayloadOutput
     return create_model(name, __base__=StrictToolModel, **fields)
 
 

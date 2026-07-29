@@ -33,9 +33,9 @@ from pal.execution.tool_facade import (
     McpToolOutput,
     PagingMode,
     PagedResult,
+    ProviderPayloadOutput,
     RejectedResult,
     RetryDirective,
-    Tool as ImmutableTool,
     ToolAffordance,
     ToolHandlerResult,
     ToolInvocationResult,
@@ -48,7 +48,6 @@ from pal.execution.tool_registry import (
     CompiledToolRecord,
     ToolRegistryGeneration,
     compile_registry_generation,
-    subtree_for_tool,
 )
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.plugins.l3.registry import L3PluginRegistry
@@ -150,58 +149,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def bound_action_index(self):
         return self._registry_generation.canonical_bindings
 
-    @property
-    def tools(self):
-        return self._registry_generation.tool_implementations
-
     def register_provider_ref(self, provider_id: str, provider: Any) -> None:
         self.provider_registry[provider_id] = provider
 
     def unregister_provider_ref(self, provider_id: str) -> None:
         self.provider_registry.pop(provider_id, None)
-
-    def register_tool(self, tool: ImmutableTool) -> None:
-        if not isinstance(tool, ImmutableTool):
-            raise TypeError("register_tool accepts only an immutable Tool facade")
-        canonical_path = str(tool.canonical_path).strip()
-        if not canonical_path:
-            raise ValueError("tool canonical path is required")
-        with self._registry_lock:
-            current = self._registry_generation
-            existing = current.record_for_alias(tool.alias)
-            if existing is not None and existing.canonical_path != canonical_path:
-                raise ValueError(
-                    f"tool alias conflict in generation: {tool.alias} -> "
-                    f"{existing.canonical_path}, {canonical_path}"
-                )
-            implementations = dict(current.tool_implementations)
-            implementations[canonical_path] = tool
-            mounted = dict(current.mounted_subtrees)
-            mounted[f"__tool__:{canonical_path}"] = subtree_for_tool(tool)
-            self._registry_generation = compile_registry_generation(
-                generation_id=current.generation_id + 1,
-                mounted_subtrees=mounted,
-                tool_implementations=implementations,
-            )
-
-    def unregister_tool(self, name: str) -> None:
-        normalized = str(name or "").strip()
-        with self._registry_lock:
-            current = self._registry_generation
-            canonical_path = normalized
-            record = current.record_for_alias(normalized)
-            if record is not None:
-                canonical_path = record.canonical_path
-            implementations = dict(current.tool_implementations)
-            if implementations.pop(canonical_path, None) is None:
-                return
-            mounted = dict(current.mounted_subtrees)
-            mounted.pop(f"__tool__:{canonical_path}", None)
-            self._registry_generation = compile_registry_generation(
-                generation_id=current.generation_id + 1,
-                mounted_subtrees=mounted,
-                tool_implementations=implementations,
-            )
 
     def begin_tool_result_turn(
         self,
@@ -428,7 +380,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
             candidate = compile_registry_generation(
                 generation_id=current.generation_id + 1,
                 mounted_subtrees=mounted,
-                tool_implementations=dict(current.tool_implementations),
             )
             self._registry_generation = candidate
             subtree.mounted = True
@@ -447,7 +398,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
             candidate = compile_registry_generation(
                 generation_id=current.generation_id + 1,
                 mounted_subtrees=mounted,
-                tool_implementations=dict(current.tool_implementations),
             )
             self._registry_generation = candidate
             subtree.mounted = False
@@ -1066,28 +1016,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None,
         allow_tools: bool,
     ) -> Any:
-        if record.facade_tool is not None:
-            handler = record.facade_tool.handler
-            result = handler(
-                validated,
-                **_tool_invoke_kwargs(
-                    handler,
-                    runtime=self,
-                    turn_id=turn_id,
-                    tool_call=call,
-                    budget=budget,
-                    allow_tools=allow_tools,
-                ),
+        args = validated.model_dump(mode="python", exclude_none=True) if isinstance(validated, BaseModel) else dict(validated)
+        result = record.binding.callable(
+            CapabilityCall(
+                name=record.canonical_path,
+                args=args,
+                meta=self._invocation_meta(call, turn_id=turn_id, budget=budget, allow_tools=allow_tools),
             )
-        else:
-            args = validated.model_dump(mode="python", exclude_none=True) if isinstance(validated, BaseModel) else dict(validated)
-            result = record.binding.callable(
-                CapabilityCall(
-                    name=record.canonical_path,
-                    args=args,
-                    meta=self._invocation_meta(call, turn_id=turn_id, budget=budget, allow_tools=allow_tools),
-                )
-            )
+        )
         if inspect.isawaitable(result):
             raise RuntimeError(f"tool requires async execution: {record.alias}")
         return result
@@ -1101,25 +1037,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None,
         allow_tools: bool,
     ) -> Any:
-        if record.facade_tool is not None:
-            handler = record.facade_tool.handler
-            invoke_kwargs = _tool_invoke_kwargs(
-                handler,
-                runtime=self,
-                turn_id=turn_id,
-                tool_call=call,
-                budget=budget,
-                allow_tools=allow_tools,
-            )
-            if inspect.iscoroutinefunction(handler):
-                result = handler(validated, **invoke_kwargs)
-            else:
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    self.sync_executor,
-                    lambda: handler(validated, **invoke_kwargs),
-                )
-            return await result if inspect.isawaitable(result) else result
         args = validated.model_dump(mode="python", exclude_none=True) if isinstance(validated, BaseModel) else dict(validated)
         capability_call = CapabilityCall(
             name=record.canonical_path,
@@ -1217,6 +1134,20 @@ class ExecutionRuntime(ExecutionRuntimePort):
             else:
                 if record.output_model is None:
                     raise TypeError("internal tool has no OutputModel")
+                if record.output_model is ProviderPayloadOutput:
+                    candidate = (
+                        candidate
+                        if isinstance(candidate, dict)
+                        and set(candidate) == {"payload"}
+                        and isinstance(candidate.get("payload"), dict)
+                        else {
+                            "payload": (
+                                dict(candidate)
+                                if isinstance(candidate, dict)
+                                else {"value": candidate}
+                            )
+                        }
+                    )
                 output_model = validate_output(record.output_model, candidate)
                 output = output_model.model_dump(mode="json", exclude_none=True)
         except (ValidationError, JsonSchemaValidationError, TypeError) as exc:
@@ -1810,17 +1741,6 @@ def _target_id_required_result(
             "Retry with args.target_id set to one of these values."
         ),
     )
-
-
-def _tool_invoke_kwargs(invoke: Any, **kwargs: Any) -> dict[str, Any]:
-    try:
-        signature = inspect.signature(invoke)
-    except (TypeError, ValueError):
-        return dict(kwargs)
-    parameters = signature.parameters
-    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
-        return dict(kwargs)
-    return {key: value for key, value in kwargs.items() if key in parameters}
 
 
 def _search_facets(records: Any) -> dict[str, Any]:

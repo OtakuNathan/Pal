@@ -4,7 +4,6 @@ from pal.execution.contracts import (
     CapabilityResult,
     ExecutionRuntimePort,
     Plugin,
-    Tool,
     ToolCallBudget,
 )
 from pal.execution.tool_facade import (
@@ -46,7 +45,6 @@ __all__ = [
     "Plugin",
     "RejectedResult",
     "ShellExecTool",
-    "Tool",
     "ToolExecutionSemantics",
     "ToolGuidance",
     "ToolHandlerResult",

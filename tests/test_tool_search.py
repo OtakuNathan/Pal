@@ -12,11 +12,11 @@ from pal.execution.tool_facade import (
     InvocationMode,
     PagingMode,
     RetryPolicy,
-    Tool,
     ToolExecutionSemantics,
     ToolGuidance,
 )
 from pal.llm.contracts import CanonicalToolCall
+from tests.capability_fixture import mount_test_capability
 
 
 def search_fixture_tool(
@@ -27,8 +27,8 @@ def search_fixture_tool(
     family: str,
     module_id: str,
     tags: tuple[str, ...],
-) -> Tool:
-    return Tool(
+) -> dict[str, object]:
+    return dict(
         alias=alias,
         canonical_path=f"op_test_{alias}",
         InputModel=EmptyToolInput,
@@ -60,8 +60,9 @@ class ToolSearchTests(unittest.TestCase):
         register_execution_with_core(self.core.context)
         self.core.publish_module_capabilities("execution")
         runtime = self.core.context.execution_runtime
-        runtime.register_tool(
-            search_fixture_tool(
+        mount_test_capability(
+            runtime,
+            **search_fixture_tool(
                 alias="web_lookup",
                 text="search public web pages internet research 网页搜索",
                 mode=InvocationMode.DIRECT,
@@ -70,8 +71,9 @@ class ToolSearchTests(unittest.TestCase):
                 tags=("network", "research"),
             )
         )
-        runtime.register_tool(
-            search_fixture_tool(
+        mount_test_capability(
+            runtime,
+            **search_fixture_tool(
                 alias="memory_lookup",
                 text="recall durable memory facts and prior cases 记忆召回",
                 mode=InvocationMode.INDIRECT,

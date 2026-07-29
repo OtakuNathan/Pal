@@ -17,7 +17,6 @@ from pal.execution.tool_facade import (
     PagingMode,
     RetryPolicy,
     StrictToolModel,
-    Tool,
     ToolExecutionSemantics,
     ToolGuidance,
     ToolHandlerResult,
@@ -28,6 +27,7 @@ from pal.llm.runtime import LLMRuntime
 from pal.memory import CompactionProfile, L1MessageKind, L1TranscriptMessage, L2Entry, L3ProviderSelector, MemoryCompactRequest, MemoryCompactResult, MemoryPackRequest, MemoryService, register_with_core as register_memory_with_core
 from pal.minion.compact import compact_minion_memory_service
 from pal.shared import LLMFinishReason, PromptAssemblyContext, RuntimeStatus
+from tests.capability_fixture import mount_test_capability
 
 
 class EchoInput(StrictToolModel):
@@ -38,8 +38,9 @@ class EchoOutput(StrictToolModel):
     echo: dict[str, object]
 
 
-def echo_tool() -> Tool:
-    return Tool(
+def mount_echo_tool(runtime) -> None:
+    mount_test_capability(
+        runtime,
         alias="echo",
         canonical_path="op_test_echo",
         InputModel=EchoInput,
@@ -211,7 +212,7 @@ def _build_core_with_compacting_llm(*, compact_on: str, memory_candidates: list[
     register_memory_with_core(core.context, memory_service)
     scripted_llm = _CompactingLLMRuntime(compact_on=compact_on, memory_candidates=memory_candidates)
     core.context.port_registry["llm:llm"] = scripted_llm
-    core.context.execution_runtime.register_tool(echo_tool())
+    mount_echo_tool(core.context.execution_runtime)
     return core, memory_service, scripted_llm
 
 

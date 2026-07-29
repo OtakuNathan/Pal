@@ -888,7 +888,6 @@ class MinionManager:
             "minion_db_path": str(self.v2_service.repository.db_path),
             "log_sink": current_service_log_sink_description(),
             "catalog_generation": str(self.catalog.snapshot()["generation"]),
-            "catalog_migration": dict(self.catalog_bootstrap.get("migration") or {}),
             **dict(self.endpoint_info),
         }
 

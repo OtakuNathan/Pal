@@ -417,7 +417,7 @@ class MinionV2PublicProvider:
         scope="minion_catalog",
         action_name="refresh",
         description=(
-            "Ask the attached Minion sidecar to reload package builtins, migrate any legacy managed seeds, validate explicit overrides, and return the "
+            "Ask the attached Minion sidecar to reload package builtins, validate explicit overrides, and return the "
             "new effective catalog generation. The Pal process does not read or modify Minion catalog files."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderRefreshInput,

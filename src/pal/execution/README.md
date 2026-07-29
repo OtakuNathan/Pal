@@ -31,7 +31,7 @@ Notes:
   `read_tool` and invoked only through `call_tool`
 - Pal-owned tools bind strict Pydantic v2 input/output models, static guidance,
   machine execution semantics, examples, search text, and the handler in one
-  immutable `Tool` value
+  immutable registry record
 - invocation returns a discriminated `complete`, `paged`, `rejected`, or
   `failed` result; effect outcome and retry direction are explicit
 - complete output is validated before paging, and paged results expose only an

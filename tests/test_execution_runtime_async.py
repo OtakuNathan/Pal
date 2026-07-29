@@ -14,20 +14,21 @@ from pal.execution.tool_facade import (
     InvocationMode,
     PagingMode,
     RetryPolicy,
-    Tool,
     ToolExecutionSemantics,
     ToolGuidance,
 )
 from pal.llm.contracts import CanonicalToolCall
 from pal.shared import RuntimeStatus
+from tests.capability_fixture import mount_test_capability
 
 
-def slow_sync_tool() -> Tool:
+def mount_slow_sync_tool(runtime: ExecutionRuntime) -> None:
     def invoke(_args: EmptyToolInput) -> dict[str, object]:
         time.sleep(0.2)
         return {}
 
-    return Tool(
+    mount_test_capability(
+        runtime,
         alias="slow_sync",
         canonical_path="op_test_slow_sync",
         InputModel=EmptyToolInput,
@@ -54,7 +55,7 @@ class ExecutionRuntimeAsyncTests(unittest.TestCase):
     def test_execute_tool_async_offloads_sync_tool_fallback(self) -> None:
         async def run() -> None:
             runtime = ExecutionRuntime(sync_executor_max_workers=1)
-            runtime.register_tool(slow_sync_tool())
+            mount_slow_sync_tool(runtime)
             try:
                 task = asyncio.create_task(runtime.execute_tool_async(CanonicalToolCall(name="slow_sync", args={})))
                 await asyncio.sleep(0.02)

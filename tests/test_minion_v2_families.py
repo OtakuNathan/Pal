@@ -17,7 +17,7 @@ from pal.minion.scoped_execution import (
 from pal.minion.workspace_tools import _normalized_reference_paths
 from pal.execution.contracts import CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
-from pal.execution.tool_facade import EmptyToolInput, OpaqueToolOutput, Tool, ToolGuidance
+from pal.execution.tool_facade import EmptyToolInput, ProviderPayloadOutput, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.adapters import prepare_v2_role_workspace, prepare_v2_workspace_environment
@@ -36,6 +36,7 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     _role_mode_profile_payload,
 )
 from pal.shared import MinionInvocationPack, RuntimeStatus
+from tests.capability_fixture import mount_test_capability
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 
 
@@ -1138,14 +1139,14 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             researcher.resolved_profile["capability_guidance_overrides"]["op_web_search"]
         )
         base = ExecutionRuntime()
-        base.register_tool(
-            Tool(
+        mount_test_capability(
+            base,
                 alias="web_search",
                 canonical_path="op_web_search",
                 family="web",
                 source="test",
                 InputModel=EmptyToolInput,
-                OutputModel=OpaqueToolOutput,
+                OutputModel=ProviderPayloadOutput,
                 guidance=ToolGuidance(
                     purpose="generic web description",
                     use_when="generic web description",
@@ -1155,7 +1156,6 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 execution=DIRECT_EXTERNAL_READ,
                 search_text="generic web search research",
                 handler=lambda _value: CapabilityResult(status=RuntimeStatus.OK, text="ok", llm_text="ok"),
-            )
         )
         scoped = MinionScopedExecutionRuntime(
             base,

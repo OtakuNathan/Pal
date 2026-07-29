@@ -258,6 +258,37 @@ class FileGrant:
         return any(start <= 1 and end >= self.total_lines for start, end in self.covered_ranges)
 
 
+@dataclass(frozen=True)
+class FileSnapshot:
+    file_key: str
+    digest: str
+    total_lines: int
+    complete: bool
+    created_user_turn: int
+    expires_at_user_turn: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "file_key": self.file_key,
+            "digest": self.digest,
+            "total_lines": self.total_lines,
+            "complete": self.complete,
+            "created_user_turn": self.created_user_turn,
+            "expires_at_user_turn": self.expires_at_user_turn,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "FileSnapshot":
+        return cls(
+            file_key=str(value.get("file_key") or ""),
+            digest=str(value.get("digest") or ""),
+            total_lines=max(0, int(value.get("total_lines") or 0)),
+            complete=bool(value.get("complete")),
+            created_user_turn=max(0, int(value.get("created_user_turn") or 0)),
+            expires_at_user_turn=max(0, int(value.get("expires_at_user_turn") or 0)),
+        )
+
+
 class LogicalExecutionStateBackend(Protocol):
     def begin_input(
         self,
@@ -303,13 +334,23 @@ class LogicalExecutionStateBackend(Protocol):
     ) -> FileGrant | None:
         ...
 
-    def set_file_full(
+    def file_snapshot(
+        self,
+        *,
+        logical_session_id: str,
+        file_key: str,
+        digest: str,
+    ) -> FileSnapshot | None:
+        ...
+
+    def set_file_snapshot(
         self,
         *,
         logical_session_id: str,
         file_key: str,
         digest: str,
         total_lines: int,
+        complete: bool,
     ) -> None:
         ...
 
@@ -328,6 +369,7 @@ class _SessionState:
     retention_user_turns: int = DEFAULT_RESULT_RETENTION_USER_TURNS
     projection: tuple[str, ...] = ()
     handles: dict[str, PagerHandleManifest] = field(default_factory=dict)
+    snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
     grants: dict[tuple[int, str], FileGrant] = field(default_factory=dict)
     retired: bool = False
 
@@ -479,23 +521,47 @@ class InMemoryLogicalExecutionState:
                 return None
             return grant
 
-    def set_file_full(
+    def file_snapshot(
+        self,
+        *,
+        logical_session_id: str,
+        file_key: str,
+        digest: str,
+    ) -> FileSnapshot | None:
+        with self._lock:
+            state = self._sessions.get(logical_session_id)
+            if state is None or state.retired:
+                return None
+            snapshot = state.snapshots.get(str(file_key))
+            if snapshot is None:
+                return None
+            if state.current_user_turn >= snapshot.expires_at_user_turn:
+                return None
+            if str(digest) and snapshot.digest != str(digest):
+                return None
+            return snapshot
+
+    def set_file_snapshot(
         self,
         *,
         logical_session_id: str,
         file_key: str,
         digest: str,
         total_lines: int,
+        complete: bool,
     ) -> None:
         with self._lock:
             state = self._sessions.setdefault(logical_session_id, _SessionState())
             total = max(0, int(total_lines))
-            state.grants[(state.context_epoch, str(file_key))] = FileGrant(
+            state.snapshots[str(file_key)] = FileSnapshot(
                 file_key=str(file_key),
                 digest=str(digest),
                 total_lines=total,
-                covered_ranges=((1, total),) if total else (),
-                empty_file=total == 0,
+                complete=bool(complete),
+                created_user_turn=state.current_user_turn,
+                expires_at_user_turn=(
+                    state.current_user_turn + state.retention_user_turns
+                ),
             )
 
     def invalidate_file(self, *, logical_session_id: str, file_key: str) -> None:
@@ -503,6 +569,7 @@ class InMemoryLogicalExecutionState:
             state = self._sessions.get(logical_session_id)
             if state is None:
                 return
+            state.snapshots.pop(str(file_key), None)
             for key in [candidate for candidate in state.grants if candidate[1] == str(file_key)]:
                 state.grants.pop(key, None)
 
@@ -572,6 +639,25 @@ class InMemoryLogicalExecutionState:
             covered_ranges=_merge_ranges(ranges),
             empty_file=manifest.empty_file or bool(previous and previous.empty_file),
             line_fragments=merged_fragments,
+        )
+        previous_snapshot = state.snapshots.get(manifest.file_key)
+        delivered_grant = state.grants[key]
+        state.snapshots[manifest.file_key] = FileSnapshot(
+            file_key=manifest.file_key,
+            digest=manifest.digest,
+            total_lines=manifest.total_lines,
+            complete=(
+                delivered_grant.complete
+                or bool(
+                    previous_snapshot is not None
+                    and previous_snapshot.digest == manifest.digest
+                    and previous_snapshot.complete
+                )
+            ),
+            created_user_turn=state.current_user_turn,
+            expires_at_user_turn=(
+                state.current_user_turn + state.retention_user_turns
+            ),
         )
 
 
