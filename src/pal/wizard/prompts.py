@@ -896,10 +896,15 @@ def prompt_review(data: WizardCollectedData, runtime_root: Path) -> bool:
 def run_interactive_wizard(
     *,
     existing_loader: Callable[[Path], WizardCollectedData | None] | None = None,
+    runtime_root: Path | None = None,
 ) -> tuple[Path, WizardCollectedData] | None:
     print("\n=== Pal Setup ===\n")
 
-    runtime_root = prompt_runtime_home()
+    runtime_root = (
+        prompt_runtime_home()
+        if runtime_root is None
+        else Path(runtime_root).expanduser().resolve()
+    )
     current = existing_loader(runtime_root) if existing_loader is not None else None
     if current is not None:
         print(f"\n  Existing Pal runtime detected at {runtime_root}; current values will be used as defaults.")

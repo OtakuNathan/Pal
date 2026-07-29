@@ -74,8 +74,10 @@ class LLMActiveModelSnapshot:
 
 @dataclass(frozen=True)
 class LLMThinkLevelSnapshot:
-    persisted_think_level: str
-    effective_think_level: str
+    endpoint_id: str | None
+    persisted_think_level: str | None
+    effective_think_level: str | None
+    available_levels: tuple[str, ...]
 
 
 @capability_node(
@@ -183,15 +185,27 @@ class LLMIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="think_level",
-        description="Show the current persisted and effective llm think level",
+        description="Show the active endpoint's provider-declared thinking choices and current selection",
         aliases=("llm_think_level",),
     )
     def think_level(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.runtime.refresh_runtime_settings()
+        status = self.runtime.thinking_status()
+        endpoint_id = str(status.get("endpoint_id") or "").strip() or None
         snapshot = LLMThinkLevelSnapshot(
-            persisted_think_level=self.runtime.settings_repository.get_think_level(),
-            effective_think_level=self.runtime.think_level,
+            endpoint_id=endpoint_id,
+            persisted_think_level=(
+                self.runtime.settings_repository.get_think_level(endpoint_id)
+                if endpoint_id is not None
+                else None
+            ),
+            effective_think_level=str(status.get("current") or "").strip() or None,
+            available_levels=tuple(
+                str(choice.get("id") or "")
+                for choice in status.get("choices") or []
+                if str(choice.get("id") or "").strip()
+            ),
         )
         return IntrospectionResult(
             status=RuntimeStatus.OK,

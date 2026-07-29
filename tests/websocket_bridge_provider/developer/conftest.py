@@ -14,6 +14,7 @@ from pathlib import Path
 
 _WORKSPACE = Path(__file__).resolve().parents[3]
 _SRC = _WORKSPACE / "src"
+_PROVIDERS = _WORKSPACE / "providers"
 
 # Drop any ``pal`` / ``pal.*`` modules already imported from a different source
 # root so that the first ``import pal`` in the test modules resolves to this
@@ -27,3 +28,5 @@ for _name in list(sys.modules):
 
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+if str(_PROVIDERS) not in sys.path:
+    sys.path.insert(0, str(_PROVIDERS))

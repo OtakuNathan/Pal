@@ -30,6 +30,7 @@ FINDING_KINDS = frozenset(
     }
 )
 FINDING_PRIORITIES = ("p0", "p1", "p2")
+FINDING_DISPOSITIONS = ("blocking", "advisory")
 PRIORITY_TO_SEVERITY = {"p0": "blocker", "p1": "major", "p2": "minor"}
 
 
@@ -60,6 +61,7 @@ class MinionV2ReviewAddFindingInput(StrictToolModel):
         "verification_defect",
     ]
     priority: Literal["p0", "p1", "p2"]
+    disposition: Literal["blocking", "advisory"] = "blocking"
     summary: str = Field(min_length=1, max_length=4000)
     locations: list[MinionV2ReviewFindingLocation] | None = Field(
         default=None,
@@ -102,6 +104,24 @@ ADD_FINDING_EXAMPLES = (
             }
         ],
     },
+    {
+        "finding_key": "decoder_state_could_be_static",
+        "finding_kind": "module_defect",
+        "priority": "p2",
+        "disposition": "advisory",
+        "summary": (
+            "The target language can express the decoder's legal states as a closed "
+            "type-level contract instead of relying only on a runtime convention."
+        ),
+        "locations": [
+            {
+                "scope": "workspace",
+                "file": "include/framepipe/decoder.hpp",
+                "line": 24,
+                "symbol": "framepipe::Decoder",
+            }
+        ],
+    },
 )
 
 ADD_FINDING_TOOL_SPEC: dict[str, Any] = {
@@ -109,8 +129,10 @@ ADD_FINDING_TOOL_SPEC: dict[str, Any] = {
     "description": (
         "Record or replace one actionable review finding in the current fenced Draft. "
         "finding_key is a readable stable snake_case identity; reusing it corrects that finding. "
-        "priority is p0, p1, or p2 and every recorded finding blocks PASS. Add all independent "
-        "findings in one parallel tool batch when possible, then use the role's no-argument terminal tool."
+        "priority is p0, p1, or p2. disposition is blocking or advisory; blocking findings prevent "
+        "PASS, while advisory is reserved for a worthwhile non-blocking p2 improvement. Add all "
+        "independent findings in one parallel tool batch when possible, then use the role's "
+        "no-argument terminal tool."
     ),
     "InputModel": MinionV2ReviewAddFindingInput,
     "examples": ADD_FINDING_EXAMPLES,
@@ -226,6 +248,8 @@ def add_finding_tool_result(
 def normalize_finding(value: Mapping[str, Any]) -> dict[str, Any]:
     validated = MinionV2ReviewAddFindingInput.model_validate(value, strict=True)
     finding = validated.model_dump(mode="python", exclude_none=True)
+    if finding["disposition"] == "advisory" and finding["priority"] != "p2":
+        raise ValueError("advisory findings must use priority p2")
     locations: list[dict[str, Any]] = []
     for raw in list(finding.get("locations") or []):
         item = dict(raw)
@@ -237,6 +261,34 @@ def normalize_finding(value: Mapping[str, Any]) -> dict[str, Any]:
         locations.append(item)
     finding["locations"] = locations
     return finding
+
+
+def partition_findings(
+    findings: list[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split normalized findings into repair-blocking defects and optional advisories."""
+
+    blocking: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []
+    for raw in findings:
+        item = normalize_finding(raw)
+        if item["disposition"] == "advisory":
+            advisories.append(item)
+        else:
+            blocking.append(item)
+    return blocking, advisories
+
+
+def structured_advisories(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Validate the compiled non-blocking advisory projection."""
+
+    raw = list(payload.get("advisories") or [])
+    blocking, advisories = partition_findings(
+        structured_findings({"findings": raw})
+    )
+    if blocking:
+        raise ValueError("compiled advisories must use disposition=advisory")
+    return advisories
 
 
 def structured_findings(payload: Mapping[str, Any]) -> list[dict[str, Any]]:

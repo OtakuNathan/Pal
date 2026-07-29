@@ -13,7 +13,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
-from pal.llm.adapters import LLMProviderRegistry, build_runtime_provider_registry, _think_level_to_completion_reasoning_effort
+from pal.llm.adapters import (
+    LLMProviderRegistry,
+    build_runtime_provider_registry,
+    resolve_endpoint_adapter,
+    _think_level_to_completion_reasoning_effort,
+)
 from pal.llm.llm_adaptor.base import OPENAI_RESPONSES_SHAPE
 from pal.llm.llm_adaptor.anthropic_api import (
     chat_messages_to_anthropic_messages,
@@ -40,9 +45,10 @@ from pal.llm.contracts import (
     LLMPreflightAdvice,
     LLMPreflightRequest,
     LLMRuntimePort,
+    ThinkingContract,
 )
 from pal.llm.models import LLMEndpointModel
-from pal.llm.repository import DEFAULT_THINK_LEVEL, LLMEndpointRepository, RuntimeSettingRepository
+from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.usage import LLMUsage, LLMUsageLedger
 from pal.memory.compact import (
     COMPACT_PAL_STRUCTURED_SYSTEM,
@@ -1558,6 +1564,7 @@ class CodexCliEndpointInvoker:
             request,
             artifact_manager=self.artifact_manager,
         )
+        timeout_seconds = _coerce_timeout_seconds(request.metadata.get("timeout_seconds"), default=120.0)
         bridge = self._require_bridge()
         with self._semaphore:
             try:
@@ -1567,6 +1574,7 @@ class CodexCliEndpointInvoker:
                     input_items=input_items,
                     dynamic_tools=dynamic_tools,
                     effort=effort,
+                    timeout_seconds=timeout_seconds,
                     messages=list(request.messages or []),
                 )
             except CodexBridgeError as exc:
@@ -1578,6 +1586,7 @@ class CodexCliEndpointInvoker:
                     input_items=input_items,
                     dynamic_tools=[],
                     effort=effort,
+                    timeout_seconds=timeout_seconds,
                     messages=list(request.messages or []),
                 )
             if _codex_completion_repeats_prior_tool_call(completion, request):
@@ -1587,6 +1596,7 @@ class CodexCliEndpointInvoker:
                     input_items=input_items,
                     dynamic_tools=[],
                     effort=effort,
+                    timeout_seconds=timeout_seconds,
                     messages=list(request.messages or []),
                 )
         return _codex_completion_to_outcome(completion, endpoint=endpoint)
@@ -1815,7 +1825,7 @@ class LLMRuntime(LLMRuntimePort):
     last_request: CanonicalLLMRequest | None = None
     last_endpoint_id: str | None = None
     last_model_id: str | None = None
-    think_level: str = DEFAULT_THINK_LEVEL
+    think_level: str = ""
     active_endpoint_id: str | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
     usage_ledger: LLMUsageLedger = field(default_factory=LLMUsageLedger, repr=False)
@@ -1883,10 +1893,113 @@ class LLMRuntime(LLMRuntimePort):
         return self._timeout_seconds_for_metadata(dict(request.metadata))
 
     def refresh_runtime_settings(self) -> None:
-        self.think_level = self.settings_repository.get_think_level()
         configured_active = self.settings_repository.get_active_llm_endpoint_id()
         endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
         self.active_endpoint_id = configured_active if configured_active in endpoint_ids else None
+        endpoint = self.active_endpoint()
+        self.think_level = self._effective_think_level_for_endpoint(endpoint) or ""
+
+    def active_endpoint(self) -> LLMEndpointModel | None:
+        return self.endpoint_resolver.primary(preferred_endpoint_id=self.active_endpoint_id)
+
+    def thinking_contract(self, endpoint_id: str | None = None) -> ThinkingContract | None:
+        endpoint = self._endpoint_by_id(endpoint_id) if endpoint_id else self.active_endpoint()
+        if endpoint is None:
+            return None
+        return self._adapter_for_endpoint(endpoint).thinking_contract()
+
+    def thinking_status(self, endpoint_id: str | None = None) -> dict[str, Any]:
+        endpoint = self._endpoint_by_id(endpoint_id) if endpoint_id else self.active_endpoint()
+        if endpoint is None:
+            return {
+                "available": False,
+                "endpoint_id": None,
+                "model_id": None,
+                "current": None,
+                "choices": [],
+            }
+        contract = self._adapter_for_endpoint(endpoint).thinking_contract()
+        current = self._effective_think_level_for_endpoint(endpoint, contract=contract)
+        return {
+            "available": contract is not None,
+            "endpoint_id": endpoint.endpoint_id,
+            "model_id": endpoint.model_id,
+            "current": current,
+            "choices": [
+                {"id": choice.choice_id, "label": choice.label}
+                for choice in (contract.choices if contract is not None else ())
+            ],
+        }
+
+    def thinking_levels_snapshot(self) -> dict[str, str]:
+        snapshot: dict[str, str] = {}
+        for endpoint in self.endpoint_resolver.enabled():
+            level = self._effective_think_level_for_endpoint(endpoint)
+            if level:
+                snapshot[endpoint.endpoint_id] = level
+        return snapshot
+
+    def set_think_level(self, value: str, *, endpoint_id: str | None = None) -> str:
+        endpoint = self._endpoint_by_id(endpoint_id) if endpoint_id else self.active_endpoint()
+        if endpoint is None:
+            raise ValueError("no enabled LLM endpoint is available")
+        contract = self._adapter_for_endpoint(endpoint).thinking_contract()
+        if contract is None:
+            raise ValueError(f"endpoint {endpoint.endpoint_id} does not support configurable thinking")
+        resolved = contract.resolve(value)
+        if resolved is None:
+            valid = ", ".join(choice.choice_id for choice in contract.choices)
+            raise ValueError(f"invalid think level for {endpoint.endpoint_id}; available: {valid}")
+        self.settings_repository.set_think_level(endpoint.endpoint_id, resolved)
+        active_endpoint = self.active_endpoint()
+        if active_endpoint is not None and endpoint.endpoint_id == active_endpoint.endpoint_id:
+            self.think_level = resolved
+        return resolved
+
+    def _endpoint_by_id(self, endpoint_id: str | None) -> LLMEndpointModel | None:
+        normalized = str(endpoint_id or "").strip()
+        if not normalized:
+            return None
+        return next(
+            (endpoint for endpoint in self.endpoint_resolver.endpoints if endpoint.endpoint_id == normalized),
+            None,
+        )
+
+    def _adapter_for_endpoint(self, endpoint: LLMEndpointModel):
+        provider_registry = getattr(self.endpoint_invoker, "provider_registry", None)
+        if provider_registry is not None:
+            return provider_registry.resolve(endpoint)
+        return resolve_endpoint_adapter(endpoint)
+
+    def _effective_think_level_for_endpoint(
+        self,
+        endpoint: LLMEndpointModel | None,
+        *,
+        contract: ThinkingContract | None = None,
+    ) -> str | None:
+        if endpoint is None:
+            return None
+        effective_contract = contract or self._adapter_for_endpoint(endpoint).thinking_contract()
+        if effective_contract is None:
+            return None
+        persisted = self.settings_repository.get_think_level(endpoint.endpoint_id)
+        active_endpoint = self.active_endpoint()
+        migrated_legacy = False
+        if persisted is None and active_endpoint is not None and endpoint.endpoint_id == active_endpoint.endpoint_id:
+            legacy = self.settings_repository.get_legacy_think_level()
+            if legacy is not None:
+                persisted = legacy
+                migrated_legacy = True
+        resolved = effective_contract.resolve(persisted)
+        if resolved is None:
+            resolved = effective_contract.default_choice_id
+        if persisted != resolved:
+            self.settings_repository.set_think_level(endpoint.endpoint_id, resolved)
+        elif migrated_legacy:
+            self.settings_repository.set_think_level(endpoint.endpoint_id, resolved)
+        if migrated_legacy:
+            self.settings_repository.delete_legacy_think_level()
+        return resolved
 
     def usage_snapshot(self) -> dict[str, Any]:
         """Return process-lifetime provider usage without exposing prompts."""
@@ -1985,6 +2098,7 @@ class LLMRuntime(LLMRuntimePort):
         normalized = str(endpoint_id or "").strip()
         self.settings_repository.set_active_llm_endpoint_id(normalized)
         self.active_endpoint_id = normalized or None
+        self.think_level = self._effective_think_level_for_endpoint(self.active_endpoint()) or ""
         return normalized
 
     def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
@@ -2823,16 +2937,34 @@ class LLMRuntime(LLMRuntimePort):
         *,
         endpoint: LLMEndpointModel | None,
     ) -> CanonicalLLMRequest:
-        requested_think_level = str(request.metadata.get("think_level") or "").strip() or self.think_level
         max_output_tokens = int(request.max_output_tokens)
         thinking_budget_tokens = request.thinking_budget_tokens
-        metadata: dict[str, Any] = {
-            **dict(request.metadata),
-            "think_level": requested_think_level,
-        }
+        metadata: dict[str, Any] = dict(request.metadata)
+        snapshot_levels = metadata.pop("think_levels", None)
+        explicit_think_level = str(metadata.get("think_level") or "").strip()
+        metadata.pop("think_level", None)
         if metadata.get("timeout_seconds") is None:
             metadata["timeout_seconds"] = self._timeout_seconds_for_metadata(metadata)
         if endpoint is not None:
+            contract = self._adapter_for_endpoint(endpoint).thinking_contract()
+            if contract is not None:
+                snapshot_level = ""
+                if isinstance(snapshot_levels, dict):
+                    snapshot_level = str(snapshot_levels.get(endpoint.endpoint_id) or "").strip()
+                if explicit_think_level:
+                    resolved_think_level = contract.resolve(explicit_think_level)
+                    if resolved_think_level is None:
+                        raise ValueError(
+                            f"invalid think level for endpoint {endpoint.endpoint_id}: {explicit_think_level}"
+                        )
+                elif snapshot_level:
+                    resolved_think_level = contract.resolve(snapshot_level) or contract.default_choice_id
+                else:
+                    resolved_think_level = (
+                        self._effective_think_level_for_endpoint(endpoint, contract=contract)
+                        or contract.default_choice_id
+                    )
+                metadata["think_level"] = resolved_think_level
             upper_limit = _endpoint_max_output_tokens_upper_limit(endpoint)
             if upper_limit is not None:
                 max_output_tokens = min(max_output_tokens, upper_limit)

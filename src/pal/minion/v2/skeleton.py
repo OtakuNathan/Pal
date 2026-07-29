@@ -223,7 +223,13 @@ def module_developer_test_path(module_name: str) -> str:
 def module_verification_corpus_path(module_name: str) -> str:
     """Return the module Verifier-owned durable test corpus path."""
 
-    return f"{_module_test_root(module_name)}/verification"
+    return f"{_module_test_root(module_name)}/verifier"
+
+
+def system_verification_corpus_path() -> str:
+    """Return the System Verifier-owned durable acceptance-test path."""
+
+    return "tests/system/verifier"
 
 
 @dataclass(frozen=True)
@@ -248,10 +254,10 @@ class ArchitectureReviewWorkspace:
     root: Path
     worktree: Path
     common_git_dir: Path
-    temporary_common_git_dir: bool = False
+    owns_worktree: bool = True
 
     def cleanup(self) -> None:
-        if self.worktree.exists() and self.common_git_dir.is_dir():
+        if self.owns_worktree and self.worktree.exists() and self.common_git_dir.is_dir():
             subprocess.run(
                 [
                     "git",
@@ -271,7 +277,8 @@ class ArchitectureReviewWorkspace:
                 stderr=subprocess.DEVNULL,
                 check=False,
             )
-        shutil.rmtree(self.root, ignore_errors=True)
+        if self.root != self.worktree:
+            shutil.rmtree(self.root, ignore_errors=True)
 
 
 @dataclass(frozen=True)
@@ -1124,6 +1131,13 @@ class GitBackedSkeletonService:
                     branch=branch,
                     start_sha=base_sha,
                 )
+            else:
+                current_head = _git(worktree, "rev-parse", "HEAD").strip()
+                if base_artifact and current_head != base_sha:
+                    raise RuntimeError(
+                        "canonical Architecture worktree is not at the accepted revision base"
+                    )
+                base_sha = current_head
         return ArchitectureWorkspace(
             worktree=worktree,
             common_git_dir=common_git_dir,
@@ -1187,7 +1201,15 @@ class GitBackedSkeletonService:
                 scope=revision_scope,
             )
             architect_authored_paths = scope_changed_paths
-        validate_architecture_changed_paths(normalized, architect_authored_paths)
+        validate_architecture_changed_paths(
+            normalized,
+            architect_authored_paths,
+            base_submission=(
+                dict(revision_base_artifact.get("submission") or {})
+                if revision_base_artifact is not None
+                else None
+            ),
+        )
         _git(architecture_workspace.worktree, "add", "-A")
         submission_hash = _stable_hash(normalized)
         commit_key = hashlib.sha256(
@@ -1305,102 +1327,44 @@ class GitBackedSkeletonService:
         artifact: Mapping[str, Any],
         review_name: str,
     ) -> ArchitectureReviewWorkspace:
-        root = Path(tempfile.mkdtemp(prefix=f"pal-architecture-review-{_safe_component(review_name)}-"))
         stored_layout = dict(artifact.get("repository_layout") or {})
         raw_project_key = str(stored_layout.get("project_key") or "").strip()
         project_key = _safe_component(raw_project_key) if raw_project_key else ""
-        bare = root / "project.git"
-        temporary_common_git_dir = False
-        worktree = root / "worktree"
-        bundle_ref = ArtifactRef.from_mapping(dict(artifact.get("git_bundle_ref") or {}))
         skeleton_sha = str(artifact.get("skeleton_commit_sha") or "")
-        try:
-            if project_key:
-                layout = resolve_project_git_layout(
-                    self.runtime_root,
-                    workspace={},
-                    workflow_id="",
-                    workflow_name=str(stored_layout.get("workflow_name") or review_name),
-                    stored_layout=stored_layout,
-                )
-                bare = layout.common_git_dir
-                with project_git_layout_lock(layout):
-                    if not bare.is_dir():
-                        self._restore_bundle_repository(bare, bundle_ref, staging_root=root)
-                    elif not _git_object_exists(bare, skeleton_sha):
-                        self._import_bundle(bare, bundle_ref)
-                    self._add_review_worktree(bare, worktree=worktree, skeleton_sha=skeleton_sha)
-            else:
-                temporary_common_git_dir = True
-                self._restore_bundle_repository(bare, bundle_ref, staging_root=root)
-                self._add_review_worktree(bare, worktree=worktree, skeleton_sha=skeleton_sha)
-        except Exception:
-            shutil.rmtree(root, ignore_errors=True)
-            raise
+        if not project_key:
+            raise RuntimeError(
+                "architecture review requires the workflow's canonical Git layout"
+            )
+        layout = resolve_project_git_layout(
+            self.runtime_root,
+            workspace={},
+            workflow_id="",
+            workflow_name=str(stored_layout.get("workflow_name") or review_name),
+            stored_layout=stored_layout,
+        )
+        bare = layout.common_git_dir
+        worktree = layout.architecture_worktree()
+        if not bare.is_dir() or not worktree.is_dir():
+            raise RuntimeError(
+                "architecture review requires the canonical Architecture worktree"
+            )
         if _git(worktree, "rev-parse", "HEAD").strip() != skeleton_sha:
-            shutil.rmtree(root, ignore_errors=True)
-            raise RuntimeError("architecture review worktree is not bound to the skeleton commit")
+            raise RuntimeError(
+                "canonical Architecture worktree is not bound to the reviewed commit"
+            )
+        scratch_root = (
+            minion_data_root(self.runtime_root)
+            / "runtime"
+            / "architecture-review"
+            / _safe_component(review_name)
+        )
+        scratch_root.mkdir(parents=True, exist_ok=True)
         return ArchitectureReviewWorkspace(
-            root=root,
+            root=scratch_root,
             worktree=worktree,
             common_git_dir=bare,
-            temporary_common_git_dir=temporary_common_git_dir,
+            owns_worktree=False,
         )
-
-    def _restore_bundle_repository(
-        self,
-        common_git_dir: Path,
-        bundle_ref: ArtifactRef,
-        *,
-        staging_root: Path,
-    ) -> None:
-        common_git_dir.parent.mkdir(parents=True, exist_ok=True)
-        bundle = staging_root / "architecture.bundle"
-        self.materialize_bundle(bundle_ref, bundle)
-        completed = subprocess.run(
-            ["git", "clone", "--bare", str(bundle), str(common_git_dir)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        bundle.unlink(missing_ok=True)
-        if completed.returncode != 0:
-            shutil.rmtree(common_git_dir, ignore_errors=True)
-            raise RuntimeError(
-                completed.stderr
-                or completed.stdout
-                or "failed to restore architecture review repository"
-            )
-
-    @staticmethod
-    def _add_review_worktree(
-        common_git_dir: Path,
-        *,
-        worktree: Path,
-        skeleton_sha: str,
-    ) -> None:
-        completed = subprocess.run(
-            [
-                "git",
-                f"--git-dir={common_git_dir}",
-                "worktree",
-                "add",
-                "--detach",
-                str(worktree),
-                skeleton_sha,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(
-                completed.stderr
-                or completed.stdout
-                or "failed to restore architecture review worktree"
-            )
 
     def _import_bundle(self, common_git_dir: Path, bundle_ref: ArtifactRef) -> None:
         with tempfile.TemporaryDirectory(prefix="pal-skeleton-import-") as temporary:
@@ -1432,15 +1396,96 @@ class GitBackedSkeletonService:
     ) -> dict[str, Any]:
         common_git_dir.parent.mkdir(parents=True, exist_ok=True)
         original_head = ""
+        source_repo_path = ""
+        source_branch = ""
+        source_remote_name = ""
+        source_clean = False
         files: list[str] = []
+        if source is not None:
+            source = source.resolve()
+            if not source.is_dir():
+                raise ValueError(f"workspace source is not a directory: {source}")
+            source_repo_path = str(source)
+            original_head = _optional_git(source, "rev-parse", "HEAD")
+            source_branch = _optional_git(
+                source, "symbolic-ref", "--quiet", "--short", "HEAD"
+            )
+            remotes = [
+                item.strip()
+                for item in _optional_git(source, "remote").splitlines()
+                if item.strip()
+            ]
+            source_remote_name = (
+                "origin" if "origin" in remotes else remotes[0] if remotes else ""
+            )
+            source_clean = bool(original_head) and not bool(
+                _optional_git(source, "status", "--porcelain", "--untracked-files=all")
+            )
+            if source_clean:
+                if common_git_dir.exists():
+                    completed = subprocess.run(
+                        [
+                            "git",
+                            f"--git-dir={common_git_dir}",
+                            "fetch",
+                            "--no-tags",
+                            str(source),
+                            f"+{original_head}:{snapshot_ref}",
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                    )
+                else:
+                    completed = subprocess.run(
+                        ["git", "clone", "--bare", str(source), str(common_git_dir)],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                    )
+                    if completed.returncode == 0:
+                        completed = subprocess.run(
+                            [
+                                "git",
+                                f"--git-dir={common_git_dir}",
+                                "update-ref",
+                                snapshot_ref,
+                                original_head,
+                            ],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            check=False,
+                        )
+                if completed.returncode != 0:
+                    raise RuntimeError(
+                        completed.stderr
+                        or completed.stdout
+                        or "failed to preserve source Git ancestry"
+                    )
+                snapshot_tree = _git_dir(
+                    common_git_dir, "rev-parse", f"{original_head}^{{tree}}"
+                ).strip()
+                files = list(_workspace_snapshot_paths(source))
+                return {
+                    "schema_version": "2",
+                    "snapshot_commit_sha": original_head,
+                    "snapshot_tree_sha": snapshot_tree,
+                    "original_head": original_head,
+                    "source_fingerprint": snapshot_tree,
+                    "included_paths": files,
+                    "source_repo_path": source_repo_path,
+                    "source_branch": source_branch,
+                    "source_remote_name": source_remote_name,
+                    "source_clean": True,
+                    "delivery_mode": "pull_request_preferred",
+                }
         with tempfile.TemporaryDirectory(prefix="pal-workspace-snapshot-") as temporary:
             seed = Path(temporary) / "seed"
             seed.mkdir()
             if source is not None:
-                source = source.resolve()
-                if not source.is_dir():
-                    raise ValueError(f"workspace source is not a directory: {source}")
-                original_head = _optional_git(source, "rev-parse", "HEAD")
                 for relative in _workspace_snapshot_paths(source):
                     _copy_snapshot_path(source, seed, relative)
                     files.append(relative)
@@ -1492,12 +1537,17 @@ class GitBackedSkeletonService:
             if completed.returncode != 0:
                 raise RuntimeError(completed.stderr or completed.stdout or "failed to persist synthetic workspace snapshot")
         return {
-            "schema_version": "1",
+            "schema_version": "2",
             "snapshot_commit_sha": snapshot_sha,
             "snapshot_tree_sha": snapshot_tree,
             "original_head": original_head,
             "source_fingerprint": snapshot_tree,
             "included_paths": files,
+            "source_repo_path": source_repo_path,
+            "source_branch": source_branch,
+            "source_remote_name": source_remote_name,
+            "source_clean": source_clean,
+            "delivery_mode": "local_only",
         }
 
 def _normalize_module_paths(
@@ -1531,7 +1581,7 @@ def _normalize_module_paths(
     if "test_scopes" in paths:
         raise ValueError(
             f"module {module_name} cannot declare paths.test_scopes; "
-            "the Manager owns tests/<module_name>/developer and tests/<module_name>/verification"
+            "the Manager owns tests/<module_name>/developer and tests/<module_name>/verifier"
         )
     if module_kind == "contract_only" and implementation:
         raise ValueError(
@@ -1574,6 +1624,8 @@ def _normalize_path_scopes(
 
 def _validate_path_policy(modules: Mapping[str, Mapping[str, Any]]) -> None:
     errors: list[str] = []
+    if "system" in modules:
+        errors.append("module name system is reserved for tests/system/verifier")
     owners: list[tuple[str, str, PathScope]] = []
     contracts: dict[str, tuple[str, str]] = {}
     references: list[tuple[str, str]] = []
@@ -1713,12 +1765,20 @@ def _compiled_path_policy(submission: Mapping[str, Any]) -> dict[str, Any]:
 def validate_architecture_changed_paths(
     submission: Mapping[str, Any],
     changed_paths: Sequence[str],
+    *,
+    base_submission: Mapping[str, Any] | None = None,
 ) -> tuple[str, ...]:
     normalized_paths = tuple(
         sorted({_normalized_repo_path(str(path)) for path in changed_paths if str(path).strip()})
     )
     undeclared = [
-        path for path in normalized_paths if not _architect_path_is_declared(path, submission)
+        path
+        for path in normalized_paths
+        if not _architect_path_is_declared(path, submission)
+        and not (
+            base_submission is not None
+            and _architect_path_is_declared(path, base_submission)
+        )
     ]
     if undeclared:
         raise ValueError(

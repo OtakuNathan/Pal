@@ -16,8 +16,13 @@ class _Settings:
     active_endpoint_id: str = "test-endpoint"
     think_level: str = "balanced"
 
-    def get_think_level(self) -> str:
+    def get_think_level(self, endpoint_id: str) -> str:
+        _ = endpoint_id
         return self.think_level
+
+    def set_think_level(self, endpoint_id: str, think_level: str) -> None:
+        _ = endpoint_id
+        self.think_level = str(think_level)
 
     def get_active_llm_endpoint_id(self) -> str:
         return self.active_endpoint_id

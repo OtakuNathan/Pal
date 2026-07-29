@@ -12,7 +12,6 @@ from unittest.mock import patch
 from pal.channel import ChannelRuntime, register_with_core as register_channel_with_core
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
-from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpoint
 from pal.control import (
     ControlAction,
     ControlCommandSpec,
@@ -28,6 +27,10 @@ from pal.control import (
     register_with_core as register_control_with_core,
     route_from_channel_envelope,
 )
+from tests.runtime_channel_providers import telegram_endpoint_module
+
+
+TelegramChannelEndpoint = telegram_endpoint_module().TelegramChannelEndpoint
 from pal.control import interactions as control_interactions
 from pal.core import L1CommitPayload, PalCore, TurnContinuation, TurnOutcome, register_with_core as register_core_with_core
 from pal.core.contracts import PendingControlRequest
@@ -36,7 +39,6 @@ from pal.core.turns import ToolObservation, channel_turn_program
 from pal.execution import CapabilityResult
 from pal.foundation import EventEnvelope
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
-from pal.llm.repository import DEFAULT_THINK_LEVEL
 from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryService, register_with_core as register_memory_with_core
 from pal.shared import EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
 from pal.stream_events import NormalizedLLMStreamEvent
@@ -66,11 +68,14 @@ class _StubEndpoint(ChannelEndpointQueueBase):
 
 @dataclass
 class _FakeSettingsRepository:
-    think_level: str = DEFAULT_THINK_LEVEL
+    think_levels: dict[str, str] = field(default_factory=lambda: {"stub": "balanced"})
     active_llm_endpoint_id: str | None = "stub"
 
-    def set_think_level(self, think_level: str) -> None:
-        self.think_level = str(think_level)
+    def get_think_level(self, endpoint_id: str) -> str | None:
+        return self.think_levels.get(endpoint_id)
+
+    def set_think_level(self, endpoint_id: str, think_level: str) -> None:
+        self.think_levels[endpoint_id] = str(think_level)
 
     def get_active_llm_endpoint_id(self) -> str | None:
         return self.active_llm_endpoint_id
@@ -131,17 +136,51 @@ class _FakeEndpointResolver:
 @dataclass
 class _FakeLLMRuntime:
     settings_repository: _FakeSettingsRepository
-    think_level: str = DEFAULT_THINK_LEVEL
+    think_level: str = "balanced"
     endpoint_resolver: _FakeEndpointResolver = field(default_factory=_FakeEndpointResolver)
     active_endpoint_id: str | None = "stub"
     refresh_payload: dict[str, object] | None = None
     refresh_calls: int = 0
 
     def refresh_runtime_settings(self) -> None:
-        self.think_level = self.settings_repository.think_level
         configured_active = self.settings_repository.get_active_llm_endpoint_id()
         endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
         self.active_endpoint_id = configured_active if configured_active in endpoint_ids else None
+        self.think_level = (
+            self.settings_repository.get_think_level(self.active_endpoint_id)
+            if self.active_endpoint_id is not None
+            else ""
+        ) or "balanced"
+
+    def thinking_status(self, endpoint_id: str | None = None) -> dict[str, object]:
+        selected_endpoint_id = endpoint_id or self.active_endpoint_id
+        current = (
+            self.settings_repository.get_think_level(selected_endpoint_id)
+            if selected_endpoint_id is not None
+            else None
+        ) or "balanced"
+        return {
+            "available": True,
+            "endpoint_id": selected_endpoint_id,
+            "model_id": "stub-model",
+            "current": current,
+            "choices": [
+                {"id": "off", "label": "off"},
+                {"id": "low", "label": "low"},
+                {"id": "deep", "label": "deep"},
+            ],
+        }
+
+    def thinking_levels_snapshot(self) -> dict[str, str]:
+        return dict(self.settings_repository.think_levels)
+
+    def set_think_level(self, think_level: str) -> str:
+        if think_level not in {"off", "low", "deep"}:
+            raise ValueError("invalid think level for stub; available: off, low, deep")
+        assert self.active_endpoint_id is not None
+        self.settings_repository.set_think_level(self.active_endpoint_id, think_level)
+        self.think_level = think_level
+        return think_level
 
     def set_active_endpoint(self, endpoint_id: str) -> str:
         normalized = str(endpoint_id).strip()
@@ -222,7 +261,7 @@ class ControlPlaneTests(unittest.TestCase):
         rendered = plane.render_panel_text()
 
         self.assertIn("/control", rendered)
-        self.assertIn("/think [off|minimal|low|balanced|deep|xhigh]", rendered)
+        self.assertIn("/think [level]", rendered)
         self.assertIn("/model [endpoint_id]", rendered)
         self.assertIn("/log [start|end]", rendered)
         self.assertIn("/ping", rendered)
@@ -241,7 +280,7 @@ class ControlPlaneTests(unittest.TestCase):
         assert action is not None
         self.assertEqual(action.action_kind, "show_think")
 
-    def test_think_alias_normalizes_to_canonical_level(self) -> None:
+    def test_think_level_is_forwarded_for_provider_validation(self) -> None:
         plane = ControlPlane()
         action = plane.parse_event(
             ControlEvent(
@@ -254,7 +293,22 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIsNotNone(action)
         assert action is not None
         self.assertEqual(action.action_kind, "set_think")
-        self.assertEqual(action.args["think_level"], "deep")
+        self.assertEqual(action.args["think_level"], "high")
+
+    def test_think_max_is_a_distinct_canonical_level(self) -> None:
+        plane = ControlPlane()
+        action = plane.parse_event(
+            ControlEvent(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/think max"},
+            )
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.action_kind, "set_think")
+        self.assertEqual(action.args["think_level"], "max")
 
     def test_model_without_argument_shows_current_model(self) -> None:
         plane = ControlPlane()
@@ -770,7 +824,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         continuation = self.core.turn_manager.start(envelope)
 
-        self.settings_repository.set_think_level("low")
+        self.settings_repository.set_think_level("stub", "low")
         self.llm_runtime.refresh_runtime_settings()
         prompt = self.core.turn_executor.build_turn_prompt(
             continuation,
@@ -778,8 +832,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             max_output_tokens=64,
         )
 
-        self.assertEqual(continuation.turn_settings_snapshot["think_level"], "deep")
-        self.assertEqual(prompt.metadata["think_level"], "deep")
+        self.assertEqual(continuation.turn_settings_snapshot["think_levels"], {"stub": "deep"})
+        self.assertEqual(prompt.metadata["think_levels"], {"stub": "deep"})
 
     async def test_turn_prompt_budget_snapshot_counts_tools_schema(self) -> None:
         envelope = self._make_channel_envelope(turn_id="turn-budget-tools", request_id="req-budget-tools", text="hello")
@@ -902,6 +956,35 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.settings_repository.get_active_llm_endpoint_id(), "backup")
         self.assertEqual(self.llm_runtime.active_endpoint_id, "backup")
         self.assertIn("Model updated to Backup LLM (backup).", self.endpoint.outbox[-1].text)
+
+    async def test_button_model_selection_opens_endpoint_think_level_submenu(self) -> None:
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="set_model",
+                target_scope="runtime",
+                args={
+                    "endpoint_id": "backup",
+                    "interaction_origin": "button",
+                    "interaction_id": "ctl_panel_1",
+                    "interaction_kind": "control_panel",
+                },
+                route=self.route,
+            )
+        )
+
+        statuses = list(self.endpoint.status_outbox)
+        self.assertGreaterEqual(len(statuses), 2)
+        self.assertEqual(statuses[-2].kind, "interactive_update")
+        spec = statuses[-2].payload["spec"]
+        self.assertIn("Model updated to Backup LLM (backup).", spec.text)
+        self.assertIn("Think level for backup: balanced", spec.text)
+        flattened = [button for row in spec.buttons for button in row]
+        self.assertEqual(
+            [button.action_args.get("think_level") for button in flattened[:-1]],
+            ["off", "low", "deep"],
+        )
+        self.assertEqual(flattened[-1].label, "Back to models")
+        self.assertEqual(flattened[-1].action_key, "control.model.open")
 
     async def test_set_model_rejects_unknown_endpoint(self) -> None:
         await self.core.handle_control_action_async(
@@ -1326,7 +1409,10 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         statuses = list(self.channel_runtime.status_outbox)
         self.assertGreaterEqual(len(statuses), 2)
         self.assertEqual(statuses[-2].kind, "interactive_resolve")
-        self.assertEqual(statuses[-2].payload["spec"].text, "Think level updated to deep. This applies to new turns only.")
+        self.assertEqual(
+            statuses[-2].payload["spec"].text,
+            "Think level for stub updated to deep. This applies to new turns only.",
+        )
         self.assertEqual(statuses[-1].kind, "working_stop")
 
     async def test_button_backed_interrupt_resolves_interaction(self) -> None:

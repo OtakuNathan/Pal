@@ -3,28 +3,32 @@ EXTENDS Naturals, TLC
 
 \* A workflow owns stable Module identities.  Execution epochs are audit and
 \* scheduling projections only: replanning classifies old/new architecture map
-\* keys as preserve, create, or delete.  It never replaces a surviving
-\* Module's worktree or logical Coder/Verifier coroutine.
+\* identities as preserve, replace, create, or delete. A surviving name keeps
+\* its worktree and logical Coder/Verifier coroutine only while its declared
+\* responsibility is unchanged.
 
 CONSTANT
     Protocol,
     Endpoint,
     Provider,
     Sidecar,
+    Bridge,
     MaxCandidate,
     MaxAdmissions
 
-Modules == {Protocol, Endpoint, Provider, Sidecar}
-SourceModules == {Protocol, Endpoint, Provider}
-TargetModules == {Protocol, Endpoint, Sidecar}
-PreservedModules == SourceModules \intersect TargetModules
+Modules == {Protocol, Endpoint, Provider, Sidecar, Bridge}
+SourceModules == {Protocol, Endpoint, Provider, Bridge}
+TargetModules == {Protocol, Endpoint, Sidecar, Bridge}
+ReplacedModules == {Bridge}
+PreservedModules == (SourceModules \intersect TargetModules) \ ReplacedModules
 AddedModules == TargetModules \ SourceModules
 DeletedModules == SourceModules \ TargetModules
 
 \* Protocol's complete effective fingerprint is unchanged. Endpoint remains
-\* the same Module but its contract changed, so its assets survive and the
-\* same logical actors receive another assignment. Sidecar models a historical
-\* identity that was deleted before this source plan and is now re-added.
+\* the same Module but its contract changed, so its assets survive. Bridge
+\* keeps its name but changes responsibility, so it is a replacement. Sidecar
+\* models a historical identity that was deleted before this source plan and
+\* is now re-added.
 ExactModules == {Protocol}
 ChangedPreservedModules == PreservedModules \ ExactModules
 
@@ -132,11 +136,11 @@ CompileTargetPlan ==
         ELSE "Absent"]
     /\ worktreeIdentity' = [m \in Modules |->
         IF m \in PreservedModules THEN worktreeIdentity[m]
-        ELSE IF m \in AddedModules THEN 2
+        ELSE IF m \in AddedModules \union ReplacedModules THEN 2
         ELSE 0]
     /\ roleGeneration' = [m \in Modules |->
         IF m \in PreservedModules THEN roleGeneration[m]
-        ELSE IF m \in AddedModules THEN roleGeneration[m] + 1
+        ELSE IF m \in AddedModules \union ReplacedModules THEN roleGeneration[m] + 1
         ELSE roleGeneration[m]]
     /\ candidate' = [m \in Modules |->
         IF m \in PreservedModules THEN candidate[m]
@@ -147,12 +151,12 @@ CompileTargetPlan ==
     /\ coderSession' = [m \in Modules |->
         IF m \in DeletedModules THEN "Retired"
         ELSE IF m \in PreservedModules THEN coderSession[m]
-        ELSE IF m \in AddedModules THEN "Suspended"
+        ELSE IF m \in AddedModules \union ReplacedModules THEN "Suspended"
         ELSE "Absent"]
     /\ verifierSession' = [m \in Modules |->
         IF m \in DeletedModules THEN "Retired"
         ELSE IF m \in PreservedModules THEN verifierSession[m]
-        ELSE IF m \in AddedModules THEN "Suspended"
+        ELSE IF m \in AddedModules \union ReplacedModules THEN "Suspended"
         ELSE "Absent"]
     /\ UNCHANGED <<workflowState, activeRole, admissionCount,
         systemState, managerUp>>
@@ -320,6 +324,9 @@ ModuleIdentityClassification ==
         /\ \A m \in AddedModules :
             /\ worktreeIdentity[m] = 2
             /\ roleGeneration[m] = 2
+        /\ \A m \in ReplacedModules :
+            /\ worktreeIdentity[m] = 2
+            /\ roleGeneration[m] = 2
         /\ \A m \in DeletedModules :
             /\ worktreeIdentity[m] = 0
             /\ moduleState[m] = "Retired"
@@ -340,6 +347,13 @@ ChangedModuleKeepsAssetsAndActors ==
             /\ corpus[m] >= 1
             /\ coderSession[m] # "Absent"
             /\ verifierSession[m] # "Absent"
+
+ReplacementStartsFresh ==
+    phase \in {"TargetRunning", "SystemVerifying", "Completed"} =>
+        \A m \in ReplacedModules :
+            admissionCount[m] = 0 =>
+                /\ candidate[m] = 0
+                /\ corpus[m] = 0
 
 OneRoleOwnsEachModuleWorktree ==
     \A m \in Modules :

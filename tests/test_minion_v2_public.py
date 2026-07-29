@@ -58,6 +58,7 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     _skeleton_architect_instruction,
     _recorded_role_metrics,
     _worker_event_timing,
+    _workflow_skill_injections,
     apply_v2_revision_scope_capability_policy,
     apply_v2_role_capability_policy,
 )
@@ -227,18 +228,25 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
         self.assertEqual(metrics["cost"], 0.04)
         self.assertEqual(metrics["latency_ms"], 2000)
 
-    def test_writers_use_bound_durable_workspace_while_reviewers_remain_isolated(self) -> None:
-        writable = {"repo_path": "/tmp/node-worktree"}
-        read_only = {
+    def test_canonical_workspace_binding_is_explicit_for_every_durable_role(self) -> None:
+        canonical = {
+            "repo_path": "/tmp/node-worktree",
+            "workspace_binding": "canonical",
+        }
+        ephemeral = {
             "repo_path": "/tmp/review-worktree",
-            "workspace_policy": {"mode": "read_only_repo"},
+            "workspace_binding": "ephemeral_artifact",
         }
 
-        for role in ("architect", "implementation"):
-            self.assertTrue(_role_uses_bound_durable_workspace(role, writable), role)
-            self.assertFalse(_role_uses_bound_durable_workspace(role, read_only), role)
-        for role in ("reviewer", "verifier"):
-            self.assertFalse(_role_uses_bound_durable_workspace(role, writable), role)
+        for role in ("architect", "implementation", "reviewer", "verifier"):
+            self.assertTrue(
+                _role_uses_bound_durable_workspace(role, canonical),
+                role,
+            )
+            self.assertFalse(
+                _role_uses_bound_durable_workspace(role, ephemeral),
+                role,
+            )
 
     def test_read_only_role_workspace_is_prepared_before_lsp_environment(self) -> None:
         runtime_root = Path(tempfile.mkdtemp(prefix="pal-v2-lsp-root-"))
@@ -2226,7 +2234,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         state = MinionAgentLoopState(
             execution_runtime=SimpleNamespace(),
             memory_service=SimpleNamespace(),
-            memory_l3=SimpleNamespace(),
+            memory_candidate_sink=SimpleNamespace(),
         )
 
         result = runner._preflight_minion_llm_round(state)
@@ -2259,7 +2267,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         state = MinionAgentLoopState(
             execution_runtime=SimpleNamespace(),
             memory_service=SimpleNamespace(),
-            memory_l3=SimpleNamespace(),
+            memory_candidate_sink=SimpleNamespace(),
         )
 
         with patch.object(runner, "_manager_submission_receipt_present", return_value=False):
@@ -2316,6 +2324,11 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         self.assertIn("## Assignment", rendered_input)
         self.assertIn("strictly module-level declaration", rendered_input)
+        self.assertIn("First read the ordered read-only task ledger", instruction)
+        self.assertIn("Do not read architecture.yaml during discovery", instruction)
+        self.assertIn("Once the design is settled", instruction)
+        self.assertIn("immediately begin file-edit tool calls", instruction)
+        self.assertIn("do not spend another response restating", instruction)
         self.assertIn("Read revision_finding before any other work", instruction)
         self.assertIn("package/__init__.py", instruction)
         self.assertIn("Do not report the earlier submit as completion", instruction)
@@ -2887,7 +2900,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "verification_corpora": {
                     "router": {
                         "kind": "directory",
-                        "path": "tests/router/verification",
+                        "path": "tests/router/verifier",
                         "owner": "verifier",
                         "coder_access": "read_only",
                     }
@@ -3667,14 +3680,25 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 for descriptor in core.context.capability_registry.descriptors.values()
                 if descriptor.canonical_path == "op_minion_start_workflow"
             )
+            generation = core.context.execution_runtime.registry_generation
+            self.assertIn("minion_start_workflow", generation.direct_aliases)
+            self.assertNotIn("minion_start_workflow", generation.indirect_aliases)
             start_schema = start_descriptor.InputModel.model_json_schema(mode="validation")
             self.assertIn("task_spec", start_schema["properties"])
+            self.assertIn("skill_refs", start_schema["properties"])
             self.assertNotIn("source_files", start_schema["properties"])
             self.assertIn("search active Pal skills", start_descriptor.description)
-            self.assertIn("ask the user whether to inject them", start_descriptor.description)
-            self.assertIn("call skill_inject for every approved skill", start_descriptor.description)
+            self.assertIn("ask the user whether to provide them", start_descriptor.description)
+            self.assertIn("pass the exact approved IDs in skill_refs", start_descriptor.description)
+            self.assertIn("first user-side context", start_descriptor.description)
             self.assertIn("Never infer consent", start_descriptor.description)
             self.assertIn("Never inspect or implement the target in the foreground first", start_descriptor.description)
+            self.assertIn("do not repeatedly inspect workflow status", start_descriptor.description)
+            self.assertIn("system callbacks", start_descriptor.description)
+            self.assertIn("identity-light executor work", start_descriptor.guidance.use_when)
+            self.assertIn("not by prose length or step count", start_descriptor.guidance.use_when)
+            self.assertIn("strongly bound to Pal's relationship with the user", start_descriptor.guidance.do_not_use_when)
+            self.assertIn("In the gray area Pal handles the task directly", start_descriptor.guidance.do_not_use_when)
             decision_schema = next(
                 descriptor.InputModel.model_json_schema(mode="validation")
                 for descriptor in core.context.capability_registry.descriptors.values()
@@ -3691,6 +3715,166 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         finally:
             with contextlib.suppress(Exception):
                 core.detach_module("minion")
+
+    def test_start_pins_approved_skill_refs_for_manager_role_sessions(self) -> None:
+        reminder = (
+            "<system-reminder>\n"
+            "Injected skill:\nSkill id: pal.channel.provider.development\n\n"
+            "Manual:\nReuse the channel provider contract.\n"
+            "</system-reminder>"
+        )
+        provider = MinionV2PublicProvider(
+            runtime_root=self.runtime_root,
+            wake_manager=lambda: None,
+        )
+        started = provider.start_workflow(
+            CapabilityCall(
+                name="op_minion_start_workflow",
+                meta={"actor_id": "nathan", "channel_id": "socket:test"},
+                args={
+                    "title": "Channel adapter",
+                    "profile": "software_engineering.v2_coder",
+                    "goal": "Implement one channel adapter.",
+                    "task_spec": {
+                        "objective": "Implement one channel adapter.",
+                        "requirements": ["Reuse the channel provider contract."],
+                    },
+                    "workspace": {"kind": "new_project", "project_name": "channel-adapter"},
+                    "skill_refs": [
+                        "pal.channel.provider.development",
+                        "pal.channel.provider.development",
+                    ],
+                },
+            )
+        )
+
+        self.assertEqual(started.status, RuntimeStatus.OK)
+        workflow_id = provider.service.repository.workflow_ids()[0]
+        workflow = provider.service.repository.read_snapshot(
+            AggregateType.WORKFLOW,
+            workflow_id,
+        )
+        self.assertIsNotNone(workflow)
+        request = provider.service.artifacts.read_json(workflow.payload["request_ref"])
+        self.assertEqual(
+            request["skill_refs"],
+            ["pal.channel.provider.development"],
+        )
+        injected: list[str] = []
+
+        def inject(skill_id: str) -> dict[str, str]:
+            injected.append(skill_id)
+            return {"skill_id": skill_id, "system_reminder": reminder}
+
+        self.assertEqual(
+            _workflow_skill_injections(request, inject),
+            [
+                {
+                    "skill_id": "pal.channel.provider.development",
+                    "system_reminder": reminder,
+                }
+            ],
+        )
+        self.assertEqual(injected, ["pal.channel.provider.development"])
+
+    def test_approved_skill_reminder_is_one_user_side_prompt_block(self) -> None:
+        reminder = (
+            "<system-reminder>\n"
+            "Injected skill:\nSkill id: channel-manual\n\n"
+            "Manual:\nFollow the channel contract.\n"
+            "</system-reminder>"
+        )
+        pack = MinionInvocationPack(
+            invocation_id="inv-skill-reminder",
+            instruction="Implement the bound module.",
+            metadata={
+                "initial_skill_injections": [
+                    {"skill_id": "channel-manual", "system_reminder": reminder},
+                    {"skill_id": "channel-manual", "system_reminder": reminder},
+                ]
+            },
+        )
+
+        first_prompt = render_minion_task_prompt(pack)
+        runner_pack = _bind_role_attempt_sandbox(
+            self.runtime_root,
+            pack,
+            run_id="run-skill-reminder",
+            durable_prompt_reused=False,
+        )
+        reconstructed_prompt = render_minion_task_prompt(
+            MinionInvocationPack.from_dict(runner_pack.to_dict())
+        )
+
+        self.assertIn("initial_skill_injections", runner_pack.metadata)
+        self.assertEqual(first_prompt.count("<system-reminder>"), 1)
+        self.assertEqual(first_prompt.count("</system-reminder>"), 1)
+        self.assertEqual(reconstructed_prompt, first_prompt)
+        self.assertLess(
+            first_prompt.index("<system-reminder>"),
+            first_prompt.index("## Execution Discipline"),
+        )
+
+    def test_manager_reuses_skill_inject_system_reminder_projection(self) -> None:
+        from pal.behavior.models import BehaviorSkillModel
+        from pal.foundation import PalV2Database
+        from pal.skill.contracts import SkillDescriptor
+        from pal.skill.repository import SkillRepository
+
+        database = PalV2Database(self.runtime_root / "pal.sqlite3")
+        database.initialize((BehaviorSkillModel,))
+        try:
+            SkillRepository().upsert_skill(
+                SkillDescriptor(
+                    skill_id="manager.manual",
+                    module_id="test",
+                    title="Manager manual",
+                    summary="Exercise Manager-owned injection.",
+                    manual_text="Read the contract before editing.",
+                )
+            )
+        finally:
+            database.close()
+
+        manager = MinionManager(self.runtime_root)
+        try:
+            injected = manager._inject_skill_for_role("manager.manual")
+        finally:
+            if manager._skill_database is not None:
+                manager._skill_database.close()
+
+        self.assertEqual(injected["skill_id"], "manager.manual")
+        self.assertTrue(injected["system_reminder"].startswith("<system-reminder>"))
+        self.assertIn("Read the contract before editing.", injected["system_reminder"])
+
+    def test_durable_role_session_reuses_injected_manual_without_reinjecting(self) -> None:
+        reminder = {
+            "skill_id": "manager.manual",
+            "system_reminder": (
+                "<system-reminder>\n"
+                "Injected skill:\nSkill id: manager.manual\n"
+                "</system-reminder>"
+            ),
+        }
+        worker = SemanticOrchestrator(
+            MinionV2WorkflowService(self.runtime_root),
+            inject_skill=lambda _skill_id: self.fail(
+                "a durable logical role session must not reinject its skill"
+            ),
+        )
+
+        with patch.object(
+            worker,
+            "_durable_session_skill_injections",
+            return_value=[reminder],
+        ):
+            resolved = worker._role_session_skill_injections(
+                request={"skill_refs": ["manager.manual"]},
+                workflow_id="workflow",
+                session_id="coder-session",
+            )
+
+        self.assertEqual(resolved, [reminder])
 
     def test_public_provider_binds_current_workflow_without_exposing_manager_identity(self) -> None:
         wakes: list[str] = []

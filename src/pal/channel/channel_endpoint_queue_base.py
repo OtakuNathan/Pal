@@ -73,12 +73,15 @@ class ChannelEndpointQueueBase(ABC):
         return {}
 
     async def send_message(self, message: str) -> ChannelMessageReceipt:
-        """Accept an active message for this configured endpoint.
+        """Accept an active message for asynchronous delivery.
 
         Reply-oriented transports can reuse their normal outbox when the
         endpoint binding provides an unambiguous default target. Transports
         without such a binding must override this method or reject the
         operation; callers never supply provider-specific target data.
+
+        Completion means the endpoint accepted the message for delivery. It
+        never waits for, or returns, a recipient's business-level response.
         """
         target = self.derive_default_reply_target()
         if not target:

@@ -99,6 +99,7 @@ from pal.minion.v2.skeleton import (
     module_developer_test_path,
     module_verification_corpus_path,
     review_architecture_skeleton,
+    system_verification_corpus_path,
 )
 from pal.minion.v2.task_ledger import (
     TASK_LEDGER_ARTIFACT,
@@ -115,8 +116,7 @@ from pal.minion.v2.swe_verification import (
     infer_repair_target_modules,
 )
 from pal.minion.v2.integration import (
-    CandidateUnionConflict,
-    CandidateUnionService,
+    DeliveryService,
     IntegrationOwnershipDefect,
     IntegrationService,
 )
@@ -130,7 +130,7 @@ from pal.minion.v2.projections import PlanRevisionProjectionStore
 from pal.minion.v2.process_lifecycle import WorkerProcessOwner
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.machines import machine_spec_for
-from pal.minion.v2.review_findings import structured_findings
+from pal.minion.v2.review_findings import structured_advisories, structured_findings
 from pal.minion.v2.replan import (
     ARCHITECTURE_FINDING_BATCH_VIEW_ARTIFACT,
     architecture_finding_semantic_view,
@@ -191,10 +191,10 @@ HumanReviewPublisher = Callable[[Mapping[str, Any]], Awaitable[None]]
 WorkerEventPublisher = Callable[[Mapping[str, Any]], Awaitable[None]]
 BrokerRunRegistrar = Callable[[str, str, MinionInvocationPack, asyncio.subprocess.Process], None]
 BrokerRunUnregistrar = Callable[[str, bool], None]
+SkillInjector = Callable[[str], Mapping[str, str]]
 
 
 EPHEMERAL_ROLE_INPUT_NAMES = frozenset({"workspace_preparation"})
-_DURABLE_WORKSPACE_WRITER_ROLES = frozenset({"architect", "implementation"})
 
 
 def _role_input_is_semantic(name: str, *, role: str, mode: str = "") -> bool:
@@ -287,50 +287,6 @@ def _verifier_reference_refs(
     return references
 
 
-def _publish_git_diff_artifact(
-    *,
-    artifacts: ContentAddressedArtifactStore,
-    worktree: Path,
-    base: str,
-    target: str,
-    paths: list[str],
-    title: str,
-    artifact_type: str,
-    child_refs: tuple[tuple[str, str], ...],
-) -> ArtifactRef:
-    if not base or not target:
-        raise ValueError(f"{title} requires complete Git provenance")
-    command = [
-        "git",
-        "-C",
-        str(worktree),
-        "diff",
-        "--find-renames",
-        "--no-ext-diff",
-        "--no-color",
-        base,
-        target,
-        "--",
-        *sorted(dict.fromkeys(str(path) for path in paths if str(path).strip())),
-    ]
-    completed = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(completed.stderr or completed.stdout or f"failed to create {title}")
-    body = completed.stdout or "(no changes in this bound path set)\n"
-    return artifacts.put_bytes(
-        (title.rstrip() + "\n\n" + body).encode("utf-8"),
-        artifact_type=artifact_type,
-        media_type="text/x-diff",
-        provenance={"owner": "manager", "audience": "verifier"},
-        child_refs=child_refs,
-    )
-
 
 def _module_verifier_git_diff_refs(
     *,
@@ -345,55 +301,33 @@ def _module_verifier_git_diff_refs(
     if not isinstance(architecture_value, Mapping) or not architecture_value.get("sha256"):
         raise ValueError("module verifier requires the accepted architecture skeleton")
     architecture_ref = _ref_from_mapping(architecture_value)
-    architecture = artifacts.read_json(architecture_ref)
-    skeleton_sha = str(architecture.get("skeleton_commit_sha") or "")
-    changed_paths = [str(item) for item in list(candidate.get("changed_paths") or [])]
-    child_refs = (
-        (candidate_ref.sha256, "candidate"),
-        (architecture_ref.sha256, "accepted_skeleton"),
+    base_sha = str(
+        candidate.get("base_sha")
+        or candidate.get("previous_head_sha")
+        or ""
     )
-    refs = {
-        "candidate_diff": _publish_git_diff_artifact(
-            artifacts=artifacts,
-            worktree=review_worktree,
-            base=skeleton_sha,
-            target=candidate_digest,
-            paths=changed_paths,
-            title="Accepted Skeleton -> current Candidate (module-owned paths)",
-            artifact_type="ModuleCandidateGitDiffArtifact",
-            child_refs=child_refs,
-        )
-    }
-    path_policy = dict(node_payload.get("path_policy") or {})
-    if str(path_policy.get("contract_mode") or "file_frozen") == "review_guarded":
-        refs["contract_diff"] = _publish_git_diff_artifact(
-            artifacts=artifacts,
-            worktree=review_worktree,
-            base=skeleton_sha,
-            target=candidate_digest,
-            paths=[str(item) for item in list(path_policy.get("contract_paths") or [])],
-            title=(
-                "Accepted contract shape -> current Candidate. Reject semantic API, ownership, "
-                "lifecycle, state, invariant, error, or compatibility drift."
+    if not base_sha or not candidate_digest:
+        raise ValueError("module verifier requires a complete Git review range")
+    if _git_output(review_worktree, "rev-parse", "HEAD") != candidate_digest:
+        raise ValueError("module verifier worktree is not at the review target")
+    review_range = artifacts.put_json(
+        {
+            "schema_version": "1",
+            "base_sha": base_sha,
+            "target_sha": candidate_digest,
+            "instruction": (
+                "Use git log/show/diff in the bound Module worktree. Git is the "
+                "only source of truth for changed code and tests."
             ),
-            artifact_type="ReviewGuardedContractGitDiffArtifact",
-            child_refs=child_refs,
-        )
-    previous_candidate = str(
-        candidate.get("parent_candidate_digest") or candidate.get("previous_head_sha") or ""
+        },
+        artifact_type="GitReviewRangeArtifact",
+        provenance={"owner": "manager", "audience": "verifier"},
+        child_refs=(
+            (candidate_ref.sha256, "checkpoint"),
+            (architecture_ref.sha256, "accepted_skeleton"),
+        ),
     )
-    if str(candidate.get("parent_candidate_digest") or "") and previous_candidate != candidate_digest:
-        refs["repair_diff"] = _publish_git_diff_artifact(
-            artifacts=artifacts,
-            worktree=review_worktree,
-            base=previous_candidate,
-            target=candidate_digest,
-            paths=changed_paths,
-            title="Previous Candidate -> repaired Candidate (this repair delta)",
-            artifact_type="ModuleRepairGitDiffArtifact",
-            child_refs=child_refs,
-        )
-    return refs
+    return {"candidate_diff": review_range}
 
 
 def _role_session_scope(
@@ -464,11 +398,51 @@ def _role_uses_bound_durable_workspace(
     role: str,
     workspace: Mapping[str, Any],
 ) -> bool:
-    if str(role or "").strip() not in _DURABLE_WORKSPACE_WRITER_ROLES:
-        return False
     repo_path = str(workspace.get("repo_path") or workspace.get("workspace_path") or "").strip()
-    mode = str(dict(workspace.get("workspace_policy") or {}).get("mode") or "").strip().lower()
-    return bool(repo_path) and mode != "read_only_repo"
+    binding = str(workspace.get("workspace_binding") or "").strip().lower()
+    if binding not in {"canonical", "ephemeral_artifact"}:
+        return False
+    return bool(repo_path) and binding == "canonical"
+
+
+def _workflow_skill_injections(
+    request: Mapping[str, Any],
+    inject_skill: SkillInjector | None,
+) -> list[dict[str, str]]:
+    skill_refs = [
+        str(item or "").strip()
+        for item in list(request.get("skill_refs") or [])
+        if str(item or "").strip()
+    ]
+    if skill_refs and inject_skill is None:
+        raise PermanentEffectError("approved skill injection is unavailable in Manager")
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for skill_ref in skill_refs:
+        if skill_ref in seen:
+            continue
+        seen.add(skill_ref)
+        try:
+            injected = dict(inject_skill(skill_ref)) if inject_skill is not None else {}
+        except Exception as exc:
+            raise PermanentEffectError(
+                f"approved skill injection failed: {skill_ref} ({exc})"
+            ) from exc
+        skill_id = str(injected.get("skill_id") or skill_ref).strip()
+        reminder = str(injected.get("system_reminder") or "").strip()
+        if not reminder.startswith("<system-reminder>") or not reminder.endswith(
+            "</system-reminder>"
+        ):
+            raise PermanentEffectError(
+                f"approved skill produced no valid system reminder: {skill_ref}"
+            )
+        result.append(
+            {
+                "skill_id": skill_id,
+                "system_reminder": reminder,
+            }
+        )
+    return result
 
 
 def _prepare_role_workspace_before_environment(
@@ -588,6 +562,7 @@ class SemanticOrchestrator:
     publish_worker_event: WorkerEventPublisher | None = None
     register_broker_run: BrokerRunRegistrar | None = None
     unregister_broker_run: BrokerRunUnregistrar | None = None
+    inject_skill: SkillInjector | None = None
     _processes: dict[str, asyncio.subprocess.Process] = field(default_factory=dict, init=False)
     _process_owners: dict[str, WorkerProcessOwner] = field(default_factory=dict, init=False)
     _run_to_invocation: dict[str, str] = field(default_factory=dict, init=False)
@@ -1615,187 +1590,11 @@ class SemanticOrchestrator:
         self,
         node: AggregateSnapshot,
     ) -> dict[str, Any]:
-        repair_ref_value = dict(node.payload.get("repair_bill_ref") or {})
-        if not repair_ref_value.get("sha256"):
-            return {}
-        repair = dict(self.service.artifacts.read_json(repair_ref_value))
-        if str(repair.get("artifact_kind") or "") != "semantic_repair_packet":
-            return {}
-        test_delta_value = dict(repair.get("test_delta_ref") or {})
-        if not test_delta_value.get("sha256"):
-            raise SubmissionInvariantError(
-                "semantic Repair Packet is missing its verifier test delta"
-            )
-        corpus_scope = dict(
-            dict(node.payload.get("path_policy") or {}).get("verification_corpus")
-            or {}
-        )
-        workspace = Path(str(node.payload.get("workspace_path") or ""))
-        candidate_digest = str(node.payload.get("candidate_digest") or "")
-        if not workspace.is_dir() or not candidate_digest:
-            raise SubmissionInvariantError(
-                "repair worktree or candidate baseline is unavailable"
-            )
-        head = subprocess.run(
-            ["git", "-C", str(workspace), "rev-parse", "HEAD"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        if head.returncode != 0 or head.stdout.strip() != candidate_digest:
-            raise SubmissionInvariantError(
-                "repair worktree is not based on the rejected candidate"
-            )
-        accepted_corpus_hashes = _candidate_corpus_path_hashes(
-            workspace,
-            candidate_baseline_sha=str(node.payload.get("base_sha") or ""),
-            candidate_digest=candidate_digest,
-            corpus_scope=corpus_scope,
-        )
-        if dict(node.payload.get("verifier_test_delta_ref") or {}) == test_delta_value:
-            verifier_test_paths = [
-                str(item)
-                for item in list(node.payload.get("verifier_test_paths") or [])
-                if str(item).strip()
-            ]
-            manager_seeded_corpus_hashes = dict(accepted_corpus_hashes)
-            manager_seeded_corpus_hashes.update(
-                dict(node.payload.get("manager_seeded_corpus_hashes") or {})
-            )
-            # Old projections may predate Manager seeding. Preserve any
-            # already-installed verifier delta when repairing such a node.
-            for path in verifier_test_paths:
-                manager_seeded_corpus_hashes[path] = _workspace_path_hash_or_deleted(
-                    workspace,
-                    path,
-                )
-            return {
-                "verifier_test_delta_ref": test_delta_value,
-                "verifier_test_paths": verifier_test_paths,
-                "manager_seeded_corpus_hashes": manager_seeded_corpus_hashes,
-            }
-        test_delta_ref = ArtifactRef.from_mapping(test_delta_value)
-        test_delta = dict(self.service.artifacts.read_json(test_delta_ref))
-        declared_paths = [
-            str(item)
-            for item in list(
-                test_delta.get("changed_paths")
-                or repair.get("changed_test_paths")
-                or []
-            )
-            if str(item).strip()
-        ]
-        external_paths = [
-            path
-            for path in declared_paths
-            if not _semantic_path_scope_matches(path, corpus_scope)
-        ]
-        if external_paths:
-            return {
-                "verifier_test_delta_ref": test_delta_ref.to_dict(),
-                "external_verifier_test_paths": declared_paths,
-                "verifier_test_paths": [],
-                "manager_seeded_corpus_hashes": accepted_corpus_hashes,
-            }
-        encoded_patch = str(test_delta.get("workspace_patch_base64") or "")
-        patch_bytes = base64.b64decode(encoded_patch, validate=True) if encoded_patch else b""
-        file_entries = [
-            dict(item)
-            for item in list(test_delta.get("files") or [])
-            if isinstance(item, Mapping)
-            and str(dict(item).get("path") or "").startswith("worktree/")
-        ]
-        if not declared_paths and not patch_bytes and not file_entries:
-            if not _verification_corpus_files(workspace, corpus_scope):
-                raise SubmissionInvariantError(
-                    "semantic Repair Packet has no verifier delta and the candidate "
-                    "contains no durable verifier corpus"
-                )
-            return {
-                "verifier_test_delta_ref": test_delta_ref.to_dict(),
-                "verifier_test_paths": [],
-                "manager_seeded_corpus_hashes": accepted_corpus_hashes,
-            }
-        subprocess.run(
-            ["git", "-C", str(workspace), "reset", "--hard", candidate_digest],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
-        for item in file_entries:
-            relative = str(item.get("path") or "").removeprefix("worktree/")
-            target = (workspace / relative).resolve()
-            if not target.is_relative_to(workspace.resolve()):
-                raise SubmissionInvariantError(
-                    f"verifier test path escapes the repair worktree: {relative}"
-                )
-            if target.exists() and target.is_file():
-                target.unlink()
-        if patch_bytes:
-            applied = subprocess.run(
-                ["git", "-C", str(workspace), "apply", "--binary", "-"],
-                input=patch_bytes,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            if applied.returncode != 0:
-                raise SubmissionInvariantError(
-                    "failed to install verifier regression patch: "
-                    + applied.stderr.decode("utf-8", errors="replace")[-4000:]
-                )
-        for item in file_entries:
-            relative = str(item.get("path") or "").removeprefix("worktree/")
-            raw = base64.b64decode(str(item.get("content_base64") or ""), validate=True)
-            if hashlib.sha256(raw).hexdigest() != str(item.get("sha256") or ""):
-                raise SubmissionInvariantError(
-                    f"verifier test artifact hash mismatch: {relative}"
-                )
-            target = workspace / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(raw)
-        changed_paths = _verification_workspace_changed_paths(
-            workspace,
-            candidate_digest,
-        )
-        outside = [
-            path
-            for path in changed_paths
-            if not _semantic_path_scope_matches(path, corpus_scope)
-        ]
-        if outside:
-            subprocess.run(
-                ["git", "-C", str(workspace), "reset", "--hard", candidate_digest],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            raise SubmissionInvariantError(
-                "verifier Repair Packet changed paths outside the module corpus: "
-                + ", ".join(outside)
-            )
-        if not changed_paths:
-            raise SubmissionInvariantError(
-                "semantic Repair Packet installed no verifier regression tests"
-            )
-        candidate_baseline = str(node.payload.get("base_sha") or "")
-        corpus_paths = [
-            path
-            for path in git_changed_paths(workspace, candidate_baseline)
-            if _semantic_path_scope_matches(path, corpus_scope)
-        ]
-        manager_seeded_corpus_hashes = {
-            path: _workspace_path_hash_or_deleted(workspace, path)
-            for path in corpus_paths
-        }
-        return {
-            "verifier_test_delta_ref": test_delta_ref.to_dict(),
-            "verifier_test_paths": changed_paths,
-            "manager_seeded_corpus_hashes": manager_seeded_corpus_hashes,
-        }
+        # Verifier tests are already ordinary commits on the shared Module
+        # branch.  A repair resumes from that HEAD and has nothing to install.
+        return {}
 
-    def _promote_verifier_tests(
+    def _checkpoint_verifier_tests(
         self,
         *,
         node: AggregateSnapshot,
@@ -1803,17 +1602,22 @@ class SemanticOrchestrator:
         candidate_ref: ArtifactRef,
         candidate: Mapping[str, Any],
         candidate_digest: str,
-        test_delta_ref: ArtifactRef,
         changed_test_paths: list[str],
     ) -> tuple[ArtifactRef, str, dict[str, Any]]:
         if self._execution_adapter(node) != SOFTWARE_GIT_ADAPTER:
             raise SubmissionInvariantError(
-                "semantic verifier test promotion currently requires the software Git adapter"
+                "verifier checkpoint currently requires the software Git adapter"
             )
         if not changed_test_paths:
-            raise SubmissionInvariantError("PASS has no verifier test delta to promote")
-        # Include untracked verifier tests in the Manager-owned tree without
-        # granting the verifier Git write authority.
+            raise SubmissionInvariantError("verifier checkpoint has no changed tests")
+        node_workspace = Path(str(node.payload.get("workspace_path") or ""))
+        if (
+            not node_workspace.is_dir()
+            or node_workspace.resolve() != review_workspace.resolve()
+        ):
+            raise SubmissionInvariantError(
+                "Verifier must checkpoint tests in the canonical Module worktree"
+            )
         subprocess.run(
             ["git", "-C", str(review_workspace), "add", "-A", "--"],
             stdout=subprocess.PIPE,
@@ -1827,26 +1631,44 @@ class SemanticOrchestrator:
             text=True,
             check=True,
         ).stdout.strip()
-        baseline_sha = str(candidate.get("base_sha") or "")
-        if not baseline_sha:
-            raise SubmissionInvariantError(
-                "verifier test promotion requires the Candidate baseline SHA"
+        checkpoint_key = hashlib.sha256(
+            f"verifier-checkpoint-v1:{node.aggregate_id}:{candidate_digest}:{tree}".encode(
+                "utf-8"
             )
-        promotion_key = hashlib.sha256(
-            f"squashed-v2:{candidate_digest}:{test_delta_ref.sha256}:{tree}".encode("utf-8")
         ).hexdigest()
-        ref_name = f"refs/pal/verifier-tests/{promotion_key}"
         existing = subprocess.run(
-            ["git", "-C", str(review_workspace), "rev-parse", "--verify", ref_name],
+            [
+                "git",
+                "-C",
+                str(review_workspace),
+                "log",
+                "--all",
+                "--fixed-strings",
+                f"--grep=Pal-Assignment-Key: {checkpoint_key}",
+                "--format=%H",
+                "-n",
+                "1",
+            ],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False,
-        )
-        if existing.returncode == 0:
-            promoted_digest = existing.stdout.strip()
+            check=True,
+        ).stdout.strip()
+        head = _git_output(review_workspace, "rev-parse", "HEAD")
+        if existing:
+            existing_parent = _git_output(review_workspace, "rev-parse", f"{existing}^")
+            existing_tree = _git_output(review_workspace, "rev-parse", f"{existing}^{{tree}}")
+            if existing_parent != candidate_digest or existing_tree != tree:
+                raise SubmissionInvariantError(
+                    "recovered verifier checkpoint does not match its reviewed parent"
+                )
+            checkpoint_digest = existing
         else:
-            promoted_digest = subprocess.run(
+            if head != candidate_digest:
+                raise SubmissionInvariantError(
+                    "Module worktree moved away from the reviewed Coder commit"
+                )
+            checkpoint_digest = subprocess.run(
                 [
                     "git",
                     "-C",
@@ -1858,11 +1680,11 @@ class SemanticOrchestrator:
                     "commit-tree",
                     tree,
                     "-p",
-                    baseline_sha,
+                    candidate_digest,
                     "-m",
                     (
-                        f"promote verifier tests for {node.aggregate_id}\n\n"
-                        f"Pal-Verification-Key: {promotion_key}"
+                        f"minion verifier checkpoint {node.aggregate_id}\n\n"
+                        f"Pal-Assignment-Key: {checkpoint_key}"
                     ),
                 ],
                 stdout=subprocess.PIPE,
@@ -1870,25 +1692,11 @@ class SemanticOrchestrator:
                 text=True,
                 check=True,
             ).stdout.strip()
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(review_workspace),
-                    "update-ref",
-                    ref_name,
-                    promoted_digest,
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-        self._publish_promoted_candidate_to_node_workspace(
-            node=node,
-            review_workspace=review_workspace,
-            source_ref=ref_name,
-            candidate_digest=candidate_digest,
-            promoted_digest=promoted_digest,
+        subprocess.run(
+            ["git", "-C", str(review_workspace), "reset", "--hard", checkpoint_digest],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
         )
         delta_patch = subprocess.run(
             [
@@ -1897,131 +1705,37 @@ class SemanticOrchestrator:
                 str(review_workspace),
                 "diff",
                 "--binary",
-                baseline_sha,
-                promoted_digest,
+                candidate_digest,
+                checkpoint_digest,
                 "--",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=True,
         ).stdout
-        promoted = {
+        checkpoint = {
             **dict(candidate),
-            "candidate_digest": promoted_digest,
+            "candidate_digest": checkpoint_digest,
             "previous_head_sha": candidate_digest,
+            "base_sha": candidate_digest,
             "candidate_tree_sha": tree,
             "delta_patch_sha": hashlib.sha256(delta_patch).hexdigest(),
             "changed_paths": sorted(
                 set(str(item) for item in list(candidate.get("changed_paths") or []))
                 | set(changed_test_paths)
             ),
-            "verifier_test_delta_ref": test_delta_ref.to_dict(),
             "verifier_test_paths": list(changed_test_paths),
-            "candidate_key": promotion_key,
+            "candidate_key": checkpoint_key,
         }
-        promoted_ref = self.service.artifacts.put_json(
-            promoted,
-            artifact_type="CandidateSnapshotArtifact",
-            provenance={"owner": "manager", "promotion": "verifier_tests"},
+        checkpoint_ref = self.service.artifacts.put_json(
+            checkpoint,
+            artifact_type="GitCheckpointArtifact",
+            provenance={"owner": "manager", "role": "verifier"},
             child_refs=(
-                (candidate_ref.sha256, "implementation_candidate"),
-                (test_delta_ref.sha256, "verifier_test_delta"),
+                (candidate_ref.sha256, "previous_checkpoint"),
             ),
         )
-        return promoted_ref, promoted_digest, promoted
-
-    def _publish_promoted_candidate_to_node_workspace(
-        self,
-        *,
-        node: AggregateSnapshot,
-        review_workspace: Path,
-        source_ref: str,
-        candidate_digest: str,
-        promoted_digest: str,
-    ) -> None:
-        node_workspace_text = str(node.payload.get("workspace_path") or "")
-        node_workspace = Path(node_workspace_text) if node_workspace_text else review_workspace
-        if not node_workspace.is_dir():
-            raise SubmissionInvariantError(
-                "verifier test promotion requires the durable Module worktree"
-            )
-        if node_workspace.resolve() == review_workspace.resolve():
-            return
-
-        lock_key = f"verification-promotion:{node.aggregate_id}"
-        _raise_if_workspace_held(
-            node_workspace,
-            "a live process still holds the Module worktree during verifier test promotion",
-        )
-        lock_path = self._worktree_locks.acquire(lock_key, node_workspace)
-        try:
-            _raise_if_workspace_held(
-                node_workspace,
-                "a process reached the Module worktree during verifier test promotion",
-                manager_snapshot_lock=lock_path,
-            )
-            head = subprocess.run(
-                ["git", "-C", str(node_workspace), "rev-parse", "HEAD"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            if head not in {candidate_digest, promoted_digest}:
-                raise SubmissionInvariantError(
-                    "Module worktree moved away from the verified Candidate before test promotion"
-                )
-            dirty = subprocess.run(
-                ["git", "-C", str(node_workspace), "status", "--porcelain"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            if dirty:
-                raise SubmissionInvariantError(
-                    "Module worktree changed before verifier test promotion"
-                )
-            fetched = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(node_workspace),
-                    "fetch",
-                    "--no-tags",
-                    str(review_workspace),
-                    f"+{source_ref}:{source_ref}",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if fetched.returncode != 0:
-                raise SubmissionInvariantError(
-                    "failed to publish verifier tests into the epoch Git repository: "
-                    + (fetched.stderr or fetched.stdout).strip()[-4000:]
-                )
-            imported = subprocess.run(
-                ["git", "-C", str(node_workspace), "rev-parse", "--verify", source_ref],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            if imported != promoted_digest:
-                raise SubmissionInvariantError(
-                    "published verifier test ref does not match the promoted Candidate"
-                )
-            subprocess.run(
-                ["git", "-C", str(node_workspace), "reset", "--hard", promoted_digest],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-            )
-        finally:
-            self._worktree_locks.release(lock_key)
+        return checkpoint_ref, checkpoint_digest, checkpoint
 
     async def _ensure_node_effect_lease(
         self,
@@ -2264,11 +1978,9 @@ class SemanticOrchestrator:
             workspace_override={
                 "kind": "existing_repo",
                 "repo_path": str(node.payload.get("workspace_path") or ""),
+                "workspace_binding": "canonical",
                 "project_name": str(node.payload.get("unit_id") or "unit"),
                 "write_path_scopes": list(compiled_module_write_scopes(path_policy)),
-                "manager_seeded_candidate_paths": sorted(
-                    dict(node.payload.get("manager_seeded_corpus_hashes") or {})
-                ),
                 "read_only_overlay_paths": coder_read_only_overlays,
             },
             prepare_workspace=True,
@@ -2475,23 +2187,6 @@ class SemanticOrchestrator:
             adapter = self._execution_adapter(node)
             if adapter == SOFTWARE_GIT_ADAPTER:
                 base_sha = str(node.payload.get("candidate_digest") or node.payload.get("base_sha") or "")
-                manager_seeded_corpus_hashes = dict(
-                    node.payload.get("manager_seeded_corpus_hashes") or {}
-                )
-                if node.payload.get("repair_bill_ref") and node.payload.get("candidate_digest"):
-                    accepted_corpus_hashes = _candidate_corpus_path_hashes(
-                        Path(str(node.payload.get("workspace_path") or "")),
-                        candidate_baseline_sha=str(node.payload.get("base_sha") or ""),
-                        candidate_digest=str(node.payload.get("candidate_digest") or ""),
-                        corpus_scope=dict(
-                            dict(node.payload.get("path_policy") or {}).get(
-                                "verification_corpus"
-                            )
-                            or {}
-                        ),
-                    )
-                    accepted_corpus_hashes.update(manager_seeded_corpus_hashes)
-                    manager_seeded_corpus_hashes = accepted_corpus_hashes
                 candidate_ref, candidate_digest = CandidateSnapshotService(
                     self.repository,
                     self.service.artifacts,
@@ -2510,9 +2205,7 @@ class SemanticOrchestrator:
                     unit_contract_hash=contract_ref.sha256,
                     dependency_output_hashes=dict(node.payload.get("dependency_output_hashes") or {}),
                     environment_fingerprint=str(node.payload.get("environment_fingerprint") or "default"),
-                    parent_candidate_digest=str(node.payload.get("candidate_digest") or ""),
                     repair_bill_ref=dict(node.payload.get("repair_bill_ref") or {}),
-                    manager_seeded_path_hashes=manager_seeded_corpus_hashes,
                 )
             elif adapter == ARTIFACT_BUNDLE_ADAPTER:
                 try:
@@ -2590,12 +2283,14 @@ class SemanticOrchestrator:
         candidate_ref = _ref_from_mapping(
             node.payload.get("unit_contract_ref") if system_mode else node.payload.get("candidate_ref")
         )
+        adapter = self._execution_adapter(node)
         candidate_digest = str(
-            node.payload.get("system_fingerprint")
+            node.payload.get("system_commit_sha")
+            if system_mode and adapter == SOFTWARE_GIT_ADAPTER
+            else node.payload.get("system_fingerprint")
             if system_mode
             else node.payload.get("candidate_digest") or ""
         )
-        adapter = self._execution_adapter(node)
         if system_mode and adapter == SOFTWARE_GIT_ADAPTER:
             review_workspace = Path(str(node.payload.get("workspace_path") or ""))
             if not review_workspace.is_dir():
@@ -2712,15 +2407,16 @@ class SemanticOrchestrator:
             dict(path_policy.get("developer_tests") or {}).get("path") or ""
         ).strip()
         verification_corpus_path = str(
-            dict(path_policy.get("verification_corpus") or {}).get("path") or ""
+            system_verification_corpus_path()
+            if system_mode
+            else dict(path_policy.get("verification_corpus") or {}).get("path") or ""
         ).strip()
-        if not system_mode:
-            for corpus_path in (
-                developer_test_path,
-                verification_corpus_path,
-            ):
-                if corpus_path:
-                    _ensure_workspace_directory(review_workspace, corpus_path)
+        for corpus_path in (
+            developer_test_path if not system_mode else "",
+            verification_corpus_path,
+        ):
+            if corpus_path:
+                _ensure_workspace_directory(review_workspace, corpus_path)
         verifier_read_only_overlays = [
             *(
                 list(path_policy.get("contract_paths") or [])
@@ -2742,10 +2438,10 @@ class SemanticOrchestrator:
                 RoleMode.SYSTEM if system_mode else RoleMode.MODULE,
             ),
             instruction=(
-                "This is the next Candidate Union assignment in your existing workflow-level verification session. First replay the "
-                "bound durable system corpus and every bound current or historical finding reproducer. Then inspect the current union "
-                "diff and affected contract graph and run a diff-risk check for newly introduced defects. Submit one outcome bound to "
-                "this union; no earlier verdict settles it."
+                "This is the next Integration commit in your existing workflow-level verification session. First replay the "
+                "bound durable system corpus and every bound current or historical finding reproducer. Then inspect the current "
+                "Integration diff and affected contract graph and run a diff-risk check for newly introduced defects. Submit one "
+                "outcome bound to this Integration commit; no earlier verdict settles it."
                 if system_mode
                 else "This is the next Candidate assignment in your existing module verification session. First replay the bound "
                 "developer and verification corpora plus every bound current or historical RepairBill reproducer. Then inspect the "
@@ -2756,21 +2452,27 @@ class SemanticOrchestrator:
             workspace_override={
                 "kind": "existing_repo",
                 "repo_path": str(review_workspace),
+                "workspace_binding": (
+                    "canonical"
+                    if adapter == SOFTWARE_GIT_ADAPTER
+                    else "ephemeral_artifact"
+                ),
                 "project_name": str(node.payload.get("unit_id") or "unit"),
                 "review_scratch_dir": str(review_scratch),
                 "workspace_policy": {
-                    "mode": (
-                        "read_only_repo"
-                        if system_mode
-                        else "writable_git_branch"
-                    )
+                    "mode": "writable_git_branch"
                 },
                 "system_verification": system_mode,
                 "verification_scratch_only": (
-                    system_mode or adapter != SOFTWARE_GIT_ADAPTER
+                    adapter != SOFTWARE_GIT_ADAPTER
                 ),
                 "write_path_scopes": (
-                    []
+                    [
+                        {
+                            "kind": "directory",
+                            "path": system_verification_corpus_path(),
+                        }
+                    ]
                     if system_mode
                     else [
                         dict(
@@ -2852,8 +2554,10 @@ class SemanticOrchestrator:
             errors.append(f"unknown semantic verification outcome: {outcome or '<missing>'}")
         try:
             findings = structured_findings(submission)
+            advisories = structured_advisories(submission)
         except ValueError as exc:
             findings = []
+            advisories = []
             errors.append(str(exc))
         reason = str(submission.get("reason") or "").strip()
         if outcome not in {"pass", "unknown"} and not findings:
@@ -2904,27 +2608,21 @@ class SemanticOrchestrator:
             errors.append(
                 "verification requires a current-Candidate diff-risk check after regressions"
             )
-        scratch_only = system_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
+        scratch_only = execution_adapter != SOFTWARE_GIT_ADAPTER
         changed_paths = (
             _verification_scratch_paths(review_scratch)
             if scratch_only
             else _verification_workspace_changed_paths(review_workspace, candidate_digest)
         )
-        submitted_changed_paths = sorted(
-            {
-                str(item).replace("\\", "/")
-                for item in list(submission.get("changed_test_paths") or [])
-                if str(item).strip()
-            }
-        )
-        if changed_paths != submitted_changed_paths:
-            errors.append(
-                "verifier test paths changed after semantic submission: submitted "
-                f"{submitted_changed_paths}, current {changed_paths}"
+        corpus_scope = (
+            {"kind": "directory", "path": system_verification_corpus_path()}
+            if system_mode
+            else dict(
+                dict(node.payload.get("path_policy") or {}).get(
+                    "verification_corpus"
+                )
+                or {}
             )
-        corpus_scope = dict(
-            dict(node.payload.get("path_policy") or {}).get("verification_corpus")
-            or {}
         )
         outside = [] if scratch_only else [
             path
@@ -3267,8 +2965,9 @@ class SemanticOrchestrator:
         )
         outcome = str(submission.get("outcome") or "").strip()
         findings = structured_findings(submission)
+        advisories = structured_advisories(submission)
         reason = str(submission.get("reason") or "").strip()
-        scratch_only = system_mode or execution_adapter != SOFTWARE_GIT_ADAPTER
+        scratch_only = execution_adapter != SOFTWARE_GIT_ADAPTER
         candidate_git_base = str(
             pending.get("candidate_git_base")
             or (
@@ -3286,20 +2985,15 @@ class SemanticOrchestrator:
                 candidate_digest,
             )
         )
-        submitted_changed_paths = sorted(
-            {
-                str(item).replace("\\", "/")
-                for item in list(submission.get("changed_test_paths") or [])
-                if str(item).strip()
-            }
-        )
-        if changed_paths != submitted_changed_paths:
-            raise SubmissionInvariantError(
-                "verifier test paths changed between submission and snapshot"
+        corpus_scope = (
+            {"kind": "directory", "path": system_verification_corpus_path()}
+            if system_mode
+            else dict(
+                dict(node.payload.get("path_policy") or {}).get(
+                    "verification_corpus"
+                )
+                or {}
             )
-        corpus_scope = dict(
-            dict(node.payload.get("path_policy") or {}).get("verification_corpus")
-            or {}
         )
         outside = [] if scratch_only else [
             path
@@ -3316,29 +3010,28 @@ class SemanticOrchestrator:
             for item in list(submission.get("tool_receipts") or [])
             if isinstance(item, Mapping)
         ]
-        test_workspace_ref = self._publish_verification_workspace(
-            review_worktree=review_workspace,
-            review_scratch=review_scratch,
-            candidate_identity=candidate_digest,
-            git_base_sha=candidate_git_base,
-            execution_adapter=execution_adapter,
-            include_candidate_patch=not scratch_only,
+        workspace_evidence_ref = (
+            self._publish_verification_evidence(
+                review_scratch=review_scratch,
+                candidate_identity=candidate_digest,
+            )
+            if scratch_only
+            else None
         )
         accepted_candidate_ref = candidate_ref
         accepted_candidate_digest = candidate_digest
         accepted_candidate = dict(candidate)
-        if outcome == "pass" and not scratch_only and changed_paths:
+        if not scratch_only and changed_paths:
             (
                 accepted_candidate_ref,
                 accepted_candidate_digest,
                 accepted_candidate,
-            ) = self._promote_verifier_tests(
+            ) = self._checkpoint_verifier_tests(
                 node=node,
                 review_workspace=review_workspace,
                 candidate_ref=candidate_ref,
                 candidate=candidate,
                 candidate_digest=candidate_digest,
-                test_delta_ref=test_workspace_ref,
                 changed_test_paths=changed_paths,
             )
         receipts_ref = self.service.artifacts.put_json(
@@ -3357,8 +3050,7 @@ class SemanticOrchestrator:
             if outcome == "unknown"
             else VerificationStatus.FAIL
         )
-        report_ref = self.service.artifacts.put_json(
-            {
+        report_payload = {
                 "schema_version": "2",
                 "module_name": str(
                     node.payload.get("module_name") or node.payload.get("unit_id") or ""
@@ -3366,26 +3058,32 @@ class SemanticOrchestrator:
                 "outcome": outcome,
                 "status": status.value,
                 "findings": findings,
+                "advisories": advisories,
                 "unknown_reason": reason,
                 "changed_test_paths": changed_paths,
                 "candidate_ref": accepted_candidate_ref.to_dict(),
                 "implementation_candidate_ref": candidate_ref.to_dict(),
-                "test_delta_ref": test_workspace_ref.to_dict(),
                 "tool_receipts_ref": receipts_ref.to_dict(),
                 **(
                     {"system_fingerprint": str(node.payload.get("system_fingerprint") or "")}
                     if system_mode
                     else {}
                 ),
-            },
+            }
+        if workspace_evidence_ref is not None:
+            report_payload["workspace_evidence_ref"] = workspace_evidence_ref.to_dict()
+        report_children = [
+            (accepted_candidate_ref.sha256, "candidate"),
+            (candidate_ref.sha256, "implementation_candidate"),
+            (receipts_ref.sha256, "tool_receipts"),
+        ]
+        if workspace_evidence_ref is not None:
+            report_children.append((workspace_evidence_ref.sha256, "workspace_evidence"))
+        report_ref = self.service.artifacts.put_json(
+            report_payload,
             artifact_type="VerificationArtifact",
             provenance={"owner": "manager", "source_role": "verifier"},
-            child_refs=(
-                (accepted_candidate_ref.sha256, "candidate"),
-                (candidate_ref.sha256, "implementation_candidate"),
-                (test_workspace_ref.sha256, "test_delta"),
-                (receipts_ref.sha256, "tool_receipts"),
-            ),
+            child_refs=tuple(report_children),
         )
         defect_kind = {
             "verification_repairs": DefectKind.VERIFICATION,
@@ -3428,7 +3126,7 @@ class SemanticOrchestrator:
                 {
                     "outcome": outcome,
                     "findings": findings,
-                    "test_delta": test_workspace_ref.sha256,
+                    "changed_test_paths": changed_paths,
                     "receipt_hashes": [str(item.get("output_sha256") or "") for item in receipts],
                     "candidate_tree": _candidate_tree_fingerprint(
                         accepted_candidate,
@@ -3454,7 +3152,6 @@ class SemanticOrchestrator:
                     "findings": findings,
                     "candidate_ref": candidate_ref.to_dict(),
                     "verification_ref": report_ref.to_dict(),
-                    "test_delta_ref": test_workspace_ref.to_dict(),
                     "changed_test_paths": changed_paths,
                     "tool_receipts_ref": receipts_ref.to_dict(),
                     "regression_commands": [
@@ -3468,7 +3165,6 @@ class SemanticOrchestrator:
                 provenance={"owner": "manager", "source_role": "verifier"},
                 child_refs=(
                     (report_ref.sha256, "verification"),
-                    (test_workspace_ref.sha256, "test_delta"),
                     (receipts_ref.sha256, "tool_receipts"),
                 ),
             )
@@ -3507,10 +3203,18 @@ class SemanticOrchestrator:
             module_node_ids=(repair_node_ids if module_node_id else ()),
             system_fingerprint=str(node.payload.get("system_fingerprint") or ""),
             accepted_candidate_ref=(
-                accepted_candidate_ref if outcome == "pass" and not scratch_only else None
+                accepted_candidate_ref
+                if not system_mode
+                and not scratch_only
+                and accepted_candidate_digest != candidate_digest
+                else None
             ),
             accepted_candidate_digest=(
-                accepted_candidate_digest if outcome == "pass" and not scratch_only else ""
+                accepted_candidate_digest
+                if not system_mode
+                and not scratch_only
+                and accepted_candidate_digest != candidate_digest
+                else ""
             ),
         )
         self.repository.release_lease(lease_resource, invocation_id, fencing_token)
@@ -3649,7 +3353,7 @@ class SemanticOrchestrator:
                 await self._release_managed_lsp_workspace(review_workspace)
                 _raise_if_workspace_held(
                     review_workspace,
-                    "node verifier still holds its review worktree",
+                    "node verifier still holds its canonical Module worktree",
                 )
         self._worktree_locks.release(node.aggregate_id)
         self._worktree_locks.release(f"verification:{node.aggregate_id}")
@@ -3916,17 +3620,15 @@ class SemanticOrchestrator:
             None,
         )
         if integration is None:
-            return await self._publish_skeleton_candidate_union(effect, epoch, epoch_nodes)
+            return await self._publish_skeleton_delivery(effect, epoch, epoch_nodes)
         verification_ref = _ref_from_mapping(integration.payload.get("verification_artifact_ref"))
         adapter = self._execution_adapter(integration)
         if adapter == SOFTWARE_GIT_ADAPTER:
-            workflow_branch = str(integration.payload.get("workflow_branch") or "").strip()
-            if not workflow_branch:
-                raise ValueError("integration publisher requires the bound workflow branch")
-            deliverable_ref = IntegrationService(self.service.artifacts).publish_final_deliverable(
-                repository=Path(str(integration.payload.get("workspace_path") or "")),
-                integration_candidate_digest=str(integration.payload.get("candidate_digest") or ""),
-                branch_name=workflow_branch,
+            repository = Path(str(integration.payload.get("workspace_path") or ""))
+            deliverable_ref = self._publish_verified_git_delivery(
+                epoch=epoch,
+                delivery_node=integration,
+                repository=repository,
                 verification_ref=verification_ref,
             )
         elif adapter == ARTIFACT_BUNDLE_ADAPTER:
@@ -3955,13 +3657,17 @@ class SemanticOrchestrator:
         )
         return {"result_artifact_ref": deliverable_ref.to_dict()}
 
-    async def _publish_skeleton_candidate_union(
+    async def _publish_skeleton_delivery(
         self,
         effect: Mapping[str, Any],
         epoch: AggregateSnapshot,
         nodes: list[AggregateSnapshot],
     ) -> Mapping[str, Any]:
-        implementation = [item for item in nodes if str(item.payload.get("node_kind") or "unit") == "unit"]
+        implementation = [
+            item
+            for item in nodes
+            if str(item.payload.get("node_kind") or "unit") == "unit"
+        ]
         system_nodes = [
             item
             for item in nodes
@@ -3973,99 +3679,26 @@ class SemanticOrchestrator:
             or any(item.state != "ACCEPTED" for item in nodes)
         ):
             raise ValueError(
-                "final candidate union requires every module and the single System Verifier ACCEPTED"
+                "final delivery requires every Module and the System Verifier ACCEPTED"
             )
         system_node = system_nodes[0]
-        verification_ref = dict(system_node.payload.get("verification_artifact_ref") or {})
-        if not verification_ref.get("sha256"):
-            raise ValueError("accepted System Verifier has no VerificationArtifact")
-        system_fingerprint = str(system_node.payload.get("system_fingerprint") or "")
-        if not system_fingerprint:
-            raise ValueError("accepted System Verifier has no system fingerprint")
-        ordered = _topological_implementation_nodes(implementation)
-        common_git_dir = Path(str(ordered[0].payload.get("common_git_dir") or ""))
-        skeleton_sha = str(epoch.payload.get("skeleton_commit_sha") or "")
-        if not common_git_dir.is_dir() or not skeleton_sha:
-            raise ValueError("candidate union requires the accepted skeleton Git repository")
-        workflow_branch = str(ordered[0].payload.get("workflow_branch") or "").strip()
-        workflow_key = str(ordered[0].payload.get("workflow_key") or "").strip()
-        if not workflow_branch or not workflow_key:
-            raise ValueError("candidate union requires the bound workflow branch and worktree key")
-        publish_worktree = common_git_dir.parent / "worktrees" / workflow_key / "publish"
-        branch = workflow_branch
-        if not publish_worktree.exists():
-            publish_worktree.parent.mkdir(parents=True, exist_ok=True)
-            completed = subprocess.run(
-                [
-                    "git",
-                    f"--git-dir={common_git_dir}",
-                    "worktree",
-                    "add",
-                    str(publish_worktree),
-                    branch,
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError(completed.stderr or completed.stdout or "failed to create publish worktree")
-        else:
-            subprocess.run(["git", "-C", str(publish_worktree), "reset", "--hard", skeleton_sha], check=True)
-            subprocess.run(["git", "-C", str(publish_worktree), "clean", "-fd"], check=True)
-        candidates = [
-            {
-                "module_name": str(node.payload.get("module_name") or node.payload.get("unit_id") or ""),
-                "candidate_digest": str(node.payload.get("candidate_digest") or ""),
-                "candidate_ref": dict(node.payload.get("candidate_ref") or {}),
-            }
-            for node in ordered
-        ]
-        service = CandidateUnionService(self.service.artifacts)
-        try:
-            union_ref, commit_sha = service.compose(
-                publish_worktree=publish_worktree,
-                ordered_candidates=candidates,
-                architecture_skeleton_ref=dict(epoch.payload.get("architecture_manifest_ref") or {}),
-            )
-        except CandidateUnionConflict as exc:
-            finding_ref = self.service.artifacts.put_json(
-                {
-                    "finding_kind": "architecture_defect",
-                    "summary": str(exc),
-                    "affected_modules": [item["module_name"] for item in candidates],
-                    "source": "final_candidate_union",
-                },
-                artifact_type="ArchitectureFindingArtifact",
-            )
-            current = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="REGISTER_REPLAN_FINDING",
-                    workflow_id=epoch.workflow_id,
-                    aggregate_type=AggregateType.EXECUTION_EPOCH,
-                    aggregate_id=epoch.aggregate_id,
-                    actor="minion-v2-manager",
-                    expected_version=current.version,
-                    idempotency_key=f"union-conflict:{finding_ref.sha256}",
-                    payload={
-                        "finding_artifact_ref": finding_ref.to_dict(),
-                        "finding_fingerprint": finding_ref.sha256,
-                        "source_node": "final_candidate_union",
-                    },
-                )
-            )
-            return {"result_artifact_ref": finding_ref.to_dict()}
-        deliverable_ref = service.publish(
-            repository=publish_worktree,
-            union_ref=union_ref,
-            commit_sha=commit_sha,
-            branch_name=workflow_branch,
-            verification_refs=[verification_ref],
-            system_fingerprint=system_fingerprint,
+        verification_ref = _ref_from_mapping(
+            system_node.payload.get("verification_artifact_ref")
         )
-        current = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
+        integration_worktree = Path(
+            str(system_node.payload.get("workspace_path") or "")
+        )
+        if not integration_worktree.is_dir():
+            raise ValueError("final delivery requires the canonical Integration worktree")
+        deliverable_ref = self._publish_verified_git_delivery(
+            epoch=epoch,
+            delivery_node=system_node,
+            repository=integration_worktree,
+            verification_ref=verification_ref,
+        )
+        current = self.repository.read_snapshot(
+            AggregateType.EXECUTION_EPOCH, epoch.aggregate_id
+        )
         self.repository.dispatch(
             ActionEnvelope(
                 action_type="FINAL_DELIVERABLE_PUBLISHED",
@@ -4079,6 +3712,58 @@ class SemanticOrchestrator:
             )
         )
         return {"result_artifact_ref": deliverable_ref.to_dict()}
+
+    def _publish_verified_git_delivery(
+        self,
+        *,
+        epoch: AggregateSnapshot,
+        delivery_node: AggregateSnapshot,
+        repository: Path,
+        verification_ref: ArtifactRef,
+    ) -> ArtifactRef:
+        if not repository.is_dir():
+            raise ValueError("delivery requires the canonical Integration worktree")
+        commit_sha = _git_output(repository, "rev-parse", "HEAD")
+        manifest_ref = _ref_from_mapping(epoch.payload.get("architecture_manifest_ref"))
+        manifest = dict(self.service.artifacts.read_json(manifest_ref))
+        snapshot_value = manifest.get("workspace_snapshot_ref")
+        source_snapshot: dict[str, Any]
+        if isinstance(snapshot_value, Mapping) and snapshot_value.get("sha256"):
+            source_snapshot = dict(
+                self.service.artifacts.read_json(_ref_from_mapping(snapshot_value))
+            )
+        else:
+            source_snapshot = {"delivery_mode": "local_only"}
+        workflow = self.repository.read_snapshot(
+            AggregateType.WORKFLOW, epoch.workflow_id
+        )
+        if workflow is None:
+            raise ValueError("delivery workflow is unavailable")
+        request = workflow_request_from_snapshot(self.service, workflow)
+        repository_layout = dict(manifest.get("repository_layout") or {})
+        workflow_key = str(
+            delivery_node.payload.get("workflow_key")
+            or repository_layout.get("workflow_key")
+            or epoch.workflow_id
+        )
+        task_title = str(
+            request.get("title")
+            or request.get("goal")
+            or request.get("objective")
+            or "Minion delivery"
+        )
+        return DeliveryService(
+            self.service.runtime_root,
+            self.service.artifacts,
+        ).publish(
+            workflow_id=epoch.workflow_id,
+            workflow_key=workflow_key,
+            task_title=task_title,
+            repository=repository,
+            commit_sha=commit_sha,
+            source_snapshot=source_snapshot,
+            verification_ref=verification_ref,
+        )
 
     async def _run_standalone_review(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         review = self._effect_snapshot(effect)
@@ -4144,6 +3829,11 @@ class SemanticOrchestrator:
             workspace_override={
                 "kind": "existing_repo",
                 "repo_path": str(review_repo),
+                "workspace_binding": (
+                    "canonical"
+                    if skeleton_review
+                    else "ephemeral_artifact"
+                ),
                 "project_name": "standalone-review",
                 "review_scratch_dir": str(review_scratch),
             },
@@ -4158,6 +3848,7 @@ class SemanticOrchestrator:
             )
             case_specs = _verification_case_specs(plan.get("cases"))
             findings = _standalone_review_findings(plan, case_specs)
+            advisories = structured_advisories(plan)
         except Exception as exc:
             raise SubmissionInvariantError(
                 f"accepted review_submit failed manager defense-in-depth validation: {exc}"
@@ -4175,12 +3866,9 @@ class SemanticOrchestrator:
             mode="standalone",
             draft_kind="standalone_review",
         )
-        test_workspace_ref = self._publish_verification_workspace(
-            review_worktree=review_repo,
+        test_workspace_ref = self._publish_verification_evidence(
             review_scratch=review_scratch,
             candidate_identity=base_sha,
-            git_base_sha=base_sha,
-            execution_adapter=SOFTWARE_GIT_ADAPTER,
         )
         status = _standalone_review_status(plan, results)
         report_ref = self.service.artifacts.put_json(
@@ -4189,6 +3877,9 @@ class SemanticOrchestrator:
                 "status": status.value,
                 "cases": [item.to_dict() for item in results],
                 "findings": [semantic_finding_payload(item) for item in findings],
+                "advisories": [
+                    semantic_finding_payload(item) for item in advisories
+                ],
                 "reviewer_summary": str(plan.get("reviewer_summary") or ""),
                 "scope": plan.get("scope") or {},
                 "reviewed_surfaces": list(plan.get("reviewed_surfaces") or []),
@@ -4751,6 +4442,7 @@ class SemanticOrchestrator:
             workspace_override: dict[str, Any] = {
                 "kind": "existing_repo",
                 "repo_path": str(architecture_workspace.worktree),
+                "workspace_binding": "canonical",
                 "project_name": architecture_workspace.project_name,
                 "architecture_skeleton_mode": True,
                 "architecture_base_sha": architecture_workspace.base_sha,
@@ -5540,6 +5232,7 @@ class SemanticOrchestrator:
                 workspace_override={
                     "kind": "existing_repo",
                     "repo_path": str(review_worktree),
+                    "workspace_binding": "canonical",
                     "project_name": "architecture-review",
                     "architecture_skeleton_mode": True,
                 },
@@ -6246,7 +5939,7 @@ class SemanticOrchestrator:
             invocation_acceptance = [
                 "Write only the declaration-level code skeleton in the bound architecture worktree; never compile, build, test, link, or execute it.",
                 "Finish only when boundaries and responsibilities, unique state/resource owners, contracts, and closed lifecycle/joins are declared and implementation details are explicitly deferred.",
-                "Keep the complete semantic module graph and real end-to-end scenarios in the Manager-preseeded architecture.yaml, then call architecture_submit with no arguments.",
+                "First settle the complete semantic module graph and real end-to-end scenarios from task.yaml and necessary repository context. Only then read the Manager-preseeded architecture.yaml; after reading it, immediately begin file-edit tool calls rather than spending another response restating or rehearsing the settled design. Encode the design and call architecture_submit with no arguments.",
             ]
         elif skeleton_mode and activation == RoleActivation(
             OrchestrationRole.REVIEWER,
@@ -6255,7 +5948,7 @@ class SemanticOrchestrator:
             invocation_acceptance = [
                 "Before reading a bound reference, investigate what its supplied path currently contains and choose a matching tool; never pass an unclassified path to read_file or assume it is a file. Once an exact file is known, read it directly without repeating discovery.",
                 "Review the bound task.yaml ledger in order, the skeleton diff, code contracts, semantic dependencies, and scenarios; reconcile every exact Manager-recorded question and answer.",
-                "Treat the Manager-derived tests/<module_name>/developer and tests/<module_name>/verification corpora as implementation and verification infrastructure: they are intentionally absent from Architect-declared paths and scenarios, so their absence is not a defect.",
+                "Treat the Manager-derived tests/<module_name>/developer and tests/<module_name>/verifier corpora as implementation and verification infrastructure: they are intentionally absent from Architect-declared paths and scenarios, so their absence is not a defect.",
                 "Compile only focused declaration/protocol consumers to confirm contracts compose; compilation is not product behavior proof and must not require implementation bodies.",
                 "For every Requirement and observable scenario claim, trace the declared interface semantics from a concrete entrypoint through data/state/error transitions to a legal terminal; API availability or hypothetical implementation support is insufficient.",
                 "For every module, verify responsibility, dependency handoffs and consumed outputs, input/output/error/invariant contracts, ownership, lifecycle, optional state machine, and agreement between architecture.yaml and declaration comments.",
@@ -6265,14 +5958,14 @@ class SemanticOrchestrator:
             ]
         elif activation.role == OrchestrationRole.VERIFIER:
             invocation_acceptance = [
-                "For module verification, read and run both durable corpora; extend only tests/<module_name>/verification and only for a demonstrated coverage gap, while tests/<module_name>/developer remains read-only. For scenario verification, reuse or extend probes only in durable review scratch. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
+                "For module verification, read and run both durable corpora; extend only tests/<module_name>/verifier and only for a demonstrated coverage gap, while tests/<module_name>/developer remains read-only. For system verification, extend only tests/system/verifier. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
                 "For this assignment, first record every required current/historical regression, then record a current-Candidate diff-risk check for newly introduced defects. A failing regression blocks PASS but never skips the diff-risk phase.",
                 "Call exactly one semantic verification outcome tool; do not construct a VerificationPlan or evidence JSON.",
             ]
         elif activation.role == OrchestrationRole.IMPLEMENTATION:
             if self._is_skeleton_manifest(snapshot.payload.get("architecture_manifest_ref")):
                 invocation_acceptance = [
-                    "Implement or repair only the bound module, write focused tests only in tests/<module_name>/developer, and keep tests/<module_name>/verification read-only.",
+                    "Implement or repair only the bound module, write focused tests only in tests/<module_name>/developer, and keep tests/<module_name>/verifier read-only.",
                     "Maintain the compact durable checklist with update_checklist; it is a micro-plan, not evidence. Complete it, run the minimum sufficient self-check with ordinary shell or LSP tools, then call candidate_submit with no arguments.",
                 ]
             else:
@@ -6729,6 +6422,20 @@ class SemanticOrchestrator:
         }:
             raise SubmissionInvariantError(
                 f"role assignment cannot start from {assignment['state']}"
+            )
+        if not durable_prompt_reused:
+            pack_value = pack.to_dict()
+            metadata = dict(pack_value.get("metadata") or {})
+            metadata["initial_skill_injections"] = self._role_session_skill_injections(
+                request=request,
+                workflow_id=snapshot.workflow_id,
+                session_id=invocation_id,
+            )
+            pack = MinionInvocationPack.from_dict(
+                {
+                    **pack_value,
+                    "metadata": metadata,
+                }
             )
         attempt = self.repository.claim_role_assignment(str(assignment["assignment_id"]))
         assignment_lease_resource = f"assignment:{assignment['assignment_id']}"
@@ -7219,6 +6926,52 @@ class SemanticOrchestrator:
             return None
         return prompt_ref
 
+    def _durable_session_skill_injections(
+        self,
+        *,
+        workflow_id: str,
+        session_id: str,
+    ) -> list[dict[str, str]] | None:
+        for assignment in self.repository.list_role_assignments(
+            workflow_id=workflow_id,
+        ):
+            if str(assignment.get("session_id") or "") != str(session_id):
+                continue
+            prompt_ref = self._durable_assignment_prompt_ref(assignment)
+            if prompt_ref is None:
+                continue
+            prompt = MinionInvocationPack.from_dict(
+                dict(self.service.artifacts.read_json(prompt_ref))
+            )
+            return [
+                {
+                    "skill_id": str(item.get("skill_id") or ""),
+                    "system_reminder": str(item.get("system_reminder") or ""),
+                }
+                for item in list(
+                    dict(prompt.metadata or {}).get("initial_skill_injections") or []
+                )
+                if isinstance(item, Mapping)
+                and str(item.get("skill_id") or "").strip()
+                and str(item.get("system_reminder") or "").strip()
+            ]
+        return None
+
+    def _role_session_skill_injections(
+        self,
+        *,
+        request: Mapping[str, Any],
+        workflow_id: str,
+        session_id: str,
+    ) -> list[dict[str, str]]:
+        prior = self._durable_session_skill_injections(
+            workflow_id=workflow_id,
+            session_id=session_id,
+        )
+        if prior is not None:
+            return prior
+        return _workflow_skill_injections(request, self.inject_skill)
+
     def _terminal_from_assignment_receipt(
         self,
         assignment: Mapping[str, Any],
@@ -7706,28 +7459,12 @@ class SemanticOrchestrator:
             journal=journal,
         )
 
-    def _publish_verification_workspace(
+    def _publish_verification_evidence(
         self,
         *,
-        review_worktree: Path,
         review_scratch: Path,
         candidate_identity: str,
-        git_base_sha: str,
-        execution_adapter: str,
-        include_candidate_patch: bool = True,
     ) -> ArtifactRef:
-        patch_bytes = b""
-        if execution_adapter == SOFTWARE_GIT_ADAPTER and include_candidate_patch:
-            if not git_base_sha:
-                raise SubmissionInvariantError(
-                    "Git verification workspace publication requires an explicit Git base SHA"
-                )
-            patch_bytes = subprocess.run(
-                ["git", "-C", str(review_worktree), "diff", "--binary", git_base_sha, "--"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            ).stdout
         files: list[dict[str, Any]] = []
         total_bytes = 0
         for root in (review_scratch,):
@@ -7743,53 +7480,14 @@ class SemanticOrchestrator:
                         "content_base64": base64.b64encode(raw).decode("ascii"),
                     }
                 )
-        untracked = (
-            subprocess.run(
-                ["git", "-C", str(review_worktree), "ls-files", "--others", "--exclude-standard", "-z"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            ).stdout.split(b"\0")
-            if execution_adapter == SOFTWARE_GIT_ADAPTER and include_candidate_patch
-            else []
-        )
-        for raw_path in (item for item in untracked if item):
-            relative = raw_path.decode("utf-8", errors="surrogateescape")
-            path = review_worktree / relative
-            if not path.is_file() or path.is_symlink():
-                continue
-            raw = path.read_bytes()
-            total_bytes += len(raw)
-            if total_bytes > 5 * 1024 * 1024:
-                raise ValueError("verification test artifact exceeds 5 MiB")
-            files.append(
-                {
-                    "path": f"worktree/{relative}",
-                    "sha256": hashlib.sha256(raw).hexdigest(),
-                    "content_base64": base64.b64encode(raw).decode("ascii"),
-                }
-            )
         return self.service.artifacts.put_json(
             {
-                "schema_version": "1",
-                # The semantic identity may be a scenario SHA-256. Only the
-                # separately supplied Git base may be passed to Git commands.
-                "candidate_digest": candidate_identity,
+                "schema_version": "2",
                 "candidate_identity": candidate_identity,
-                "git_base_sha": git_base_sha,
-                "workspace_patch_base64": base64.b64encode(patch_bytes).decode("ascii"),
-                "changed_paths": (
-                    _verification_workspace_changed_paths(
-                        review_worktree,
-                        git_base_sha,
-                    )
-                    if execution_adapter == SOFTWARE_GIT_ADAPTER
-                    and include_candidate_patch
-                    else _verification_scratch_paths(review_scratch)
-                ),
+                "changed_paths": _verification_scratch_paths(review_scratch),
                 "files": files,
             },
-            artifact_type="VerificationTestWorkspaceArtifact",
+            artifact_type="VerificationWorkspaceEvidenceArtifact",
         )
 
 
@@ -7798,14 +7496,11 @@ def _bind_architecture_yaml_draft(pack: MinionInvocationPack) -> MinionInvocatio
     workspace = dict(value.get("workspace") or {})
     path = prepare_architecture_draft_file(workspace)
     guidance = (
-        f" The complete topology Draft is preseeded at `{path}`. Read that file before changing topology. "
-        "It is control-plane metadata, not product source. Its fixed YAML shape is: "
-        "`schema_version: 4`; `requirements` maps stable snake_case keys to `{claim, owner, contract_path}`; "
-        "`modules` maps stable names to a complete Module Protocol containing module_kind, behavior_kind, responsibility, dependencies, contract inputs/outputs/errors/invariants, ownership, lifecycle, optional state_machine, and paths; "
-        "each dependency names a provider and declares consumed output keys, purpose, and handoff; each implementation scope is `{kind: file|directory, path: relative/path}`. "
-        "`scenarios` maps stable names to `{modules, requirement_refs, entrypoint, contract_flow, observable_behavior, failure_behavior, environment}`. "
-        "Map every binding Requirement exactly enough to identify its owner and public contract path, and consume every mapping from at least one scenario. Do not write test cases or algorithms in this metadata. "
-        "Edit this preseeded file with read_file plus edit_file/write_file. Do not recreate unchanged revision entries."
+        f" The complete topology Draft is preseeded at `{path}`. It is the submission format for the design, not a discovery input or design checklist. "
+        "First read task.yaml, inspect only the repository context needed to understand existing public boundaries, and settle the smallest complete module-level design. "
+        "Only after that design is settled, read the preseeded architecture.yaml and follow its commented template to encode the design as the complete semantic DAG. "
+        "After reading the template, immediately begin edit_file/write_file calls; do not spend another response restating, rehearsing, simulating, or drafting the settled design in prose. "
+        "Do not write test cases or algorithms in this metadata. Edit the preseeded file with read_file plus edit_file/write_file, and do not recreate unchanged revision entries."
     )
     return MinionInvocationPack.from_dict(
         {
@@ -7848,12 +7543,16 @@ def _skeleton_architect_instruction(
     has_revision_scope: bool,
 ) -> str:
     instruction = (
-        "Author the current Architecture Skeleton in the bound worktree. Read the ordered read-only task ledger, perform the required "
-        "consistency pass, then fill the Manager-preseeded architecture.yaml and matching public declarations. This work is strictly "
-        "module-level declaration: define boundaries, contracts, ownership, lifecycle, invariants, optional state machines, and scenario "
-        "composition; never implement product behavior, private algorithms, test bodies, or build machinery. Use the task-selected language. "
-        "Ask the user only for an unresolved requirement or scope-changing decision. Call architecture_submit after the complete YAML and "
-        "declaration skeleton agree."
+        "Author the current Architecture Skeleton in the bound worktree. First read the ordered read-only task ledger, perform the required "
+        "consistency pass, and inspect only the repository context needed to understand existing public boundaries. Then settle the smallest "
+        "complete module-level design: define responsibilities and boundaries, directional public contracts and dependency handoffs, ownership, "
+        "lifecycle, invariants, observable errors, optional state machines, and meaningful end-to-end scenario composition. Do not read "
+        "architecture.yaml during discovery or use its fields as a design checklist. Once the design is settled, read the Manager-preseeded "
+        "architecture.yaml and immediately begin file-edit tool calls; do not spend another response restating, rehearsing, simulating, or "
+        "drafting the settled design in prose. Encode that design according to the commented structure and write the matching public declarations. This work is "
+        "strictly module-level declaration: never implement "
+        "product behavior, private algorithms, test bodies, or build machinery. Use the task-selected language. Ask the user only for an unresolved "
+        "requirement or scope-changing decision. Call architecture_submit after the complete YAML and declaration skeleton agree."
     )
     if has_base_manifest:
         instruction += (
@@ -7944,19 +7643,26 @@ def _verification_workspace_from_prompt_pack(
     artifacts: ContentAddressedArtifactStore,
     prompt_ref: ArtifactRef | Mapping[str, Any],
 ) -> tuple[Path, Path]:
-    """Resolve the isolated workspace actually bound to a verifier process."""
+    """Resolve the Manager-bound workspace actually used by the verifier.
+
+    Software verifiers work directly in the canonical Module or Integration
+    worktree shared with the corresponding producer.  Other adapters may still
+    receive an attempt-local role workspace.  The immutable prompt pack records
+    which ownership model was selected.
+    """
 
     prompt_pack = artifacts.read_json(prompt_ref)
     workspace = dict(prompt_pack.get("workspace") or {})
-    if not bool(workspace.get("v2_role_workspace")):
+    binding = str(workspace.get("workspace_binding") or "").strip().lower()
+    if binding != "canonical" and not bool(workspace.get("v2_role_workspace")):
         raise SubmissionInvariantError(
-            "verifier prompt pack is not bound to an isolated role workspace"
+            "verifier prompt pack is not bound to a canonical or isolated role workspace"
         )
     review_workspace = Path(str(workspace.get("repo_path") or ""))
     review_scratch = Path(str(workspace.get("review_scratch_dir") or ""))
     if not review_workspace.is_dir():
         raise SubmissionInvariantError(
-            "verifier prompt pack references an unavailable role workspace"
+            "verifier prompt pack references an unavailable bound workspace"
         )
     if not review_scratch.is_dir():
         raise SubmissionInvariantError(
@@ -8041,86 +7747,6 @@ def _ensure_workspace_directory(workspace: Path, relative_path: str) -> Path:
     target.mkdir(parents=True, exist_ok=True)
     return target
 
-
-def _workspace_path_hash_or_deleted(workspace: Path, relative_path: str) -> str:
-    root = workspace.resolve()
-    target = (root / str(relative_path)).resolve()
-    if not target.is_relative_to(root):
-        raise SubmissionInvariantError(
-            f"verification corpus path escapes the repair worktree: {relative_path}"
-        )
-    if not target.exists():
-        return "deleted"
-    if not target.is_file() or target.is_symlink():
-        raise SubmissionInvariantError(
-            f"verification corpus path is not a regular file: {relative_path}"
-        )
-    return hashlib.sha256(target.read_bytes()).hexdigest()
-
-
-def _candidate_corpus_path_hashes(
-    workspace: Path,
-    *,
-    candidate_baseline_sha: str,
-    candidate_digest: str,
-    corpus_scope: Mapping[str, Any],
-) -> dict[str, str]:
-    """Hash Manager-owned corpus changes already present in an accepted candidate."""
-
-    if not candidate_baseline_sha or not candidate_digest or not corpus_scope:
-        return {}
-    changed = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(workspace),
-            "diff",
-            "--name-only",
-            "--no-renames",
-            "-z",
-            candidate_baseline_sha,
-            candidate_digest,
-            "--",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if changed.returncode != 0:
-        raise SubmissionInvariantError(
-            "cannot project the accepted candidate verification corpus: "
-            + changed.stderr.decode("utf-8", errors="replace")[-4000:]
-        )
-    paths = [
-        item.decode("utf-8", errors="surrogateescape")
-        for item in changed.stdout.split(b"\0")
-        if item
-    ]
-    hashes: dict[str, str] = {}
-    for path in paths:
-        if not _semantic_path_scope_matches(path, corpus_scope):
-            continue
-        blob = subprocess.run(
-            ["git", "-C", str(workspace), "show", f"{candidate_digest}:{path}"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if blob.returncode == 0:
-            hashes[path] = hashlib.sha256(blob.stdout).hexdigest()
-            continue
-        exists = subprocess.run(
-            ["git", "-C", str(workspace), "cat-file", "-e", f"{candidate_digest}:{path}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if exists.returncode == 0:
-            raise SubmissionInvariantError(
-                f"cannot read accepted verification corpus path: {path}"
-            )
-        hashes[path] = "deleted"
-    return hashes
 
 
 def _named_json_output(terminal: Mapping[str, Any], filename: str) -> dict[str, Any]:
@@ -8416,6 +8042,7 @@ def _parse_architecture_review(payload: Mapping[str, Any]) -> SkeletonReviewResu
     verdict = str(payload.get("verdict") or "").strip().upper()
     if verdict not in {"PASS", "FAIL"}:
         raise ValueError("architecture review verdict must be PASS or FAIL")
+    structured_advisories(payload)
     findings = tuple(
         SkeletonReviewFinding(
             finding_key=str(item["finding_key"]),
@@ -8437,6 +8064,7 @@ def _parse_skeleton_review(payload: Mapping[str, Any]) -> SkeletonReviewResult:
     verdict = str(payload.get("verdict") or "").strip().upper()
     if verdict not in {"PASS", "FAIL"}:
         raise ValueError("architecture skeleton review verdict must be PASS or FAIL")
+    structured_advisories(payload)
     raw_findings = structured_findings(payload)
     findings = tuple(
         SkeletonReviewFinding(
@@ -9192,6 +8820,15 @@ def _compile_standalone_review_markdown(report: Mapping[str, Any]) -> str:
                 label += f"::{str(item['symbol'])}"
             lines.append(f"- Location: {label}")
 
+    advisories = [
+        dict(item or {}) for item in list(report.get("advisories") or [])
+    ]
+    if advisories:
+        lines.extend(("", "## Optional Advisories"))
+        for advisory in advisories:
+            summary_text = str(advisory.get("summary") or "Advisory").strip()
+            lines.append(f"- {summary_text}")
+
     cases = [dict(item or {}) for item in list(report.get("cases") or [])]
     lines.extend(("", "## Verification Cases"))
     if not cases:
@@ -9333,27 +8970,19 @@ def _safe_component(value: str) -> str:
     return "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in value)
 
 
-def _topological_implementation_nodes(nodes: list[AggregateSnapshot]) -> list[AggregateSnapshot]:
-    by_id = {item.aggregate_id: item for item in nodes}
-    pending = {
-        item.aggregate_id: {
-            str(dependency)
-            for dependency in list(item.payload.get("contract_dependency_node_ids") or [])
-            if str(dependency) in by_id
-        }
-        for item in nodes
-    }
-    ordered: list[AggregateSnapshot] = []
-    while pending:
-        ready = sorted(node_id for node_id, dependencies in pending.items() if not dependencies)
-        if not ready:
-            raise ValueError("implementation Candidate graph contains a cycle during final union")
-        for node_id in ready:
-            ordered.append(by_id[node_id])
-            pending.pop(node_id)
-        for dependencies in pending.values():
-            dependencies.difference_update(ready)
-    return ordered
+def _git_output(worktree: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(worktree), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            completed.stderr or completed.stdout or "Git command failed"
+        )
+    return completed.stdout.strip()
 
 
 def _raise_if_workspace_held(

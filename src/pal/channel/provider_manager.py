@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import inspect
 import re
 import sys
@@ -20,8 +21,8 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
 RUNTIME_CHANNEL_PROVIDER_DIR = "channel/providers"
+RUNTIME_CHANNEL_DATA_DIR = "data/channel"
 CHANNEL_PROVIDER_MANIFEST_FILENAME = "provider.toml"
-PACKAGED_CHANNEL_PROVIDER_DIR = Path(__file__).resolve().parent / "providers"
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,9 @@ class ChannelProviderContext:
     repository: ChannelEndpointRepository
     runtime_root: Path
 
+    def endpoint_data_root(self, endpoint_id: str) -> Path:
+        return channel_endpoint_data_root(self.runtime_root, endpoint_id)
+
 
 @dataclass(frozen=True)
 class ChannelProviderBuildContext:
@@ -48,6 +52,10 @@ class ChannelProviderBuildContext:
     provider_dir: Path
     manifest: RuntimeChannelProviderManifest
     manager: Any
+
+    @property
+    def channel_data_root(self) -> Path:
+        return self.runtime_root / RUNTIME_CHANNEL_DATA_DIR
 
 
 class ChannelProvider(Protocol):
@@ -611,22 +619,10 @@ def build_default_channel_provider_manager(
 
 
 def _runtime_provider_dirs(runtime_root: Path) -> tuple[Path, ...]:
-    # Packaged providers make a wheel self-contained. Runtime-root providers are
-    # scanned afterwards so an explicitly installed provider can override the
-    # packaged implementation with the same provider id.
-    candidates = (
-        PACKAGED_CHANNEL_PROVIDER_DIR,
-        runtime_root / RUNTIME_CHANNEL_PROVIDER_DIR,
-    )
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for path in candidates:
-        resolved = path.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        unique.append(path)
-    return tuple(unique)
+    # Channel providers are external runtime-owned components. Keeping this
+    # search rooted exclusively in the selected runtime prevents a packaged
+    # site-packages copy and a deployed copy from drifting independently.
+    return (runtime_root / RUNTIME_CHANNEL_PROVIDER_DIR,)
 
 
 def _iter_runtime_provider_manifest_paths(providers_dir: Path) -> tuple[Path, ...]:
@@ -685,35 +681,49 @@ def _runtime_provider_entrypoint_path(manifest: RuntimeChannelProviderManifest) 
 
 
 def _runtime_provider_module_name(entrypoint_path: Path, *, root: Path, provider_id: str) -> str:
-    try:
-        relative = entrypoint_path.resolve().relative_to(root.resolve())
-    except ValueError:
-        relative = Path(entrypoint_path.name)
-    stem = re.sub(r"[^0-9A-Za-z_]+", "_", str(relative))
     provider_stem = re.sub(r"[^0-9A-Za-z_]+", "_", provider_id)
-    return f"_pal_runtime_channel_provider_{provider_stem}_{stem}"
+    module_stem = re.sub(r"[^0-9A-Za-z_]+", "_", entrypoint_path.stem)
+    return f"_pal_runtime_channel_provider_{provider_stem}.{module_stem}"
 
 
 def _load_source_module(module_name: str, module_path: Path) -> types.ModuleType:
-    source = module_path.read_text(encoding="utf-8")
-    module = types.ModuleType(module_name)
-    module.__file__ = str(module_path)
-    module.__package__ = ""
-    provider_dir = str(module_path.parent)
-    inserted = False
-    if provider_dir not in sys.path:
-        sys.path.insert(0, provider_dir)
-        inserted = True
+    provider_dir = module_path.parent.resolve()
+    package_name, separator, _ = module_name.rpartition(".")
+    if not separator:
+        package_name = f"{module_name}_package"
+        module_name = f"{package_name}.{module_path.stem}"
+    package = sys.modules.get(package_name)
+    if package is None:
+        package = types.ModuleType(package_name)
+        package.__file__ = str(provider_dir)
+        package.__package__ = package_name
+        package.__path__ = [str(provider_dir)]  # type: ignore[attr-defined]
+        package.__spec__ = importlib.util.spec_from_loader(
+            package_name,
+            loader=None,
+            is_package=True,
+        )
+        sys.modules[package_name] = package
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not create import spec for channel provider: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     try:
-        sys.modules[module_name] = module
-        exec(compile(source, str(module_path), "exec"), module.__dict__)  # noqa: S102
-    finally:
-        if inserted:
-            try:
-                sys.path.remove(provider_dir)
-            except ValueError:
-                pass
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
     return module
+
+
+def channel_endpoint_data_root(runtime_root: Path, endpoint_id: str) -> Path:
+    normalized = str(endpoint_id or "").strip()
+    if not normalized:
+        raise ValueError("channel endpoint_id is required for provider data")
+    if normalized in {".", ".."} or "/" in normalized or "\\" in normalized:
+        raise ValueError(f"channel endpoint_id is not a safe data directory name: {normalized!r}")
+    return Path(runtime_root) / RUNTIME_CHANNEL_DATA_DIR / normalized
 
 
 def _provider_from_module(module: types.ModuleType, *, context: ChannelProviderBuildContext) -> ChannelProvider:

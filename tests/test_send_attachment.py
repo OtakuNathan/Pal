@@ -9,12 +9,17 @@ from types import SimpleNamespace
 from pal.channel import ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.endpoints.socket_endpoint import SocketChannelEndpoint
-from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpoint, _telegram_markdown
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.llm import CanonicalToolCall
 from pal.shared import EventKind, SourceKind
+from tests.runtime_channel_providers import telegram_endpoint_module
+
+
+_telegram_module = telegram_endpoint_module()
+TelegramChannelEndpoint = _telegram_module.TelegramChannelEndpoint
+_telegram_markdown = _telegram_module._telegram_markdown
 
 
 class _AttachmentEndpoint(ChannelEndpointQueueBase):

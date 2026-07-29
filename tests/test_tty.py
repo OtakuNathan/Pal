@@ -87,6 +87,7 @@ def _build_repl(
     ids: list[str],
     open_error: BaseException | None = None,
     read_error: BaseException | None = None,
+    interaction_selector=None,
 ) -> tuple[TtyRepl, _FakeWriter, Console]:
     writer = _FakeWriter()
     event_iterator = iter(events)
@@ -109,6 +110,7 @@ def _build_repl(
         read_message=read_message,
         request_id_factory=lambda: next(id_iterator),
         prompt_session=_FakePrompt(inputs),
+        interaction_selector=interaction_selector,
         renderer=TtyRenderer(OutputBoundary(console)),
     )
     return repl, writer, console
@@ -167,6 +169,27 @@ class SocketSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"slash_command", writer.written)
         self.assertIn(b"hello", writer.written)
         self.assertIn(b"/status", writer.written)
+
+    async def test_send_interaction_result_keeps_action_semantics_server_side(self) -> None:
+        writer = _FakeWriter()
+        session = SocketSession(
+            object(),
+            writer,
+            lambda _reader: None,
+            lambda: "request-id",
+        )
+
+        request_id = await session.send_interaction_result(
+            interaction_id="choose-model",
+            button_token="b1",
+        )
+
+        self.assertEqual(request_id, "request-id")
+        self.assertIn(b"interaction_result", writer.written)
+        self.assertIn(b"choose-model", writer.written)
+        self.assertIn(b"b1", writer.written)
+        self.assertNotIn(b"action_key", writer.written)
+        self.assertNotIn(b"action_args", writer.written)
 
     async def test_send_maps_write_failure_to_disconnected(self) -> None:
         session = SocketSession(
@@ -346,6 +369,133 @@ class TtyReplTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("final", rendered)
         self.assertTrue(writer.closed)
 
+    async def test_inline_interaction_renders_numbered_choices_and_submits_token(self) -> None:
+        repl, writer, console = _build_repl(
+            [
+                {
+                    "type": "interactive_open",
+                    "request_id": "r1",
+                    "interaction": {
+                        "interaction_id": "choose-model",
+                        "interaction_kind": "model_select",
+                        "text": "Choose the active model.",
+                        "buttons": [
+                            [{"label": "Fast", "token": "b0"}],
+                            [{"label": "Deep", "token": "b1"}],
+                        ],
+                        "expires_at": None,
+                    },
+                },
+                {"type": "done", "request_id": "r1", "finish_reason": "stop"},
+                {
+                    "type": "interactive_resolve",
+                    "request_id": "r2",
+                    "interaction": {
+                        "interaction_id": "choose-model",
+                        "interaction_kind": "model_select",
+                        "text": "Active model: Deep",
+                        "buttons": [],
+                        "expires_at": None,
+                    },
+                },
+                {"type": "done", "request_id": "r2", "finish_reason": "stop"},
+            ],
+            ["/model", "invalid", "2", "/exit"],
+            ids=["r1", "r2"],
+        )
+
+        await repl.run()
+
+        rendered = console.file.getvalue()
+        self.assertIn("Choose the active model.", rendered)
+        self.assertIn("1. Fast", rendered)
+        self.assertIn("2. Deep", rendered)
+        self.assertIn("0. Cancel", rendered)
+        self.assertIn("Choose a number from 1 to 2, or 0 to cancel.", rendered)
+        self.assertIn("Active model: Deep", rendered)
+        self.assertIn(b"interaction_result", writer.written)
+        self.assertIn(b"choose-model", writer.written)
+        self.assertIn(b"b1", writer.written)
+        self.assertNotIn(b"action_key", writer.written)
+        self.assertTrue(writer.closed)
+
+    async def test_inline_interaction_can_be_locally_cancelled_without_action(self) -> None:
+        repl, writer, _console_value = _build_repl(
+            [
+                {
+                    "type": "interactive_open",
+                    "request_id": "r1",
+                    "interaction": {
+                        "interaction_id": "control-panel",
+                        "interaction_kind": "control_panel",
+                        "text": "Choose an action.",
+                        "buttons": [[{"label": "Status", "token": "b0"}]],
+                    },
+                },
+                {"type": "done", "request_id": "r1", "finish_reason": "stop"},
+                {"type": "text_delta", "request_id": "r2", "text": "hello"},
+                {"type": "done", "request_id": "r2", "finish_reason": "stop"},
+            ],
+            ["/control", "0", "hello", "/exit"],
+            ids=["r1", "r2"],
+        )
+
+        await repl.run()
+
+        self.assertNotIn(b"interaction_result", writer.written)
+        self.assertIn(b"hello", writer.written)
+        self.assertTrue(writer.closed)
+
+    async def test_injected_navigation_selector_submits_selected_token(self) -> None:
+        seen_interactions = []
+
+        async def interaction_selector(interaction):
+            seen_interactions.append(interaction)
+            return "b1"
+
+        repl, writer, _console_value = _build_repl(
+            [
+                {
+                    "type": "interactive_open",
+                    "request_id": "r1",
+                    "interaction": {
+                        "interaction_id": "choose-model",
+                        "interaction_kind": "model_select",
+                        "text": "Choose a model.",
+                        "buttons": [[
+                            {"label": "Fast", "token": "b0"},
+                            {"label": "Deep", "token": "b1"},
+                        ]],
+                    },
+                },
+                {"type": "done", "request_id": "r1", "finish_reason": "stop"},
+                {
+                    "type": "interactive_resolve",
+                    "request_id": "r2",
+                    "interaction": {
+                        "interaction_id": "choose-model",
+                        "interaction_kind": "model_select",
+                        "text": "Active model: Deep",
+                        "buttons": [],
+                    },
+                },
+                {"type": "done", "request_id": "r2", "finish_reason": "stop"},
+            ],
+            ["/model", "/exit"],
+            ids=["r1", "r2"],
+            interaction_selector=interaction_selector,
+        )
+
+        await repl.run()
+
+        self.assertEqual(
+            [interaction.interaction_id for interaction in seen_interactions],
+            ["choose-model"],
+        )
+        self.assertIn(b"interaction_result", writer.written)
+        self.assertIn(b"b1", writer.written)
+        self.assertTrue(writer.closed)
+
     async def test_connect_failure_is_rendered_without_open_writer(self) -> None:
         repl, writer, console = _build_repl(
             [],
@@ -372,6 +522,46 @@ class TtyReplTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("socket closed by peer", console.file.getvalue())
         self.assertTrue(writer.closed)
+
+
+class TtyReasoningRendererTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_terminal_reasoning_is_one_status_not_raw_token_spam(self) -> None:
+        console = _console(terminal=False)
+        renderer = TtyRenderer(OutputBoundary(console))
+
+        await renderer.thinking_delta("!!!!,,,,....")
+        await renderer.thinking_delta("repeated private reasoning")
+        await renderer.thinking_delta("repeated private reasoning")
+        await renderer.thinking_close()
+
+        rendered = console.file.getvalue()
+        self.assertEqual(rendered.count("[thinking]"), 1)
+        self.assertNotIn("!!!!", rendered)
+        self.assertNotIn("private reasoning", rendered)
+
+    async def test_terminal_reasoning_uses_one_bounded_transient_live_region(self) -> None:
+        console = _console(terminal=True)
+        _FakeLive.instances.clear()
+        renderer = TtyRenderer(
+            OutputBoundary(console),
+            live_factory=_FakeLive,
+        )
+
+        await renderer.thinking_delta("......")
+        await renderer.thinking_delta("inspect the active contract")
+        await renderer.thinking_delta("inspect the active contract")
+        await renderer.thinking_delta("x" * 600)
+        await renderer.thinking_close()
+
+        self.assertEqual(len(_FakeLive.instances), 1)
+        live = _FakeLive.instances[0]
+        self.assertTrue(live.started)
+        self.assertTrue(live.stopped)
+        self.assertEqual(len(live.updates), 2)
+        preview = live.updates[-1]
+        self.assertLessEqual(len(preview.plain), 252)
+        self.assertTrue(preview.plain.startswith("[thinking] …"))
+        self.assertEqual(console.file.getvalue(), "")
 
 
 class AssistantBodyRendererTests(unittest.TestCase):

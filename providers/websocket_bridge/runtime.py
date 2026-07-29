@@ -1,16 +1,8 @@
-"""Runtime-root channel provider declarations for the WebSocket bridge (review_guarded).
+"""Runtime-root-only channel provider declarations for the WebSocket bridge (review_guarded).
 
-Responsibility: own the WebSocket sidecar subprocess lifecycle and expose it as a
-TRANSPORT-LIFECYCLE channel endpoint through ``ChannelEndpointProviderManager``,
-reusing the existing socket channel for ALL message semantics.
-
-This is intentionally NOT a parallel WebSocket channel. The bridge endpoint
-performs no direct message ingress: inbound WebSocket messages are delivered by
-the sidecar into the existing socket channel user-message path, and replies flow
-back over the socket channel. Active send is exposed through the standard
-endpoint ``send_message(message)`` contract; provider-specific peer addressing
-remains private. No new WebSocket message kind, envelope schema, control
-protocol, or message semantics is introduced.
+Responsibility: own the WebSocket sidecar subprocess and the provider-private
+Unix channel used to exchange messages with the local Pal runtime.  The bridge
+never routes peer traffic through the ordinary TTY ``pal.sock``.
 
 This file declares the public provider and endpoint surface only. Subprocess
 supervision, sidecar RPC health/shutdown, and introspection wiring are private
@@ -41,8 +33,8 @@ from pal.channel.contracts import (
     ChannelDeliveryError,
     ChannelMessageReceipt,
     EndpointConfig,
-    ResponseHandle,
 )
+from pal.channel.endpoints import SocketChannelEndpoint
 from pal.channel.models import ChannelEndpointModel
 from pal.channel.provider_manager import (
     ChannelProvider,
@@ -57,6 +49,10 @@ from pal.foundation.sidecar import (
 )
 from pal.shared import IntrospectionResult, RuntimeStatus
 from pal.shared.result_rendering import render_titled_structured_for_llm
+try:
+    from .protocol import render_peer_input
+except ImportError:
+    from protocol import render_peer_input  # type: ignore[no-redef]
 
 
 logger = logging.getLogger(__name__)
@@ -64,8 +60,8 @@ logger = logging.getLogger(__name__)
 PROVIDER_ID = "websocket_bridge"
 ENDPOINT_TYPE = "websocket_bridge"
 
-# The sidecar process and its manager socket live under
-# ``<runtime_root>/data/websocket_bridge/`` (the repo SidecarEndpoint convention).
+# Each endpoint keeps its sidecar sockets under
+# ``<runtime_root>/data/channel/<endpoint_id>/``.
 SIDECAR_NAME = "websocket_bridge"
 
 # Environment variable used to hand the serialized ``SidecarConfig`` to the child
@@ -79,10 +75,13 @@ _CONFIG_ENV = "PAL_WEBSOCKET_BRIDGE_CONFIG"
 # handle and the manager-socket supervision.
 _SIDECAR_BOOTSTRAP = (
     "import asyncio, json, os, pathlib\n"
+    "from pal.foundation.service_logging import configure_process_logging\n"
+    "configure_process_logging(component='pal.channel.providers.websocket_bridge.sidecar')\n"
     "from sidecar import serve, SidecarConfig\n"
     "payload = json.loads(os.environ['PAL_WEBSOCKET_BRIDGE_CONFIG'])\n"
     "payload['runtime_root'] = pathlib.Path(payload['runtime_root'])\n"
-    "payload['socket_channel_path'] = pathlib.Path(payload['socket_channel_path'])\n"
+    "payload['data_root'] = pathlib.Path(payload['data_root'])\n"
+    "payload['bridge_socket_path'] = pathlib.Path(payload['bridge_socket_path'])\n"
     "asyncio.run(serve(SidecarConfig(**payload)))\n"
 )
 
@@ -92,32 +91,23 @@ PROVIDER_DIR = Path(__file__).resolve().parent
 
 
 @dataclass
-class WebSocketBridgeEndpoint(ChannelEndpointQueueBase):
-    """Transport-lifecycle channel endpoint owning the sidecar subprocess.
+class WebSocketBridgeEndpoint(SocketChannelEndpoint):
+    """A real channel endpoint backed by a provider-private Unix socket.
 
-    Performs no direct message ingress and adds no channel semantics. It starts/stops
-    the sidecar process on ``start_async``/``stop_async`` (called by
-    ``ChannelRuntime``) and reports provider-owned health/auth/backlog. All
-    message semantics are reused from the existing socket channel.
-
-    Like the sibling ``TelegramChannelEndpoint``/``SocketChannelEndpoint``, this
-    is a ``@dataclass`` subclass whose added fields all carry defaults, so it
-    stays constructible with the base ``ChannelEndpointQueueBase`` constructor
-    (whose only required field is ``endpoint``). The provider's ``create_endpoint``
-    factory populates ``runtime_root``/``socket_channel_path``/``binding_metadata``
-    from the ``channel_endpoints`` row, mirroring how the telegram factory injects
-    ``runtime_root`` and binding data.
+    The inherited framed-session plumbing is shared with the ordinary socket
+    endpoint, but the path and endpoint identity are independent.  This makes
+    peer-source tagging and reply routing mechanical without involving
+    ``socket_default`` or ``pal.sock``.
     """
 
     runtime_root: Any = None
-    socket_channel_path: Any = None
+    data_root: Path | None = None
     binding_metadata: dict[str, Any] = field(default_factory=dict)
     # Lifecycle tunables (overridable per-instance, e.g. in tests).
     startup_probe_seconds: float = 5.0
     shutdown_rpc_seconds: float = 3.0
     shutdown_wait_seconds: float = 2.0
     rpc_timeout_seconds: float = 3.0
-    message_timeout_seconds: float = 3000.0
     _process: Any = field(default=None, init=False, repr=False)
     _startup_error: str = field(default="", init=False, repr=False)
     # Test/injection hook: when set, spawn this command instead of the default
@@ -125,52 +115,70 @@ class WebSocketBridgeEndpoint(ChannelEndpointQueueBase):
     _sidecar_command_override: tuple[str, ...] | None = field(default=None, init=False, repr=False)
 
     async def start_async(self) -> None:
-        """Spawn and supervise the sidecar subprocess (repo sidecar conventions)."""
-        if self._process is not None and self._process.poll() is None:
+        """Bind the private channel socket, then spawn and supervise the sidecar."""
+        if (
+            self._process is not None
+            and self._process.poll() is None
+            and self.server is not None
+        ):
             return
-        if not self.runtime_root or not self.socket_channel_path:
-            self._startup_error = "bridge endpoint missing runtime_root or socket_channel_path"
+        if not self.runtime_root or not self.socket_path:
+            self._startup_error = "bridge endpoint missing runtime_root or bridge_socket_path"
             return
         self._startup_error = ""
+        if self._process is not None and self._process.poll() is None:
+            _force_terminate(self._process)
+        self._process = None
         try:
+            await super().start_async()
             process = self._spawn_sidecar()
         except Exception as exc:  # pragma: no cover - defensive spawn guard
             self._startup_error = f"sidecar spawn failed: {exc.__class__.__name__}: {exc}"
             self._process = None
             logger.exception("websocket bridge sidecar failed to spawn")
+            with contextlib.suppress(Exception):
+                await super().stop_async()
             return
         self._process = process
         await self._await_sidecar_ready(process)
+        if self._startup_error:
+            if process.poll() is None:
+                _force_terminate(process)
+            self._process = None
+            with contextlib.suppress(Exception):
+                await cleanup_sidecar_endpoint(self._manager_endpoint())
+            with contextlib.suppress(Exception):
+                await super().stop_async()
 
     async def stop_async(self) -> None:
-        """Cleanly shut down the sidecar subprocess and release the manager socket."""
+        """Cleanly stop the sidecar and release both provider-owned sockets."""
         process = self._process
-        if process is None:
-            return
-        loop = asyncio.get_running_loop()
-        # Best-effort clean shutdown over the manager socket RPC.
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(
-                self._rpc_client().request("shutdown"),
-                timeout=self.shutdown_rpc_seconds,
-            )
-        exited = await self._await_exit(process, loop, self.shutdown_wait_seconds)
-        if not exited:
-            _force_terminate(process)
+        if process is not None:
+            loop = asyncio.get_running_loop()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    self._rpc_client().request("shutdown"),
+                    timeout=self.shutdown_rpc_seconds,
+                )
+            exited = await self._await_exit(process, loop, self.shutdown_wait_seconds)
+            if not exited:
+                _force_terminate(process)
         self._process = None
         with contextlib.suppress(Exception):
             await cleanup_sidecar_endpoint(self._manager_endpoint())
+        await super().stop_async()
 
     def normalize_raw(self, payload: Any) -> dict[str, Any]:
-        """No ingress: the bridge never normalizes inbound messages into the runtime."""
-        return {}
-
-    def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
-        """No channel replies: replies flow over the existing socket channel."""
-        return
+        """Normalize private-socket ingress and append receiver-owned identity."""
+        normalized = super().normalize_raw(payload)
+        normalized["text"] = render_peer_input(
+            str(normalized.get("text") or ""),
+            self.endpoint.endpoint_id,
+        )
+        return normalized
 
     async def send_message(self, message: str) -> ChannelMessageReceipt:
-        """Initiate one ordinary peer message and return its socket reply."""
+        """Accept one ordinary peer message for asynchronous delivery."""
         process = self._process
         if process is None or process.poll() is not None:
             raise ChannelDeliveryError(
@@ -179,21 +187,17 @@ class WebSocketBridgeEndpoint(ChannelEndpointQueueBase):
                 reason="sidecar_unavailable",
             )
         try:
-            result = await self._rpc_client(
-                request_timeout_seconds=self.message_timeout_seconds + 5.0
-            ).request("send_message", {"message": message})
+            result = await self._rpc_client().request("send_message", {"message": message})
         except SidecarRpcError as exc:
-            reason = "response_timeout" if exc.kind == "timeout" else "websocket_send_failed"
             raise ChannelDeliveryError(
                 str(exc),
                 permanent=False,
-                reason=reason,
+                reason="websocket_send_failed",
             ) from exc
         return ChannelMessageReceipt(
             endpoint_id=self.endpoint.endpoint_id,
             message_id=str(result.get("message_id") or ""),
-            status="completed",
-            response_text=str(result.get("response") or ""),
+            status="accepted",
         )
 
     def inspect_health(self) -> dict[str, Any]:
@@ -203,6 +207,8 @@ class WebSocketBridgeEndpoint(ChannelEndpointQueueBase):
         health: dict[str, Any] = {
             "endpoint_id": self.endpoint.endpoint_id,
             "process_running": process_running,
+            "channel_socket_bound": self.server is not None,
+            "channel_socket_path": str(self.socket_path or ""),
             "listener_bound": False,
             "connected_peers": 0,
             "last_error": self._startup_error,
@@ -220,7 +226,7 @@ class WebSocketBridgeEndpoint(ChannelEndpointQueueBase):
         health["listener_bound"] = bool(result.get("listener_bound"))
         health["connected_peers"] = int(result.get("connected_peers") or 0)
         health["last_error"] = str(result.get("last_error") or "")
-        health["healthy"] = bool(health["listener_bound"])
+        health["healthy"] = bool(health["listener_bound"] and health["channel_socket_bound"])
         return health
 
     def inspect_auth_state(self) -> dict[str, Any]:
@@ -239,9 +245,15 @@ class WebSocketBridgeEndpoint(ChannelEndpointQueueBase):
     # -- private sidecar supervision ----------------------------------------
 
     def _manager_endpoint(self) -> SidecarEndpoint:
+        data_root = (
+            Path(self.data_root)
+            if self.data_root is not None
+            else Path(str(self.socket_path)).parent
+        )
         return SidecarEndpoint(
             runtime_root=Path(str(self.runtime_root)),
             name=SIDECAR_NAME,
+            runtime_dir_override=data_root,
         )
 
     def _rpc_client(self, *, request_timeout_seconds: float | None = None) -> SidecarRpcClient:
@@ -261,9 +273,15 @@ class WebSocketBridgeEndpoint(ChannelEndpointQueueBase):
 
     def _sidecar_config_payload(self) -> dict[str, Any]:
         metadata = dict(self.binding_metadata or {})
+        data_root = (
+            Path(self.data_root)
+            if self.data_root is not None
+            else Path(str(self.socket_path)).parent
+        )
         return {
             "runtime_root": str(Path(str(self.runtime_root))),
-            "socket_channel_path": str(Path(str(self.socket_channel_path))),
+            "data_root": str(data_root),
+            "bridge_socket_path": str(Path(str(self.socket_path))),
             "bind_host": _clean_str(metadata.get("bind_host")) or "0.0.0.0",
             "bind_port": _as_int(metadata.get("bind_port"), 0),
             "peer_url": _clean_str(metadata.get("peer_url")) or None,
@@ -272,9 +290,6 @@ class WebSocketBridgeEndpoint(ChannelEndpointQueueBase):
             ),
             "reconnect_max_delay_seconds": _as_float(
                 metadata.get("reconnect_max_delay_seconds"), 30.0
-            ),
-            "message_timeout_seconds": _as_float(
-                metadata.get("message_timeout_seconds"), self.message_timeout_seconds
             ),
             "binding_metadata": metadata,
         }
@@ -295,8 +310,6 @@ class WebSocketBridgeEndpoint(ChannelEndpointQueueBase):
             env=env,
             cwd=provider_dir,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
 
@@ -346,21 +359,19 @@ class WebSocketBridgeProvider:
         if str(record.channel_kind or "").strip() != ENDPOINT_TYPE:
             return None
         runtime_root = Path(str(context.runtime_root))
+        data_root = context.endpoint_data_root(str(record.endpoint_id))
         endpoint = WebSocketBridgeEndpoint(
             endpoint=EndpointConfig(
                 endpoint_id=str(record.endpoint_id),
                 channel_kind=str(record.channel_kind),
                 binding_key=str(record.binding_key),
                 send_policy=dict(record.send_policy_blob or {}),
-            )
+            ),
+            socket_path=data_root / "channel.sock",
         )
         endpoint.runtime_root = runtime_root
-        endpoint.socket_channel_path = runtime_root / "pal.sock"
+        endpoint.data_root = data_root
         endpoint.binding_metadata = dict(record.binding_metadata or {})
-        endpoint.message_timeout_seconds = _as_float(
-            endpoint.binding_metadata.get("message_timeout_seconds"),
-            endpoint.message_timeout_seconds,
-        )
         endpoint.enabled = bool(record.enabled)
         endpoint.attached = record.detached_at is None
         endpoint.paired = True

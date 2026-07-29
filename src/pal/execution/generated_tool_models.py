@@ -153,15 +153,16 @@ BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitInput = _strict
 BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitOutput = _strict_model(
     'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitOutput',
     {
-        'affordance_id': (str, Field(None)),
-        'learn_result': (Literal['learned', 'merged', 'overwritten', 'skipped'], Field(None)),
-        'source_kind': (str, Field(None)),
-        'scenario_text': (str, Field(None)),
-        'prompt_hint': (str, Field(None)),
-        'reason': (str, Field(None)),
-        'action_required': (str, Field(None)),
-        'conflict_resolution_options': (list[str], Field(None)),
-        'candidates': (list[dict[str, Any]], Field(None)),
+        'affordance_id': (str, Field(...)),
+        'module_id': (str, Field(...)),
+        'title': (str, Field(...)),
+        'learn_result': (Literal['learned', 'merged', 'overwritten', 'skipped'], Field(...)),
+        'source_kind': (str, Field(...)),
+        'scenario_text': (str, Field(...)),
+        'prompt_hint': (str, Field(...)),
+        'capability_refs': (list[str], Field(...)),
+        'skill_refs': (list[str], Field(...)),
+        'memory_query_hints': (list[str], Field(...)),
     },
 )
 
@@ -184,9 +185,13 @@ BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateInput = _strict
 BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateOutput = _strict_model(
     'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateOutput',
     {
-        'affordance_id': (str, Field(None)),
-        'affordance_hash': (str, Field(None)),
-        'updated_fields': (list[str], Field(None)),
+        'affordance_id': (str, Field(...)),
+        'affordance_hash': (str, Field(...)),
+        'module_id': (str, Field(...)),
+        'title': (str, Field(...)),
+        'scenario_text': (str, Field(...)),
+        'prompt_hint': (str, Field(...)),
+        'updated_fields': (list[str], Field(...)),
     },
 )
 
@@ -201,9 +206,11 @@ BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteInput = _strict
 BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteOutput = _strict_model(
     'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteOutput',
     {
-        'affordance_id': (str, Field(None)),
-        'affordance_hash': (str, Field(None)),
-        'deleted': (bool, Field(None)),
+        'affordance_id': (str, Field(...)),
+        'affordance_hash': (str, Field(...)),
+        'module_id': (str, Field(...)),
+        'title': (str, Field(...)),
+        'deleted': (bool, Field(...)),
     },
 )
 
@@ -241,8 +248,7 @@ ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput = _strict_model
     {
         'channel_id': (str, Field(...)),
         'message_id': (str, Field(...)),
-        'status': (Literal['accepted', 'completed'], Field(...)),
-        'response': (str | None, Field(None, description='Remote response text when the transport waits for one.')),
+        'status': (Literal['accepted'], Field(...)),
     },
 )
 
@@ -1368,24 +1374,25 @@ WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput = _strict_model
 WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput = _strict_model(
     'WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput',
     {
-        'artifact_id': (str, Field(None)),
-        'stored_artifact_id': (str, Field(None)),
-        'local_cached_path': (str, Field(None)),
-        'mime_type': (str, Field(None)),
-        'size_bytes': (int, Field(None)),
-        'sha256': (str, Field(None)),
-        'requested_url': (str, Field(None)),
-        'final_url': (str, Field(None)),
-        'title': (str, Field(None)),
-        'status_code': (int, Field(None)),
-        'configured_provider_id': (str, Field(None)),
-        'effective_provider_id': (str, Field(None)),
-        'fallback_used': (bool, Field(None)),
-        'full_page': (bool, Field(None)),
-        'viewport_width': (int, Field(None)),
-        'viewport_height': (int, Field(None)),
-        'registered_artifact': (bool, Field(None)),
+        'artifact_id': (str, Field(...)),
+        'stored_artifact_id': (str, Field(...)),
+        'local_cached_path': (str, Field(...)),
+        'mime_type': (str, Field(...)),
+        'size_bytes': (int, Field(...)),
+        'sha256': (str, Field(...)),
+        'requested_url': (str, Field(...)),
+        'final_url': (str, Field(...)),
+        'title': (str, Field(...)),
+        'status_code': (int | None, Field(...)),
+        'configured_provider_id': (str | None, Field(...)),
+        'effective_provider_id': (str | None, Field(...)),
+        'fallback_used': (bool, Field(...)),
+        'full_page': (bool, Field(...)),
+        'viewport_width': (int, Field(...)),
+        'viewport_height': (int, Field(...)),
+        'registered_artifact': (bool, Field(...)),
         'artifact': (dict[str, Any], Field(None)),
+        'artifact_registration_error': (str, Field(None)),
     },
 )
 
@@ -1634,7 +1641,6 @@ MinionV2SkeletonBuilderOpMinionAskQuestionInput = _strict_model(
         'option_1': (str, Field(..., min_length=1)),
         'option_2': (str, Field(..., min_length=1)),
         'option_3': (str, Field(..., min_length=1)),
-        'timeout_seconds': (float | None, Field(None, ge=1)),
     },
 )
 

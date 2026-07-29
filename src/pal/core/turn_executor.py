@@ -642,9 +642,9 @@ class TurnExecutor:
             metadata["preferred_endpoint_id"] = continuation.preferred_llm_endpoint_id
         if continuation.preferred_llm_model_id:
             metadata["preferred_model_id"] = continuation.preferred_llm_model_id
-        snapshot_think_level = str(continuation.turn_settings_snapshot.get("think_level") or "").strip()
-        if snapshot_think_level:
-            metadata["think_level"] = snapshot_think_level
+        snapshot_think_levels = dict(continuation.turn_settings_snapshot.get("think_levels") or {})
+        if snapshot_think_levels:
+            metadata["think_levels"] = snapshot_think_levels
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
         metadata["artifact_scope_key"] = continuation.control_scope_key
         metadata["artifact_turn_id"] = continuation.turn_id
@@ -713,8 +713,8 @@ class TurnExecutor:
             primary_input=extract_text_from_payload(getattr(getattr(assembly_context, "event", None), "payload", None)).strip(),
         )
         metadata = dict(prompt.metadata)
-        if snapshot_think_level:
-            metadata["think_level"] = snapshot_think_level
+        if snapshot_think_levels:
+            metadata["think_levels"] = snapshot_think_levels
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
         metadata["artifact_scope_key"] = continuation.control_scope_key
         metadata["artifact_turn_id"] = continuation.turn_id

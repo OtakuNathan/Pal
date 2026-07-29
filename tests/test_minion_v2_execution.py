@@ -27,7 +27,6 @@ from pal.minion.v2.execution import (
     terminate_process_group,
     workspace_process_holders,
     workspace_content_fingerprint,
-    _validate_manager_seeded_paths,
     _validate_skeleton_candidate_paths,
 )
 from pal.minion.v2.task_ledger import TaskLedgerService
@@ -77,25 +76,6 @@ def _contract(unit_id: str, owned_area: str) -> dict:
 
 
 class MinionV2ExecutionTests(unittest.TestCase):
-    def test_manager_seeded_corpus_hash_is_checked_before_snapshot(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="pal_seeded_corpus_"))
-        self.addCleanup(shutil.rmtree, root, True)
-        test_file = root / "tests" / "router" / "test_router.py"
-        test_file.parent.mkdir(parents=True)
-        test_file.write_text("def test_route():\n    assert True\n", encoding="utf-8")
-        expected = hashlib.sha256(test_file.read_bytes()).hexdigest()
-
-        _validate_manager_seeded_paths(
-            root,
-            {"tests/router/test_router.py": expected},
-        )
-        test_file.write_text("def test_route():\n    assert False\n", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "Coder modified"):
-            _validate_manager_seeded_paths(
-                root,
-                {"tests/router/test_router.py": expected},
-            )
-
     def test_contract_enforcement_modes_distinguish_frozen_and_guarded_files(self) -> None:
         policy = {
             "contract_paths": ["src/router.py"],
@@ -118,12 +98,6 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 ["tests/router/test_router.py"],
                 {**policy, "contract_mode": "review_guarded"},
             )
-        _validate_skeleton_candidate_paths(
-            ["tests/router/test_router.py"],
-            {**policy, "contract_mode": "review_guarded"},
-            manager_seeded_paths={"tests/router/test_router.py"},
-        )
-
         with self.assertRaisesRegex(ValueError, "outside"):
             _validate_skeleton_candidate_paths(
                 ["src/other.py"],
@@ -331,7 +305,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         subprocess.run(["git", "commit", "-qm", "implementation"], cwd=worktree, check=True)
         (worktree / "module_test.cpp").write_text("// verifier test\n", encoding="utf-8")
         subprocess.run(["git", "add", "module_test.cpp"], cwd=worktree, check=True)
-        subprocess.run(["git", "commit", "-qm", "promote verifier test"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "checkpoint verifier test"], cwd=worktree, check=True)
         accepted_sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
         ).strip()
@@ -716,7 +690,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         self.assertEqual(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip(), candidate_digest)
         self.assertEqual(self.store.read_json(candidate_ref)["changed_paths"], ["src/a.txt"])
         message = subprocess.check_output(["git", "log", "-1", "--format=%B"], cwd=worktree, text=True)
-        self.assertIn("Pal-Candidate-Key:", message)
+        self.assertIn("Pal-Assignment-Key:", message)
 
     def test_workspace_lock_identity_is_the_canonical_worktree(self) -> None:
         worktree = self.runtime_root / "canonical_lock_workspace"
@@ -730,7 +704,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         self.assertTrue(locks.is_held("new-node-run"))
         locks.release("new-node-run")
 
-    def test_repair_candidate_is_a_cumulative_delta_from_the_fixed_node_baseline(self) -> None:
+    def test_repair_candidate_is_a_linear_delta_from_the_previous_checkpoint(self) -> None:
         worktree = self.runtime_root / "cumulative_candidate_repo"
         worktree.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
@@ -796,7 +770,6 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 unit_contract_hash=contract.sha256,
                 dependency_output_hashes={},
                 environment_fingerprint="env-hash",
-                parent_candidate_digest=parent_candidate,
             )
 
         (worktree / "src" / "first.cpp").write_text("implemented first\n", encoding="utf-8")
@@ -808,30 +781,22 @@ class MinionV2ExecutionTests(unittest.TestCase):
         )
 
         second = self.store.read_json(second_ref)
-        self.assertEqual(second["base_sha"], baseline_sha)
+        self.assertEqual(second["base_sha"], first_digest)
         self.assertEqual(second["previous_head_sha"], first_digest)
-        self.assertEqual(second["parent_candidate_digest"], first_digest)
-        self.assertEqual(second["changed_paths"], ["src/first.cpp", "src/second.cpp"])
+        self.assertEqual(second["architecture_base_sha"], baseline_sha)
+        self.assertEqual(second["changed_paths"], ["src/second.cpp"])
         self.assertEqual(
             subprocess.check_output(
                 ["git", "rev-parse", f"{second_digest}^"], cwd=worktree, text=True
             ).strip(),
-            baseline_sha,
+            first_digest,
         )
-
-        union_worktree = self.runtime_root / "cumulative_union"
-        subprocess.run(
-            ["git", "worktree", "add", "-q", "-b", "union", str(union_worktree), baseline_sha],
-            cwd=worktree,
-            check=True,
-        )
-        subprocess.run(["git", "cherry-pick", second_digest], cwd=union_worktree, check=True)
         self.assertEqual(
-            (union_worktree / "src" / "first.cpp").read_text(encoding="utf-8"),
+            (worktree / "src" / "first.cpp").read_text(encoding="utf-8"),
             "implemented first\n",
         )
         self.assertEqual(
-            (union_worktree / "src" / "second.cpp").read_text(encoding="utf-8"),
+            (worktree / "src" / "second.cpp").read_text(encoding="utf-8"),
             "repaired second\n",
         )
         self.assertEqual(self.store.read_json(first_ref)["changed_paths"], ["src/first.cpp"])

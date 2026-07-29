@@ -37,7 +37,7 @@ from pal.minion.v2.recovery import MinionV2Recovery
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.semantic_orchestration import SemanticOrchestrator
 from pal.minion.v2.role_gateway import RoleAssignmentGateway
-from pal.shared import MinionApprovalDecision, MinionInvocationPack
+from pal.shared import MinionApprovalDecision, MinionInvocationPack, RuntimeStatus
 
 
 _DEFAULT_MAX_PARALLEL_NODES = 5
@@ -152,6 +152,8 @@ class MinionManager:
     _drain_task: asyncio.Task[Any] | None = field(default=None, init=False, repr=False)
     _shutdown_reason: str = field(default="", init=False)
     _shutdown_started_at: str = field(default="", init=False)
+    _skill_database: Any | None = field(default=None, init=False, repr=False)
+    _skill_inject_tool: Any | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.catalog = MinionCatalogService(Path(self.runtime_root))
@@ -169,6 +171,7 @@ class MinionManager:
             publish_worker_event=self._publish_v2_worker_event,
             register_broker_run=self._register_v2_broker_run,
             unregister_broker_run=self._unregister_v2_broker_run,
+            inject_skill=self._inject_skill_for_role,
         )
         self.v2_outbox = MinionV2OutboxProcessor(
             self.v2_service,
@@ -235,8 +238,48 @@ class MinionManager:
                 with contextlib.suppress(asyncio.CancelledError):
                     await role_serve_task
                 await self.events.close()
+                if self._skill_database is not None:
+                    with contextlib.suppress(Exception):
+                        self._skill_database.close()
+                    self._skill_database = None
+                    self._skill_inject_tool = None
                 await cleanup_manager_endpoint(self.runtime_root)
                 await cleanup_role_gateway_endpoint(self.runtime_root)
+
+    def _inject_skill_for_role(self, skill_id: str) -> dict[str, str]:
+        if self._skill_inject_tool is None:
+            from pal.foundation import PalV2Database
+            from pal.skill.repository import SkillRepository
+            from pal.skill.service import SkillService
+            from pal.skill.tools import SkillInjectTool
+            from pal.behavior.models import BehaviorSkillModel
+
+            self._skill_database = PalV2Database(
+                db_path=Path(self.runtime_root) / "pal.sqlite3",
+                read_only=True,
+            )
+            self._skill_database.initialize((BehaviorSkillModel,))
+            self._skill_inject_tool = SkillInjectTool(
+                service=SkillService(
+                    repository=SkillRepository(),
+                    runtime_root=Path(self.runtime_root),
+                )
+            )
+        result = self._skill_inject_tool.invoke({"skill_id": str(skill_id)})
+        if result.status != RuntimeStatus.OK:
+            reason = str(
+                dict(result.structured or {}).get("reason")
+                or result.text
+                or "skill_injection_failed"
+            )
+            raise ValueError(f"{skill_id}: {reason}")
+        reminder = str(result.llm_text or "").strip()
+        if not reminder:
+            raise ValueError(f"{skill_id}: skill injection returned no reminder")
+        return {
+            "skill_id": str(dict(result.structured or {}).get("skill_id") or skill_id),
+            "system_reminder": reminder,
+        }
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:

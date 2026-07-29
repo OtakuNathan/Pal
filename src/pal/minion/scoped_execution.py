@@ -490,7 +490,6 @@ class MinionScopedExecutionRuntime:
     allowed_capabilities: list[str]
     workspace: dict[str, Any] = field(default_factory=dict)
     produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
-    memory_l3: Any | None = None
     capability_guidance_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
     request_user_clarification: Any | None = None
     _original_runtime: Any = field(default=None, init=False, repr=False)

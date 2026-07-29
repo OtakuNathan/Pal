@@ -29,6 +29,7 @@ from pal.channel.provider_manager import (
     FactoryChannelProvider,
     RuntimeChannelProviderManifest,
     build_default_channel_provider_manager,
+    channel_endpoint_data_root,
 )
 from pal.channel.repository import ChannelEndpointRepository
 from pal.channel.runtime import ChannelAdapterRegistry, ChannelEndpointRegistry, ChannelRuntime
@@ -69,6 +70,7 @@ __all__ = [
     "StoredArtifact",
     "build_default_factory_registry",
     "build_default_channel_provider_manager",
+    "channel_endpoint_data_root",
     "inspect_channel",
     "register_with_core",
 ]

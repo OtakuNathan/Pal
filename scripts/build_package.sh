@@ -6,10 +6,40 @@ cd "$repo_root"
 
 python_bin="${PYTHON:-python3}"
 dist_dir="$repo_root/dist"
+runtime_overlay_dir="$dist_dir/runtime_root"
+runtime_overlay_path="$dist_dir/pal_v2-runtime-root-overlay.tar.gz"
+installer_source="$repo_root/scripts/install_package.sh"
+installer_path="$dist_dir/install-pal.sh"
+install_bundle_dir="$dist_dir/install_bundle"
+install_bundle_path="$dist_dir/pal_v2-install-bundle.tar.gz"
+websocket_provider_source="$repo_root/providers/websocket_bridge"
+websocket_provider_relative="channel/providers/websocket_bridge"
+websocket_provider_files=(
+  "provider.toml"
+  "runtime.py"
+  "sidecar.py"
+  "sidecar_main.py"
+  "protocol.py"
+  "README.md"
+)
+telegram_provider_source="$repo_root/providers/telegram"
+telegram_provider_relative="channel/providers/telegram"
+telegram_provider_files=(
+  "provider.toml"
+  "runtime.py"
+  "endpoint.py"
+  "interaction_store.py"
+  "README.md"
+)
 
 mkdir -p "$dist_dir"
 rm -rf "$repo_root/build" "$repo_root/src/pal_v2.egg-info"
 rm -f "$dist_dir"/pal_v2-*.whl
+rm -rf "$runtime_overlay_dir"
+rm -f "$runtime_overlay_path"
+rm -f "$installer_path"
+rm -rf "$install_bundle_dir"
+rm -f "$install_bundle_path"
 
 "$python_bin" -m pip wheel . --no-deps --no-build-isolation -w "$dist_dir"
 
@@ -20,11 +50,6 @@ if [[ -z "${wheel_path:-}" || ! -f "$wheel_path" ]]; then
 fi
 
 required_wheel_paths=(
-  "pal/channel/providers/websocket_bridge/provider.toml"
-  "pal/channel/providers/websocket_bridge/runtime.py"
-  "pal/channel/providers/websocket_bridge/sidecar.py"
-  "pal/channel/providers/websocket_bridge/sidecar_main.py"
-  "pal/channel/providers/websocket_bridge/protocol.py"
   "pal/core/tool_surface.toml"
   "pal/lsp/server_templates/clangd.toml"
   "pal/lsp/server_templates/pyright.toml"
@@ -103,15 +128,17 @@ if (( ${#missing[@]} )); then
   exit 1
 fi
 
-"$python_bin" - "$wheel_path" <<'PY'
+"$python_bin" - "$wheel_path" "$repo_root/providers" <<'PY'
 from __future__ import annotations
 
 import sys
 import tomllib
 import zipfile
+from pathlib import Path
 
 
 wheel_path = sys.argv[1]
+provider_root = Path(sys.argv[2])
 
 
 def fail(message: str) -> None:
@@ -126,9 +153,26 @@ with zipfile.ZipFile(wheel_path) as wheel:
             fail(f"missing {path}")
         return wheel.read(path).decode("utf-8")
 
-    websocket_manifest = tomllib.loads(
-        read_text("pal/channel/providers/websocket_bridge/provider.toml")
+    packaged_channel_provider_paths = sorted(
+        name
+        for name in names
+        if name.startswith("pal/channel/providers/")
+        or name.startswith("pal/channel/endpoints/telegram_endpoint")
+        or name.startswith("pal/plugins_builtin/telegram_channel/")
     )
+    if packaged_channel_provider_paths:
+        fail(
+            "Detachable channel providers must be runtime-root-only, but the wheel contains "
+            f"{packaged_channel_provider_paths}"
+        )
+
+    def read_provider_text(provider_id: str, path: str) -> str:
+        target = provider_root / provider_id / path
+        if not target.is_file():
+            fail(f"missing runtime provider source {target}")
+        return target.read_text(encoding="utf-8")
+
+    websocket_manifest = tomllib.loads(read_provider_text("websocket_bridge", "provider.toml"))
     if websocket_manifest.get("provider_id") != "websocket_bridge":
         fail("WebSocket bridge manifest has the wrong provider_id")
     if websocket_manifest.get("entrypoint") != "runtime.py":
@@ -145,14 +189,58 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if token not in channel_capabilities:
             fail(f"channel active-send contract is missing {token}")
 
-    websocket_sidecar = read_text("pal/channel/providers/websocket_bridge/sidecar.py")
+    websocket_sidecar = read_provider_text("websocket_bridge", "sidecar.py")
     for token in (
         'method == "send_message"',
-        'finish_reason == "tool_calls"',
-        "pending.current_text_parts.clear()",
+        'return {"message_id": request_id}',
+        "MAX_PEER_MESSAGE_COUNT",
+        "PEER_END_SENTINEL",
+        "bridge_socket_path",
+        "importlib.import_module(f\"{module_name}.exceptions\")",
+        "websocket bridge sidecar terminated unexpectedly",
     ):
         if token not in websocket_sidecar:
-            fail(f"WebSocket sidecar final-message filtering is missing {token}")
+            fail(f"WebSocket sidecar contract is missing {token}")
+    for forbidden in (
+        "pending_requests",
+        "message_timeout_seconds",
+        "socket_channel_path",
+        "forward_reply",
+    ):
+        if forbidden in websocket_sidecar:
+            fail(f"WebSocket sidecar contains obsolete synchronous-send state {forbidden}")
+
+    websocket_runtime = read_provider_text("websocket_bridge", "runtime.py")
+    for token in (
+        "configure_process_logging",
+        'status="accepted"',
+        'socket_path=data_root / "channel.sock"',
+        "render_peer_input",
+    ):
+        if token not in websocket_runtime:
+            fail(f"WebSocket provider runtime is missing {token}")
+    for forbidden in (
+        "stdout=subprocess.DEVNULL",
+        "stderr=subprocess.DEVNULL",
+        "message_timeout_seconds",
+        "socket_channel_path",
+    ):
+        if forbidden in websocket_runtime:
+            fail(f"WebSocket provider runtime contains obsolete behavior {forbidden}")
+
+    telegram_manifest = tomllib.loads(read_provider_text("telegram", "provider.toml"))
+    if telegram_manifest.get("provider_id") != "telegram":
+        fail("Telegram manifest has the wrong provider_id")
+    if telegram_manifest.get("entrypoint") != "runtime.py":
+        fail("Telegram manifest must load runtime.py")
+    telegram_endpoint = read_provider_text("telegram", "endpoint.py")
+    for token in (
+        "TelegramInteractionStore",
+        "_segment_text(spec.text",
+        "data_root=",
+    ):
+        if token not in telegram_endpoint:
+            fail(f"Telegram provider is missing {token}")
 
     metadata_paths = sorted(name for name in names if name.endswith(".dist-info/METADATA"))
     if len(metadata_paths) != 1:
@@ -251,8 +339,50 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if forbidden in shared_messages:
             fail(f"shared worker transport contains legacy symbol {forbidden}")
 
-print("Verified WebSocket channel packaging, V2 families, role profiles, controlled builders, adapters, worker transport, and legacy cutover")
+print("Verified runtime-root-only channel providers, V2 families, role profiles, controlled builders, adapters, worker transport, and legacy cutover")
 PY
 
+websocket_overlay_dir="$runtime_overlay_dir/$websocket_provider_relative"
+mkdir -p "$websocket_overlay_dir"
+for provider_file in "${websocket_provider_files[@]}"; do
+  install -m 0644 \
+    "$websocket_provider_source/$provider_file" \
+    "$websocket_overlay_dir/$provider_file"
+  if ! cmp -s \
+    "$websocket_provider_source/$provider_file" \
+    "$websocket_overlay_dir/$provider_file"; then
+    echo "Runtime overlay differs from provider source file: $provider_file" >&2
+    exit 1
+  fi
+done
+telegram_overlay_dir="$runtime_overlay_dir/$telegram_provider_relative"
+mkdir -p "$telegram_overlay_dir"
+for provider_file in "${telegram_provider_files[@]}"; do
+  install -m 0644 \
+    "$telegram_provider_source/$provider_file" \
+    "$telegram_overlay_dir/$provider_file"
+  if ! cmp -s \
+    "$telegram_provider_source/$provider_file" \
+    "$telegram_overlay_dir/$provider_file"; then
+    echo "Runtime overlay differs from Telegram provider source file: $provider_file" >&2
+    exit 1
+  fi
+done
+tar -czf "$runtime_overlay_path" -C "$runtime_overlay_dir" .
+
+install -m 0755 "$installer_source" "$installer_path"
+bash -n "$installer_path"
+
+mkdir -p "$install_bundle_dir"
+install -m 0644 "$wheel_path" "$install_bundle_dir/$(basename "$wheel_path")"
+install -m 0644 "$runtime_overlay_path" "$install_bundle_dir/$(basename "$runtime_overlay_path")"
+install -m 0755 "$installer_path" "$install_bundle_dir/$(basename "$installer_path")"
+tar -czf "$install_bundle_path" -C "$install_bundle_dir" .
+rm -rf "$install_bundle_dir"
+
 echo "Built $wheel_path"
+echo "Built $runtime_overlay_path"
+echo "Built $installer_path"
+echo "Built $install_bundle_path"
 echo "Verified ${#required_wheel_paths[@]} required wheel files"
+echo "Verified runtime overlays at $websocket_provider_relative/ and $telegram_provider_relative/"

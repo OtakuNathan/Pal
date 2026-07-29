@@ -33,7 +33,7 @@ def prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
 @dataclass
 class MinionPromptFragmentProvider(PromptFragmentProvider):
     scaffold_factory: Callable[[], dict[str, Any]]
-    memory_text_factory: Callable[[], str]
+    role_context_factory: Callable[[], str]
     provider_id: str = "minion.v2.worker.prompt"
     module_id: str = "minion"
 
@@ -41,22 +41,57 @@ class MinionPromptFragmentProvider(PromptFragmentProvider):
         scaffold = dict(self.scaffold_factory() or {})
         fragments: list[PromptFragment] = []
 
-        def add(section: str, title: str, content: str, priority: int) -> None:
+        def add(
+            section: str,
+            title: str,
+            content: str,
+            priority: int,
+            *,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
             text = str(content or "").strip()
             if text:
-                fragments.append(PromptFragment(section=section, title=title, content=text, priority=priority))
+                fragments.append(
+                    PromptFragment(
+                        section=section,
+                        title=title,
+                        content=text,
+                        priority=priority,
+                        metadata=dict(metadata or {}),
+                    )
+                )
 
         add("identity", "Minion Identity", str(scaffold.get("identity") or ""), 10)
         add("behavior_guidance", "Role Contract", str(scaffold.get("behavior") or ""), 20)
         add("task_acceptance", "Bound Invocation", _render_bound_invocation(scaffold), 35)
+        role_context = str(self.role_context_factory() or "").strip()
+        if role_context:
+            add(
+                "memory",
+                "Role Working State",
+                role_context,
+                54,
+                metadata={
+                    "block_id": "minion_role_working_state",
+                    "raw_user_context": True,
+                    "runtime_context_kind": "role_state",
+                },
+            )
         add("operating_rules", "Execution Rules", _render_execution_rules(scaffold), 60)
         add("output_contract", "Output Contract", str(scaffold.get("output_contract") or ""), 70)
-        memory = str(self.memory_text_factory() or "").strip()
-        if memory:
-            add("memory", "Durable Worker Context", memory, 90)
         retry = str(dict(context.metadata or {}).get("retry_note") or "")
         if retry:
-            add("memory", "Retry Guidance", retry, 95)
+            add(
+                "memory",
+                "Retry Guidance",
+                retry,
+                95,
+                metadata={
+                    "block_id": "minion_retry_guidance",
+                    "raw_user_context": True,
+                    "runtime_context_kind": "retry_guidance",
+                },
+            )
         return fragments
 
 
@@ -95,6 +130,9 @@ def render_minion_task_prompt(pack: MinionInvocationPack) -> str:
     goal = str(pack.instruction or pack.goal or "").strip()
     if goal:
         lines.extend(["", "## Assignment", goal])
+    skill_reminders = _initial_skill_reminders(pack)
+    if skill_reminders:
+        lines.extend(["", *skill_reminders])
     lines.extend(
         [
             "",
@@ -156,6 +194,21 @@ def render_minion_task_prompt(pack: MinionInvocationPack) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _initial_skill_reminders(pack: MinionInvocationPack) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in list(dict(pack.metadata or {}).get("initial_skill_injections") or []):
+        if not isinstance(item, dict):
+            continue
+        skill_id = str(item.get("skill_id") or "").strip()
+        reminder = str(item.get("system_reminder") or "").strip()
+        if not skill_id or not reminder or skill_id in seen:
+            continue
+        seen.add(skill_id)
+        result.append(reminder)
+    return result
 
 
 def _execution_discipline_lines(pack: MinionInvocationPack) -> list[str]:

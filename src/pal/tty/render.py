@@ -7,9 +7,14 @@ from typing import Any, Callable
 
 from prompt_toolkit.application import get_app_or_none, run_in_terminal
 from rich.console import Console
+from rich.console import Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.text import Text
+
+from pal.tty.interactions import TtyInteraction
+
+_THINKING_PREVIEW_MAX_CHARS = 240
 
 
 class OutputBoundary:
@@ -108,6 +113,10 @@ class TtyRenderer:
         self._live_factory = live_factory
         self._markdown_factory = markdown_factory
         self._reasoning_open = False
+        self._reasoning_live: Live | None = None
+        self._reasoning_buffer = ""
+        self._reasoning_preview = ""
+        self._last_reasoning_chunk = ""
 
     def new_respondent(
         self,
@@ -125,27 +134,103 @@ class TtyRenderer:
         await self._output.render(Text(f"connected to {socket_path}", style="dim"))
 
     async def help_hint(self) -> None:
-        await self._output.render(Text("type /exit or Ctrl-D to quit", style="dim"))
+        await self._output.render(
+            Text(
+                "type /exit or Ctrl-D to quit; choose numbered actions when offered",
+                style="dim",
+            )
+        )
 
     async def thinking_delta(self, text: str) -> None:
         if not self._reasoning_open:
             self._reasoning_open = True
-            await self._output.render(Text("[thinking]", style="dim italic"))
-        await self._output.render(
-            Text(text, style="dim"),
-            end="",
-            soft_wrap=True,
-            highlight=False,
-        )
+            self._reasoning_buffer = ""
+            self._reasoning_preview = ""
+            self._last_reasoning_chunk = ""
+            if self._output.console.is_terminal:
+                self._reasoning_live = self._live_factory(
+                    self._thinking_renderable(""),
+                    console=self._output.console,
+                    refresh_per_second=4.0,
+                    transient=True,
+                )
+                self._reasoning_live.start()
+            else:
+                await self._output.render(self._thinking_renderable(""))
+        preview = self._append_reasoning_preview(text)
+        if preview == self._reasoning_preview:
+            return
+        self._reasoning_preview = preview
+        if self._reasoning_live is not None:
+            self._reasoning_live.update(self._thinking_renderable(preview))
 
     async def thinking_close(self) -> None:
-        if self._reasoning_open:
-            self._reasoning_open = False
-            await self._output.render("")
+        if not self._reasoning_open:
+            return
+        self._reasoning_open = False
+        live = self._reasoning_live
+        self._reasoning_live = None
+        self._reasoning_buffer = ""
+        self._reasoning_preview = ""
+        self._last_reasoning_chunk = ""
+        if live is not None:
+            try:
+                live.stop()
+            except Exception:
+                pass
+
+    def _append_reasoning_preview(self, text: str) -> str:
+        cleaned = "".join(
+            character if character.isprintable() or character.isspace() else " "
+            for character in str(text or "")
+        )
+        if not cleaned:
+            return self._reasoning_preview
+        normalized_chunk = " ".join(cleaned.split())
+        if normalized_chunk and normalized_chunk == self._last_reasoning_chunk:
+            return self._reasoning_preview
+        self._last_reasoning_chunk = normalized_chunk
+        self._reasoning_buffer = (self._reasoning_buffer + cleaned)[-_THINKING_PREVIEW_MAX_CHARS * 2 :]
+        collapsed = " ".join(self._reasoning_buffer.split())
+        if not any(character.isalnum() for character in collapsed):
+            return self._reasoning_preview
+        if len(collapsed) > _THINKING_PREVIEW_MAX_CHARS:
+            collapsed = f"…{collapsed[-(_THINKING_PREVIEW_MAX_CHARS - 1):]}"
+        return collapsed
+
+    @staticmethod
+    def _thinking_renderable(preview: str) -> Text:
+        suffix = f" {preview}" if preview else " …"
+        return Text(f"[thinking]{suffix}", style="dim italic", overflow="ellipsis", no_wrap=True)
 
     async def tool_call(self, name: str) -> None:
         await self.thinking_close()
         await self._output.render(Text(f"[tool] {name}", style="cyan"))
+
+    async def interaction(self, interaction: TtyInteraction) -> None:
+        await self.thinking_close()
+        renderables: list[Any] = []
+        if interaction.text.strip():
+            renderables.append(self._markdown_factory(interaction.text))
+        if interaction.options:
+            choices = Text()
+            for index, option in enumerate(interaction.options, start=1):
+                choices.append(f"  {index}. ", style="bold cyan")
+                choices.append(option.label)
+                choices.append("\n")
+            choices.append("  0. ", style="dim cyan")
+            choices.append("Cancel", style="dim")
+            renderables.append(choices)
+        if renderables:
+            await self._output.render(Group(*renderables))
+
+    async def invalid_selection(self, option_count: int) -> None:
+        await self._output.render(
+            Text(
+                f"Choose a number from 1 to {option_count}, or 0 to cancel.",
+                style="yellow",
+            )
+        )
 
     async def error(self, kind: str, text: str) -> None:
         await self.thinking_close()

@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from pal.llm.contracts import CanonicalLLMRequest
+from pal.llm.contracts import CanonicalLLMRequest, ThinkingContract
 from pal.llm.models import LLMEndpointModel
 
-from pal.llm.llm_adaptor.base import LLMProviderAdapter, OpenAIChatCompletionDraft, _capabilities, _normalize_key
+from pal.llm.llm_adaptor.base import (
+    ANTHROPIC_THINKING_CONTRACT,
+    LLMProviderAdapter,
+    OpenAIChatCompletionDraft,
+    _capabilities,
+    _normalize_key,
+)
 
 
 class DeepSeekProvider(LLMProviderAdapter):
@@ -19,13 +25,19 @@ class DeepSeekProvider(LLMProviderAdapter):
     def matches_endpoint(cls, endpoint: LLMEndpointModel) -> bool:
         return _is_deepseek_identifier(endpoint)
 
+    def provider_thinking_contract(self) -> ThinkingContract | None:
+        if not _supports_deepseek_thinking(self.endpoint):
+            return None
+        return ANTHROPIC_THINKING_CONTRACT
+
     def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:
         if not _supports_deepseek_thinking(self.endpoint):
             return
-        thinking = _think_level_to_deepseek_thinking(request.metadata.get("think_level"))
+        choice_id = self.resolve_think_level(request.metadata.get("think_level"))
+        thinking = _think_level_to_deepseek_thinking(choice_id)
         if thinking is not None:
             draft.thinking = thinking
-        effort = _think_level_to_deepseek_reasoning_effort(request.metadata.get("think_level"))
+        effort = _think_level_to_deepseek_reasoning_effort(choice_id)
         if effort is not None:
             draft.reasoning_effort = effort
 
@@ -62,6 +74,7 @@ def _think_level_to_deepseek_reasoning_effort(value: Any) -> str | None:
         "deep": "high",
         "high": "high",
         "xhigh": "high",
+        "max": "high",
     }
     return mapping.get(text, "medium" if text else None)
 

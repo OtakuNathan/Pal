@@ -194,11 +194,15 @@ class ExecutionCompiler:
             for unit_id, dependencies in dict(topology.get("depends_on") or {}).items()
         }
         unit_refs_by_id: dict[str, dict[str, Any]] = {}
+        unit_responsibilities: dict[str, str] = {}
         for ref, contract in zip(manifest["unit_contract_refs"], fragments.get("unit_contract") or [], strict=True):
             unit_id = str(dict(contract).get("unit_id") or "")
             if not unit_id or unit_id in unit_refs_by_id:
                 raise ValueError(f"invalid or duplicate unit id: {unit_id or '<empty>'}")
             unit_refs_by_id[unit_id] = dict(ref)
+            unit_responsibilities[unit_id] = str(
+                dict(contract).get("responsibility") or ""
+            )
         if set(depends_on) != set(unit_refs_by_id):
             raise ValueError("topology nodes do not match unit contracts")
 
@@ -223,17 +227,18 @@ class ExecutionCompiler:
         )
 
         unit_node_ids = {unit_id: f"{epoch_id}:node:{unit_id}" for unit_id in unit_refs_by_id}
+        module_identity_delta = _module_identity_delta(
+            self.repository,
+            workflow_id=workflow_id,
+            source_epoch_id=source_epoch_id,
+            target_module_responsibilities=unit_responsibilities,
+        )
         source_role_generations = _module_role_session_generations(
             self.repository,
             workflow_id=workflow_id,
             source_epoch_id=source_epoch_id,
             target_subjects={*unit_refs_by_id, "integration"},
-        )
-        module_identity_delta = _module_identity_delta(
-            self.repository,
-            workflow_id=workflow_id,
-            source_epoch_id=source_epoch_id,
-            target_module_names=set(unit_refs_by_id),
+            replaced_subjects=set(module_identity_delta["replaced"]),
         )
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
         request = (
@@ -286,6 +291,7 @@ class ExecutionCompiler:
                     {
                         "epoch_id": epoch_id,
                         "unit_id": unit_id,
+                        "module_responsibility": unit_responsibilities[unit_id],
                         "node_kind": "unit",
                         "unit_contract_ref": unit_refs_by_id[unit_id],
                         "architecture_manifest_ref": manifest_ref.to_dict(),
@@ -546,17 +552,22 @@ class ExecutionCompiler:
         )
         unit_node_ids = {name: f"{epoch_id}:node:{name}" for name in implementation_modules}
         system_verification_node_id = f"{epoch_id}:system-verification"
+        module_responsibilities = {
+            name: str(modules[name].get("responsibility") or "")
+            for name in implementation_modules
+        }
+        module_identity_delta = _module_identity_delta(
+            self.repository,
+            workflow_id=workflow_id,
+            source_epoch_id=source_epoch_id,
+            target_module_responsibilities=module_responsibilities,
+        )
         source_role_generations = _module_role_session_generations(
             self.repository,
             workflow_id=workflow_id,
             source_epoch_id=source_epoch_id,
             target_subjects={*implementation_modules, system_unit_id},
-        )
-        module_identity_delta = _module_identity_delta(
-            self.repository,
-            workflow_id=workflow_id,
-            source_epoch_id=source_epoch_id,
-            target_module_names=set(implementation_modules),
+            replaced_subjects=set(module_identity_delta["replaced"]),
         )
         for name in sorted(implementation_modules):
             paths = dict(modules[name].get("paths") or {})
@@ -572,6 +583,7 @@ class ExecutionCompiler:
                         "epoch_id": epoch_id,
                         "unit_id": name,
                         "module_name": name,
+                        "module_responsibility": module_responsibilities[name],
                         "node_kind": "unit",
                         "unit_contract_ref": module_refs[name].to_dict(),
                         "architecture_manifest_ref": manifest_ref.to_dict(),
@@ -766,6 +778,14 @@ def reconcile_module_identities(
             or target_node.state != "BLOCKED_BY_DEPS"
         ):
             continue
+        if not _same_module_identity(source_node, target_node):
+            _recreate_replaced_module_worktree(
+                repository=repository,
+                workflow_id=workflow_id,
+                source_node=source_node,
+                target_node=target_node,
+            )
+            continue
         dependency_ids = [str(item) for item in list(target_node.payload.get("dependency_node_ids") or [])]
         accepted_dependencies = [
             dependency_id
@@ -918,6 +938,14 @@ def _reconcile_skeleton_module_identities(
         )
         if source_node is None or target_node is None:
             continue
+        if not _same_module_identity(source_node, target_node):
+            _recreate_replaced_module_worktree(
+                repository=repository,
+                workflow_id=workflow_id,
+                source_node=source_node,
+                target_node=target_node,
+            )
+            continue
         source_contract = source_contracts.get(module_name)
         target_contract = target_contracts.get(module_name)
         if source_contract is None or target_contract is None:
@@ -951,31 +979,24 @@ def _reconcile_skeleton_module_identities(
                 source_node=source_node,
                 target_node=target_node,
             )
-        target_nodes_by_id = {
-            item.aggregate_id: (
-                repository.read_snapshot(
-                    AggregateType.DAG_NODE_RUN,
-                    item.aggregate_id,
-                )
-                or item
-            )
-            for item in target_nodes.values()
+        module_head = _merge_architecture_into_preserved_module(
+            source_node=source_node,
+            target_node=target_node,
+        )
+        baseline = {
+            "base_sha": module_head,
+            "base_digest": module_head,
+            "accepted_dependency_candidate_digests": [],
+            "dependency_output_hashes": {},
+            "dependency_outputs": {},
+            "dependency_fingerprint": "",
         }
-        baseline = prepare_node_dependency_baseline(target_node, target_nodes_by_id)
         if (
             source_node.state != "ACCEPTED"
             or not verification_ref
             or not source_fingerprint
             or source_fingerprint != target_fingerprint
         ):
-            prepared = _preserve_skeleton_module_worktree(
-                architecture=architecture,
-                source_node=source_node,
-                target_node=target_node,
-                source_candidate_ref=source_candidate_ref,
-                source_candidate_digest=source_candidate_digest,
-                baseline=baseline,
-            )
             result = repository.dispatch(
                 _action(
                     "PRESERVE_MODULE_WORKTREE",
@@ -988,27 +1009,22 @@ def _reconcile_skeleton_module_identities(
                         "preserved_from_epoch_id": source_epoch_id,
                         "preserved_from_node_run_id": source_node.aggregate_id,
                         "parent_candidate_digest": source_candidate_digest,
+                        "module_replan_prepared": True,
+                        "preserved_workspace_paths": [],
+                        "replan_conflict_paths": [],
                         **baseline,
-                        **prepared,
                     },
                 )
             )
             target_nodes[module_name] = result.snapshot
             continue
-        (
-            candidate_ref,
-            candidate_digest,
-            target_base,
-            manager_seeded_corpus_hashes,
-        ) = _carry_forward_exact_skeleton_candidate(
+        candidate_ref = _checkpoint_preserved_module_head(
             architecture=architecture,
-            source_node=source_node,
             target_node=target_node,
             source_candidate_ref=source_candidate_ref,
             source_candidate_digest=source_candidate_digest,
             target_contract_ref=target_contract[0],
-            target_fingerprint=target_fingerprint,
-            baseline=baseline,
+            module_head=module_head,
         )
         result = repository.dispatch(
             _action(
@@ -1020,17 +1036,14 @@ def _reconcile_skeleton_module_identities(
                 target_node.version,
                 {
                     "candidate_ref": candidate_ref.to_dict(),
-                    "candidate_digest": candidate_digest,
+                    "candidate_digest": module_head,
                     "verification_artifact_ref": verification_ref,
                     "module_revision_fingerprint": target_fingerprint,
                     "accepted_dependency_node_ids": [],
                     "epoch_frozen": False,
                     "output_hashes": dict(source_node.payload.get("output_hashes") or {}),
                     "carried_forward_from_epoch_id": source_epoch_id,
-                    "manager_seeded_corpus_hashes": manager_seeded_corpus_hashes,
                     **baseline,
-                    "base_sha": target_base,
-                    "base_digest": target_base,
                 },
             )
         )
@@ -1051,28 +1064,35 @@ def _snapshot_module_workspace_for_replan(
     source_node: AggregateSnapshot,
     target_node: AggregateSnapshot,
 ) -> tuple[dict[str, Any], str]:
-    """Capture current Module assets before rebasing its stable worktree."""
+    """Commit in-flight Module assets without changing its linear history."""
 
     worktree = Path(str(source_node.payload.get("workspace_path") or ""))
     if not worktree.is_dir():
         raise ValueError("preserved Module has no stable worktree")
     current_head = _git(worktree, "rev-parse", "HEAD").strip()
-    source_base = str(source_node.payload.get("base_sha") or current_head)
     _git(worktree, "add", "-A")
     tree_sha = _git(worktree, "write-tree").strip()
-    preserved_digest = _git(
-        worktree,
-        "-c",
-        "user.name=Pal Minion",
-        "-c",
-        "user.email=minion@localhost",
-        "commit-tree",
-        tree_sha,
-        "-p",
-        source_base,
-        "-m",
-        f"preserve Module assets for {target_node.aggregate_id}",
-    ).strip()
+    current_tree = _git(worktree, "rev-parse", f"{current_head}^{{tree}}").strip()
+    if tree_sha == current_tree:
+        preserved_digest = current_head
+    else:
+        preserved_digest = _git(
+            worktree,
+            "-c",
+            "user.name=Pal Minion",
+            "-c",
+            "user.email=minion@localhost",
+            "commit-tree",
+            tree_sha,
+            "-p",
+            current_head,
+            "-m",
+            (
+                f"minion module checkpoint {target_node.aggregate_id}\n\n"
+                f"Pal-Assignment-Key: replan-{_safe_ref(target_node.aggregate_id)}"
+            ),
+        ).strip()
+        _git(worktree, "reset", "--hard", preserved_digest)
     changed_paths = [
         item.decode("utf-8", errors="surrogateescape")
         for item in _git_bytes(
@@ -1081,35 +1101,111 @@ def _snapshot_module_workspace_for_replan(
             "--name-only",
             "--no-renames",
             "-z",
-            source_base,
+            current_head,
             preserved_digest,
             "--",
         ).split(b"\0")
         if item
     ]
-    _git(
-        worktree,
-        "update-ref",
-        f"refs/pal/replan-assets/{_safe_ref(target_node.aggregate_id)}",
-        preserved_digest,
-    )
-    _git(worktree, "reset", "--mixed", current_head)
-    manager_seeded_hashes = dict(
-        source_node.payload.get("manager_seeded_corpus_hashes") or {}
-    )
     ref = architecture.artifacts.put_json(
         {
-            "schema_version": "1",
+            "schema_version": "3",
             "candidate_digest": preserved_digest,
-            "base_sha": source_base,
+            "base_sha": current_head,
+            "architecture_base_sha": str(source_node.payload.get("epoch_base_sha") or ""),
+            "previous_head_sha": current_head,
             "changed_paths": sorted(set(changed_paths)),
-            "manager_seeded_paths": sorted(manager_seeded_hashes),
             "capture_kind": "module_replan_assets",
             "source_node_run_id": source_node.aggregate_id,
         },
-        artifact_type="ModuleReplanAssetsArtifact",
+        artifact_type="GitCheckpointArtifact",
     )
     return ref.to_dict(), preserved_digest
+
+
+def _merge_architecture_into_preserved_module(
+    *,
+    source_node: AggregateSnapshot,
+    target_node: AggregateSnapshot,
+) -> str:
+    worktree = Path(str(target_node.payload.get("workspace_path") or ""))
+    target_skeleton = str(target_node.payload.get("epoch_base_sha") or "")
+    if not worktree.is_dir() or not target_skeleton:
+        raise RuntimeError("preserved Module has incomplete canonical worktree metadata")
+    if _git(worktree, "status", "--porcelain").strip():
+        raise RuntimeError("preserved Module worktree is dirty after Manager checkpoint")
+    current_head = _git(worktree, "rev-parse", "HEAD").strip()
+    if _git_is_ancestor(worktree, target_skeleton, current_head):
+        return current_head
+    merged = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "-c",
+            "user.name=Pal Minion",
+            "-c",
+            "user.email=minion@localhost",
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            target_skeleton,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if merged.returncode != 0:
+        subprocess.run(
+            ["git", "-C", str(worktree), "merge", "--abort"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        raise RuntimeError(
+            "accepted Architecture cannot be merged into preserved Module "
+            f"{source_node.payload.get('module_name') or source_node.payload.get('unit_id')}: "
+            + (merged.stderr or merged.stdout or "unknown Git merge failure")
+        )
+    return _git(worktree, "rev-parse", "HEAD").strip()
+
+
+def _checkpoint_preserved_module_head(
+    *,
+    architecture: ArchitectureArtifactService,
+    target_node: AggregateSnapshot,
+    source_candidate_ref: Mapping[str, Any],
+    source_candidate_digest: str,
+    target_contract_ref: Mapping[str, Any],
+    module_head: str,
+) -> ArtifactRef:
+    worktree = Path(str(target_node.payload.get("workspace_path") or ""))
+    changed_paths = git_changed_paths(worktree, source_candidate_digest)
+    payload = {
+        "schema_version": "3",
+        "node_run_id": target_node.aggregate_id,
+        "candidate_digest": module_head,
+        "base_sha": source_candidate_digest,
+        "architecture_base_sha": str(target_node.payload.get("epoch_base_sha") or ""),
+        "previous_head_sha": source_candidate_digest,
+        "candidate_tree_sha": _git(
+            worktree, "rev-parse", f"{module_head}^{{tree}}"
+        ).strip(),
+        "changed_paths": changed_paths,
+        "unit_contract_hash": str(target_contract_ref.get("sha256") or ""),
+        "carried_forward_from_candidate": str(
+            source_candidate_ref.get("sha256") or ""
+        ),
+    }
+    return architecture.artifacts.put_json(
+        payload,
+        artifact_type="GitCheckpointArtifact",
+        child_refs=(
+            (str(source_candidate_ref["sha256"]), "previous_checkpoint"),
+            (str(target_contract_ref["sha256"]), "module_contract"),
+        ),
+    )
 
 
 def _retire_removed_module_resources(
@@ -1178,6 +1274,83 @@ def _retire_removed_module_resources(
     return tuple(retired)
 
 
+def _same_module_identity(
+    source_node: AggregateSnapshot,
+    target_node: AggregateSnapshot,
+) -> bool:
+    source = str(source_node.payload.get("module_responsibility") or "")
+    target = str(target_node.payload.get("module_responsibility") or "")
+    # Existing runtime rows predate responsibility identity. Preserve them
+    # once; all newly compiled nodes carry the explicit identity field.
+    return not source or _normalized_responsibility(source) == _normalized_responsibility(target)
+
+
+def _recreate_replaced_module_worktree(
+    *,
+    repository: MinionV2Repository,
+    workflow_id: str,
+    source_node: AggregateSnapshot,
+    target_node: AggregateSnapshot,
+) -> None:
+    workspace = Path(str(target_node.payload.get("workspace_path") or ""))
+    common_git_dir = Path(str(target_node.payload.get("common_git_dir") or ""))
+    branch = str(target_node.payload.get("worktree_branch") or "")
+    target_base = str(
+        target_node.payload.get("epoch_base_sha")
+        or target_node.payload.get("base_sha")
+        or ""
+    )
+    if not workspace or not common_git_dir.is_dir() or not branch or not target_base:
+        raise RuntimeError("replaced Module has incomplete canonical worktree metadata")
+    holders = workspace_process_holders(workspace) if workspace.is_dir() else ()
+    if holders:
+        raise RuntimeError(
+            "replaced Module still has live workspace holders:\n"
+            + format_workspace_process_holders(holders)
+        )
+    generation = node_role_generation(source_node.payload)
+    module_name = str(
+        source_node.payload.get("module_name")
+        or source_node.payload.get("unit_id")
+        or ""
+    )
+    for session_id in (
+        coder_session_id(workflow_id, module_name, generation),
+        module_verifier_session_id(workflow_id, module_name, generation),
+    ):
+        repository.complete_role_session(session_id, status="cancelled")
+    if workspace.is_dir():
+        removed = subprocess.run(
+            [
+                "git",
+                f"--git-dir={common_git_dir}",
+                "worktree",
+                "remove",
+                "--force",
+                str(workspace),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if removed.returncode != 0:
+            raise RuntimeError(
+                removed.stderr
+                or removed.stdout
+                or f"failed to retire replaced Module worktree {workspace}"
+            )
+    if _git_branch_exists(common_git_dir, branch):
+        _git_dir(common_git_dir, "branch", "-D", branch)
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    _add_branch_worktree(
+        common_git_dir,
+        worktree=workspace,
+        branch=branch,
+        start_sha=target_base,
+    )
+
+
 def _skeleton_module_revision_signature(
     *,
     artifact: Mapping[str, Any],
@@ -1215,302 +1388,6 @@ def _skeleton_module_revision_signature(
     except ValueError:
         return ""
 
-
-def _preserve_skeleton_module_worktree(
-    *,
-    architecture: ArchitectureArtifactService,
-    source_node: AggregateSnapshot,
-    target_node: AggregateSnapshot,
-    source_candidate_ref: Mapping[str, Any],
-    source_candidate_digest: str,
-    baseline: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Project reusable implementation assets into the same Module worktree.
-
-    The target worktree has already been reset to the newly accepted skeleton.
-    Its HEAD remains that skeleton while the prior Candidate delta is restored
-    as ordinary working-tree changes for the existing Coder session.
-    """
-
-    source_candidate = dict(architecture.artifacts.read_json(source_candidate_ref))
-    source_base = str(source_candidate.get("base_sha") or "")
-    source_changed_paths = [
-        str(item).replace(os.sep, "/").strip("/")
-        for item in list(source_candidate.get("changed_paths") or [])
-        if str(item).strip()
-    ]
-    source_git = Path(str(source_node.payload.get("common_git_dir") or ""))
-    target_worktree = Path(str(target_node.payload.get("workspace_path") or ""))
-    if (
-        not source_base
-        or not source_candidate_digest
-        or not source_git.is_dir()
-        or not target_worktree.is_dir()
-    ):
-        raise ValueError("preserved Module Candidate has incomplete Git provenance")
-
-    path_policy = dict(target_node.payload.get("path_policy") or {})
-    manager_seeded_paths = {
-        str(item).replace(os.sep, "/").strip("/")
-        for item in list(source_candidate.get("manager_seeded_paths") or [])
-    }
-    source_manager_seeded_hashes = dict(
-        source_node.payload.get("manager_seeded_corpus_hashes") or {}
-    )
-    manager_seeded_corpus_hashes = {
-        path: str(source_manager_seeded_hashes[path])
-        for path in sorted(manager_seeded_paths)
-        if path in source_manager_seeded_hashes
-    }
-    writable_patterns: list[str] = []
-    for scope in compiled_module_write_scopes(path_policy):
-        path = str(scope.get("path") or "").strip("/")
-        if not path:
-            continue
-        writable_patterns.append(
-            path if str(scope.get("kind") or "") == "file" else f"{path}/**"
-        )
-    reusable_paths = [
-        path
-        for path in source_changed_paths
-        if path in manager_seeded_paths or _matches_any(path, writable_patterns)
-    ]
-    if not reusable_paths:
-        return {
-            "module_replan_prepared": True,
-            "preserved_workspace_paths": [],
-            "replan_conflict_paths": [],
-            "manager_seeded_corpus_hashes": {},
-        }
-
-    completed = subprocess.run(
-        [
-            "git",
-            f"--git-dir={source_git}",
-            "diff",
-            "--binary",
-            source_base,
-            source_candidate_digest,
-            "--",
-            *reusable_paths,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            completed.stderr.decode("utf-8", errors="replace")
-            or "failed to read preserved Module delta"
-        )
-    if not completed.stdout:
-        return {
-            "module_replan_prepared": True,
-            "preserved_workspace_paths": [],
-            "replan_conflict_paths": [],
-            "manager_seeded_corpus_hashes": {},
-        }
-
-    applied = subprocess.run(
-        ["git", "-C", str(target_worktree), "apply", "--3way", "--index", "--binary", "-"],
-        input=completed.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    conflicts = [
-        item.decode("utf-8", errors="surrogateescape")
-        for item in subprocess.check_output(
-            [
-                "git",
-                "-C",
-                str(target_worktree),
-                "diff",
-                "--name-only",
-                "--diff-filter=U",
-                "-z",
-            ]
-        ).split(b"\0")
-        if item
-    ]
-    if applied.returncode != 0 and not conflicts:
-        raise RuntimeError(
-            applied.stderr.decode("utf-8", errors="replace")
-            or "preserved Module delta could not be applied"
-        )
-    forbidden_conflicts = [
-        path
-        for path in conflicts
-        if path in manager_seeded_paths or not _matches_any(path, writable_patterns)
-    ]
-    if forbidden_conflicts:
-        raise RuntimeError(
-            "replan conflicts with Manager-owned or non-writable paths: "
-            + ", ".join(sorted(forbidden_conflicts))
-        )
-
-    # Convert Git's temporary index state into ordinary working-tree changes.
-    # The Coder owns conflict resolution; Manager continues to own Git state.
-    _git(target_worktree, "add", "-A")
-    _git(target_worktree, "reset", "--mixed", str(baseline.get("base_sha") or "HEAD"))
-    actual_paths = git_changed_paths(
-        target_worktree,
-        str(baseline.get("base_sha") or ""),
-    )
-    _validate_skeleton_candidate_paths(
-        actual_paths,
-        path_policy,
-        manager_seeded_paths=manager_seeded_paths,
-    )
-    retained_seeded_hashes = {
-        path: digest
-        for path, digest in manager_seeded_corpus_hashes.items()
-        if path in actual_paths
-    }
-    _validate_manager_seeded_paths(target_worktree, retained_seeded_hashes)
-    return {
-        "module_replan_prepared": True,
-        "preserved_workspace_paths": actual_paths,
-        "replan_conflict_paths": sorted(conflicts),
-        "manager_seeded_corpus_hashes": retained_seeded_hashes,
-    }
-
-
-def _carry_forward_exact_skeleton_candidate(
-    *,
-    architecture: ArchitectureArtifactService,
-    source_node: AggregateSnapshot,
-    target_node: AggregateSnapshot,
-    source_candidate_ref: Mapping[str, Any],
-    source_candidate_digest: str,
-    target_contract_ref: Mapping[str, Any],
-    target_fingerprint: str,
-    baseline: Mapping[str, Any],
-) -> tuple[ArtifactRef, str, str, dict[str, str]]:
-    source_candidate = dict(architecture.artifacts.read_json(source_candidate_ref))
-    source_base = str(source_candidate.get("base_sha") or "")
-    changed_paths = [str(item) for item in list(source_candidate.get("changed_paths") or [])]
-    manager_seeded_paths = {
-        str(item).replace(os.sep, "/").strip("/")
-        for item in list(source_candidate.get("manager_seeded_paths") or [])
-    }
-    source_manager_seeded_hashes = dict(
-        source_node.payload.get("manager_seeded_corpus_hashes") or {}
-    )
-    manager_seeded_corpus_hashes = {
-        path: str(source_manager_seeded_hashes[path])
-        for path in sorted(manager_seeded_paths)
-        if path in source_manager_seeded_hashes
-    }
-    if set(manager_seeded_corpus_hashes) != manager_seeded_paths:
-        raise ValueError(
-            "reusable skeleton candidate is missing Manager-seeded corpus hashes"
-        )
-    source_git = Path(str(source_node.payload.get("common_git_dir") or ""))
-    target_worktree = Path(str(target_node.payload.get("workspace_path") or ""))
-    if not source_base or not changed_paths or not source_git.is_dir() or not target_worktree.is_dir():
-        raise ValueError("reusable skeleton candidate has incomplete Git provenance")
-    path_policy = dict(target_node.payload.get("path_policy") or {})
-    _validate_skeleton_candidate_paths(
-        changed_paths,
-        path_policy,
-        manager_seeded_paths=manager_seeded_paths,
-    )
-    candidate_key = _stable_json_hash(
-        {
-            "source_candidate_ref": str(source_candidate_ref.get("sha256") or ""),
-            "target_contract_ref": str(target_contract_ref.get("sha256") or ""),
-            "target_fingerprint": target_fingerprint,
-        }
-    )
-    existing = _find_candidate_commit(target_worktree, candidate_key)
-    if existing:
-        candidate_digest = existing
-        target_base = _git(target_worktree, "rev-parse", f"{existing}^").strip()
-    else:
-        if _git(target_worktree, "status", "--porcelain").strip():
-            raise RuntimeError("target worktree is dirty before exact Candidate carry-forward")
-        completed = subprocess.run(
-            [
-                "git",
-                f"--git-dir={source_git}",
-                "diff",
-                "--binary",
-                source_base,
-                source_candidate_digest,
-                "--",
-                *changed_paths,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if completed.returncode != 0 or not completed.stdout:
-            raise RuntimeError(completed.stderr.decode("utf-8", errors="replace") or "reusable candidate diff is empty")
-        checked = subprocess.run(
-            ["git", "-C", str(target_worktree), "apply", "--check", "--binary", "-"],
-            input=completed.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if checked.returncode != 0:
-            raise RuntimeError(checked.stderr.decode("utf-8", errors="replace") or "reusable candidate does not apply")
-        applied = subprocess.run(
-            ["git", "-C", str(target_worktree), "apply", "--index", "--binary", "-"],
-            input=completed.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if applied.returncode != 0:
-            raise RuntimeError(applied.stderr.decode("utf-8", errors="replace") or "failed to apply reusable candidate")
-        target_base = str(baseline.get("base_sha") or "")
-        actual_paths = git_changed_paths(target_worktree, target_base)
-        _validate_skeleton_candidate_paths(
-            actual_paths,
-            path_policy,
-            manager_seeded_paths=manager_seeded_paths,
-        )
-        _git(
-            target_worktree,
-            "-c",
-            "user.name=Pal Minion",
-            "-c",
-            "user.email=minion@localhost",
-            "commit",
-            "-m",
-            f"minion carried Candidate forward {target_node.aggregate_id}\n\nPal-Candidate-Key: {candidate_key}",
-        )
-        candidate_digest = _git(target_worktree, "rev-parse", "HEAD").strip()
-        changed_paths = actual_paths
-    _validate_manager_seeded_paths(
-        target_worktree,
-        manager_seeded_corpus_hashes,
-    )
-    candidate = {
-        "schema_version": "1",
-        "candidate_digest": candidate_digest,
-        "base_sha": target_base,
-        "parent_candidate_sha": "",
-        "module_contract_hash": str(target_contract_ref.get("sha256") or ""),
-        "dependency_output_hashes": dict(baseline.get("dependency_output_hashes") or {}),
-        "environment_fingerprint": str(target_node.payload.get("environment_fingerprint") or ""),
-        "workspace_fingerprint": workspace_content_fingerprint(target_worktree),
-        "changed_paths": changed_paths,
-        "manager_seeded_paths": sorted(manager_seeded_paths),
-        "candidate_key": candidate_key,
-        "carried_forward_from_candidate": str(source_candidate_ref.get("sha256") or ""),
-    }
-    ref = architecture.artifacts.put_json(
-        candidate,
-        artifact_type="CandidateSnapshotArtifact",
-        child_refs=(
-            (str(source_candidate_ref["sha256"]), "carries_forward"),
-            (str(target_contract_ref["sha256"]), "module_contract"),
-        ),
-    )
-    return ref, candidate_digest, target_base, manager_seeded_corpus_hashes
 
 
 def _module_revision_signature(
@@ -1606,6 +1483,7 @@ def _module_role_session_generations(
     workflow_id: str,
     source_epoch_id: str,
     target_subjects: set[str],
+    replaced_subjects: set[str] | None = None,
 ) -> dict[str, int]:
     """Preserve a Module identity, or allocate a fresh generation after removal."""
 
@@ -1634,9 +1512,12 @@ def _module_role_session_generations(
                 source_generations.get(subject, 0),
                 generation,
             )
+    replaced = set(replaced_subjects or set())
     return {
         subject: (
-            source_generations[subject]
+            source_generations[subject] + 1
+            if subject in source_generations and subject in replaced
+            else source_generations[subject]
             if subject in source_generations
             else historical_generations[subject] + 1
             if subject in historical_generations
@@ -1651,14 +1532,12 @@ def _module_identity_delta(
     *,
     workflow_id: str,
     source_epoch_id: str,
-    target_module_names: set[str],
+    target_module_responsibilities: Mapping[str, str],
 ) -> dict[str, list[str]]:
     source_epoch = str(source_epoch_id or "").strip()
-    source_module_names = {
-        str(
-            snapshot.payload.get("module_name")
-            or snapshot.payload.get("unit_id")
-            or ""
+    source_modules = {
+        str(snapshot.payload.get("module_name") or snapshot.payload.get("unit_id") or ""): str(
+            snapshot.payload.get("module_responsibility") or ""
         )
         for snapshot in repository.list_workflow_snapshots(workflow_id)
         if source_epoch
@@ -1666,12 +1545,29 @@ def _module_identity_delta(
         and str(snapshot.payload.get("epoch_id") or "") == source_epoch
         and str(snapshot.payload.get("node_kind") or "") == "unit"
     }
-    source_module_names.discard("")
-    return {
-        "preserved": sorted(source_module_names & target_module_names),
-        "added": sorted(target_module_names - source_module_names),
-        "deleted": sorted(source_module_names - target_module_names),
+    source_modules.pop("", None)
+    target_modules = {
+        str(name): str(responsibility)
+        for name, responsibility in target_module_responsibilities.items()
     }
+    common = set(source_modules) & set(target_modules)
+    replaced = {
+        name
+        for name in common
+        if source_modules[name]
+        and _normalized_responsibility(source_modules[name])
+        != _normalized_responsibility(target_modules[name])
+    }
+    return {
+        "preserved": sorted(common - replaced),
+        "replaced": sorted(replaced),
+        "added": sorted(set(target_modules) - set(source_modules)),
+        "deleted": sorted(set(source_modules) - set(target_modules)),
+    }
+
+
+def _normalized_responsibility(value: str) -> str:
+    return " ".join(str(value).casefold().split())
 
 
 def _contract_value(
@@ -2023,9 +1919,7 @@ class CandidateSnapshotService:
         unit_contract_hash: str,
         dependency_output_hashes: Mapping[str, str],
         environment_fingerprint: str,
-        parent_candidate_digest: str = "",
         repair_bill_ref: Mapping[str, Any] | None = None,
-        manager_seeded_path_hashes: Mapping[str, str] | None = None,
     ) -> tuple[ArtifactRef, str]:
         self.repository.assert_fencing_token(lease_resource_key, worker_id, fencing_token)
         if not self.worktree_locks.is_held(node_run_id):
@@ -2041,52 +1935,53 @@ class CandidateSnapshotService:
             if expected_environment and environment_fingerprint != expected_environment:
                 raise ValueError("candidate environment fingerprint does not match the execution epoch")
             current_head = _git(worktree, "rev-parse", "HEAD").strip()
-            if current_head != base_sha:
-                raise ValueError(
-                    "coder changed Git HEAD; commits, merges, rebases, checkouts, and resets are manager-owned operations"
-                )
             before = workspace_content_fingerprint(worktree)
             if before != expected_workspace_fingerprint:
                 raise RuntimeError("worktree changed after quiescing")
             if not candidate_baseline_sha:
-                raise ValueError("candidate requires the fixed assembled Node baseline")
-            changed_paths = git_changed_paths(worktree, candidate_baseline_sha)
+                raise ValueError("candidate requires the accepted Architecture baseline")
+            # A Module branch is a normal linear history.  Validate only the
+            # current role's delta; prior Coder and Verifier commits are
+            # already durable ancestors of ``base_sha``.
+            changed_paths = git_changed_paths(worktree, base_sha)
             if path_policy:
                 _validate_skeleton_candidate_paths(
                     changed_paths,
                     path_policy,
-                    manager_seeded_paths=set(manager_seeded_path_hashes or {}),
                 )
             else:
                 _validate_reference_only_paths(changed_paths, reference_only_paths)
-            _validate_manager_seeded_paths(
-                worktree,
-                manager_seeded_path_hashes or {},
-            )
-            if not changed_paths:
-                raise ValueError("candidate has no changes")
             candidate_key = hashlib.sha256(
                 json.dumps(
                     {
                         "node_run_id": node_run_id,
-                        "candidate_baseline_sha": candidate_baseline_sha,
+                        "assignment_base_sha": base_sha,
                         "previous_head_sha": base_sha,
-                        "parent_candidate_digest": parent_candidate_digest,
                         "workspace_fingerprint": before,
                         "unit_contract_hash": unit_contract_hash,
-                        "manager_seeded_path_hashes": dict(
-                            sorted((manager_seeded_path_hashes or {}).items())
-                        ),
                     },
                     sort_keys=True,
                 ).encode("utf-8")
             ).hexdigest()
             existing_sha = _find_candidate_commit(worktree, candidate_key)
+            if current_head not in {base_sha, existing_sha}:
+                raise ValueError(
+                    "coder changed Git HEAD; commits, merges, rebases, checkouts, and resets are manager-owned operations"
+                )
             if existing_sha:
                 candidate_digest = existing_sha
+            elif not changed_paths:
+                # A role may legitimately prove that the accepted baseline
+                # already satisfies the Module Protocol.  Record the handoff
+                # against the current HEAD without manufacturing an empty
+                # content commit.
+                candidate_digest = base_sha
             else:
                 _git(worktree, "add", "-A")
-                message = f"minion candidate {node_run_id}\n\nPal-Candidate-Key: {candidate_key}"
+                message = (
+                    f"minion module checkpoint {node_run_id}\n\n"
+                    f"Pal-Assignment-Key: {candidate_key}"
+                )
                 tree_sha = _git(worktree, "write-tree").strip()
                 candidate_digest = _git(
                     worktree,
@@ -2097,35 +1992,39 @@ class CandidateSnapshotService:
                     "commit-tree",
                     tree_sha,
                     "-p",
-                    candidate_baseline_sha,
+                    base_sha,
                     "-m",
                     message,
                 ).strip()
-                _git(worktree, "update-ref", f"refs/pal/candidates/{candidate_key}", candidate_digest)
+                _git(
+                    worktree,
+                    "update-ref",
+                    f"refs/pal/checkpoints/{candidate_key}",
+                    candidate_digest,
+                )
                 _git(worktree, "reset", "--hard", candidate_digest)
             after = workspace_content_fingerprint(worktree)
             if before != after:
                 raise RuntimeError("worktree content changed while candidate commit was created")
-            baseline_tree_sha = _git(worktree, "rev-parse", f"{candidate_baseline_sha}^{{tree}}").strip()
+            baseline_tree_sha = _git(worktree, "rev-parse", f"{base_sha}^{{tree}}").strip()
             candidate_tree_sha = _git(worktree, "rev-parse", f"{candidate_digest}^{{tree}}").strip()
-            delta_patch = _git_bytes(worktree, "diff", "--binary", candidate_baseline_sha, candidate_digest, "--")
+            delta_patch = _git_bytes(worktree, "diff", "--binary", base_sha, candidate_digest, "--")
             candidate = {
-                "schema_version": "2",
+                "schema_version": "3",
                 "node_run_id": node_run_id,
                 "candidate_digest": candidate_digest,
-                "base_sha": candidate_baseline_sha,
+                "base_sha": base_sha,
+                "architecture_base_sha": candidate_baseline_sha,
                 "previous_head_sha": base_sha,
                 "baseline_tree_sha": baseline_tree_sha,
                 "candidate_tree_sha": candidate_tree_sha,
                 "delta_patch_sha": hashlib.sha256(delta_patch).hexdigest(),
-                "parent_candidate_digest": parent_candidate_digest,
                 "repair_bill_ref": dict(repair_bill_ref or {}),
                 "unit_contract_hash": unit_contract_hash,
                 "dependency_output_hashes": dict(dependency_output_hashes),
                 "environment_fingerprint": environment_fingerprint,
                 "workspace_fingerprint": before,
                 "changed_paths": changed_paths,
-                "manager_seeded_paths": sorted(manager_seeded_path_hashes or {}),
                 "candidate_key": candidate_key,
             }
             child_refs = ()
@@ -2133,7 +2032,7 @@ class CandidateSnapshotService:
                 child_refs = ((str(repair_bill_ref["sha256"]), "repair_bill"),)
             ref = self.artifacts.put_json(
                 candidate,
-                artifact_type="CandidateSnapshotArtifact",
+                artifact_type="GitCheckpointArtifact",
                 child_refs=child_refs,
             )
             return ref, candidate_digest
@@ -2664,8 +2563,6 @@ def _validate_reference_only_paths(changed_paths: list[str], reference_only_path
 def _validate_skeleton_candidate_paths(
     changed_paths: list[str],
     policy: Mapping[str, Any],
-    *,
-    manager_seeded_paths: set[str] | None = None,
 ) -> None:
     contract_mode = str(policy.get("contract_mode") or "file_frozen")
     if contract_mode not in {"file_frozen", "review_guarded"}:
@@ -2673,21 +2570,6 @@ def _validate_skeleton_candidate_paths(
     frozen = {str(item).replace(os.sep, "/") for item in list(policy.get("contract_paths") or [])}
     references = {str(item).replace(os.sep, "/") for item in list(policy.get("reference_only") or [])}
     writable = list(compiled_module_write_scopes(policy))
-    manager_seeded = {
-        str(item).replace(os.sep, "/").strip("/")
-        for item in set(manager_seeded_paths or set())
-    }
-    corpus_scope = dict(policy.get("verification_corpus") or {})
-    invalid_seeded = sorted(
-        path
-        for path in manager_seeded
-        if not _path_scope_matches(path, corpus_scope)
-    )
-    if invalid_seeded:
-        raise ValueError(
-            "Manager-seeded paths are outside the module verification corpus: "
-            + ", ".join(invalid_seeded)
-        )
     frozen_violations = sorted(
         path
         for path in changed_paths
@@ -2701,41 +2583,10 @@ def _validate_skeleton_candidate_paths(
     outside = sorted(
         path
         for path in changed_paths
-        if path.replace(os.sep, "/").strip("/") not in manager_seeded
-        and not any(_path_scope_matches(path, scope) for scope in writable)
+        if not any(_path_scope_matches(path, scope) for scope in writable)
     )
     if outside:
         raise ValueError("candidate changed paths outside its compiled module write scopes: " + ", ".join(outside))
-
-
-def _validate_manager_seeded_paths(
-    worktree: Path,
-    expected_hashes: Mapping[str, str],
-) -> None:
-    root = worktree.resolve()
-    errors: list[str] = []
-    for raw_path, expected_hash in sorted(expected_hashes.items()):
-        path = str(raw_path).replace(os.sep, "/").strip("/")
-        target = (root / path).resolve()
-        if not target.is_relative_to(root):
-            errors.append(f"{path}: escapes the worktree")
-            continue
-        if str(expected_hash) == "deleted":
-            if target.exists() or target.is_symlink():
-                errors.append(f"{path}: restored after Manager deletion")
-            continue
-        if not target.is_file() or target.is_symlink():
-            errors.append(f"{path}: missing or non-file")
-            continue
-        actual_hash = hashlib.sha256(target.read_bytes()).hexdigest()
-        if actual_hash != str(expected_hash):
-            errors.append(f"{path}: content changed after Manager installation")
-    if errors:
-        raise ValueError(
-            "Coder modified Manager-seeded verification corpus files: "
-            + ", ".join(errors)
-        )
-
 
 def _path_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
     normalized = str(path).replace(os.sep, "/").strip("/")
@@ -2769,16 +2620,15 @@ def _topology_sinks(depends_on: Mapping[str, list[str]], node_ids: Mapping[str, 
 
 def _find_candidate_commit(worktree: Path, candidate_key: str) -> str:
     try:
-        # Candidate idempotency is worktree-local. A matching commit reachable
-        # only from another Candidate branch does not mean this worktree has
-        # applied it.
+        # Checkpoint idempotency is branch-local. A matching commit reachable
+        # only from another Module branch does not settle this assignment.
         output = _git(
             worktree,
             "log",
             "HEAD",
             "--format=%H%x00%B%x00",
             "--grep",
-            f"Pal-Candidate-Key: {candidate_key}",
+            f"Pal-Assignment-Key: {candidate_key}",
             "-n",
             "1",
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -199,6 +200,54 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(result.snapshot.state, "ACCEPTED")
         with self.assertRaisesRegex(ValueError, "stale or already consumed"):
             self.service.submit_human_decision(card, decision="accept")
+
+    def test_issued_human_decision_survives_legacy_wall_clock_expiry(self) -> None:
+        requirements, _evidence, manifest = self._publish_contract()
+        workflow_id = "wf_durable_human_review"
+        revision_id = "arch_durable_human_review"
+        card = self._prepare_workflow_human_review(
+            workflow_id=workflow_id,
+            revision_id=revision_id,
+            requirements_ref=requirements.to_dict(),
+            manifest_ref=manifest.to_dict(),
+        )
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE minion_v2_human_decisions
+                SET expires_at = '2000-01-01T00:00:00+00:00'
+                WHERE workflow_id = ? AND status = 'issued'
+                """,
+                (workflow_id,),
+            )
+            connection.execute(
+                """
+                UPDATE minion_v2_schema_meta
+                SET schema_value = '22'
+                WHERE schema_key = 'schema_version'
+                """
+            )
+            connection.execute(
+                """
+                UPDATE minion_v2_aggregate_snapshots
+                SET payload_json = json_set(
+                    payload_json,
+                    '$.orchestration_contract_version',
+                    '6'
+                )
+                WHERE workflow_id = ?
+                """,
+                (workflow_id,),
+            )
+
+        self.repository.ensure_schema()
+        record = self.repository.inspect_human_decision_token(card.decision_token)
+        assert record is not None
+        self.assertEqual(record["expires_at"], "")
+        self.assertEqual(record["status"], "issued")
+
+        result = self.service.submit_human_decision(card, decision="accept")
+        self.assertEqual(result.snapshot.state, "ACCEPTED")
 
     def test_human_card_cannot_be_replayed_by_another_channel(self) -> None:
         requirements, evidence, manifest = self._publish_contract()

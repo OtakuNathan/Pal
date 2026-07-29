@@ -1,8 +1,8 @@
 """Public declarations for the WebSocket sidecar process (review_guarded).
 
 Responsibility: run the WebSocket transport as a dedicated process that bridges
-WebSocket text frames to the existing socket channel protocol and back, using
-the ``websockets`` library as the SOLE WebSocket wire implementation.
+bounded peer exchanges to the provider-private local channel socket, using the
+``websockets`` library as the sole WebSocket wire implementation.
 
 This file declares the public contract surface only. Transport control flow,
 reconnect/backoff scheduling, framing, and the socket-channel client sessions
@@ -10,14 +10,12 @@ are private implementation owned by the Coder. The formal connection state
 machine is recorded in architecture.yaml ``websocket_sidecar``.
 
 Invariants (frozen by ``bridge_protocol``):
-* The socket channel is the sole local Pal Channel; WebSocket peers reuse its
-  request/response message shapes without adding a new wire message kind,
-  envelope, control protocol, or semantics.
-* Inbound ordinary messages reach the runtime only through the existing socket
-  channel user-message path (equivalent to ``pal client --message``).
-* Active requests are correlated by the existing request id. Reasoning,
-  tool-call progress, and intermediate model-round text are never surfaced as
-  extra messages.
+* Peer traffic never enters the ordinary TTY ``pal.sock``.
+* Active sends are fire-and-forget: completion means the WebSocket transport
+  accepted the root frame.
+* Only the final local Pal round can become the next peer message.
+* ``[[peer_end]]`` and the ninth-message boundary terminate and clear an
+  exchange without emitting another frame.
 * Slash-prefixed and control-plane-like inbound frames are rejected at the
   boundary and never reach the slash-command dispatcher.
 * ``websockets`` is the only WebSocket wire implementation.
@@ -27,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import contextvars
 import enum
 import importlib
 import json
@@ -38,11 +35,32 @@ from typing import Any
 from uuid import uuid4
 
 from pal.channel.endpoints.socket_protocol import read_socket_message
-from pal.channel.providers.websocket_bridge.protocol import (
-    REJECTION_REASON_CONTROL_PLANE,
-    REJECTION_REASON_SLASH,
-    SLASH_PREFIX,
-)
+try:
+    from .protocol import (
+        InvalidPeerContext,
+        MAX_PEER_MESSAGE_COUNT,
+        PEER_END_SENTINEL,
+        PeerExchangeContext,
+        REJECTION_REASON_CONTROL_PLANE,
+        REJECTION_REASON_PEER_CONTEXT,
+        REJECTION_REASON_SLASH,
+        SLASH_PREFIX,
+        parse_peer_context,
+    )
+except ImportError:
+    # The production sidecar imports this module directly from its runtime-root
+    # provider directory, outside a Python package.
+    from protocol import (  # type: ignore[no-redef]
+        InvalidPeerContext,
+        MAX_PEER_MESSAGE_COUNT,
+        PEER_END_SENTINEL,
+        PeerExchangeContext,
+        REJECTION_REASON_CONTROL_PLANE,
+        REJECTION_REASON_PEER_CONTEXT,
+        REJECTION_REASON_SLASH,
+        SLASH_PREFIX,
+        parse_peer_context,
+    )
 from pal.foundation.sidecar import (
     SidecarEndpoint,
     cleanup_sidecar_endpoint,
@@ -124,6 +142,27 @@ def _decode_protocol_payload(text: str) -> dict[str, Any] | None:
     if payload_type not in {"user_message", "slash_command", *_SOCKET_RESPONSE_TYPES}:
         return None
     return decoded
+
+
+def _encode_peer_message(
+    text: str,
+    *,
+    context: PeerExchangeContext,
+    request_id: str | None = None,
+) -> str:
+    frame = {
+        "type": "user_message",
+        "request_id": str(request_id or uuid4()),
+        "text": str(text),
+        "peer_context": context.to_wire(),
+    }
+    return json.dumps(frame, ensure_ascii=False, separators=(",", ":"))
+
+
+def _context_for_inbound(payload: dict[str, Any] | None) -> PeerExchangeContext:
+    if payload is None or "peer_context" not in payload:
+        raise InvalidPeerContext("peer_context is required")
+    return parse_peer_context(payload.get("peer_context"))
 
 
 def classify_inbound(text: str) -> InboundClassification:
@@ -252,16 +291,18 @@ def advance_state(
 
 _RUNTIME: _SidecarRuntime | None = None
 
-# The peer id of the inbound frame currently being delivered, scoped per async
-# task so concurrent peer deliveries never cross. Used by ``deliver_inbound`` to
-# bind the socket-channel reply stream back to the originating peer.
-_current_peer: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "websocket_sidecar_current_peer", default=None
-)
 
-
-def _manager_endpoint(runtime_root: Path) -> SidecarEndpoint:
-    return SidecarEndpoint(runtime_root=Path(runtime_root), name=SIDECAR_NAME)
+def _manager_endpoint(config: SidecarConfig) -> SidecarEndpoint:
+    data_root = (
+        Path(config.data_root)
+        if config.data_root is not None
+        else Path(config.bridge_socket_path).parent
+    )
+    return SidecarEndpoint(
+        runtime_root=Path(config.runtime_root),
+        name=SIDECAR_NAME,
+        runtime_dir_override=data_root,
+    )
 
 
 def _load_websockets():
@@ -273,6 +314,15 @@ def _transient_exception_types(websockets_module: Any) -> tuple[type[BaseExcepti
     """Collect the transient WebSocket/connection exception types for reconnect."""
     collected: list[type[BaseException]] = [OSError]
     exceptions = getattr(websockets_module, "exceptions", None)
+    if exceptions is None:
+        # websockets 14.x doesn't expose ``exceptions`` on the package until the
+        # submodule has been imported. Without this explicit import, an ordinary
+        # ConnectionClosed escapes the reconnect loop and kills the sidecar.
+        module_name = str(getattr(websockets_module, "__name__", "") or "websockets")
+        try:
+            exceptions = importlib.import_module(f"{module_name}.exceptions")
+        except (ImportError, AttributeError):
+            exceptions = None
     if exceptions is not None:
         for name in (
             "ConnectionClosed",
@@ -302,9 +352,9 @@ class _PeerConnection:
 
 
 @dataclass
-class _PendingRequest:
-    peer_id: str
-    future: asyncio.Future[dict[str, Any]]
+class _ResponseStream:
+    """Incremental local-Pal response text for one peer message."""
+
     current_text_parts: list[str] = field(default_factory=list)
     error_text: str = ""
 
@@ -318,9 +368,12 @@ class _SidecarRuntime:
     listener_bound: bool = False
     last_error: str = ""
     rejection_count: int = 0
+    sentinel_drop_count: int = 0
+    limit_drop_count: int = 0
+    legacy_response_drop_count: int = 0
+    active_exchange_id: str = ""
+    active_message_count: int = 0
     peers: dict[str, _PeerConnection] = field(default_factory=dict)
-    deliveries: dict[str, str] = field(default_factory=dict)  # request_id -> peer_id
-    pending_requests: dict[str, _PendingRequest] = field(default_factory=dict)
     manager_server: Any = None
     manager_endpoint_info: dict[str, Any] = field(default_factory=dict)
     shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -369,6 +422,9 @@ class _SidecarRuntime:
         if not classification.deliverable:
             reason = classification.reason or "blank_message_rejected"
             raise ValueError(reason)
+        if message == PEER_END_SENTINEL:
+            self._terminate_exchange("sentinel")
+            raise ValueError("peer_end_is_not_a_root_message")
         active_peers = [peer for peer in self.peers.values() if not peer.closed]
         if not active_peers:
             raise RuntimeError("websocket peer is not connected")
@@ -376,40 +432,21 @@ class _SidecarRuntime:
             raise RuntimeError("websocket endpoint has multiple connected peers")
         peer = active_peers[0]
         request_id = str(uuid4())
-        pending = _PendingRequest(
-            peer_id=peer.peer_id,
-            future=asyncio.get_running_loop().create_future(),
-        )
-        self.pending_requests[request_id] = pending
-        frame = {
-            "type": "user_message",
-            "request_id": request_id,
-            "text": message,
-        }
+        context = PeerExchangeContext.root()
+        self._activate_exchange(context)
         try:
-            await peer.send(json.dumps(frame, ensure_ascii=False, separators=(",", ":")))
-            result = await asyncio.wait_for(
-                asyncio.shield(pending.future),
-                timeout=max(float(self.config.message_timeout_seconds), 0.001),
+            await peer.send(
+                _encode_peer_message(message, context=context, request_id=request_id)
             )
-        except asyncio.TimeoutError as exc:
-            raise TimeoutError(
-                f"peer response timed out after {self.config.message_timeout_seconds:.3g}s"
-            ) from exc
         finally:
-            self.pending_requests.pop(request_id, None)
-            if not pending.future.done():
-                pending.future.cancel()
-        return {
-            "message_id": request_id,
-            "response": str(result.get("response") or ""),
-            "finish_reason": str(result.get("finish_reason") or ""),
-        }
+            # The wire context, not a process-local conversation ledger, carries
+            # the exchange identity and count to the next hop.
+            self._clear_exchange()
+        return {"message_id": request_id}
 
     async def _begin_shutdown(self) -> None:
         self._safe_advance(ConnectionStateEvent.SHUTDOWN_REQUESTED)
         self.shutdown_event.set()
-        self._fail_pending_requests("websocket bridge is shutting down")
         # Unblock any active peer frame loops so a connected transport shuts down
         # promptly rather than waiting for the next inbound frame.
         for peer in list(self.peers.values()):
@@ -427,6 +464,11 @@ class _SidecarRuntime:
             "state": self.state.value,
             "last_error": self.last_error,
             "rejection_count": self.rejection_count,
+            "sentinel_drop_count": self.sentinel_drop_count,
+            "limit_drop_count": self.limit_drop_count,
+            "legacy_response_drop_count": self.legacy_response_drop_count,
+            "active_exchange_id": self.active_exchange_id,
+            "active_message_count": self.active_message_count,
             "mode": "outbound" if self.config.peer_url else "inbound",
             "peer_url": self.config.peer_url or "",
             "bind_host": self.config.bind_host,
@@ -434,76 +476,31 @@ class _SidecarRuntime:
             **dict(self.manager_endpoint_info),
         }
 
-    # ---- delivery / reply routing ----
-    def _register_delivery(self, request_id: str, peer_id: str) -> None:
-        self.deliveries[request_id] = peer_id
-
-    def _unregister_delivery(self, request_id: str) -> None:
-        self.deliveries.pop(request_id, None)
-
-    def _peer_for_reply(self, request_id: str) -> _PeerConnection | None:
-        peer_id = self.deliveries.get(request_id)
-        if peer_id is None:
-            return None
-        return self.peers.get(peer_id)
-
     def _report_rejection(self, reason: str, text: str) -> None:
         self.rejection_count += 1
         preview = text.strip()[:80]
         self.last_error = f"{reason}: {preview}" if preview else reason
         logger.warning("websocket bridge rejected inbound frame (%s): %r", reason, preview)
 
-    def _route_response(self, payload: dict[str, Any]) -> bool:
-        request_id = str(payload.get("request_id") or "")
-        pending = self.pending_requests.get(request_id)
-        if pending is None:
-            return False
-        payload_type = str(payload.get("type") or "")
-        if payload_type == "text_delta":
-            text = str(payload.get("text") or "")
-            if text:
-                pending.current_text_parts.append(text)
-        elif payload_type in {"llm_error", "error"}:
-            pending.error_text = str(
-                payload.get("error_text") or payload.get("text") or "remote Pal failed"
-            )
-        terminal = payload_type in {"done", "error"}
-        if payload_type == "llm_done":
-            finish_reason = str(payload.get("finish_reason") or "")
-            if finish_reason == "tool_calls":
-                # Text emitted before a tool call belongs to an intermediate
-                # model round. It is transport progress, not the peer's final
-                # reply, so do not surface it as another message.
-                pending.current_text_parts.clear()
-                return True
-            terminal = bool(finish_reason and finish_reason != "tool_calls")
-        if not terminal or pending.future.done():
-            return True
-        if pending.error_text:
-            pending.future.set_exception(RuntimeError(pending.error_text))
-        else:
-            pending.future.set_result(
-                {
-                    "response": "".join(pending.current_text_parts),
-                    "finish_reason": str(payload.get("finish_reason") or "stop"),
-                }
-            )
-        return True
+    def _activate_exchange(self, context: PeerExchangeContext) -> None:
+        self.active_exchange_id = context.exchange_id
+        self.active_message_count = context.message_count
 
-    def _fail_pending_for_peer(self, peer_id: str, reason: str) -> None:
-        for pending in list(self.pending_requests.values()):
-            if pending.peer_id == peer_id and not pending.future.done():
-                pending.future.set_exception(ConnectionError(reason))
+    def _clear_exchange(self) -> None:
+        self.active_exchange_id = ""
+        self.active_message_count = 0
 
-    def _fail_pending_requests(self, reason: str) -> None:
-        for pending in list(self.pending_requests.values()):
-            if not pending.future.done():
-                pending.future.set_exception(ConnectionError(reason))
+    def _terminate_exchange(self, reason: str) -> None:
+        if reason == "sentinel":
+            self.sentinel_drop_count += 1
+        elif reason == "limit":
+            self.limit_drop_count += 1
+        self._clear_exchange()
 
     # ---- lifecycle ----
     async def run(self) -> None:
         self.manager_server, self.manager_endpoint_info = await start_sidecar_server(
-            _manager_endpoint(self.config.runtime_root), self._handle_manager_client
+            _manager_endpoint(self.config), self._handle_manager_client
         )
         try:
             if self.config.peer_url:
@@ -548,6 +545,11 @@ class _SidecarRuntime:
                 connection = await websockets.connect(self.config.peer_url)
             except self._ws_transient as exc:
                 self.last_error = f"connection failed: {exc.__class__.__name__}: {exc}"
+                logger.warning(
+                    "websocket bridge outbound connection failed; retrying: %s: %s",
+                    exc.__class__.__name__,
+                    exc,
+                )
                 self._safe_advance(ConnectionStateEvent.CONNECTION_FAILED)
                 if not await self._backoff_wait(attempt):
                     return
@@ -569,9 +571,14 @@ class _SidecarRuntime:
                 await self._process_peer_frames(connection, peer.peer_id)
             except self._ws_transient as exc:
                 self.last_error = f"peer disconnected: {exc.__class__.__name__}: {exc}"
+                logger.info(
+                    "websocket bridge peer disconnected; reconnecting: %s: %s",
+                    exc.__class__.__name__,
+                    exc,
+                )
             finally:
                 peer.closed = True
-                self._fail_pending_for_peer(peer.peer_id, "websocket peer disconnected")
+                self._terminate_exchange("disconnect")
                 async with self._lock:
                     self.peers.pop(peer.peer_id, None)
                 self.listener_bound = False
@@ -617,48 +624,84 @@ class _SidecarRuntime:
             logger.debug("websocket bridge peer %s disconnected: %s", peer_id, exc)
         finally:
             peer.closed = True
-            self._fail_pending_for_peer(peer.peer_id, "websocket peer disconnected")
+            self._terminate_exchange("disconnect")
             async with self._lock:
                 self.peers.pop(peer_id, None)
 
     async def _process_peer_frames(self, websocket: Any, peer_id: str) -> None:
+        peer = self.peers.get(peer_id)
+        if peer is None:
+            peer = _PeerConnection(websocket, peer_id)
         async for raw in websocket:
             text = raw if isinstance(raw, str) else bytes(raw).decode("utf-8", "replace")
             protocol_payload = _decode_protocol_payload(text)
             inbound_text = text
-            request_id: str | None = None
             if protocol_payload is not None:
                 payload_type = str(protocol_payload.get("type") or "")
                 if payload_type == "user_message":
                     inbound_text = str(protocol_payload.get("text") or "")
-                    request_id = str(protocol_payload.get("request_id") or "") or None
                 elif payload_type == "slash_command":
                     self._report_rejection(REJECTION_REASON_SLASH, text)
                     continue
                 elif payload_type in _SOCKET_RESPONSE_TYPES:
-                    if not self._route_response(protocol_payload):
-                        self.last_error = (
-                            "orphan websocket response: "
-                            f"{payload_type}:{str(protocol_payload.get('request_id') or '')}"
-                        )
+                    self.legacy_response_drop_count += 1
+                    logger.info(
+                        "websocket bridge dropped legacy response frame type=%s",
+                        payload_type,
+                    )
                     continue
+            if inbound_text == PEER_END_SENTINEL:
+                self._terminate_exchange("sentinel")
+                continue
             classification = classify_inbound(inbound_text)
             if not classification.deliverable:
                 if classification.reason is not None:
                     self._report_rejection(classification.reason, inbound_text)
+                self._terminate_exchange("rejected")
                 continue
-            token = _current_peer.set(peer_id)
             try:
-                await deliver_inbound(
+                exchange = _context_for_inbound(protocol_payload)
+            except InvalidPeerContext as exc:
+                self._report_rejection(REJECTION_REASON_PEER_CONTEXT, str(exc))
+                self._terminate_exchange("invalid_context")
+                continue
+            if exchange.message_count > MAX_PEER_MESSAGE_COUNT:
+                self._terminate_exchange("limit")
+                continue
+            self._activate_exchange(exchange)
+            try:
+                final_text = await deliver_inbound(
                     inbound_text,
                     config=self.config,
-                    request_id=request_id,
                 )
             except Exception as exc:  # transient delivery failure: report, keep bridging
                 self.last_error = f"delivery failed: {exc.__class__.__name__}: {exc}"
                 logger.exception("websocket bridge delivery failed")
-            finally:
-                _current_peer.reset(token)
+                self._terminate_exchange("delivery_error")
+                continue
+            if not final_text:
+                self._terminate_exchange("empty")
+                continue
+            if final_text == PEER_END_SENTINEL:
+                self._terminate_exchange("sentinel")
+                continue
+            next_exchange = exchange.next_message()
+            if next_exchange.message_count > MAX_PEER_MESSAGE_COUNT:
+                self._terminate_exchange("limit")
+                continue
+            self._activate_exchange(next_exchange)
+            try:
+                await peer.send(
+                    _encode_peer_message(final_text, context=next_exchange)
+                )
+            except Exception:
+                self._terminate_exchange("send_error")
+                raise
+            else:
+                # The exchange continues only in the message metadata now owned
+                # by the peer.  Keeping a local ledger would leave stale state
+                # when the peer ends the conversation without another frame.
+                self._clear_exchange()
 
     async def _cleanup(self) -> None:
         self._safe_advance(ConnectionStateEvent.TERMINATED)
@@ -668,9 +711,7 @@ class _SidecarRuntime:
             with contextlib.suppress(Exception):
                 await peer.websocket.close()
         self.peers.clear()
-        self.deliveries.clear()
-        self._fail_pending_requests("websocket bridge stopped")
-        self.pending_requests.clear()
+        self._terminate_exchange("shutdown")
         self.listener_bound = False
         if self.manager_server is not None:
             self.manager_server.close()
@@ -678,28 +719,26 @@ class _SidecarRuntime:
                 await self.manager_server.wait_closed()
             self.manager_server = None
         with contextlib.suppress(Exception):
-            await cleanup_sidecar_endpoint(_manager_endpoint(self.config.runtime_root))
+            await cleanup_sidecar_endpoint(_manager_endpoint(self.config))
 
 
 @dataclass(frozen=True)
 class SidecarConfig:
     """Declarative configuration for one bridge sidecar process.
 
-    ``socket_channel_path`` is the existing local socket channel (pal.sock) and
-    remains the sole message ingress. ``bind_host``/``bind_port`` expose the
-    inbound WebSocket listener on the trusted LAN; ``peer_url`` is the optional
-    outbound peer bridge URL. Reconnect tuning reuses socket-channel delivery
-    semantics where possible.
+    ``bridge_socket_path`` is the provider-owned local channel socket.
+    ``bind_host``/``bind_port`` expose the inbound WebSocket listener on the
+    trusted LAN; ``peer_url`` is the optional outbound peer bridge URL.
     """
 
     runtime_root: Path
-    socket_channel_path: Path
+    bridge_socket_path: Path
+    data_root: Path | None = None
     bind_host: str = "0.0.0.0"
     bind_port: int = 0
     peer_url: str | None = None
     reconnect_initial_delay_seconds: float = 1.0
     reconnect_max_delay_seconds: float = 30.0
-    message_timeout_seconds: float = 3000.0
     binding_metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -720,15 +759,21 @@ async def serve(config: SidecarConfig) -> None:
     disconnect, error reporting). Private implementation is deferred.
     """
     global _RUNTIME
-    websockets = _load_websockets()
-    runtime = _SidecarRuntime(config=config)
-    runtime._ws = websockets
-    runtime._ws_transient = _transient_exception_types(websockets)
-    _RUNTIME = runtime
+    runtime: _SidecarRuntime | None = None
     try:
+        websockets = _load_websockets()
+        runtime = _SidecarRuntime(config=config)
+        runtime._ws = websockets
+        runtime._ws_transient = _transient_exception_types(websockets)
+        _RUNTIME = runtime
         await runtime.run()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("websocket bridge sidecar terminated unexpectedly")
+        raise
     finally:
-        if _RUNTIME is runtime:
+        if runtime is not None and _RUNTIME is runtime:
             _RUNTIME = None
 
 
@@ -736,62 +781,60 @@ async def deliver_inbound(
     text: str,
     *,
     config: SidecarConfig,
-    request_id: str | None = None,
-) -> None:
-    """Deliver one ordinary inbound message into the existing socket channel
-    user-message path (SocketSession send to pal.sock). Slash-prefixed or
-    control-plane-like text MUST be rejected before this path is reached.
+) -> str | None:
+    """Run one peer message through the provider-private local channel.
+
+    The local socket may stream reasoning and tool rounds, but this adapter
+    returns only the final model round.  Empty/error responses terminate the
+    exchange and are never converted into peer text.
     """
     classification = classify_inbound(text)
     if not classification.deliverable:
-        # Defense in depth: the boundary rejects upstream. If a non-deliverable
-        # frame reaches here it is never forwarded; a named rejection is reported.
         runtime = _RUNTIME
         if runtime is not None and classification.reason is not None:
             runtime._report_rejection(classification.reason, text)
-        return
+        return None
 
-    runtime = _RUNTIME
-    peer_id = _current_peer.get()
     session: SocketSession | None = None
-    active_request_id = ""
+    stream = _ResponseStream()
     try:
-        reader, writer = await asyncio.open_unix_connection(str(config.socket_channel_path))
+        reader, writer = await asyncio.open_unix_connection(str(config.bridge_socket_path))
         session = SocketSession(
             reader,
             writer,
             read_message=read_socket_message,
-            request_id_factory=lambda: request_id or str(uuid4()),
+            request_id_factory=lambda: str(uuid4()),
         )
-        active_request_id = await session.send(text)
-        if runtime is not None and peer_id is not None:
-            runtime._register_delivery(active_request_id, peer_id)
-        async for payload in session.stream_response(active_request_id):
-            await forward_reply(payload, config=config)
+        request_id = await session.send(text)
+        async for payload in session.stream_response(request_id):
+            payload_type = str(payload.get("type") or "")
+            if payload_type == "text_delta":
+                chunk = str(payload.get("text") or "")
+                if chunk:
+                    stream.current_text_parts.append(chunk)
+                continue
+            if payload_type in {"llm_error", "error"}:
+                stream.error_text = str(
+                    payload.get("error_text") or payload.get("text") or "local Pal failed"
+                )
+                continue
+            if payload_type == "llm_done":
+                finish_reason = str(payload.get("finish_reason") or "")
+                if finish_reason == "tool_calls":
+                    stream.current_text_parts.clear()
+                    stream.error_text = ""
+                    continue
     finally:
-        if runtime is not None and active_request_id:
-            runtime._unregister_delivery(active_request_id)
         if session is not None:
             await session.aclose()
 
-
-async def forward_reply(payload: dict[str, Any], *, config: SidecarConfig) -> None:
-    """Forward one existing socket channel reply frame back to the peer over
-    WebSocket. Reuses the socket protocol message shape; adds no new envelope.
-    """
-    runtime = _RUNTIME
-    if runtime is None:
-        return
-    if not isinstance(payload, dict):
-        return
-    request_id = str(payload.get("request_id") or "")
-    peer = runtime._peer_for_reply(request_id)
-    if peer is None:
-        return
-    # Reuse the socket protocol message shape verbatim, serialized as text with
-    # no added wrapper/envelope so the peer sees the existing frame as-is.
-    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    await peer.send(text)
+    if stream.error_text:
+        runtime = _RUNTIME
+        if runtime is not None:
+            runtime.last_error = f"local Pal response failed: {stream.error_text}"
+        return None
+    final_text = "".join(stream.current_text_parts)
+    return final_text if final_text.strip() else None
 
 
 def health_snapshot() -> SidecarHealth:
@@ -817,6 +860,5 @@ __all__ = [
     "SidecarHealth",
     "serve",
     "deliver_inbound",
-    "forward_reply",
     "health_snapshot",
 ]

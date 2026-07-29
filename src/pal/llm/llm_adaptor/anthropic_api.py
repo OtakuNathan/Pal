@@ -4,10 +4,11 @@ import base64
 import json
 from typing import Any
 
-from pal.llm.contracts import CanonicalLLMRequest
+from pal.llm.contracts import CanonicalLLMRequest, ThinkingContract
 from pal.llm.models import LLMEndpointModel
 
 from pal.llm.llm_adaptor.base import (
+    ANTHROPIC_THINKING_CONTRACT,
     LLMProviderAdapter,
     OpenAIChatCompletionDraft,
     render_instruction_fallback_text,
@@ -22,11 +23,17 @@ class AnthropicMessagesProvider(LLMProviderAdapter):
 
     @classmethod
     def matches_endpoint(cls, endpoint: LLMEndpointModel) -> bool:
-        return str(endpoint.api_mode or "") == "anthropic_messages"
+        return str(getattr(endpoint, "api_mode", "") or "") == "anthropic_messages"
+
+    def provider_thinking_contract(self) -> ThinkingContract | None:
+        if getattr(self.endpoint, "supports_reasoning", False) is False:
+            return None
+        return ANTHROPIC_THINKING_CONTRACT
 
     def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:
+        choice_id = self.resolve_think_level(request.metadata.get("think_level"))
         draft.thinking = _think_level_to_anthropic_thinking(
-            request.metadata.get("think_level"),
+            choice_id,
             request.max_output_tokens,
             thinking_budget_tokens=request.thinking_budget_tokens,
         )
@@ -154,6 +161,7 @@ def _think_level_to_anthropic_effort(value: Any) -> str | None:
         "deep": "high",
         "high": "high",
         "xhigh": "high",
+        "max": "high",
     }
     return mapping.get(text, "medium" if text else None)
 

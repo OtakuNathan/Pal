@@ -161,6 +161,35 @@ Runtime extension points:
 Runtime adapters must export one or more `LLMProviderAdapter` subclasses,
 directly or through `ADAPTER` / `ADAPTERS`.
 
+## Thinking Levels
+
+Thinking levels are provider-owned endpoint capabilities, not a Pal-wide enum.
+An adapter returns an immutable `ThinkingContract` from
+`provider_thinking_contract()`. The contract declares the choices exposed to
+the user, their aliases, and the provider default. The adapter then projects
+the resolved choice into its wire request in `apply_request()`.
+
+Selections are persisted under the endpoint ID. Switching models restores that
+endpoint's prior selection, and a fallback endpoint uses its own selection.
+The `/think` control is rendered from the active endpoint's contract; endpoints
+without a contract do not expose configurable thinking.
+
+An endpoint may narrow a provider contract with
+`capabilities_blob.thinking_contract`, but it cannot invent a choice the
+provider adapter cannot project:
+
+```json
+{
+  "thinking_contract": {
+    "default": "high",
+    "choices": [
+      "off",
+      {"id": "high", "label": "focused", "aliases": ["deep"]}
+    ]
+  }
+}
+```
+
 ## Wire Shapes
 
 Pal currently recognizes three main provider shape families.
@@ -241,7 +270,10 @@ Examples:
 
 - DeepSeek thinking-capable endpoints set both `reasoning_effort` and
   `extra_body.thinking`.
-- Z.ai/GLM thinking-capable endpoints set `extra_body.thinking`.
+- Z.ai/GLM OpenAI-shaped endpoints expose the effective `off`, `high`, and
+  `max` choices and set both `reasoning_effort` and `extra_body.thinking`.
+  Older Pal aliases are resolved by that provider contract rather than sent
+  verbatim.
 - Codex bridge endpoints render Responses-shaped payloads while preserving the
   bridge-specific invocation path.
 

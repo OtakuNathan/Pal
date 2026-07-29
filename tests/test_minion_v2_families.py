@@ -594,7 +594,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                     {"kind": "directory", "path": "src"},
                 ],
                 "read_only_overlay_paths": [
-                    "tests/router/verification",
+                    "tests/router/verifier",
                 ],
             },
         )
@@ -604,7 +604,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 CanonicalToolCall(
                     name="write_file",
                     args={
-                        "file_path": "tests/router/verification/test_router.py",
+                        "file_path": "tests/router/verifier/test_router.py",
                         "content": "assert True\n",
                     },
                 )
@@ -869,7 +869,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Manager-bound contract as adjudication truth", verifier_behavior)
         self.assertIn("smallest sufficient checks", verifier_behavior)
         self.assertNotIn("SystemVerificationWorkView", verifier_behavior)
-        self.assertNotIn("tests/<module_name>/verification", verifier_behavior)
+        self.assertNotIn("tests/<module_name>/verifier", verifier_behavior)
         architecture_review_behavior = str(
             self._pack("software_engineering.v2_reviewer").resolved_profile[
                 "behavior_fragment"
@@ -1041,6 +1041,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Mechanically verify examples", architect)
         self.assertIn("call ask_question and wait", architect)
         self.assertIn("Design the smallest complete system at module level", architect)
+        self.assertIn("Do not read architecture.yaml during discovery", architect)
+        self.assertIn("Once the design is settled", architect)
+        self.assertIn("immediately begin file-edit tool calls", architect)
+        self.assertIn("do not spend another response restating", architect)
         self.assertIn("every state, worker, object, and resource has exactly one owner", architect)
         self.assertIn("lifecycle transitions and composition joins close", architect)
         self.assertIn("private implementation is explicitly deferred", architect)
@@ -1049,6 +1053,11 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Build commands, manifests, test runners", architect)
         self.assertIn("meaningful end-to-end scenarios", architect)
         self.assertIn("established project or language/runtime primitives", architect)
+        self.assertIn("type system and compiler can reject invalid programs early", architect)
+        self.assertIn("C++ may use strong types, RAII, concepts, or SFINAE", architect)
+        self.assertIn("participates in overload resolution", architect)
+        self.assertIn("later function-body failure does not satisfy it", architect)
+        self.assertIn("without unnecessary dynamic allocation", architect)
         self.assertIn("object-address side table", architecture_review)
         self.assertIn("Audit requirement preservation", architecture_review)
         self.assertIn("Review semantic composition, not private implementation", architecture_review)
@@ -1059,6 +1068,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Compilation and LSP support", architecture_review)
         self.assertIn("Tests remain verification evidence", architecture_review)
         self.assertIn("On revision, regress the prior finding", architecture_review)
+        self.assertIn("disposition=advisory with priority=p2", architecture_review)
+        self.assertIn("Never block acceptance for a stylistic type-level abstraction", architecture_review)
+        self.assertIn("missing enforcement is a blocking contract_defect", architecture_review)
+        self.assertIn("positive and negative declaration probe", architecture_review)
 
         self.assertIn("Accepted Skeleton declarations", coder)
         self.assertIn("dependency's public contract as an axiom", coder)
@@ -1068,6 +1081,9 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Functional Core / Imperative Shell", coder)
         self.assertIn("process-global registry", coder)
         self.assertIn("make illegal states or malformed data hard to represent", coder)
+        self.assertIn("Prefer compile-time rejection", coder)
+        self.assertIn("Preserve every accepted declaration's static constraints exactly", coder)
+        self.assertIn("Avoid dynamic allocation, unnecessary copying", coder)
         self.assertIn("update_checklist as a micro-plan, not proof", coder)
         self.assertIn("submit immediately for independent verification", coder)
 
@@ -1086,6 +1102,11 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("do not invent facts", generic)
         self.assertIn("never acceptance evidence", verifier)
         self.assertIn("minimum sufficient focused build/test path", verifier)
+        self.assertIn("disposition=advisory with priority=p2", verifier)
+        self.assertIn("Do not block acceptance for stylistic type-level abstraction", verifier)
+        self.assertIn("positive and negative consumer compile probe", verifier)
+        self.assertIn("does not prove overload exclusion", verifier)
+        self.assertIn("positive and negative external-consumer compile probes", system_verifier)
         self.assertNotIn("owned_impl", coder)
         self.assertNotIn("owned_test", coder)
 
@@ -1097,7 +1118,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         for behavior in (architect, architecture_review, coder):
             self.assertNotIn("Do not run git commit", behavior)
             self.assertNotIn("tests/<module_name>/developer", behavior)
-            self.assertNotIn("tests/<module_name>/verification", behavior)
+            self.assertNotIn("tests/<module_name>/verifier", behavior)
 
     def test_every_architect_profile_gates_design_on_source_consistency(self) -> None:
         for profile in (

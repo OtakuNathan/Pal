@@ -24,8 +24,14 @@ _PNG_1X1 = base64.b64decode(
 
 
 class _FakeScreenshotService:
-    def __init__(self, runtime_root: Path) -> None:
+    def __init__(
+        self,
+        runtime_root: Path,
+        *,
+        include_response_metadata: bool = True,
+    ) -> None:
         self.browser_manager = SimpleNamespace(runtime_root=runtime_root)
+        self.include_response_metadata = include_response_metadata
         self.requests = []
 
     def screenshot(self, request):
@@ -35,9 +41,17 @@ class _FakeScreenshotService:
             final_url="https://example.com/final",
             title="Example",
             png_bytes=_PNG_1X1,
-            configured_provider_id="playwright_fetch_default",
-            effective_provider_id="playwright_fetch_default",
-            status_code=200,
+            configured_provider_id=(
+                "playwright_fetch_default"
+                if self.include_response_metadata
+                else None
+            ),
+            effective_provider_id=(
+                "playwright_fetch_default"
+                if self.include_response_metadata
+                else None
+            ),
+            status_code=200 if self.include_response_metadata else None,
             full_page=request.full_page,
             viewport_width=request.viewport_width,
             viewport_height=request.viewport_height,
@@ -136,6 +150,65 @@ class WebScreenshotToolTests(unittest.TestCase):
         self.assertEqual(result.structured["final_url"], "https://example.com/final")
         self.assertTrue(Path(result.structured["local_cached_path"]).is_file())
         self.assertEqual(service.requests[0].url, "https://example.com")
+
+    def test_facade_accepts_nullable_screenshot_provider_metadata(self) -> None:
+        service = _FakeScreenshotService(
+            self.root,
+            include_response_metadata=False,
+        )
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        runtime = core.context.execution_runtime
+        register_web_fetch_with_core(core.context, service)
+        core.publish_module_capabilities("web_fetch")
+
+        result = asyncio.run(
+            runtime.execute_tool_async(
+                CanonicalToolCall(
+                    name="call_tool",
+                    args={
+                        "name": "screenshot_web",
+                        "args": {"url": "https://example.com"},
+                    },
+                ),
+                turn_id=self.turn_id,
+            )
+        )
+
+        self.assertTrue(result.ok, result.llm_text)
+        self.assertEqual(result.invocation_result.kind, "complete")
+        self.assertNotIn("status_code", result.structured)
+        self.assertNotIn("configured_provider_id", result.structured)
+        self.assertNotIn("effective_provider_id", result.structured)
+
+    def test_facade_declares_artifact_registration_degradation(self) -> None:
+        service = _FakeScreenshotService(self.root)
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        core.context.port_registry["artifact:artifact"] = self.manager
+        runtime = core.context.execution_runtime
+        register_web_fetch_with_core(core.context, service)
+        core.publish_module_capabilities("web_fetch")
+
+        result = asyncio.run(
+            runtime.execute_tool_async(
+                CanonicalToolCall(
+                    name="call_tool",
+                    args={
+                        "name": "screenshot_web",
+                        "args": {"url": "https://example.com"},
+                    },
+                ),
+                turn_id=self.turn_id,
+            )
+        )
+
+        self.assertTrue(result.ok, result.llm_text)
+        self.assertEqual(result.invocation_result.kind, "complete")
+        self.assertFalse(result.structured["registered_artifact"])
+        self.assertIn("artifact_registration_error", result.structured)
 
 
 if __name__ == "__main__":

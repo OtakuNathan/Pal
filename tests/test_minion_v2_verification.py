@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import os
@@ -26,8 +25,12 @@ from pal.minion.v2 import (
     ContentAddressedArtifactStore,
     MinionV2Repository,
 )
-from pal.minion.v2.contracts import AggregateSnapshot
-from pal.minion.v2.integration import IntegrationOwnershipDefect, IntegrationService
+from pal.minion.v2.contracts import AggregateSnapshot, SubmissionInvariantError
+from pal.minion.v2.integration import (
+    DeliveryService,
+    IntegrationOwnershipDefect,
+    IntegrationService,
+)
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result
@@ -165,9 +168,9 @@ class MinionV2VerificationTests(unittest.TestCase):
             check=True,
         )
         (root / "src").mkdir()
-        (root / "tests" / "router" / "verification").mkdir(parents=True)
+        (root / "tests" / "router" / "verifier").mkdir(parents=True)
         (root / "src" / "router.py").write_text("def route(value):\n    return value\n")
-        (root / "tests" / "router" / "verification" / "test_router.py").write_text(
+        (root / "tests" / "router" / "verifier" / "test_router.py").write_text(
             "def test_route():\n    assert True\n"
         )
         subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
@@ -182,7 +185,7 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_swe_verifier_uses_semantic_outcomes_and_manager_recorded_evidence(self) -> None:
         repo, _digest = self._git_repo("semantic-tool")
-        (repo / "tests" / "router" / "verification" / "test_router.py").write_text(
+        (repo / "tests" / "router" / "verifier" / "test_router.py").write_text(
             "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n"
         )
         workspace = self._bind_workspace(
@@ -191,20 +194,20 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "artifact_dir": str(self.runtime_root / "semantic-artifacts"),
                 "artifact_stage_dir": str(self.runtime_root / "semantic-stage"),
                 "write_path_scopes": [
-                    {"kind": "directory", "path": "tests/router/verification"}
+                    {"kind": "directory", "path": "tests/router/verifier"}
                 ],
                 "review_tool_evidence_refs": [
                     {
                         "kind": "test_write",
                         "tool_name": "op_file_edit",
                         "ok": True,
-                        "args": {"path": "tests/router/verification/test_router.py"},
+                        "args": {"path": "tests/router/verifier/test_router.py"},
                     },
                     {
                         "kind": "command",
                         "tool_name": "op_exec_shell",
                         "ok": True,
-                        "args": {"cmd": "python -m pytest tests/router/verification/test_router.py"},
+                        "args": {"cmd": "python -m pytest tests/router/verifier/test_router.py"},
                         "output_sha256": "ok",
                     },
                 ],
@@ -226,7 +229,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(submission["outcome"], "pass")
         self.assertEqual(
             submission["changed_test_paths"],
-            ["tests/router/verification/test_router.py"],
+            ["tests/router/verifier/test_router.py"],
         )
         self.assertEqual(submission["findings"], [])
         self.assertNotIn("obligation_coverage", submission)
@@ -377,7 +380,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                             ],
                             "verification_corpus": {
                                 "kind": "directory",
-                                "path": "tests/streaming_decoder/verification",
+                                "path": "tests/streaming_decoder/verifier",
                             },
                         }
                     }
@@ -398,7 +401,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "locations": [
                         {
                             "scope": "workspace",
-                            "file": "tests/streaming_decoder/verification/test_double.cpp",
+                            "file": "tests/streaming_decoder/verifier/test_double.cpp",
                             "line": 22,
                         }
                     ],
@@ -436,7 +439,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "artifact_dir": str(self.runtime_root / "unchanged-corpus-artifacts"),
                 "artifact_stage_dir": str(self.runtime_root / "unchanged-corpus-stage"),
                 "write_path_scopes": [
-                    {"kind": "directory", "path": "tests/router/verification"}
+                    {"kind": "directory", "path": "tests/router/verifier"}
                 ],
                 "review_tool_evidence_refs": [
                     {
@@ -446,7 +449,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                         "args": {
                             "cmd": (
                                 "python -m pytest "
-                                "tests/router/verification/test_router.py"
+                                "tests/router/verifier/test_router.py"
                             )
                         },
                         "output_sha256": "ok",
@@ -476,9 +479,83 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         self.assertEqual(submission["changed_test_paths"], [])
 
+    def test_swe_verifier_pass_preserves_optional_advisory(self) -> None:
+        repo, _digest = self._git_repo("verifier-advisory")
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "advisory-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "advisory-stage"),
+                "write_path_scopes": [
+                    {"kind": "directory", "path": "tests/router/verifier"}
+                ],
+                "review_tool_evidence_refs": [
+                    {
+                        "kind": "command",
+                        "tool_name": "op_exec_shell",
+                        "ok": True,
+                        "args": {
+                            "cmd": (
+                                "python -m pytest "
+                                "tests/router/verifier/test_router.py"
+                            )
+                        },
+                        "output_sha256": "ok",
+                    }
+                ],
+            },
+            role="verifier",
+        )
+        recorded = add_finding_tool_result(
+            CanonicalToolCall(
+                name=ADD_FINDING_CAPABILITY,
+                args={
+                    "finding_key": "router_result_could_avoid_copy",
+                    "finding_kind": "module_defect",
+                    "priority": "p2",
+                    "disposition": "advisory",
+                    "summary": (
+                        "The result can use a lifetime-safe view to avoid one "
+                        "unnecessary copy without changing the contract."
+                    ),
+                    "locations": [
+                        {
+                            "scope": "workspace",
+                            "file": "src/router.py",
+                            "line": 1,
+                        }
+                    ],
+                },
+            ),
+            workspace,
+        )
+        self.assertTrue(recorded.ok, recorded.llm_text)
+
+        result = swe_verification_tool_result(
+            CanonicalToolCall(
+                name="op_minion_verification_pass",
+                args={},
+            ),
+            workspace,
+            [],
+        )
+
+        self.assertTrue(result.ok, result.llm_text)
+        submission = json.loads(
+            (
+                self.runtime_root / "advisory-stage" / "verification_submission.json"
+            ).read_text()
+        )
+        self.assertEqual(submission["outcome"], "pass")
+        self.assertEqual(submission["findings"], [])
+        self.assertEqual(
+            submission["advisories"][0]["finding_key"],
+            "router_result_could_avoid_copy",
+        )
+
     def test_swe_verifier_requires_a_case_when_corpus_is_empty(self) -> None:
         repo, _digest = self._git_repo("empty-verifier-corpus")
-        corpus = repo / "tests" / "router" / "verification"
+        corpus = repo / "tests" / "router" / "verifier"
         for path in corpus.iterdir():
             path.unlink()
         subprocess.run(
@@ -495,7 +572,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "artifact_dir": str(self.runtime_root / "empty-corpus-artifacts"),
                 "artifact_stage_dir": str(self.runtime_root / "empty-corpus-stage"),
                 "write_path_scopes": [
-                    {"kind": "directory", "path": "tests/router/verification"}
+                    {"kind": "directory", "path": "tests/router/verifier"}
                 ],
                 "review_tool_evidence_refs": [
                     {
@@ -545,7 +622,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 },
             )
 
-    def test_artifact_verifier_uses_durable_scratch_as_its_test_delta(self) -> None:
+    def test_artifact_verifier_uses_durable_scratch_as_workspace_evidence(self) -> None:
         scratch = self.runtime_root / "artifact-verifier-scratch"
         scratch.mkdir()
         (scratch / "unsafe_claim_probe.md").write_text(
@@ -564,7 +641,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
 
     def test_scenario_workspace_snapshot_never_treats_fingerprint_as_git_revision(self) -> None:
-        repo, system_commit_sha = self._git_repo("scenario-snapshot")
+        _repo, _system_commit_sha = self._git_repo("scenario-snapshot")
         scratch = self.runtime_root / "scenario-snapshot-scratch"
         scratch.mkdir()
         (scratch / "end_to_end_probe.txt").write_text("passed\n", encoding="utf-8")
@@ -572,141 +649,49 @@ class MinionV2VerificationTests(unittest.TestCase):
 
         ref = SemanticOrchestrator(
             MinionV2WorkflowService(self.runtime_root)
-        )._publish_verification_workspace(
-            review_worktree=repo,
+        )._publish_verification_evidence(
             review_scratch=scratch,
             candidate_identity=system_fingerprint,
-            git_base_sha=system_commit_sha,
-            execution_adapter="software_git.v2",
-            include_candidate_patch=False,
         )
 
         snapshot = self.store.read_json(ref)
         self.assertEqual(snapshot["candidate_identity"], system_fingerprint)
-        self.assertEqual(snapshot["git_base_sha"], system_commit_sha)
         self.assertEqual(
             snapshot["changed_paths"],
             ["review_scratch/end_to_end_probe.txt"],
         )
-        self.assertEqual(snapshot["workspace_patch_base64"], "")
 
-    def test_workspace_snapshot_uses_explicit_git_base_not_semantic_identity(self) -> None:
-        repo, candidate_commit_sha = self._git_repo("module-snapshot")
-        test_path = repo / "tests" / "router" / "verification" / "test_router.py"
-        test_path.write_text(
-            "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n",
-            encoding="utf-8",
-        )
+    def test_workspace_evidence_contains_scratch_not_a_second_git_patch(self) -> None:
+        _repo, _candidate_commit_sha = self._git_repo("module-snapshot")
         scratch = self.runtime_root / "module-snapshot-scratch"
         scratch.mkdir()
+        (scratch / "probe.txt").write_text("reproduced\n", encoding="utf-8")
 
         ref = SemanticOrchestrator(
             MinionV2WorkflowService(self.runtime_root)
-        )._publish_verification_workspace(
-            review_worktree=repo,
+        )._publish_verification_evidence(
             review_scratch=scratch,
             candidate_identity="b" * 64,
-            git_base_sha=candidate_commit_sha,
-            execution_adapter="software_git.v2",
         )
 
         snapshot = self.store.read_json(ref)
-        self.assertEqual(
-            snapshot["changed_paths"],
-            ["tests/router/verification/test_router.py"],
-        )
-        self.assertTrue(snapshot["workspace_patch_base64"])
+        self.assertEqual(snapshot["changed_paths"], ["review_scratch/probe.txt"])
+        self.assertNotIn("workspace_patch_base64", snapshot)
+        self.assertNotIn("git_base_sha", snapshot)
 
-    def test_semantic_repair_packet_installs_verifier_tests_before_repair(self) -> None:
-        repo, candidate_digest = self._git_repo("repair-install")
-        test_path = repo / "tests" / "router" / "verification" / "test_router.py"
-        test_path.write_text(
-            "def test_route():\n    assert True\n\ndef test_empty_rejected():\n    assert False\n"
-        )
-        patch_bytes = subprocess.run(
-            ["git", "-C", str(repo), "diff", "--binary", candidate_digest, "--"],
-            stdout=subprocess.PIPE,
-            check=True,
-        ).stdout
-        subprocess.run(
-            ["git", "-C", str(repo), "reset", "--hard", candidate_digest],
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-        test_delta_ref = self.store.put_json(
-            {
-                "schema_version": "1",
-                "candidate_digest": candidate_digest,
-                "workspace_patch_base64": base64.b64encode(patch_bytes).decode(),
-                "files": [],
-            },
-            artifact_type="VerificationTestWorkspaceArtifact",
-        )
-        repair_ref = self.store.put_json(
-            {
-                "artifact_kind": "semantic_repair_packet",
-                "module_name": "router",
-                "findings": [
-                    {
-                        "finding_key": "empty_input_accepted",
-                        "finding_kind": "module_defect",
-                        "priority": "p1",
-                        "summary": "Empty input is accepted unexpectedly.",
-                        "locations": [],
-                    }
-                ],
-                "test_delta_ref": test_delta_ref.to_dict(),
-            },
-            artifact_type="RepairPacketArtifact",
-        )
-        node = AggregateSnapshot(
-            aggregate_type=AggregateType.DAG_NODE_RUN,
-            aggregate_id="node-router",
-            workflow_id="wf-router",
-            state="REPAIR_QUEUED",
-            version=1,
-            created_at="2026-07-19T00:00:00+00:00",
-            updated_at="2026-07-19T00:00:00+00:00",
-            payload={
-                "workspace_path": str(repo),
-                "candidate_digest": candidate_digest,
-                "repair_bill_ref": repair_ref.to_dict(),
-                "base_sha": candidate_digest,
-                "path_policy": {
-                    "implementation_scopes": [{"kind": "directory", "path": "src"}],
-                    "verification_corpus": {
-                        "kind": "directory",
-                        "path": "tests/router/verification",
-                    },
-                },
-            },
-        )
-        installed = SemanticOrchestrator(
-            MinionV2WorkflowService(self.runtime_root)
-        )._install_verifier_tests_for_repair(node)
-        self.assertIn("test_empty_rejected", test_path.read_text())
-        self.assertEqual(
-            installed["verifier_test_paths"],
-            ["tests/router/verification/test_router.py"],
-        )
-        self.assertIn(
-            "tests/router/verification/test_router.py",
-            installed["manager_seeded_corpus_hashes"],
-        )
-
-    def test_semantic_repair_reuses_existing_verifier_corpus_without_new_delta(self) -> None:
+    def test_semantic_repair_reuses_existing_verifier_corpus_from_git_history(self) -> None:
         repo, baseline_digest = self._git_repo("repair-existing-corpus")
-        promoted_test = (
+        committed_test = (
             repo
             / "tests"
             / "router"
-            / "verification"
-            / "test_promoted_regression.py"
+            / "verifier"
+            / "test_committed_regression.py"
         )
-        promoted_test.write_text("def test_promoted_regression():\n    assert True\n")
+        committed_test.write_text("def test_committed_regression():\n    assert True\n")
         subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
         subprocess.run(
-            ["git", "-C", str(repo), "commit", "-qm", "promote verifier corpus"],
+            ["git", "-C", str(repo), "commit", "-qm", "checkpoint verifier corpus"],
             check=True,
         )
         candidate_digest = subprocess.run(
@@ -715,16 +700,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             text=True,
             check=True,
         ).stdout.strip()
-        test_delta_ref = self.store.put_json(
-            {
-                "schema_version": "1",
-                "candidate_digest": candidate_digest,
-                "changed_paths": [],
-                "workspace_patch_base64": "",
-                "files": [],
-            },
-            artifact_type="VerificationTestWorkspaceArtifact",
-        )
         repair_ref = self.store.put_json(
             {
                 "artifact_kind": "semantic_repair_packet",
@@ -744,7 +719,6 @@ class MinionV2VerificationTests(unittest.TestCase):
                         ],
                     }
                 ],
-                "test_delta_ref": test_delta_ref.to_dict(),
                 "changed_test_paths": [],
             },
             artifact_type="RepairPacketArtifact",
@@ -768,7 +742,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     ],
                     "verification_corpus": {
                         "kind": "directory",
-                        "path": "tests/router/verification",
+                        "path": "tests/router/verifier",
                     },
                 },
             },
@@ -778,34 +752,27 @@ class MinionV2VerificationTests(unittest.TestCase):
             MinionV2WorkflowService(self.runtime_root)
         )._install_verifier_tests_for_repair(node)
 
-        self.assertEqual(installed["verifier_test_paths"], [])
-        self.assertEqual(
-            installed["manager_seeded_corpus_hashes"],
-            {
-                "tests/router/verification/test_promoted_regression.py": (
-                    hashlib.sha256(promoted_test.read_bytes()).hexdigest()
-                )
-            },
-        )
+        self.assertEqual(installed, {})
+        self.assertTrue(committed_test.is_file())
         self.assertTrue(
             (
                 repo
                 / "tests"
                 / "router"
-                / "verification"
+                / "verifier"
                 / "test_router.py"
             ).is_file()
         )
 
     def test_semantic_verifier_changed_paths_preserve_both_sides_of_rename(self) -> None:
         repo, _candidate_digest = self._git_repo("renamed-verifier-test")
-        source = repo / "tests" / "router" / "verification" / "test_router.py"
-        destination = repo / "tests" / "router" / "verification" / "test_routes.py"
+        source = repo / "tests" / "router" / "verifier" / "test_router.py"
+        destination = repo / "tests" / "router" / "verifier" / "test_routes.py"
         source.rename(destination)
 
         self.assertEqual(
             _changed_paths({"repo_path": str(repo)}),
-            ["tests/router/verification/test_router.py", "tests/router/verification/test_routes.py"],
+            ["tests/router/verifier/test_router.py", "tests/router/verifier/test_routes.py"],
         )
 
     def test_semantic_verifier_submission_persists_original_candidate_for_snapshot(self) -> None:
@@ -838,7 +805,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "path_policy": {
                     "verification_corpus": {
                         "kind": "directory",
-                        "path": "tests/router/verification",
+                        "path": "tests/router/verifier",
                     },
                 }
             },
@@ -910,16 +877,49 @@ class MinionV2VerificationTests(unittest.TestCase):
         dispatched_action = dispatch.call_args.args[0]
         self.assertEqual(dispatched_action.action_type, "SUBMIT_SEMANTIC_VERIFICATION")
 
-    def test_verifier_settlement_uses_prompt_bound_isolated_workspace(self) -> None:
-        source, candidate_digest = self._git_repo("verifier-workspace-source")
-        provisioned = self.runtime_root / "provisioned-review"
-        role_workspace = self.runtime_root / "role-review"
-        subprocess.run(["git", "clone", "-q", str(source), str(provisioned)], check=True)
-        subprocess.run(["git", "clone", "-q", str(source), str(role_workspace)], check=True)
-        (role_workspace / "tests" / "router" / "verification" / "test_router.py").write_text(
+    def test_verifier_settlement_uses_prompt_bound_canonical_worktree(self) -> None:
+        canonical_worktree, candidate_digest = self._git_repo(
+            "verifier-canonical-worktree"
+        )
+        (
+            canonical_worktree
+            / "tests"
+            / "router"
+            / "verifier"
+            / "test_router.py"
+        ).write_text(
             "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n"
         )
-        review_scratch = self.runtime_root / "role-review-scratch"
+        review_scratch = self.runtime_root / "canonical-review-scratch"
+        review_scratch.mkdir()
+        prompt_ref = self.store.put_json(
+            {
+                "workspace": {
+                    "repo_path": str(canonical_worktree),
+                    "review_scratch_dir": str(review_scratch),
+                    "workspace_binding": "canonical",
+                }
+            },
+            artifact_type="RolePromptPackArtifact",
+        )
+
+        actual_workspace, actual_scratch = _verification_workspace_from_prompt_pack(
+            artifacts=self.store,
+            prompt_ref=prompt_ref,
+        )
+
+        self.assertEqual(actual_workspace, canonical_worktree)
+        self.assertEqual(actual_scratch, review_scratch)
+        self.assertEqual(
+            _verification_workspace_changed_paths(actual_workspace, candidate_digest),
+            ["tests/router/verifier/test_router.py"],
+        )
+
+    def test_verifier_settlement_accepts_prompt_bound_isolated_workspace(self) -> None:
+        role_workspace, _candidate_digest = self._git_repo(
+            "verifier-isolated-workspace"
+        )
+        review_scratch = self.runtime_root / "isolated-review-scratch"
         review_scratch.mkdir()
         prompt_ref = self.store.put_json(
             {
@@ -939,25 +939,42 @@ class MinionV2VerificationTests(unittest.TestCase):
 
         self.assertEqual(actual_workspace, role_workspace)
         self.assertEqual(actual_scratch, review_scratch)
-        self.assertEqual(
-            _verification_workspace_changed_paths(actual_workspace, candidate_digest),
-            ["tests/router/verification/test_router.py"],
+
+    def test_verifier_settlement_rejects_unbound_workspace(self) -> None:
+        unbound_workspace, _candidate_digest = self._git_repo(
+            "verifier-unbound-workspace"
         )
-        self.assertEqual(
-            _verification_workspace_changed_paths(provisioned, candidate_digest),
-            [],
+        review_scratch = self.runtime_root / "unbound-review-scratch"
+        review_scratch.mkdir()
+        prompt_ref = self.store.put_json(
+            {
+                "workspace": {
+                    "repo_path": str(unbound_workspace),
+                    "review_scratch_dir": str(review_scratch),
+                }
+            },
+            artifact_type="RolePromptPackArtifact",
         )
 
-    def test_cross_module_verifier_tests_remain_external_to_repair_worktree(self) -> None:
+        with self.assertRaisesRegex(
+            SubmissionInvariantError,
+            "not bound to a canonical or isolated role workspace",
+        ):
+            _verification_workspace_from_prompt_pack(
+                artifacts=self.store,
+                prompt_ref=prompt_ref,
+            )
+
+    def test_repair_start_does_not_mutate_the_shared_module_worktree(self) -> None:
         repo, baseline_digest = self._git_repo("external-repair-test")
-        promoted_test = repo / "tests" / "router" / "verification" / "test_router.py"
-        promoted_test.write_text(
+        committed_test = repo / "tests" / "router" / "verifier" / "test_router.py"
+        committed_test.write_text(
             "def test_route():\n    assert True\n\n"
-            "def test_promoted_regression():\n    assert True\n"
+            "def test_committed_regression():\n    assert True\n"
         )
         subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
         subprocess.run(
-            ["git", "-C", str(repo), "commit", "-qm", "promote verifier corpus"],
+            ["git", "-C", str(repo), "commit", "-qm", "checkpoint verifier corpus"],
             check=True,
         )
         candidate_digest = subprocess.run(
@@ -966,16 +983,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             text=True,
             check=True,
         ).stdout.strip()
-        test_delta_ref = self.store.put_json(
-            {
-                "schema_version": "1",
-                "candidate_digest": candidate_digest,
-                "changed_paths": ["tests/integration/test_pipeline.py"],
-                "workspace_patch_base64": "",
-                "files": [],
-            },
-            artifact_type="VerificationTestWorkspaceArtifact",
-        )
         repair_ref = self.store.put_json(
             {
                 "artifact_kind": "semantic_repair_packet",
@@ -989,7 +996,6 @@ class MinionV2VerificationTests(unittest.TestCase):
                         "locations": [],
                     }
                 ],
-                "test_delta_ref": test_delta_ref.to_dict(),
             },
             artifact_type="RepairPacketArtifact",
         )
@@ -1010,7 +1016,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "implementation_scopes": [{"kind": "directory", "path": "src"}],
                     "verification_corpus": {
                         "kind": "directory",
-                        "path": "tests/router/verification",
+                        "path": "tests/router/verifier",
                     },
                 },
             },
@@ -1020,19 +1026,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             MinionV2WorkflowService(self.runtime_root)
         )._install_verifier_tests_for_repair(node)
 
-        self.assertEqual(installed["verifier_test_paths"], [])
-        self.assertEqual(
-            installed["external_verifier_test_paths"],
-            ["tests/integration/test_pipeline.py"],
-        )
-        self.assertEqual(
-            installed["manager_seeded_corpus_hashes"],
-            {
-                "tests/router/verification/test_router.py": hashlib.sha256(
-                    promoted_test.read_bytes()
-                ).hexdigest()
-            },
-        )
+        self.assertEqual(installed, {})
         self.assertFalse((repo / "tests" / "integration" / "test_pipeline.py").exists())
         self.assertEqual(
             subprocess.run(
@@ -1044,9 +1038,9 @@ class MinionV2VerificationTests(unittest.TestCase):
             "",
         )
 
-    def test_pass_promotes_verifier_test_delta_into_candidate(self) -> None:
-        repo, candidate_digest = self._git_repo("pass-promotion")
-        test_path = repo / "tests" / "router" / "verification" / "test_router.py"
+    def test_pass_commits_verifier_tests_on_the_shared_module_branch(self) -> None:
+        repo, candidate_digest = self._git_repo("pass-checkpoint")
+        test_path = repo / "tests" / "router" / "verifier" / "test_router.py"
         test_path.write_text(
             "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n"
         )
@@ -1066,10 +1060,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             candidate,
             artifact_type="CandidateSnapshotArtifact",
         )
-        test_delta_ref = self.store.put_json(
-            {"changed_paths": ["tests/router/verification/test_router.py"]},
-            artifact_type="VerificationTestWorkspaceArtifact",
-        )
         node = AggregateSnapshot(
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-router",
@@ -1078,21 +1068,23 @@ class MinionV2VerificationTests(unittest.TestCase):
             version=1,
             created_at="2026-07-19T00:00:00+00:00",
             updated_at="2026-07-19T00:00:00+00:00",
-            payload={"execution_adapter": "software_git.v2"},
+            payload={
+                "execution_adapter": "software_git.v2",
+                "workspace_path": str(repo),
+            },
         )
-        promoted_ref, promoted_digest, promoted = SemanticOrchestrator(
+        checkpoint_ref, checkpoint_digest, checkpoint = SemanticOrchestrator(
             MinionV2WorkflowService(self.runtime_root)
-        )._promote_verifier_tests(
+        )._checkpoint_verifier_tests(
             node=node,
             review_workspace=repo,
             candidate_ref=candidate_ref,
             candidate=candidate,
             candidate_digest=candidate_digest,
-            test_delta_ref=test_delta_ref,
-            changed_test_paths=["tests/router/verification/test_router.py"],
+            changed_test_paths=["tests/router/verifier/test_router.py"],
         )
-        self.assertNotEqual(promoted_digest, candidate_digest)
-        self.assertIn("tests/router/verification/test_router.py", promoted["changed_paths"])
+        self.assertNotEqual(checkpoint_digest, candidate_digest)
+        self.assertIn("tests/router/verifier/test_router.py", checkpoint["changed_paths"])
         self.assertEqual(
             subprocess.run(
                 [
@@ -1100,7 +1092,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "-C",
                     str(repo),
                     "show",
-                    f"{promoted_digest}:tests/router/verification/test_router.py",
+                    f"{checkpoint_digest}:tests/router/verifier/test_router.py",
                 ],
                 stdout=subprocess.PIPE,
                 text=True,
@@ -1109,12 +1101,12 @@ class MinionV2VerificationTests(unittest.TestCase):
             test_path.read_text(),
         )
         self.assertEqual(
-            self.store.read_json(promoted_ref)["verifier_test_delta_ref"]["sha256"],
-            test_delta_ref.sha256,
+            self.store.read_json(checkpoint_ref)["previous_head_sha"],
+            candidate_digest,
         )
 
-    def test_pass_imports_promoted_verifier_commit_into_durable_node_repo(self) -> None:
-        node_repo, base_digest = self._git_repo("promotion-node")
+    def test_verifier_checkpoint_rejects_an_isolated_review_clone(self) -> None:
+        node_repo, base_digest = self._git_repo("checkpoint-node")
         (node_repo / "src" / "router.py").write_text(
             "def route(value):\n    return str(value)\n",
             encoding="utf-8",
@@ -1130,12 +1122,12 @@ class MinionV2VerificationTests(unittest.TestCase):
             text=True,
             check=True,
         ).stdout.strip()
-        review_repo = self.runtime_root / "promotion-review"
+        review_repo = self.runtime_root / "checkpoint-review"
         subprocess.run(
             ["git", "clone", "-q", str(node_repo), str(review_repo)],
             check=True,
         )
-        test_path = review_repo / "tests" / "router" / "verification" / "test_router.py"
+        test_path = review_repo / "tests" / "router" / "verifier" / "test_router.py"
         test_path.write_text(
             "def test_route():\n    assert True\n\ndef test_empty():\n    assert True\n",
             encoding="utf-8",
@@ -1156,10 +1148,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             candidate,
             artifact_type="CandidateSnapshotArtifact",
         )
-        test_delta_ref = self.store.put_json(
-            {"changed_paths": ["tests/router/verification/test_router.py"]},
-            artifact_type="VerificationTestWorkspaceArtifact",
-        )
         node = AggregateSnapshot(
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node-router-isolated-review",
@@ -1175,71 +1163,18 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
 
         worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
-        _promoted_ref, promoted_digest, _promoted = worker._promote_verifier_tests(
-            node=node,
-            review_workspace=review_repo,
-            candidate_ref=candidate_ref,
-            candidate=candidate,
-            candidate_digest=candidate_digest,
-            test_delta_ref=test_delta_ref,
-            changed_test_paths=["tests/router/verification/test_router.py"],
-        )
-
-        self.assertEqual(
-            subprocess.run(
-                ["git", "-C", str(node_repo), "rev-parse", "HEAD"],
-                stdout=subprocess.PIPE,
-                text=True,
-                check=True,
-            ).stdout.strip(),
-            promoted_digest,
-        )
-        self.assertEqual(
-            subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(node_repo),
-                    "show",
-                    f"{promoted_digest}:tests/router/verification/test_router.py",
-                ],
-                stdout=subprocess.PIPE,
-                text=True,
-                check=True,
-            ).stdout,
-            test_path.read_text(encoding="utf-8"),
-        )
-        self.assertEqual(
-            subprocess.run(
-                ["git", "-C", str(node_repo), "rev-parse", f"{promoted_digest}^"],
-                stdout=subprocess.PIPE,
-                text=True,
-                check=True,
-            ).stdout.strip(),
-            base_digest,
-        )
-        consumer = self.runtime_root / "promotion-consumer"
-        subprocess.run(["git", "clone", "-q", str(node_repo), str(consumer)], check=True)
-        subprocess.run(
-            ["git", "-C", str(consumer), "reset", "--hard", base_digest],
-            stdout=subprocess.PIPE,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(consumer), "cherry-pick", promoted_digest],
-            stdout=subprocess.PIPE,
-            check=True,
-        )
-        self.assertEqual(
-            (consumer / "src" / "router.py").read_text(encoding="utf-8"),
-            "def route(value):\n    return str(value)\n",
-        )
-        self.assertEqual(
-            (consumer / "tests" / "router" / "verification" / "test_router.py").read_text(
-                encoding="utf-8"
-            ),
-            test_path.read_text(encoding="utf-8"),
-        )
+        with self.assertRaisesRegex(
+            SubmissionInvariantError,
+            "canonical Module worktree",
+        ):
+            worker._checkpoint_verifier_tests(
+                node=node,
+                review_workspace=review_repo,
+                candidate_ref=candidate_ref,
+                candidate=candidate,
+                candidate_digest=candidate_digest,
+                changed_test_paths=["tests/router/verifier/test_router.py"],
+            )
 
     def test_module_verifier_receives_scoped_view_without_task_ledger(self) -> None:
         requirements_ref = TaskLedgerService(self.runtime_root, self.store).publish(
@@ -1353,17 +1288,11 @@ class MinionV2VerificationTests(unittest.TestCase):
             review_worktree=repo,
         )
 
-        self.assertEqual(
-            set(references),
-            {"candidate_diff", "contract_diff", "repair_diff"},
-        )
-        candidate_diff = self.store.read_bytes(references["candidate_diff"]).decode("utf-8")
-        contract_diff = self.store.read_bytes(references["contract_diff"]).decode("utf-8")
-        repair_diff = self.store.read_bytes(references["repair_diff"]).decode("utf-8")
-        self.assertIn("Accepted Skeleton -> current Candidate", candidate_diff)
-        self.assertIn("strict=False", contract_diff)
-        self.assertIn("Previous Candidate -> repaired Candidate", repair_diff)
-        self.assertIn("str(value)", repair_diff)
+        self.assertEqual(set(references), {"candidate_diff"})
+        review_range = self.store.read_json(references["candidate_diff"])
+        self.assertEqual(review_range["base_sha"], previous_candidate)
+        self.assertEqual(review_range["target_sha"], candidate_digest)
+        self.assertIn("git log/show/diff", review_range["instruction"])
 
     @staticmethod
     def _verification_submission() -> dict[str, object]:
@@ -2001,7 +1930,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     {"name": "verification_policy", "path": str(policy_path)}
                 ],
                 "write_path_scopes": [
-                    {"kind": "directory", "path": "tests/router/verification"}
+                    {"kind": "directory", "path": "tests/router/verifier"}
                 ],
                 "review_tool_evidence_refs": [
                     {
@@ -2009,7 +1938,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                         "tool_name": "op_exec_shell",
                         "ok": True,
                         "args": {
-                            "cmd": "python -m pytest tests/router/verification"
+                            "cmd": "python -m pytest tests/router/verifier"
                         },
                         "output_sha256": "ok",
                     }
@@ -2060,7 +1989,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     {"name": "verification_policy", "path": str(policy_path)}
                 ],
                 "write_path_scopes": [
-                    {"kind": "directory", "path": "tests/router/verification"}
+                    {"kind": "directory", "path": "tests/router/verifier"}
                 ],
                 "review_tool_evidence_refs": list(
                     workspace["review_tool_evidence_refs"]
@@ -3523,6 +3452,15 @@ class MinionV2VerificationTests(unittest.TestCase):
                         ],
                     }
                 ],
+                "advisories": [
+                    {
+                        "finding_key": "resource_id_could_be_strong_type",
+                        "finding_kind": "module_defect",
+                        "priority": "p2",
+                        "disposition": "advisory",
+                        "summary": "Use a strong resource identifier type when available.",
+                    }
+                ],
                 "cases": [
                     {
                         "name": "released resource rejects use",
@@ -3537,6 +3475,8 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertIn("Use after release succeeds.", markdown)
         self.assertIn("use_after_release_succeeds", markdown)
         self.assertIn("src/resource.py:42::use", markdown)
+        self.assertIn("Optional Advisories", markdown)
+        self.assertIn("Use a strong resource identifier type when available.", markdown)
         self.assertIn("released resource rejects use", markdown)
         self.assertNotIn("hidden-report-digest", markdown)
         self.assertNotIn("hidden-stdout-digest", markdown)
@@ -3938,7 +3878,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         union = self.store.put_json(
             {"scenario": "streaming_round_trip"},
-            artifact_type="CandidateUnionArtifact",
+            artifact_type="IntegrationCandidateArtifact",
         )
         actions = [
             (
@@ -3961,7 +3901,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "VERIFICATION_PREPARED",
                 {
                     "system_fingerprint": system_fingerprint,
-                    "system_candidate_union_ref": union.to_dict(),
+                    "system_integration_ref": union.to_dict(),
                     "system_commit_sha": "scenario-commit",
                     "verification_workspace_fingerprint": "scenario-tree",
                 },
@@ -4044,7 +3984,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         union = self.store.put_json(
             {"scenario": "streaming_round_trip"},
-            artifact_type="CandidateUnionArtifact",
+            artifact_type="IntegrationCandidateArtifact",
         )
         actions = [
             (
@@ -4067,7 +4007,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "VERIFICATION_PREPARED",
                 {
                     "system_fingerprint": system_fingerprint,
-                    "system_candidate_union_ref": union.to_dict(),
+                    "system_integration_ref": union.to_dict(),
                     "system_commit_sha": "scenario-commit",
                     "verification_workspace_fingerprint": "scenario-tree",
                 },
@@ -4177,7 +4117,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                             },
                             "verification_corpus": {
                                 "kind": "directory",
-                                "path": f"tests/{module_name}/verification",
+                                "path": f"tests/{module_name}/verifier",
                             },
                         },
                     },
@@ -4241,7 +4181,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                         "locations": [
                             {
                                 "scope": "workspace",
-                                "file": "tests/streaming_decoder/verification/test_double.cpp",
+                                "file": "tests/streaming_decoder/verifier/test_double.cpp",
                                 "line": 8,
                             }
                         ],
@@ -4257,7 +4197,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                         "locations": [
                             {
                                 "scope": "workspace",
-                                "file": "tests/streaming_decoder/verification/test_double.cpp",
+                                "file": "tests/streaming_decoder/verifier/test_double.cpp",
                                 "line": 8,
                             }
                         ],
@@ -4855,7 +4795,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             artifact_type="VerificationScenarioContractArtifact",
         )
         union = self.store.put_json(
-            {"scenario": node_id}, artifact_type="CandidateUnionArtifact"
+            {"scenario": node_id}, artifact_type="IntegrationCandidateArtifact"
         )
         actions = [
             (
@@ -4878,7 +4818,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "VERIFICATION_PREPARED",
                 {
                     "system_fingerprint": system_fingerprint,
-                    "system_candidate_union_ref": union.to_dict(),
+                    "system_integration_ref": union.to_dict(),
                     "system_commit_sha": f"commit-{node_id}",
                     "verification_workspace_fingerprint": f"tree-{node_id}",
                 },
@@ -4942,7 +4882,7 @@ class MinionV2IntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
-    def test_integration_cherry_picks_candidates_in_declared_order(self) -> None:
+    def test_integration_merges_candidates_in_declared_order(self) -> None:
         sha_a = self._candidate("candidate-a", "a.txt", "a\n")
         sha_b = self._candidate("candidate-b", "b.txt", "b\n")
         self._git("checkout", "-q", "--detach", self.base)
@@ -4958,6 +4898,109 @@ class MinionV2IntegrationTests(unittest.TestCase):
         self.assertEqual([item["node_run_id"] for item in self.store.read_json(ref)["merged_candidates"]], ["a", "b"])
         self.assertTrue((self.repo / "a.txt").is_file())
         self.assertTrue((self.repo / "b.txt").is_file())
+
+    def test_local_delivery_is_an_independent_checkout_with_a_receipt(self) -> None:
+        (self.repo / "delivered.txt").write_text("ready\n", encoding="utf-8")
+        self._git("add", "delivered.txt")
+        self._git("commit", "-qm", "verified delivery")
+        commit_sha = self._git("rev-parse", "HEAD").strip()
+        verification_ref = self.store.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+
+        receipt_ref = DeliveryService(
+            self.runtime_root,
+            self.store,
+        ).publish(
+            workflow_id="wf-delivery",
+            workflow_key="delivery-workflow",
+            task_title="Local delivery",
+            repository=self.repo,
+            commit_sha=commit_sha,
+            source_snapshot={"delivery_mode": "local_only"},
+            verification_ref=verification_ref,
+        )
+
+        receipt = self.store.read_json(receipt_ref)
+        delivery = Path(receipt["local_path"])
+        self.assertEqual(receipt["kind"], "local_checkout")
+        self.assertEqual(receipt["commit_sha"], commit_sha)
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(delivery), "rev-parse", "HEAD"],
+                text=True,
+            ).strip(),
+            commit_sha,
+        )
+        shutil.rmtree(self.repo)
+        self.assertEqual(
+            (delivery / "delivered.txt").read_text(encoding="utf-8"),
+            "ready\n",
+        )
+
+    def test_clean_git_delivery_pushes_verified_head_and_creates_pull_request(self) -> None:
+        remote = self.runtime_root / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        self._git("remote", "add", "origin", str(remote))
+        self._git("push", "-q", "origin", f"{self.base}:refs/heads/main")
+        (self.repo / "delivered.txt").write_text("ready\n", encoding="utf-8")
+        self._git("add", "delivered.txt")
+        self._git("commit", "-qm", "verified delivery")
+        commit_sha = self._git("rev-parse", "HEAD").strip()
+        verification_ref = self.store.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+        fake_bin = self.runtime_root / "bin"
+        fake_bin.mkdir()
+        fake_gh = fake_bin / "gh"
+        fake_gh.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1 $2\" = \"pr list\" ]; then exit 0; fi\n"
+            "printf '%s\\n' 'https://example.invalid/pull/17'\n",
+            encoding="utf-8",
+        )
+        fake_gh.chmod(0o755)
+
+        with patch.dict(
+            os.environ,
+            {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        ):
+            receipt_ref = DeliveryService(
+                self.runtime_root,
+                self.store,
+            ).publish(
+                workflow_id="wf-pr-delivery",
+                workflow_key="pr-delivery",
+                task_title="PR delivery",
+                repository=self.repo,
+                commit_sha=commit_sha,
+                source_snapshot={
+                    "source_clean": True,
+                    "delivery_mode": "pull_request_preferred",
+                    "source_branch": "main",
+                    "source_repo_path": str(self.repo),
+                    "source_remote_name": "origin",
+                    "original_head": self.base,
+                },
+                verification_ref=verification_ref,
+            )
+
+        receipt = self.store.read_json(receipt_ref)
+        self.assertEqual(receipt["kind"], "pull_request")
+        self.assertEqual(receipt["pr_url"], "https://example.invalid/pull/17")
+        self.assertEqual(receipt["commit_sha"], commit_sha)
+        remote_sha = subprocess.check_output(
+            [
+                "git",
+                "ls-remote",
+                str(remote),
+                "refs/heads/pal/minion/pr-delivery",
+            ],
+            text=True,
+        ).split()[0]
+        self.assertEqual(remote_sha, commit_sha)
 
     def test_integration_conflict_is_an_ownership_defect(self) -> None:
         sha_a = self._candidate("conflict-a", "base.txt", "from a\n")

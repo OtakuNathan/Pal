@@ -585,10 +585,10 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
                     "PRAGMA index_list(minion_v2_role_assignments)"
                 )
             }
-        self.assertEqual(version, "22")
+        self.assertEqual(version, "24")
         self.assertIn("minion_v2_role_assignments_one_open", indexes)
 
-    def test_v22_cutover_keeps_v5_workflow_active(self) -> None:
+    def test_v24_cutover_archives_v5_workflow(self) -> None:
         with sqlite3.connect(str(self.repository.db_path)) as connection:
             connection.execute(
                 """
@@ -614,8 +614,20 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             "workflow-router",
         )
         assert workflow is not None
-        self.assertEqual(workflow.state, "ACTIVE")
-        self.assertFalse(bool(workflow.payload.get("archived")))
+        self.assertEqual(workflow.state, "CANCELLED")
+        self.assertTrue(workflow.payload["archived"])
+        self.assertEqual(
+            workflow.payload["required_orchestration_contract_version"],
+            "6",
+        )
+        self.assertIn(
+            "canonical Architecture, Module, and Integration worktrees",
+            workflow.payload["archive_reason"],
+        )
+        projection = self.repository.read_workflow_projection("workflow-router")
+        assert projection is not None
+        self.assertEqual(projection["workflow_state"], "CANCELLED")
+        self.assertEqual(projection["liveness"], "terminal")
 
     def test_v18_renames_legacy_protocol_tables_without_a_compatibility_view(self) -> None:
         with sqlite3.connect(str(self.repository.db_path)) as connection:

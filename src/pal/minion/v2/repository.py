@@ -1291,7 +1291,6 @@ class MinionV2Repository:
         manifest_sha: str,
         actor_id: str,
         active_channel_id: str,
-        ttl_seconds: int = 86400,
     ) -> str:
         required = {
             "workflow_id": workflow_id,
@@ -1307,7 +1306,6 @@ class MinionV2Repository:
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         now = _utc_datetime()
-        expires_at = now + timedelta(seconds=max(60, int(ttl_seconds)))
         with self._transaction() as connection:
             artifact = connection.execute(
                 "SELECT durable FROM minion_v2_artifacts WHERE sha256 = ?",
@@ -1337,7 +1335,7 @@ class MinionV2Repository:
                     str(manifest_sha).removeprefix("sha256:"),
                     actor_id,
                     active_channel_id,
-                    expires_at.isoformat(),
+                    "",
                     now.isoformat(),
                 ),
             )
@@ -1381,7 +1379,6 @@ class MinionV2Repository:
         workflow_id: str,
         actor_id: str,
         active_channel_id: str,
-        ttl_seconds: int = 86400,
     ) -> str:
         """Replace the unique pending card token for a semantic/manual decision path."""
 
@@ -1397,16 +1394,7 @@ class MinionV2Repository:
         now = _utc_datetime()
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        expires_at = now + timedelta(seconds=max(60, int(ttl_seconds)))
         with self._transaction() as connection:
-            connection.execute(
-                """
-                UPDATE minion_v2_human_decisions
-                SET status = 'expired'
-                WHERE status = 'issued' AND expires_at <= ?
-                """,
-                (now.isoformat(),),
-            )
             rows = connection.execute(
                 """
                 SELECT * FROM minion_v2_human_decisions
@@ -1461,7 +1449,7 @@ class MinionV2Repository:
                     manifest_sha,
                     str(actor_id),
                     str(active_channel_id),
-                    expires_at.isoformat(),
+                    "",
                     now.isoformat(),
                 ),
             )
@@ -3395,12 +3383,6 @@ class MinionV2Repository:
             raise ValueError("unknown human decision token")
         if str(row["status"]) != "issued":
             raise ValueError("human decision token is stale or already consumed")
-        if _parse_datetime(str(row["expires_at"])) <= _utc_datetime():
-            connection.execute(
-                "UPDATE minion_v2_human_decisions SET status = 'expired' WHERE token_hash = ?",
-                (token_hash,),
-            )
-            raise ValueError("human decision token has expired")
         manifest_sha = _manifest_sha_from_action(action)
         mismatches = []
         if str(row["workflow_id"]) != action.workflow_id:

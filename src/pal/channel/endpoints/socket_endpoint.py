@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelDeliveryError, EndpointConfig, ResponseHandle
+from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec
 from pal.foundation import AttachmentSpec
 from pal.channel.endpoints.socket_protocol import (
     DEFAULT_SOCKET_FILENAME,
@@ -135,6 +136,9 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             while True:
                 incoming = await read_socket_message(reader)
                 payload_type = str(incoming.get("type") or "user_message")
+                if payload_type == "interaction_result":
+                    self._accept_interaction_result(session, incoming)
+                    continue
                 text = str(incoming.get("text") or "").strip()
                 if not text and payload_type != "slash_command":
                     continue
@@ -151,9 +155,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                     event_kind=event_kind,
                     correlation_id=request_id,
                     reply_target={
-                        "session_id": session_id,
-                        "request_id": request_id,
-                        "control_scope_key": f"socket:{self.endpoint.endpoint_id}:{session_id}",
+                        **self._session_reply_target(session, request_id),
                     },
                 )
         except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
@@ -199,6 +201,161 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         request_id = str(response_handle.reply_target.get("request_id") or "")
         session.outbound.put_nowait({"type": "text_delta", "request_id": request_id, "text": text})
         session.outbound.put_nowait({"type": "done", "request_id": request_id, "finish_reason": "stop"})
+
+    def open_or_update_interaction(
+        self,
+        response_handle: ResponseHandle,
+        *,
+        spec: InteractionMessageSpec,
+        allow_update: bool,
+    ) -> None:
+        self.prune_interactive_messages()
+        self.remember_interaction_message(
+            spec,
+            {"reply_target": dict(response_handle.reply_target)},
+        )
+        self._send_interaction(
+            response_handle,
+            kind="interactive_update" if allow_update else "interactive_open",
+            spec=spec,
+        )
+
+    def apply_interaction_status(
+        self,
+        response_handle: ResponseHandle,
+        *,
+        kind: str,
+        spec: InteractionMessageSpec,
+        payload: dict[str, Any],
+    ) -> None:
+        if kind == "interactive_expire":
+            self.forget_interaction_message(spec.interaction_id)
+            self._send_interaction(
+                response_handle,
+                kind=kind,
+                spec=spec,
+            )
+            return
+        super().apply_interaction_status(
+            response_handle,
+            kind=kind,
+            spec=spec,
+            payload=payload,
+        )
+
+    def resolve_interaction(
+        self,
+        response_handle: ResponseHandle,
+        *,
+        spec: InteractionMessageSpec,
+    ) -> None:
+        self.forget_interaction_message(spec.interaction_id)
+        self._send_interaction(
+            response_handle,
+            kind="interactive_resolve",
+            spec=spec,
+        )
+
+    def _send_interaction(
+        self,
+        response_handle: ResponseHandle,
+        *,
+        kind: str,
+        spec: InteractionMessageSpec,
+    ) -> None:
+        session = self._require_session(response_handle)
+        request_id = str(response_handle.reply_target.get("request_id") or "")
+        rows: list[list[dict[str, str]]] = []
+        button_index = 0
+        for row in spec.buttons:
+            projected_row: list[dict[str, str]] = []
+            for button in row:
+                if not isinstance(button, InteractionButtonSpec):
+                    continue
+                token = self.interaction_button_token(button_index)
+                button_index += 1
+                label = str(button.label or "").strip()
+                if not label:
+                    continue
+                projected_row.append(
+                    {
+                        "label": label,
+                        "token": token,
+                    }
+                )
+            if projected_row:
+                rows.append(projected_row)
+        session.outbound.put_nowait(
+            {
+                "type": kind,
+                "request_id": request_id,
+                "interaction": {
+                    "interaction_id": spec.interaction_id,
+                    "interaction_kind": spec.interaction_kind,
+                    "text": spec.text,
+                    "buttons": rows,
+                    "expires_at": spec.expires_at,
+                },
+            }
+        )
+        session.outbound.put_nowait(
+            {
+                "type": "done",
+                "request_id": request_id,
+                "finish_reason": "stop",
+            }
+        )
+
+    def _accept_interaction_result(
+        self,
+        session: _SocketSession,
+        incoming: dict[str, Any],
+    ) -> None:
+        request_id = str(incoming.get("request_id") or uuid4())
+        session.request_ids.add(request_id)
+        interaction_id = str(incoming.get("interaction_id") or "").strip()
+        button_token = str(incoming.get("button_token") or "").strip()
+        metadata = self._interactive_messages.get(interaction_id)
+        reply_target = metadata.get("reply_target") if isinstance(metadata, dict) else None
+        owner_session_id = (
+            str(reply_target.get("session_id") or "")
+            if isinstance(reply_target, dict)
+            else ""
+        )
+        result = None
+        if owner_session_id == session.session_id:
+            result = self.interaction_result_from_token(
+                interaction_id,
+                button_token,
+            )
+        if result is None:
+            session.outbound.put_nowait(
+                {
+                    "type": "error",
+                    "request_id": request_id,
+                    "error_text": "interaction is unavailable or the selection is invalid",
+                    "finish_reason": "error",
+                }
+            )
+            return
+        self.emit_interaction_result(
+            result,
+            correlation_id=request_id,
+            reply_target=self._session_reply_target(session, request_id),
+        )
+
+    def _session_reply_target(
+        self,
+        session: _SocketSession,
+        request_id: str,
+    ) -> dict[str, str]:
+        return {
+            "session_id": session.session_id,
+            "request_id": str(request_id),
+            "control_scope_key": (
+                f"socket:{self.endpoint.endpoint_id}:{session.session_id}"
+            ),
+        }
 
     def queue_stream_event(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pal.tty.interactions import TtyInteraction, TtyInteractionOption
 from pal.tty.render import AssistantBodyRenderer, OutputBoundary, TtyRenderer
 from pal.tty.session import (
     SocketDisconnected,
@@ -18,6 +19,8 @@ __all__ = [
     "SocketProtocolError",
     "SocketSession",
     "SocketSessionError",
+    "TtyInteraction",
+    "TtyInteractionOption",
     "TtyRenderer",
     "TtyRepl",
 ]

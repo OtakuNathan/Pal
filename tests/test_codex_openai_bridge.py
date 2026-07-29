@@ -183,6 +183,7 @@ class OpenAICodexBridgeMappingTests(unittest.TestCase):
 
     def test_bridge_maps_completion_reasoning_effort_to_codex_effort(self) -> None:
         self.assertEqual(_codex_effort_from_payload({"reasoning_effort": "xhigh"}), "xhigh")
+        self.assertEqual(_codex_effort_from_payload({"reasoning_effort": "max"}), "max")
         self.assertEqual(_codex_effort_from_payload({"reasoning_effort": {"effort": "high"}}), "high")
         self.assertEqual(_codex_effort_from_payload({"reasoning": {"effort": "minimal"}}), "minimal")
         self.assertIsNone(_codex_effort_from_payload({"reasoning_effort": "invalid"}))
@@ -192,6 +193,7 @@ class OpenAICodexBridgeMappingTests(unittest.TestCase):
         self.assertEqual(_codex_cli_config_effort("balanced"), "medium")
         self.assertEqual(_codex_cli_config_effort("minimal"), "low")
         self.assertEqual(_codex_cli_config_effort("xhigh"), "xhigh")
+        self.assertEqual(_codex_cli_config_effort("max"), "max")
 
     def test_codex_bridge_starts_app_server_with_effort_config_override(self) -> None:
         fake_proc = SimpleNamespace(pid=1234)
@@ -236,6 +238,11 @@ class OpenAICodexBridgeMappingTests(unittest.TestCase):
         self.assertIn("shell", developer)
         self.assertIn("authorized shell path", developer)
         self.assertIn("instead of claiming shell access is unavailable", developer)
+        self.assertIn("call that tool in the same turn", developer)
+        self.assertIn("Do not end the turn with a promise", developer)
+        self.assertIn("commentary-only turn is incomplete", developer)
+        self.assertIn("followed by the actual tool call", developer)
+        self.assertIn("report the exact blocker", developer)
         self.assertIn("Use Pal policy.", developer)
         self.assertIn("User:\nFind my reminder.", turn)
         self.assertIn("memory_search", turn)
@@ -826,7 +833,7 @@ class OpenAICodexBridgeMappingTests(unittest.TestCase):
                         },
                     }
                 ],
-                metadata={"think_level": "deep"},
+                metadata={"think_level": "deep", "timeout_seconds": 3000},
             ),
         )
 
@@ -835,6 +842,7 @@ class OpenAICodexBridgeMappingTests(unittest.TestCase):
         self.assertEqual(outcome.tool_calls[0].args, {"ok": True})
         self.assertEqual(invoker.bridge.kwargs["model"], "gpt-5.4")
         self.assertEqual(invoker.bridge.kwargs["effort"], "high")
+        self.assertEqual(invoker.bridge.kwargs["timeout_seconds"], 3000.0)
         self.assertEqual(
             invoker.bridge.kwargs["input_items"],
             [

@@ -7,7 +7,6 @@ from uuid import uuid4
 
 InteractionEventWriter = Callable[[str, dict[str, Any]], Awaitable[None]]
 InteractionReader = Callable[[float | None], Awaitable[dict[str, Any] | None]]
-DEFAULT_CLARIFICATION_TIMEOUT_SECONDS = 30 * 24 * 60 * 60
 
 
 @dataclass
@@ -68,9 +67,6 @@ class MinionUserInteractionPort:
     async def request_clarification(
         self,
         ask_user_question: dict[str, Any],
-        *,
-        approval_policy: dict[str, Any],
-        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         clarification_id = f"clarify_{uuid4().hex[:16]}"
         payload = {
@@ -94,19 +90,8 @@ class MinionUserInteractionPort:
             )
             return {}
         await self.emit_event("clarification_requested", payload)
-        configured_timeout = (approval_policy or {}).get("clarification_timeout_seconds")
-        timeout = (
-            float(timeout_seconds)
-            if timeout_seconds is not None
-            else (
-                float(configured_timeout)
-                if configured_timeout is not None
-                else float(DEFAULT_CLARIFICATION_TIMEOUT_SECONDS)
-            )
-        )
-        response = await self.read_response(timeout)
+        response = await self.read_response(None)
         if not isinstance(response, dict):
-            await self.emit_event("clarification_timeout", {"clarification_id": clarification_id})
             return {}
         clarification = response.get("clarification") if isinstance(response.get("clarification"), dict) else response
         if not isinstance(clarification, dict):

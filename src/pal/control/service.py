@@ -14,20 +14,6 @@ from pal.control.contracts import (
 )
 from pal.shared import EventKind
 
-_THINK_ALIASES = {
-    "off": "off",
-    "minimal": "minimal",
-    "low": "low",
-    "balanced": "balanced",
-    "deep": "deep",
-    "xhigh": "xhigh",
-    "medium": "balanced",
-    "high": "deep",
-    "max": "xhigh",
-    "maximum": "xhigh",
-}
-
-
 @dataclass
 class ControlCommandRegistry:
     commands: dict[str, ControlCommandSpec] = field(default_factory=dict)
@@ -192,14 +178,14 @@ class ControlPlane(ControlPlanePort):
             )
             return _with_interaction_context(action, result)
         if action_key == "control.think.set":
-            requested = _normalize_think_level(str(result.action_args.get("think_level") or ""))
-            if requested is None:
+            requested = str(result.action_args.get("think_level") or "").strip().lower()
+            if not requested:
                 action = ControlAction(
                     action_kind="invalid_command",
                     target_scope="control",
                     route=result.route,
                     args={"reason": "invalid think level"},
-                    notes="Valid think levels: off, minimal, low, balanced, deep, xhigh.",
+                    notes="Think level is required.",
                 )
                 return _with_interaction_context(action, result)
             action = ControlAction(
@@ -399,7 +385,7 @@ class ControlPlane(ControlPlanePort):
                 name="think",
                 handler=self._handle_think,
                 description="Show or update the think level for future turns.",
-                usage="/think [off|minimal|low|balanced|deep|xhigh]",
+                usage="/think [level]",
                 show_in_panel=True,
                 panel_group="builtin",
                 panel_button=True,
@@ -543,8 +529,8 @@ class ControlPlane(ControlPlanePort):
                 target_scope="runtime",
                 route=invocation.route,
             )
-        requested = _normalize_think_level(invocation.argv[0])
-        if requested is None:
+        requested = str(invocation.argv[0] or "").strip().lower()
+        if not requested:
             return ControlAction(
                 action_kind="invalid_command",
                 target_scope="control",
@@ -553,7 +539,7 @@ class ControlPlane(ControlPlanePort):
                     "command_name": invocation.command_name,
                     "reason": "invalid think level",
                 },
-                notes="Valid think levels: off, minimal, low, balanced, deep, xhigh.",
+                notes="Think level is required.",
             )
         return ControlAction(
             action_kind="set_think",
@@ -697,10 +683,6 @@ def _normalize_command_name(value: str) -> str:
     if "@" in text:
         text = text.split("@", 1)[0]
     return text
-
-
-def _normalize_think_level(value: str) -> str | None:
-    return _THINK_ALIASES.get(str(value or "").strip().lower())
 
 
 def _route_from_payload(payload: object) -> ControlRoute | None:

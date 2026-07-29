@@ -19,6 +19,7 @@ from pal.execution.git_tool import classify_git_command
 from pal.llm import EndpointResolver, LLMRuntime
 from pal.lsp.ipc import LspManagerClient
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice, LLMPreflightRequest
+from pal.memory import MemoryService
 from pal.minion.manager import MinionManager, MinionRunState
 from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
 from pal.minion.llm_broker import (
@@ -40,10 +41,7 @@ from pal.minion.runner import (
 )
 from pal.minion.prompt_adapter import render_minion_task_prompt
 from pal.minion.git_shim import GIT_TRAP_EXIT_CODE, _RoleGatewayClient, main as git_shim_main
-from pal.minion.user_interaction import (
-    DEFAULT_CLARIFICATION_TIMEOUT_SECONDS,
-    MinionUserInteractionPort,
-)
+from pal.minion.user_interaction import MinionUserInteractionPort
 from pal.minion.v2.worker_main import _read_control_message
 from pal.minion.sandbox import (
     PAL_MINION_RUNTIME_ROOT_ENV,
@@ -116,7 +114,6 @@ class MinionSandboxTests(unittest.TestCase):
                             }
                         ],
                     },
-                    approval_policy={},
                 )
             )
             await asyncio.wait_for(requested.wait(), timeout=1)
@@ -148,10 +145,7 @@ class MinionSandboxTests(unittest.TestCase):
             response = await asyncio.wait_for(pending, timeout=1)
 
             self.assertEqual(response["answers"][0]["answer"], "Preserve")
-            self.assertEqual(
-                observed_timeouts,
-                [float(DEFAULT_CLARIFICATION_TIMEOUT_SECONDS)],
-            )
+            self.assertEqual(observed_timeouts, [None])
             self.assertEqual(
                 [item["kind"] for item in events],
                 ["clarification_requested", "clarification_received"],
@@ -1449,7 +1443,11 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                 run_id="r_sandbox_shell",
                 write_event=write_event,
                 read_decision=read_decision,
-                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+                runtime_bundle=MinionRuntimeBundle(
+                    llm_runtime=SimpleNamespace(),
+                    execution_runtime=SimpleNamespace(),
+                    memory_service=MemoryService(),
+                ),
             )
             result = await runner._execute_allowed_tool(
                 FakeExecution(),
@@ -1500,7 +1498,11 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                 run_id="r_provider_alias",
                 write_event=write_event,
                 read_decision=read_decision,
-                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+                runtime_bundle=MinionRuntimeBundle(
+                    llm_runtime=SimpleNamespace(),
+                    execution_runtime=SimpleNamespace(),
+                    memory_service=MemoryService(),
+                ),
             )
 
             result = await runner._execute_allowed_tool(
@@ -1726,8 +1728,12 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
                 manager.events.queue_event = lambda event: recorded.append(dict(event))  # type: ignore[method-assign]
 
                 class Settings:
-                    def get_think_level(self):
+                    def get_think_level(self, endpoint_id):
+                        _ = endpoint_id
                         return "balanced"
+
+                    def set_think_level(self, endpoint_id, think_level):
+                        _ = endpoint_id, think_level
 
                     def get_active_llm_endpoint_id(self):
                         return None

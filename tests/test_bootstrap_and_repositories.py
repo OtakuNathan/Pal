@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 from pal.bootstrap import compose_runtime
 from pal.channel import ChannelEndpointRepository, ChannelRuntime, FactoryChannelProvider
 from pal.channel.contracts import EndpointConfig, ResponseHandle
-from pal.channel.endpoints import SocketChannelEndpoint, TelegramChannelEndpoint, TelegramChannelEndpointFactory
+from pal.channel.endpoints import SocketChannelEndpoint
 from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
 from pal.channel.capabilities import ChannelIntrospectionProvider
 from pal.control import InteractionButtonSpec, InteractionMessageSpec
@@ -29,7 +29,6 @@ from pal.llm import (
     AnthropicMessagesEndpointInvoker,
     CanonicalLLMRequest,
     CanonicalLLMOutcome,
-    DEFAULT_THINK_LEVEL,
     EncryptedFileSecretStore,
     EndpointResolver,
     InMemorySecretStore,
@@ -58,6 +57,12 @@ from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
 from pal.web_fetch import DEFAULT_WEB_FETCH_USER_AGENT, BrowserServiceManager, WebFetchProviderRepository, plain_http_fetch
 from pal.web_search import WebSearchItem, WebSearchProviderRepository
+from tests.runtime_channel_providers import telegram_endpoint_module
+
+
+_telegram_module = telegram_endpoint_module()
+TelegramChannelEndpoint = _telegram_module.TelegramChannelEndpoint
+TelegramChannelEndpointFactory = _telegram_module.TelegramChannelEndpointFactory
 
 
 def _unix_socket_bind_available() -> bool:
@@ -108,6 +113,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.db_path = self.registration.runtime.db_path
         self.database = self.wizard.create_database(self.registration)
         self.wizard.provision_builtin_plugins(self.registration)
+        self.wizard.provision_runtime_channel_providers(self.registration)
 
     def tearDown(self) -> None:
         for handle in reversed(self._runtime_handles):
@@ -1014,9 +1020,9 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_openai_chat_invoker_maps_glm_think_level_to_thinking_body(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="glm-5",
+            endpoint_id="glm-5.2",
             provider="zhipu",
-            model_id="glm-5.1",
+            model_id="glm-5.2",
             api_mode="openai_chat",
             base_url="https://api.z.ai/api/coding/paas/v4",
             auth_kind="api_key_ref",
@@ -1041,14 +1047,14 @@ class PalV2BootstrapTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(kwargs["model"], "glm-5.1")
+        self.assertEqual(kwargs["model"], "glm-5.2")
         self.assertEqual(kwargs["thinking"], {"type": "enabled"})
-        self.assertEqual(kwargs["reasoning_effort"], "xhigh")
+        self.assertEqual(kwargs["reasoning_effort"], "max")
         self.assertNotIn("extra_body", kwargs)
         self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
         _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
         self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "enabled"}})
-        self.assertEqual(request_kwargs["reasoning_effort"], "xhigh")
+        self.assertEqual(request_kwargs["reasoning_effort"], "max")
         self.assertNotIn("thinking", request_kwargs)
 
     def test_openai_chat_invoker_replays_reasoning_content_for_openai_shape_reasoning_providers(self) -> None:
@@ -2083,10 +2089,65 @@ class PalV2BootstrapTests(unittest.TestCase):
         repository = RuntimeSettingRepository()
 
         repository.ensure_defaults()
-        self.assertEqual(repository.get_think_level(), DEFAULT_THINK_LEVEL)
+        self.assertIsNone(repository.get_think_level("endpoint-a"))
 
-        repository.set_think_level("deep")
-        self.assertEqual(repository.get_think_level(), "deep")
+        repository.set_think_level("endpoint-a", "deep")
+        repository.set_think_level("endpoint-b", "low")
+        self.assertEqual(repository.get_think_level("endpoint-a"), "deep")
+        self.assertEqual(repository.get_think_level("endpoint-b"), "low")
+
+    def test_llm_runtime_uses_provider_choices_and_persists_them_per_endpoint(self) -> None:
+        endpoint_repository = LLMEndpointRepository()
+        endpoint_repository.ensure_defaults(
+            [
+                {
+                    "endpoint_id": "glm",
+                    "provider": "zhipu",
+                    "model_id": "glm-5.2",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/glm",
+                    "credential_ref": "stub-key",
+                    "supports_reasoning": True,
+                    "capabilities_blob": {"supports_thinking": True},
+                    "priority": 0,
+                    "enabled": True,
+                },
+                {
+                    "endpoint_id": "claude",
+                    "provider": "anthropic",
+                    "model_id": "claude-sonnet",
+                    "api_mode": "anthropic_messages",
+                    "base_url": "stub://local/claude",
+                    "credential_ref": "stub-key",
+                    "supports_reasoning": True,
+                    "priority": 1,
+                    "enabled": True,
+                },
+            ]
+        )
+        settings = RuntimeSettingRepository()
+        settings.set_active_llm_endpoint_id("glm")
+        settings.set("think_level", "xhigh")
+
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
+            settings_repository=settings,
+        )
+
+        self.assertEqual(runtime.think_level, "max")
+        self.assertEqual(settings.get_think_level("glm"), "max")
+        self.assertIsNone(settings.get_legacy_think_level())
+        self.assertEqual(
+            [choice["id"] for choice in runtime.thinking_status()["choices"]],
+            ["off", "high", "max"],
+        )
+
+        runtime.set_active_endpoint("claude")
+        self.assertEqual(runtime.think_level, "medium")
+        self.assertEqual(runtime.set_think_level("minimal"), "low")
+        runtime.set_active_endpoint("glm")
+        self.assertEqual(runtime.think_level, "max")
+        self.assertEqual(settings.get_think_level("claude"), "low")
 
     def test_llm_runtime_injects_think_level_into_request_metadata(self) -> None:
         endpoint_repository = LLMEndpointRepository()
@@ -2095,19 +2156,30 @@ class PalV2BootstrapTests(unittest.TestCase):
             [
                 {
                     "endpoint_id": "stub_endpoint",
-                    "provider": "stub",
-                    "model_id": "stub-model",
+                    "provider": "zhipu",
+                    "model_id": "glm-5.2",
                     "api_mode": "openai_chat",
                     "base_url": "stub://local/llm",
                     "credential_ref": "stub-key",
                     "context_window": 10000,
                     "max_output_tokens": 1200,
+                    "supports_reasoning": True,
+                    "capabilities_blob": {
+                        "supports_thinking": True,
+                        "thinking_contract": {
+                            "default": "high",
+                            "choices": [
+                                "off",
+                                {"id": "high", "label": "focused", "aliases": ["deep"]},
+                            ],
+                        }
+                    },
                     "priority": 0,
                     "enabled": True,
                 }
             ]
         )
-        settings_repository.set_think_level("deep")
+        settings_repository.set_think_level("stub_endpoint", "deep")
         runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(repository=endpoint_repository),
             settings_repository=settings_repository,
@@ -2122,7 +2194,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(runtime.last_request)
-        self.assertEqual(runtime.last_request.metadata["think_level"], "deep")
+        self.assertEqual(runtime.last_request.metadata["think_level"], "high")
 
     def test_llm_runtime_injects_default_timeout_into_effective_request(self) -> None:
         endpoint_repository = LLMEndpointRepository()
@@ -2483,7 +2555,6 @@ class PalV2BootstrapTests(unittest.TestCase):
             "mcp": "pal.mcp",
             "minion": "pal.minion",
             "sqlite_vec_l3": "pal.plugins.l3",
-            "telegram_channel": "pal.channel.endpoints.telegram_endpoint",
             "web_fetch": "pal.web_fetch",
             "web_search": "pal.web_search",
         }
@@ -3295,7 +3366,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(outcome.text, "reply via fallback")
         self.assertEqual(runtime.last_endpoint_id, "fallback")
         self.assertEqual(runtime.last_model_id, "fallback-model")
-        self.assertEqual(runtime.last_request.metadata["think_level"], DEFAULT_THINK_LEVEL)
+        self.assertNotIn("think_level", runtime.last_request.metadata)
         self.assertEqual(runtime.last_request.metadata["endpoint_id"], "fallback")
         self.assertEqual(
             [event["phase"] for event in events],
@@ -4130,7 +4201,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIs(handle.channel_runtime.get_endpoint("socket_default"), old_endpoint)
         self.assertTrue(old_endpoint.attached)
 
-    def test_compose_runtime_registers_telegram_endpoint_via_provider_registry(self) -> None:
+    def test_compose_runtime_registers_telegram_endpoint_via_runtime_provider(self) -> None:
         self.wizard.seed_defaults(self.registration)
         ChannelEndpointRepository().upsert(
             endpoint_id="telegram_main",
@@ -4152,12 +4223,14 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(endpoint)
         self.assertEqual(endpoint.__class__.__name__, "TelegramChannelEndpoint")
         self.assertEqual(endpoint.endpoint.binding_key, "chat:123")
-        records = handle.plugin_host.list_plugins()
-        telegram_record = next(item for item in records if item["plugin_id"] == "telegram_channel")
-        self.assertTrue(telegram_record["attached"])
-        self.assertIsNotNone(handle.core.context.module_registry.get("telegram_channel"))
         manager = handle.core.context.require_port("channel:provider_manager")
-        self.assertIsNotNone(manager.provider_for_endpoint_type("telegram"))
+        provider = manager.provider_for_endpoint_type("telegram")
+        self.assertIsNotNone(provider)
+        self.assertEqual(
+            {item["provider_id"]: item for item in manager.list_providers()}["telegram"]["source"],
+            "runtime_root",
+        )
+        self.assertIsNone(handle.core.context.module_registry.get("telegram_channel"))
 
     def test_channel_provider_rescan_uses_manager_provider_registry(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -4290,7 +4363,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 provider_id="telegram",
                 endpoint_types=("telegram",),
                 factory=TelegramChannelEndpointFactory(),
-                reload_modules=("pal.channel.endpoints.telegram_endpoint",),
+                reload_modules=(),
             )
         )
 
@@ -4337,7 +4410,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertNotIn("base_url", llm_show.structured)
         self.assertEqual(llm_show.structured["model_id"], "stub-model")
         self.assertEqual(llm_show.structured["endpoint_id"], "stub_llm_default")
-        self.assertEqual(llm_think_level.structured["effective_think_level"], DEFAULT_THINK_LEVEL)
+        self.assertIsNone(llm_think_level.structured["effective_think_level"])
+        self.assertEqual(llm_think_level.structured["available_levels"], ())
 
     def test_compose_runtime_consumes_wizard_owned_database(self) -> None:
         handle = self._compose_runtime(
@@ -5141,7 +5215,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             reply_target={"chat_id": "100", "message_id": "10", "thread_id": ""},
         )
 
-        with patch("pal.channel.endpoints.telegram_endpoint._telegram_markdown", side_effect=lambda text: (str(text), None)):
+        with patch.object(_telegram_module, "_telegram_markdown", side_effect=lambda text: (str(text), None)):
             self.endpoint.queue_reply("first", response_handle=handle)
             self.endpoint.queue_reply("second", response_handle=handle)
             self.endpoint.flush_outbox()
@@ -5280,6 +5354,121 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertNotIn("ctl_panel_1", self.endpoint._interactive_messages)
+
+    async def test_telegram_endpoint_segments_long_interaction_and_keeps_keyboard_on_last_message(self) -> None:
+        spec = InteractionMessageSpec(
+            interaction_id="review_long",
+            interaction_kind="minion_v2_architecture_review",
+            text=("architecture contract\n" * 600).strip(),
+            buttons=(
+                (
+                    InteractionButtonSpec(
+                        label="Accept",
+                        action_key="control.action.dispatch",
+                        action_args={"decision": "accept"},
+                    ),
+                ),
+            ),
+            expires_at=None,
+        )
+        self.endpoint.queue_status(
+            "interactive_open",
+            payload={"spec": spec},
+            response_handle=self.endpoint.build_response_handle(
+                reply_target={"chat_id": "42"},
+            ),
+        )
+
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+
+        messages = [
+            payload
+            for kind, payload in self.fake_bot.actions
+            if kind == "message"
+        ]
+        self.assertGreater(len(messages), 1)
+        self.assertTrue(all(len(str(item["text"])) <= 4096 for item in messages))
+        self.assertNotIn("reply_markup", messages[0])
+        self.assertIn("reply_markup", messages[-1])
+        self.assertIn("review_long", self.endpoint._interactive_messages)
+
+    async def test_telegram_endpoint_restores_durable_interaction_after_endpoint_restart(self) -> None:
+        spec = InteractionMessageSpec(
+            interaction_id="review_restart",
+            interaction_kind="minion_v2_architecture_review",
+            text="Review ready",
+            buttons=(
+                (
+                    InteractionButtonSpec(
+                        label="Accept",
+                        action_key="control.action.dispatch",
+                        action_args={
+                            "action_kind": "minion_v2_human_decision",
+                            "args": {"decision": "accept"},
+                        },
+                    ),
+                ),
+            ),
+            expires_at=None,
+        )
+        self.endpoint.queue_status(
+            "interactive_open",
+            payload={"spec": spec},
+            response_handle=self.endpoint.build_response_handle(
+                reply_target={"chat_id": "42"},
+            ),
+        )
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+        self.assertTrue(
+            (
+                self.runtime_root
+                / "data"
+                / "channel"
+                / "telegram_main"
+                / "state.sqlite3"
+            ).is_file()
+        )
+
+        restarted = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="user:42",
+                send_policy={"max_message_chars": 4096},
+            ),
+            runtime_root=self.runtime_root,
+            bot_token="token-123",
+        )
+
+        class _CallbackQuery:
+            data = "ix:review_restart:b0"
+            message = _FakeTelegramMessage(
+                chat_id=42,
+                user_id=42,
+                message_id=999,
+                text="",
+            )
+            from_user = _FakeTelegramUser(42)
+            id = "callback-restart"
+
+            async def answer(self) -> None:
+                return None
+
+        class _Update:
+            callback_query = _CallbackQuery()
+
+        result = await restarted._interaction_result_from_update(_Update())
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.interaction_id, "review_restart")
+        self.assertEqual(result.action_key, "control.action.dispatch")
+        self.assertEqual(
+            result.action_args["args"]["decision"],
+            "accept",
+        )
 
     async def test_telegram_endpoint_interactive_update_falls_back_to_new_message_when_edit_fails(self) -> None:
         self.endpoint._interactive_messages["ctl_panel_stale"] = {

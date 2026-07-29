@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import json
 from typing import Any
 
-from pal.llm.contracts import CanonicalLLMRequest
+from pal.llm.contracts import CanonicalLLMRequest, ThinkingContract
 from pal.llm.models import LLMEndpointModel
 
 from pal.llm.llm_adaptor.base import (
@@ -12,6 +12,7 @@ from pal.llm.llm_adaptor.base import (
     LLMProviderAdapter,
     _capabilities,
     _think_level_to_completion_reasoning_effort,
+    openai_thinking_contract_for_endpoint,
 )
 
 
@@ -77,8 +78,14 @@ class OpenAIResponsesProvider(LLMProviderAdapter):
             input=input_items,
         )
 
+    def provider_thinking_contract(self) -> ThinkingContract | None:
+        if getattr(self.endpoint, "supports_reasoning", False) is False:
+            return None
+        return openai_thinking_contract_for_endpoint(self.endpoint)
+
     def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIResponsesDraft) -> None:  # type: ignore[override]
-        effort = _think_level_to_completion_reasoning_effort(request.metadata.get("think_level"))
+        choice_id = self.resolve_think_level(request.metadata.get("think_level"))
+        effort = _think_level_to_completion_reasoning_effort(choice_id)
         if effort is not None:
             draft.reasoning = {"effort": effort}
 

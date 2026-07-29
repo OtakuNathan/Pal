@@ -33,6 +33,7 @@ from pal.minion.v2.architecture import (
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
     empty_review_draft,
+    partition_findings,
     structured_findings,
 )
 from pal.minion.v2.submission_drafts import (
@@ -421,8 +422,13 @@ def _compile_review(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> tu
     _require_no_args(call)
     context, store = _store(workspace, "architecture_review")
     snapshot = store.read(context, seed=_review_seed())
-    findings = structured_findings(snapshot.payload)
-    output = {"schema_version": "2", "verdict": "FAIL" if findings else "PASS", "findings": findings}
+    findings, advisories = partition_findings(structured_findings(snapshot.payload))
+    output = {
+        "schema_version": "2",
+        "verdict": "FAIL" if findings else "PASS",
+        "findings": findings,
+        "advisories": advisories,
+    }
     _validate_architecture_review(output)
     return output, snapshot.version
 
@@ -663,6 +669,7 @@ def _contract_counts(payload: Mapping[str, Any]) -> dict[str, int]:
 def _validate_architecture_review(payload: Mapping[str, Any]) -> None:
     verdict = str(payload.get("verdict") or "")
     findings = list(payload.get("findings") or [])
+    advisory_values = list(payload.get("advisories") or [])
     if verdict == "PASS" and findings:
         raise ValueError("PASS architecture review cannot contain findings")
     if verdict == "FAIL" and not findings:
@@ -670,6 +677,11 @@ def _validate_architecture_review(payload: Mapping[str, Any]) -> None:
     if verdict not in {"PASS", "FAIL"}:
         raise ValueError("architecture review verdict is invalid")
     structured_findings({"findings": findings})
+    _blocking_advisories, advisories = partition_findings(
+        structured_findings({"findings": advisory_values})
+    )
+    if len(advisories) != len(advisory_values):
+        raise ValueError("architecture review advisories must use disposition=advisory")
 
 
 def _reject_implementation_fields(value: Any) -> None:

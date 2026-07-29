@@ -69,13 +69,12 @@ from pal.memory import (
     build_ollama_embedding_provider_from_config,
     register_with_core as register_memory_with_core,
 )
+from pal.memory.prompt import MemoryPromptFragmentProvider
 from pal.memory.tool_protocol import l1_tool_protocol_transcript
 from pal.minion.compact import (
     build_minion_prior_user_inputs_compaction_payload,
     build_minion_prior_user_inputs_source_text,
     compact_minion_memory_service,
-    is_minion_compaction_payload,
-    render_minion_compact_context_for_llm,
 )
 from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.llm_broker import MinionBrokerLLMRuntime
@@ -130,6 +129,8 @@ _MAX_MANAGER_TURN_TIMEOUT_SECONDS = 3600.0
 class MinionRuntimeBundle:
     llm_runtime: Any
     execution_runtime: Any
+    memory_service: MemoryService
+    config: RuntimeConfig | None = None
     close_async: Callable[[], Awaitable[None]] | None = None
 
     async def close(self) -> None:
@@ -540,7 +541,7 @@ class _MinionExecutionRuntimeAdapter:
 class MinionAgentLoopState:
     execution_runtime: "MinionScopedExecutionRuntime"
     memory_service: MemoryService
-    memory_l3: MockL3Plugin
+    memory_candidate_sink: MockL3Plugin
     channel_envelope: ChannelEnvelope = field(
         default_factory=lambda: ChannelEnvelope(
             event=EventEnvelope(
@@ -578,8 +579,7 @@ class MinionRunner:
     web_research_usage: dict[str, int] = field(default_factory=dict)
     auto_accept_approvals: bool = False
     user_interaction: MinionUserInteractionPort | None = field(default=None, init=False, repr=False)
-    _memory_l3: MockL3Plugin | None = field(default=None, init=False, repr=False)
-    _memory_service: MemoryService | None = field(default=None, init=False, repr=False)
+    _memory_candidate_sink: MockL3Plugin | None = field(default=None, init=False, repr=False)
     _pending_control_messages: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _cancel_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _restart_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
@@ -743,7 +743,8 @@ class MinionRunner:
         return str(output_policy.get("primary_artifact") or "").strip()
 
     async def _run_agent_loop(self, bundle: MinionRuntimeBundle, *, forced_retry_note: str = "") -> str:
-        memory_l3, memory_service = self._runner_memory()
+        memory_service = bundle.memory_service
+        memory_candidate_sink = self._runner_memory_candidate_sink()
         workspace = dict(self.pack.workspace)
         workspace.setdefault("runtime_root", str(self.runtime_root))
         workspace.setdefault("run_id", self.run_id)
@@ -762,7 +763,6 @@ class MinionRunner:
             self.pack.allowed_capabilities,
             workspace,
             produced_artifacts=self.produced_artifacts,
-            memory_l3=memory_l3,
             capability_guidance_overrides=dict(
                 dict(self.pack.resolved_profile or {}).get("capability_guidance_overrides") or {}
             ),
@@ -809,7 +809,7 @@ class MinionRunner:
         state = MinionAgentLoopState(
             execution_runtime=execution_runtime,
             memory_service=memory_service,
-            memory_l3=memory_l3,
+            memory_candidate_sink=memory_candidate_sink,
             channel_envelope=channel_envelope,
             tool_protocol_messages=tool_protocol_messages,
             llm_round_count=max(0, int(restored.get("llm_round_count") or 0)),
@@ -907,7 +907,7 @@ class MinionRunner:
                         tool_call_count=state.tool_call_count,
                     )
                 await self._commit_minion_l1(state, outcome.commit_payload.transcript)
-                self.memory_candidates = _memory_candidates_from_l3(state.memory_l3)
+                self.memory_candidates = _memory_candidates_from_sink(state.memory_candidate_sink)
                 final_reply = str(outcome.final_reply or "").strip()
                 if final_reply:
                     continuation.tool_protocol_messages.append({"role": "assistant", "content": final_reply})
@@ -1049,20 +1049,12 @@ class MinionRunner:
         os.replace(temporary, target)
         self._agent_session_checkpoint = payload
 
-    def _runner_memory(self) -> tuple[MockL3Plugin, MemoryService]:
-        if self._memory_l3 is not None and self._memory_service is not None:
-            return self._memory_l3, self._memory_service
-        memory_l3 = MockL3Plugin(provider_id=f"minion_run_{self.run_id}_l3")
-        memory_service = MemoryService(
-            l3_selector=L3ProviderSelector(
-                resolver=lambda provider_id: memory_l3,
-                active_provider_id=memory_l3.provider_id,
-            )
-        )
-        memory_l3.service = memory_service
-        self._memory_l3 = memory_l3
-        self._memory_service = memory_service
-        return memory_l3, memory_service
+    def _runner_memory_candidate_sink(self) -> MockL3Plugin:
+        if self._memory_candidate_sink is not None:
+            return self._memory_candidate_sink
+        sink = MockL3Plugin(provider_id=f"minion_run_{self.run_id}_memory_candidates")
+        self._memory_candidate_sink = sink
+        return sink
 
     async def _read_manager_control(self, timeout: float | None = None) -> dict[str, Any] | None:
         if self._pending_control_messages:
@@ -1161,13 +1153,7 @@ class MinionRunner:
         memory_service = _MinionMemoryServiceAdapter(self, state)
         output_port = _MinionOutputPort(self)
         execution_runtime = _MinionExecutionRuntimeAdapter(self, state, continuation)
-        prompt_fragment_registry = PromptFragmentRegistry()
-        prompt_fragment_registry.register(
-            MinionPromptFragmentProvider(
-                scaffold_factory=self._prompt_scaffold,
-                memory_text_factory=lambda: self._render_minion_memory_context(state),
-            )
-        )
+        prompt_fragment_registry = self._build_minion_prompt_fragment_registry(config=bundle.config)
         context = _MinionTurnContext(
             execution_runtime=execution_runtime,
             prompt_fragment_registry=prompt_fragment_registry,
@@ -1217,6 +1203,26 @@ class MinionRunner:
             should_enter_failure_flow_for_tool_result=lambda _tool_result: False,
             handle_llm_provider_errors=False,
         )
+
+    def _build_minion_prompt_fragment_registry(
+        self,
+        *,
+        config: RuntimeConfig | None = None,
+    ) -> PromptFragmentRegistry:
+        prompt_fragment_registry = PromptFragmentRegistry()
+        prompt_fragment_registry.register(
+            MinionPromptFragmentProvider(
+                scaffold_factory=self._prompt_scaffold,
+                role_context_factory=self._render_durable_role_context,
+            )
+        )
+        prompt_fragment_registry.register(
+            MemoryPromptFragmentProvider(
+                config=config,
+                include_l1_recent_context=False,
+            )
+        )
+        return prompt_fragment_registry
 
     async def _execute_minion_agent_effect(
         self,
@@ -1380,25 +1386,6 @@ class MinionRunner:
     def _persist_tool_protocol_to_l1(self) -> bool:
         return True
 
-    def _render_minion_memory_context(self, state: MinionAgentLoopState) -> str:
-        pack = state.memory_service.build_pack(MemoryPackRequest(turn_kind="minion", work_order_id=self.pack.invocation_id))
-        parts: list[str] = []
-        role_context = self._render_durable_role_context()
-        if role_context:
-            parts.append(role_context)
-        summary_text = self._render_minion_current_summary(pack.current_summary)
-        if summary_text:
-            parts.append(f"Current summary:\n{summary_text}")
-        entries = [entry for entry in list(pack.l2_working_memory or []) if str(entry.entry_id) != "memory.summary"]
-        if entries:
-            lines = [f"- {entry.kind}:{entry.title or entry.entry_id}: {entry.summary}" for entry in entries[:8]]
-            parts.append("Working memory:\n" + "\n".join(lines))
-        records = list(getattr(state.memory_l3, "records", []) or [])
-        if records:
-            lines = [f"- {record.get('document_kind')}:{record.get('title')}: {record.get('summary')}" for record in records[:8]]
-            parts.append("Candidate experience records:\n" + "\n".join(lines))
-        return "\n\n".join(parts).strip()
-
     def _render_durable_role_context(self) -> str:
         binding = dict((self.pack.metadata or {}).get("minion_v2") or {})
         if str(binding.get("role") or "") != "implementation":
@@ -1412,17 +1399,6 @@ class MinionRunner:
             "minion_v2": binding,
         }
         return candidate_checklist_context(workspace)
-
-    @staticmethod
-    def _render_minion_current_summary(entry: Any) -> str:
-        if entry is None:
-            return ""
-        summary = str(getattr(entry, "summary", "") or "").strip()
-        rendered = str(getattr(entry, "rendered", "") or "").strip()
-        payload = getattr(entry, "payload", None)
-        if is_minion_compaction_payload(payload):
-            return render_minion_compact_context_for_llm(summary=summary, payload=dict(payload or {}))
-        return rendered or summary
 
     def _minion_compaction_source_text(self, state: MinionAgentLoopState, *, target_input_budget: int) -> str:
         items = getattr(getattr(state.memory_service, "l1_store", None), "items", [])
@@ -1701,13 +1677,8 @@ class MinionRunner:
     async def _request_architecture_clarification(
         self,
         payload: dict[str, Any],
-        timeout_seconds: float | None,
     ) -> dict[str, Any]:
-        return await self._user_interaction_port().request_clarification(
-            payload,
-            approval_policy=self.pack.approval_policy or {},
-            timeout_seconds=timeout_seconds,
-        )
+        return await self._user_interaction_port().request_clarification(payload)
 
     def _completion_evidence_present(self) -> bool:
         if self._manager_submission_receipt_required():
@@ -2343,7 +2314,13 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
                 shutdown_sync()
         database.close()
 
-    return MinionRuntimeBundle(llm_runtime=llm_runtime, execution_runtime=core.context.execution_runtime, close_async=close)
+    return MinionRuntimeBundle(
+        llm_runtime=llm_runtime,
+        execution_runtime=core.context.execution_runtime,
+        memory_service=memory_service,
+        config=config,
+        close_async=close,
+    )
 
 
 def _minion_prompt_context(pack: MinionInvocationPack, *, event: EventEnvelope | None = None, metadata: dict[str, Any]) -> PromptAssemblyContext:
@@ -2356,9 +2333,9 @@ def _minion_prompt_context(pack: MinionInvocationPack, *, event: EventEnvelope |
     )
 
 
-def _memory_candidates_from_l3(memory_l3: MockL3Plugin) -> list[dict[str, Any]]:
+def _memory_candidates_from_sink(memory_candidate_sink: MockL3Plugin) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    for record in list(getattr(memory_l3, "records", []) or []):
+    for record in list(getattr(memory_candidate_sink, "records", []) or []):
         if not isinstance(record, dict):
             continue
         item = {
@@ -2372,7 +2349,7 @@ def _memory_candidates_from_l3(memory_l3: MockL3Plugin) -> list[dict[str, Any]]:
             "dedupe_fingerprint": str(record.get("dedupe_fingerprint")) if record.get("dedupe_fingerprint") is not None else None,
             "topics": list(record.get("topics") or []),
             "payload": dict(record.get("payload") or {}),
-            "source_kind": "minion_ephemeral_l3",
+            "source_kind": "minion_candidate_sink",
             "candidate_state": "candidate",
         }
         payload = item["payload"]

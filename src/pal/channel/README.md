@@ -6,7 +6,7 @@ Owns:
 - normalize, reply routing, and response handles
 - active text delivery resolved by configured endpoint id
 - adapter registry for legacy/transport compatibility
-- provider manager for plugin-contributed channel providers
+- provider manager for runtime-root channel providers
 - delivery diagnostics for queued replies
 - channel-neutral interaction status and callback mapping
 
@@ -67,7 +67,13 @@ Interaction rule:
 - runtime-root channel providers live under:
   - `runtime_root/channel/providers/<provider_id>/provider.toml`
   - the manifest points at provider-owned Python code, usually `entrypoint = "runtime.py"`
-  - rescan loads those providers and registers them with `ChannelEndpointProviderManager`
+  - rescan loads that directory as a Python package through `importlib`, so
+    provider-owned modules may use relative imports without entering Pal's wheel
+  - rescan registers the resulting provider with `ChannelEndpointProviderManager`
+- provider-owned mutable state lives under:
+  - `runtime_root/data/channel/<endpoint_id>/`
+  - providers choose their private representation inside that directory
+  - provider state is not part of Pal's central channel binding schema
 - channel providers own their concrete lifecycle and endpoint introspection:
   - endpoint construction/deserialization
   - attach/detach/restart implementation
@@ -81,11 +87,11 @@ Interaction rule:
   - `backlog`
 - endpoint nodes do **not** expose `attach/detach`; those are channel-parent
   management actions
-- channel root is a core bus and is not hot-reloaded as a module; provider/endpoint
-  implementations are the hot-reload boundary
-- channel providers are registered through `ChannelEndpointProviderManager`, so
-  built-in and community plugins can contribute new endpoint type providers
-  without changing the channel core
+- channel root and the recovery socket endpoint are core runtime components and
+  are not hot-reloaded; every other provider/endpoint implementation is a
+  runtime-root hot-reload boundary
+- detachable providers are not imported from `site-packages`; deployment,
+  replacement, and removal happen entirely within the selected runtime root
 - only channel-neutral operations are exposed to `Pal/LLM`; provider-specific
   target addressing stays private to the endpoint
 - secrets/tokens are write-only; introspection never returns them

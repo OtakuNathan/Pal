@@ -354,8 +354,9 @@ class VerificationService:
             raise ValueError(
                 "accepted verifier candidate requires both artifact ref and digest"
             )
-        if accepted_candidate_ref is not None and status != VerificationStatus.PASS:
-            raise ValueError("only a PASS verdict may promote verifier-authored tests")
+        # A failing verifier checkpoint is still a durable Module asset: the
+        # next Coder repair must inherit the exact regression tests that
+        # exposed the defect.
         common = {
             "verification_artifact_ref": verification_ref.to_dict(),
             **(
@@ -659,6 +660,7 @@ def semantic_finding_payload(value: Mapping[str, Any]) -> dict[str, Any]:
             "finding_key": str(item.get("finding_key") or ""),
             "finding_kind": str(item.get("finding_kind") or ""),
             "priority": str(item.get("priority") or ""),
+            "disposition": str(item.get("disposition") or "blocking"),
             "summary": str(item.get("summary") or ""),
             "locations": [dict(entry) for entry in list(item.get("locations") or [])],
         }

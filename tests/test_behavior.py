@@ -863,6 +863,72 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(stored.prompt_hint, "Inspect git status before committing.")
         self.assertEqual(stored.activation_terms, ("commit",))
 
+    def test_behavior_mutation_successes_validate_through_facade(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        register_behavior_with_core(core.context, self.service)
+        core.publish_module_capabilities("execution")
+        core.publish_module_capabilities("behavior")
+        runtime = core.context.execution_runtime
+
+        learned = runtime.execute_tool(
+            CanonicalToolCall(
+                name="learn_behavior",
+                args={
+                    "title": "Petra identity",
+                    "scenario_text": "send a message to Petra",
+                    "prompt_hint": "Identify as Pal before messaging Petra.",
+                    "capability_refs": ["cap.known"],
+                    "memory_query_hints": ["Petra identity"],
+                },
+            )
+        )
+
+        self.assertTrue(learned.ok, learned.llm_text)
+        self.assertEqual(learned.invocation_result.kind, "complete")
+        self.assertEqual(learned.invocation_result.effect.value, "applied")
+        self.assertEqual(learned.structured["module_id"], "behavior")
+        self.assertEqual(learned.structured["title"], "Petra identity")
+        self.assertEqual(learned.structured["capability_refs"], ["cap.known"])
+        affordance_id = learned.structured["affordance_id"]
+        self.assertIsNotNone(self.repository.get_affordance(affordance_id))
+
+        updated = runtime.execute_tool(
+            CanonicalToolCall(
+                name="update_behavior",
+                args={
+                    "affordance": "Identify as Pal before messaging Petra.",
+                    "prompt_hint": "Start messages to Petra by identifying as Pal.",
+                },
+            )
+        )
+
+        self.assertTrue(updated.ok, updated.llm_text)
+        self.assertEqual(updated.invocation_result.kind, "complete")
+        self.assertEqual(
+            updated.structured["prompt_hint"],
+            "Start messages to Petra by identifying as Pal.",
+        )
+        self.assertEqual(
+            self.repository.get_affordance(affordance_id).prompt_hint,
+            "Start messages to Petra by identifying as Pal.",
+        )
+
+        forgotten = runtime.execute_tool(
+            CanonicalToolCall(
+                name="forget_behavior",
+                args={
+                    "affordance": "Start messages to Petra by identifying as Pal.",
+                },
+            )
+        )
+
+        self.assertTrue(forgotten.ok, forgotten.llm_text)
+        self.assertEqual(forgotten.invocation_result.kind, "complete")
+        self.assertTrue(forgotten.structured["deleted"])
+        self.assertEqual(forgotten.structured["module_id"], "behavior")
+        self.assertIsNone(self.repository.get_affordance(affordance_id))
+
     def test_read_tool_contracts_separate_memory_from_behavior(self) -> None:
         core = PalCore()
         register_core_with_core(core)

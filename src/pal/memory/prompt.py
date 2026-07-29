@@ -19,6 +19,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
     provider_id: str = "memory.prompt.default"
     module_id: str = "memory"
     config: RuntimeConfig | None = None
+    include_l1_recent_context: bool = True
 
     @property
     def _keep_recent(self) -> int:
@@ -32,11 +33,15 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
 
         summary_text = _current_summary_text(pack)
         summary_context = _render_current_summary_context(pack)
-        messages = [
-            message
-            for message in list(pack.l1_recent_context)
-            if not _is_synthetic_compaction_summary(message, summary_text, summary_context)
-        ]
+        messages = (
+            [
+                message
+                for message in list(pack.l1_recent_context)
+                if not _is_synthetic_compaction_summary(message, summary_text, summary_context)
+            ]
+            if self.include_l1_recent_context
+            else []
+        )
         cleared_indices = _build_cleared_tool_indices(messages, keep_recent=self._keep_recent)
 
         block_index = 0

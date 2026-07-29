@@ -23,6 +23,7 @@ models=(
     WorkerProcessLifecycle
     ReplanReuseLifecycle
     ImplementationTopology
+    CanonicalWorktreeLifecycle
 )
 
 cd "${repo_root}"

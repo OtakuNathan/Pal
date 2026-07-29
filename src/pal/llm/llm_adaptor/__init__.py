@@ -14,6 +14,7 @@ from pal.llm.llm_adaptor.base import (
     resolve_endpoint_adapter,
     unregister_llm_provider_adapter,
 )
+from pal.llm.contracts import ThinkingChoice, ThinkingContract
 
 __all__ = [
     "LEGACY_RUNTIME_PROVIDER_ADAPTER_DIR",
@@ -22,6 +23,8 @@ __all__ = [
     "LLMProviderAdapter",
     "LLMProviderRegistry",
     "OpenAIChatCompletionDraft",
+    "ThinkingChoice",
+    "ThinkingContract",
     "build_default_provider_registry",
     "build_runtime_provider_registry",
     "default_provider_registry",

@@ -20,6 +20,7 @@ from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
     empty_review_draft,
+    partition_findings,
     structured_findings,
 )
 from pal.minion.v2.repository import MinionV2Repository
@@ -48,7 +49,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": (
             "Submit PASS after the durable module corpus covers the candidate and passes. Add or materially strengthen "
             "adversarial coverage only when the existing corpus leaves a real gap. Takes no arguments. The Manager requires "
-            "a non-empty tests/<module_name>/verification corpus and a successful ordinary shell or LSP check after any final edit."
+            "a non-empty tests/<module_name>/verifier corpus and a successful ordinary shell or LSP check after any final edit."
         ),
         "InputModel": EmptyToolInput,
     },
@@ -61,7 +62,7 @@ SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "alias": "verification_request_corpus_repair",
         "description": (
             "Submit a Verifier-owned corpus defect after recording every incorrect probe with "
-            "finding_kind=verification_defect and an exact tests/<module>/verification location. "
+            "finding_kind=verification_defect and an exact tests/<module>/verifier location. "
             "Manager routes the original module Verifier to correct and rerun its corpus; Coder is never invoked."
         ),
         "InputModel": EmptyToolInput,
@@ -152,7 +153,7 @@ def compile_swe_verification_tool_contract(
         guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
             "Record or replace one evidence-backed scenario finding. Use verification_defect when the failure is "
             "caused by an incorrect Verifier-owned module corpus or test double; cite its exact "
-            "tests/<module>/verification path and submit corpus repair so Manager returns it to the original Verifier. "
+            "tests/<module>/verifier path and submit corpus repair so Manager returns it to the original Verifier. "
             "For every implementation repair, cite at least "
             "one exact workspace file owned by the affected module so Manager can derive the graph route mechanically. "
             "Use contract_defect, architecture_defect, or requirements_defect when no implementation-owned path can "
@@ -216,7 +217,9 @@ def swe_verification_tool_result(
         )
         store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
         snapshot = store.read(context, seed=empty_review_draft())
-        findings = structured_findings(snapshot.payload)
+        findings, advisories = partition_findings(
+            structured_findings(snapshot.payload)
+        )
         contract = dict(
             dict(workspace.get("minion_v2") or {}).get(
                 "swe_verification_tool_contract"
@@ -280,6 +283,7 @@ def swe_verification_tool_result(
             "schema_version": "4",
             "outcome": outcome,
             "findings": findings,
+            "advisories": advisories,
             **({"reason": reason} if reason else {}),
             **({"target_modules": target_modules} if target_modules else {}),
             "changed_test_paths": changed_paths,
@@ -566,7 +570,7 @@ def _work_view_verification_path_owners(
             if not scope:
                 scope = {
                     "kind": "directory",
-                    "path": f"tests/{module_name}/verification",
+                    "path": f"tests/{module_name}/verifier",
                 }
             owners[module_name] = [scope]
         return owners

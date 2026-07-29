@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -95,11 +97,20 @@ class ProjectGitLayout:
     def branch_namespace(self) -> str:
         return self.workflow_branch.removesuffix("/main")
 
-    def architecture_worktree(self, revision_name: str) -> Path:
-        return self.workflow_worktree_root / "architecture" / _short_key(revision_name, prefix="revision")
+    def architecture_worktree(self, revision_name: str = "") -> Path:
+        """Return the workflow-lifetime Architecture worktree.
 
-    def architecture_branch(self, revision_name: str) -> str:
-        return f"{self.branch_namespace}/architecture/{_short_key(revision_name, prefix='revision')}"
+        Architecture revisions are commits on one branch, not separate
+        workspaces.  ``revision_name`` remains accepted so callers do not need
+        to invent a second workspace identity while dispatching a revision.
+        """
+
+        return self.workflow_worktree_root / "architecture"
+
+    def architecture_branch(self, revision_name: str = "") -> str:
+        """Return the workflow-lifetime Architecture branch."""
+
+        return f"{self.branch_namespace}/architecture"
 
     def module_worktree(self, module_name: str) -> Path:
         """Return the workflow-lifetime worktree owned by one Module identity."""
@@ -125,10 +136,6 @@ class ProjectGitLayout:
     @property
     def integration_branch(self) -> str:
         return f"{self.branch_namespace}/integration"
-
-    @property
-    def publish_worktree(self) -> Path:
-        return self.workflow_worktree_root / "publish"
 
     def to_artifact_dict(self) -> dict[str, str]:
         return {
@@ -183,6 +190,82 @@ def resolve_project_git_layout(
         workflow_key=workflow_key,
         workflow_branch=workflow_branch,
     )
+
+
+def cleanup_workflow_worktrees(
+    runtime_root: Path,
+    *,
+    repository_layout: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Remove every internal worktree owned by one terminal workflow.
+
+    Delivery checkouts live outside this layout and are intentionally retained.
+    The shared bare repository and content-addressed artifacts are also retained.
+    """
+
+    layout = resolve_project_git_layout(
+        runtime_root,
+        workspace={},
+        workflow_id="",
+        workflow_name=str(repository_layout.get("workflow_name") or "workflow"),
+        stored_layout=repository_layout,
+    )
+    root = layout.workflow_worktree_root.resolve()
+    removed: list[str] = []
+    if layout.common_git_dir.is_dir():
+        listed = subprocess.run(
+            [
+                "git",
+                f"--git-dir={layout.common_git_dir}",
+                "worktree",
+                "list",
+                "--porcelain",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if listed.returncode != 0:
+            raise RuntimeError(
+                listed.stderr or listed.stdout or "failed to enumerate workflow worktrees"
+            )
+        for line in listed.stdout.splitlines():
+            if not line.startswith("worktree "):
+                continue
+            worktree = Path(line.removeprefix("worktree ").strip()).resolve()
+            if worktree != root and not worktree.is_relative_to(root):
+                continue
+            retired = subprocess.run(
+                [
+                    "git",
+                    f"--git-dir={layout.common_git_dir}",
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(worktree),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if retired.returncode != 0:
+                raise RuntimeError(
+                    retired.stderr
+                    or retired.stdout
+                    or f"failed to retire workflow worktree {worktree}"
+                )
+            removed.append(str(worktree))
+        subprocess.run(
+            ["git", f"--git-dir={layout.common_git_dir}", "worktree", "prune"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    shutil.rmtree(layout.workflow_worktree_root, ignore_errors=True)
+    shutil.rmtree(layout.workflow_metadata_root, ignore_errors=True)
+    return tuple(sorted(removed))
 
 
 def inferred_project_name(workspace: Mapping[str, Any]) -> str:

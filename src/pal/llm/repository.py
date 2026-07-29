@@ -4,8 +4,9 @@ from pal.foundation import utc_now
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 
 
-DEFAULT_THINK_LEVEL = "balanced"
 ACTIVE_LLM_ENDPOINT_SETTING_KEY = "active_llm_endpoint_id"
+LEGACY_THINK_LEVEL_SETTING_KEY = "think_level"
+THINK_LEVEL_SETTING_PREFIX = "think_level:"
 
 
 class LLMEndpointRepository:
@@ -69,11 +70,29 @@ class RuntimeSettingRepository:
         instance.save()
         return instance
 
-    def get_think_level(self) -> str:
-        return str(self.get("think_level") or DEFAULT_THINK_LEVEL)
+    def delete(self, setting_key: str) -> bool:
+        deleted = (
+            PalRuntimeSettingModel.delete()
+            .where(PalRuntimeSettingModel.setting_key == str(setting_key))
+            .execute()
+        )
+        return bool(deleted)
 
-    def set_think_level(self, think_level: str) -> PalRuntimeSettingModel:
-        return self.set("think_level", str(think_level).strip() or DEFAULT_THINK_LEVEL)
+    def get_think_level(self, endpoint_id: str) -> str | None:
+        return self.get(_think_level_setting_key(endpoint_id))
+
+    def set_think_level(self, endpoint_id: str, think_level: str) -> PalRuntimeSettingModel:
+        normalized = str(think_level or "").strip()
+        if not normalized:
+            raise ValueError("think_level must be non-empty")
+        return self.set(_think_level_setting_key(endpoint_id), normalized)
+
+    def get_legacy_think_level(self) -> str | None:
+        value = str(self.get(LEGACY_THINK_LEVEL_SETTING_KEY) or "").strip()
+        return value or None
+
+    def delete_legacy_think_level(self) -> bool:
+        return self.delete(LEGACY_THINK_LEVEL_SETTING_KEY)
 
     def get_active_llm_endpoint_id(self) -> str | None:
         value = str(self.get(ACTIVE_LLM_ENDPOINT_SETTING_KEY) or "").strip()
@@ -83,6 +102,12 @@ class RuntimeSettingRepository:
         normalized = str(endpoint_id).strip()
         return self.set(ACTIVE_LLM_ENDPOINT_SETTING_KEY, normalized)
 
-    def ensure_defaults(self, *, think_level: str = DEFAULT_THINK_LEVEL) -> None:
-        if self.get("think_level") is None:
-            self.set_think_level(think_level)
+    def ensure_defaults(self) -> None:
+        return None
+
+
+def _think_level_setting_key(endpoint_id: str) -> str:
+    normalized = str(endpoint_id or "").strip()
+    if not normalized:
+        raise ValueError("endpoint_id must be non-empty")
+    return f"{THINK_LEVEL_SETTING_PREFIX}{normalized}"

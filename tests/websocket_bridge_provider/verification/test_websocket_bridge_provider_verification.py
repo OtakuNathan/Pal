@@ -27,7 +27,7 @@ from pal.channel.provider_manager import ChannelProviderContext
 from pal.channel.runtime import ChannelRuntime
 from pal.shared import RuntimeStatus
 
-from pal.channel.providers.websocket_bridge.runtime import (
+from websocket_bridge.runtime import (
     ENDPOINT_TYPE,
     PROVIDER_ID,
     WebSocketBridgeEndpoint,

@@ -122,47 +122,85 @@ def control_panel_delivery(control_plane: Any, route: ControlRoute | None) -> Co
 
 def build_think_panel_interaction(
     route: ControlRoute,
-    think_level: str,
+    think_status: dict[str, Any],
     *,
     banner: str | None = None,
+    back_to_models: bool = False,
 ) -> InteractionMessageSpec:
-    current = str(think_level or "balanced")
+    current = str(think_status.get("current") or "")
+    endpoint_id = str(think_status.get("endpoint_id") or "-")
+    choices = list(think_status.get("choices") or [])
 
-    def label(level: str) -> str:
-        return f"> {level}" if level == current else level
+    def label(choice_id: str, display: str) -> str:
+        return f"> {display}" if choice_id == current else display
 
-    text = f"Think level: {current}\nSelect a level for new turns."
+    if choices:
+        text = f"Think level for {endpoint_id}: {current}\nSelect a level for new turns."
+    else:
+        text = f"Endpoint {endpoint_id} does not expose configurable thinking levels."
     if banner:
         text = f"{banner}\n\n{text}"
+    choice_buttons = [
+        InteractionButtonSpec(
+            label=label(
+                str(choice.get("id") or ""),
+                str(choice.get("label") or choice.get("id") or ""),
+            ),
+            action_key="control.think.set",
+            action_args={"think_level": str(choice.get("id") or "")},
+        )
+        for choice in choices
+        if str(choice.get("id") or "").strip()
+    ]
+    rows = [
+        tuple(choice_buttons[index : index + 3])
+        for index in range(0, len(choice_buttons), 3)
+    ]
+    rows.append(
+        (
+            InteractionButtonSpec(
+                label="Back to models" if back_to_models else "Back",
+                action_key="control.model.open" if back_to_models else "control.panel.back",
+            ),
+        )
+    )
     return InteractionMessageSpec(
         interaction_id=control_panel_interaction_id(route),
         interaction_kind="control_panel",
         route=route,
         text=text,
-        buttons=(
-            (
-                InteractionButtonSpec(label=label("off"), action_key="control.think.set", action_args={"think_level": "off"}),
-                InteractionButtonSpec(label=label("minimal"), action_key="control.think.set", action_args={"think_level": "minimal"}),
-                InteractionButtonSpec(label=label("low"), action_key="control.think.set", action_args={"think_level": "low"}),
-            ),
-            (
-                InteractionButtonSpec(label=label("balanced"), action_key="control.think.set", action_args={"think_level": "balanced"}),
-                InteractionButtonSpec(label=label("deep"), action_key="control.think.set", action_args={"think_level": "deep"}),
-                InteractionButtonSpec(label=label("xhigh"), action_key="control.think.set", action_args={"think_level": "xhigh"}),
-            ),
-            (InteractionButtonSpec(label="Back", action_key="control.panel.back"),),
-        ),
+        buttons=tuple(rows),
         expires_at=None,
     )
 
 
-def think_panel_delivery(route: ControlRoute | None, think_level: str) -> ControlDelivery:
+def think_panel_delivery(
+    route: ControlRoute | None,
+    think_status: dict[str, Any],
+    *,
+    banner: str | None = None,
+    back_to_models: bool = False,
+) -> ControlDelivery:
+    endpoint_id = str(think_status.get("endpoint_id") or "-")
+    current = str(think_status.get("current") or "")
+    choices = list(think_status.get("choices") or [])
     if route is None:
-        return delivery_for_reply(None, f"Current think level: {think_level}")
+        if not choices:
+            return delivery_for_reply(None, f"Endpoint {endpoint_id} does not expose configurable thinking levels.")
+        available = ", ".join(str(choice.get("id") or "") for choice in choices)
+        return delivery_for_reply(
+            None,
+            f"Think level for {endpoint_id}: {current}\nAvailable levels: {available}",
+        )
     return delivery_for_interaction(
         route,
         "interactive_update",
-        build_think_panel_interaction(route, think_level),
+        build_think_panel_interaction(
+            route,
+            think_status,
+            banner=banner,
+            back_to_models=back_to_models,
+        ),
     )
 
 

@@ -31,7 +31,9 @@ from pal.minion.v2.execution import (
     UnitWorkViewBuilder,
     _validate_skeleton_candidate_paths,
 )
+from pal.minion.v2.integration import IntegrationService
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
+from pal.minion.v2.paths import cleanup_workflow_worktrees, resolve_project_git_layout
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
@@ -266,7 +268,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "contract_paths": ["src/main.cpp"],
             "implementation_scopes": [{"kind": "file", "path": "CMakeLists.txt"}],
             "developer_tests": {"kind": "directory", "path": "tests/cli/developer"},
-            "verification_corpus": {"kind": "directory", "path": "tests/cli/verification"},
+            "verification_corpus": {"kind": "directory", "path": "tests/cli/verifier"},
             "reference_only": [],
         }
 
@@ -285,7 +287,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             },
             "verification_corpus": {
                 "kind": "directory",
-                "path": "tests/router/verification",
+                "path": "tests/router/verifier",
             },
             "reference_only": [],
         }
@@ -296,7 +298,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "outside its compiled module write scopes"):
             _validate_skeleton_candidate_paths(
-                ["tests/router/verification/test_router.cpp"],
+                ["tests/router/verifier/test_router.cpp"],
                 policy,
             )
 
@@ -320,14 +322,14 @@ class MinionV2SkeletonTests(unittest.TestCase):
             )
 
     def test_review_guarded_contract_cannot_be_owned_by_verification_corpus(self) -> None:
-        corpus_contract = self.repo / "tests" / "router" / "verification" / "contract.h"
+        corpus_contract = self.repo / "tests" / "router" / "verifier" / "contract.h"
         corpus_contract.parent.mkdir(parents=True)
         corpus_contract.write_text(_contract("router"), encoding="utf-8")
         submission = self._submission()
         submission["modules"]["router"]["paths"] = {
             **submission["modules"]["router"]["paths"],
             "contract_mode": "review_guarded",
-            "contract_paths": ["tests/router/verification/contract.h"],
+            "contract_paths": ["tests/router/verifier/contract.h"],
         }
 
         with self.assertRaisesRegex(ValueError, "verification_corpus.*review_guarded contract"):
@@ -521,7 +523,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         self.assertEqual(
             consumer.payload["path_policy"]["verification_corpus"],
-            {"kind": "directory", "path": "tests/consumer/verification"},
+            {"kind": "directory", "path": "tests/consumer/verifier"},
         )
         self.assertEqual(
             consumer.payload["path_policy"]["developer_tests"],
@@ -569,8 +571,8 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         observed: list[dict[str, object]] = []
 
-        async def answer(payload: dict[str, object], timeout: float | None) -> dict[str, object]:
-            observed.append({"payload": payload, "timeout": timeout})
+        async def answer(payload: dict[str, object]) -> dict[str, object]:
+            observed.append({"payload": payload})
             return {
                 "answers": [
                     {"question_id": "architecture-question", "answer": "Preserve the public API"}
@@ -603,7 +605,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result.llm_text)
         self.assertEqual(result.structured["answer"], "Preserve the public API")
-        self.assertIsNone(observed[0]["timeout"])
         self.assertEqual(
             result.structured["status"],
             "answered_revision_recorded",
@@ -892,7 +893,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertTrue(workspace.workflow_branch.startswith("minion/Tiny-Router-Delivery-"))
         self.assertTrue(workspace.workflow_branch.endswith("/main"))
 
-        self.assertIn("/architecture/revision-", workspace.architecture_branch)
+        self.assertTrue(workspace.architecture_branch.endswith("/architecture"))
 
         (workspace.worktree / "include").mkdir()
         (workspace.worktree / "include" / "router.h").write_text(
@@ -932,8 +933,8 @@ class MinionV2SkeletonTests(unittest.TestCase):
             review_name="tiny-router",
         )
         review_root = review_workspace.root
-        self.assertTrue(review_root.is_relative_to(Path("/tmp")))
-        self.assertFalse(review_root.is_relative_to(self.runtime_root))
+        self.assertTrue(review_root.is_relative_to(self.runtime_root))
+        self.assertEqual(review_workspace.worktree, workspace.worktree)
         self.assertEqual(review_workspace.common_git_dir, workspace.common_git_dir)
         review_workspace.cleanup()
         self.assertFalse(review_root.exists())
@@ -968,7 +969,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         self.assertNotIn("Manager Advisory Warnings", markdown)
 
-    def test_review_restores_missing_canonical_repository_from_bundle(self) -> None:
+    def test_review_rejects_a_missing_canonical_repository(self) -> None:
         workspace = self.service.provision_architecture_workspace(
             workflow_id="restore-review-repository",
             workflow_name="Restore Review Repository",
@@ -991,18 +992,14 @@ class MinionV2SkeletonTests(unittest.TestCase):
         canonical_git_dir = workspace.common_git_dir
         shutil.rmtree(canonical_git_dir)
 
-        review_workspace = self.service.provision_review_worktree(
-            artifact=skeleton,
-            review_name="restored-review",
-        )
-
-        self.assertEqual(review_workspace.common_git_dir, canonical_git_dir)
-        self.assertFalse(review_workspace.temporary_common_git_dir)
-        self.assertEqual(
-            _git(review_workspace.worktree, "rev-parse", "HEAD").strip(),
-            skeleton["skeleton_commit_sha"],
-        )
-        review_workspace.cleanup()
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "canonical Architecture worktree",
+        ):
+            self.service.provision_review_worktree(
+                artifact=skeleton,
+                review_name="restored-review",
+            )
 
     def test_architecture_snapshot_is_idempotent_and_reuses_workspace_snapshot_after_restart(self) -> None:
         workspace = self._provision_complete_workspace("idempotent", "initial")
@@ -1150,7 +1147,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         self.assertEqual(
             work_view["verification_corpus"],
-            {"kind": "directory", "path": "tests/router/verification"},
+            {"kind": "directory", "path": "tests/router/verifier"},
         )
         self.assertEqual(
             work_view["historical_repair_bills"][0]["case_name"],
@@ -1161,7 +1158,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         for forbidden_value in ("hidden-workflow", "hidden-node", "hidden-candidate", "hidden-fingerprint"):
             self.assertNotIn(forbidden_value, encoded)
 
-    def test_system_verification_artifact_closes_final_candidate_union(self) -> None:
+    def test_system_verifier_uses_the_persistent_integration_worktree(self) -> None:
         workspace = self._provision_complete_workspace("module-union", "initial")
         skeleton_ref = self.service.snapshot_architect_result(
             workflow_name="module-union",
@@ -1226,49 +1223,96 @@ class MinionV2SkeletonTests(unittest.TestCase):
             artifact_type="VerificationArtifact",
         )
         system_id = compilation.system_verification_node_id
+        system_node = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            system_id,
+        )
+        assert system_node is not None
+        integration_worktree = Path(system_node.payload["workspace_path"])
+        _integration_ref, integration_sha = IntegrationService(
+            self.artifacts
+        ).integrate_candidates(
+            integration_worktree=integration_worktree,
+            ordered_candidates=[
+                {
+                    "node_run_id": router_id,
+                    "candidate_digest": candidate_digest,
+                }
+            ],
+            architecture_manifest_sha=skeleton_ref.sha256,
+        )
         self._accept_system_verification(
             system_id,
             dependency_node_ids=[router_id],
             verification_ref=scenario_ref.to_dict(),
             system_fingerprint="system-delivery-fingerprint",
         )
-        epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, "module-union-epoch")
-        assert epoch is not None
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="ALL_REQUIRED_NODES_ACCEPTED",
-                workflow_id=epoch.workflow_id,
-                aggregate_type=AggregateType.EXECUTION_EPOCH,
-                aggregate_id=epoch.aggregate_id,
-                actor="test",
-                expected_version=epoch.version,
-                idempotency_key="module-union:ready-to-publish",
-                payload={
-                    "accepted_candidate_refs": [candidate_ref.to_dict()],
-                    "verification_artifact_refs": [scenario_ref.to_dict()],
-                },
-            )
-        )
-        publish_result = asyncio.run(
-            SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root)).execute_semantic_effect(
-                {
-                    "effect_type": "publish_final_deliverable",
-                    "effect_id": "module-union:publish",
-                    "workflow_id": "module-union",
-                    "aggregate_type": AggregateType.EXECUTION_EPOCH.value,
-                    "aggregate_id": "module-union-epoch",
-                }
-            )
-        )
-        published = self.artifacts.read_json(publish_result["result_artifact_ref"])
-        self.assertEqual(published["verification_refs"], [scenario_ref.to_dict()])
+        self.assertEqual(_git(integration_worktree, "rev-parse", "HEAD").strip(), integration_sha)
         self.assertEqual(
-            published["system_fingerprint"],
-            "system-delivery-fingerprint",
-        )
-        self.assertEqual(
-            (Path(router.payload["common_git_dir"]).parent / "worktrees" / router.payload["workflow_key"] / "publish" / "src" / "router.cpp").read_text(encoding="utf-8"),
+            (integration_worktree / "src" / "router.cpp").read_text(encoding="utf-8"),
             "int route_rule() { return 17; }\n",
+        )
+
+    def test_terminal_cleanup_removes_internal_worktrees_but_keeps_delivery(self) -> None:
+        workspace = self._provision_complete_workspace("terminal-cleanup", "initial")
+        manifest_ref = self.service.snapshot_architect_result(
+            workflow_name="terminal-cleanup",
+            revision_name="initial",
+            architecture_workspace=workspace,
+            submission=self._submission(),
+            requirements_ref=self.requirements_ref,
+        )
+        manifest = self.artifacts.read_json(manifest_ref)
+        repository_layout = dict(manifest["repository_layout"])
+        layout = resolve_project_git_layout(
+            self.runtime_root,
+            workspace={},
+            workflow_id="terminal-cleanup",
+            workflow_name="terminal-cleanup",
+            stored_layout=repository_layout,
+        )
+        skeleton_sha = str(manifest["skeleton_commit_sha"])
+        for worktree, branch in (
+            (layout.module_worktree("router"), layout.module_branch("router")),
+            (layout.integration_worktree, layout.integration_branch),
+        ):
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [
+                    "git",
+                    f"--git-dir={layout.common_git_dir}",
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    str(worktree),
+                    skeleton_sha,
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+        delivery = (
+            self.runtime_root
+            / "data"
+            / "minion"
+            / "deliveries"
+            / "terminal-cleanup"
+        )
+        delivery.mkdir(parents=True)
+        (delivery / "receipt.txt").write_text("durable\n", encoding="utf-8")
+
+        removed = cleanup_workflow_worktrees(
+            self.runtime_root,
+            repository_layout=repository_layout,
+        )
+
+        self.assertEqual(len(removed), 3)
+        self.assertFalse(layout.workflow_worktree_root.exists())
+        self.assertFalse(layout.workflow_metadata_root.exists())
+        self.assertTrue(layout.common_git_dir.is_dir())
+        self.assertEqual(
+            (delivery / "receipt.txt").read_text(encoding="utf-8"),
+            "durable\n",
         )
 
     def test_skeleton_builder_surface_contains_only_question_submit_and_review_tools(self) -> None:
@@ -1376,7 +1420,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertIn(r"^[a-z][a-z0-9_]{1,79}$", module_map["patternProperties"])
         self.assertIn(r"^[a-z][a-z0-9_]{1,79}$", scenario_map["patternProperties"])
 
-        payload = {"schema_version": 4, **self._submission()}
+        payload = {"schema_version": 5, **self._submission()}
         ArchitectureDraft.model_validate(payload, strict=True)
         for invalid_name in ("CLI Decode Streaming", "a", "2fast", "bad-name", "a" * 81):
             with self.subTest(invalid_name=invalid_name), self.assertRaises(ValueError):
@@ -1403,6 +1447,11 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertIn("Do not silently choose precedence", description)
         self.assertIn("identify the exact issue and the decision needed", description)
         self.assertIn("suspends the current tool call", description)
+        self.assertIn("wall-clock time never expires", description)
+        self.assertNotIn(
+            "timeout_seconds",
+            SKELETON_BUILDER_TOOL_SPECS["op_minion_ask_question"]["InputModel"].model_fields,
+        )
         self.assertEqual(
             SKELETON_BUILDER_TOOL_SPECS["op_minion_ask_question"]["alias"],
             "ask_question",
@@ -1586,6 +1635,50 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertNotIn("obligation_traces", artifact)
         self.assertNotIn("decision_traces", artifact)
         self.assertNotIn("verification_node_names", artifact["review_scope"])
+
+    def test_architecture_review_pass_preserves_optional_advisory(self) -> None:
+        workspace = self._review_builder_workspace()
+        recorded = self._builder_call(
+            workspace,
+            ADD_FINDING_CAPABILITY,
+            {
+                "finding_key": "router_key_could_be_strong_type",
+                "finding_kind": "contract_defect",
+                "priority": "p2",
+                "disposition": "advisory",
+                "summary": (
+                    "A strong key type would let the compiler reject accidental "
+                    "mixing with unrelated integer identifiers."
+                ),
+                "locations": [
+                    {
+                        "scope": "workspace",
+                        "file": "include/router.h",
+                        "line": 1,
+                    }
+                ],
+            },
+        )
+        self.assertTrue(recorded.ok, recorded.llm_text)
+
+        submitted = self._builder_call(
+            workspace,
+            "op_minion_architecture_review_pass",
+        )
+
+        self.assertTrue(submitted.ok, submitted.llm_text)
+        artifact = json.loads(
+            (
+                Path(workspace["artifact_stage_dir"])
+                / "architecture_review.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(artifact["verdict"], "PASS")
+        self.assertEqual(artifact["findings"], [])
+        self.assertEqual(
+            artifact["advisories"][0]["finding_key"],
+            "router_key_could_be_strong_type",
+        )
 
     def test_architecture_review_pass_rejects_legacy_trace_arguments(self) -> None:
         workspace = self._review_builder_workspace()
@@ -1876,7 +1969,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             revision_name="rejected",
             workspace={"repo_path": str(self.repo)},
             requirements_ref=self.requirements_ref,
-            base_artifact=base_artifact,
+            base_artifact=self.artifacts.read_json(accepted_ref),
         )
         (rejected_revision.worktree / "tests" / "test_router.cpp").write_text(
             "// unrelated revision\n",
@@ -1889,7 +1982,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 architecture_workspace=rejected_revision,
                 submission=revised_submission,
                 requirements_ref=self.requirements_ref,
-                revision_base_artifact=base_artifact,
+                revision_base_artifact=self.artifacts.read_json(accepted_ref),
                 revision_scope=scope,
             )
 
@@ -2016,7 +2109,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         draft_path = Path(str(workspace["architecture_draft_path"]))
         header, separator, live_document = draft_path.read_text(
             encoding="utf-8"
-        ).rpartition("\nschema_version: 4\n")
+        ).rpartition("\nschema_version: 5\n")
         self.assertTrue(separator)
         draft_path.write_text(
             header
@@ -2342,7 +2435,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             source_worktree
             / "tests"
             / "router"
-            / "verification"
+            / "verifier"
             / "test_route_contract.py"
         )
         verification_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2350,12 +2443,11 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "def test_route_contract():\\n    assert True\\n",
             encoding="utf-8",
         )
-        verification_hash = hashlib.sha256(verification_path.read_bytes()).hexdigest()
         _git(
             source_worktree,
             "add",
             "src/router.cpp",
-            "tests/router/verification/test_route_contract.py",
+            "tests/router/verifier/test_route_contract.py",
         )
         _git(
             source_worktree,
@@ -2374,13 +2466,10 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "candidate_digest": source_candidate_digest,
                 "changed_paths": [
                     "src/router.cpp",
-                    "tests/router/verification/test_route_contract.py",
-                ],
-                "manager_seeded_paths": [
-                    "tests/router/verification/test_route_contract.py",
+                    "tests/router/verifier/test_route_contract.py",
                 ],
             },
-            artifact_type="CandidateSnapshotArtifact",
+            artifact_type="GitCheckpointArtifact",
         )
         verification_ref = self.artifacts.put_json(
             {"status": "PASS"}, artifact_type="VerificationArtifact"
@@ -2390,9 +2479,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
             candidate_ref=candidate_ref.to_dict(),
             candidate_digest=source_candidate_digest,
             verification_ref=verification_ref.to_dict(),
-            manager_seeded_corpus_hashes={
-                "tests/router/verification/test_route_contract.py": verification_hash,
-            },
         )
 
         reused = compiler.compile_epoch(
@@ -2412,17 +2498,19 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 Path(reused_node.payload["workspace_path"])
                 / "tests"
                 / "router"
-                / "verification"
+                / "verifier"
                 / "test_route_contract.py"
             ).is_file()
         )
         self.assertEqual(
-            reused_node.payload["manager_seeded_corpus_hashes"],
-            {
-                "tests/router/verification/test_route_contract.py": verification_hash,
-            },
+            _git(
+                Path(reused_node.payload["workspace_path"]),
+                "rev-parse",
+                "HEAD",
+            ).strip(),
+            reused_node.payload["candidate_digest"],
         )
-        self.assertNotEqual(reused_node.payload["candidate_digest"], source_candidate_digest)
+        self.assertEqual(reused_node.payload["candidate_digest"], source_candidate_digest)
 
         second_reuse = compiler.compile_epoch(
             workflow_id="reuse",
@@ -2443,15 +2531,13 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 second_reused_worktree
                 / "tests"
                 / "router"
-                / "verification"
+                / "verifier"
                 / "test_route_contract.py"
             ).is_file()
         )
         self.assertEqual(
-            second_reused_node.payload["manager_seeded_corpus_hashes"],
-            {
-                "tests/router/verification/test_route_contract.py": verification_hash,
-            },
+            _git(second_reused_worktree, "status", "--porcelain"),
+            "",
         )
 
         initial = self.artifacts.read_json(initial_ref)
@@ -2727,7 +2813,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             [],
         )
 
-    def test_replan_preserves_changed_module_worktree_and_role_session(self) -> None:
+    def test_replan_recreates_module_when_its_responsibility_changes(self) -> None:
         workflow_id = "preserve-changed-module"
         source_workspace = self._provision_complete_workspace(workflow_id, "initial")
         source_manifest = self.service.snapshot_architect_result(
@@ -2829,18 +2915,17 @@ class MinionV2SkeletonTests(unittest.TestCase):
         assert target_node is not None
         assert target_epoch is not None
         self.assertEqual(target_node.state, "BLOCKED_BY_DEPS")
-        self.assertTrue(target_node.payload["module_replan_prepared"])
         self.assertEqual(target_node.payload["workspace_path"], str(module_worktree))
         self.assertEqual(
             target_node.payload["worktree_branch"],
             source_node.payload["worktree_branch"],
         )
-        self.assertEqual(target_node.payload["role_session_generation"], 0)
-        self.assertEqual(
+        self.assertEqual(target_node.payload["role_session_generation"], 1)
+        self.assertNotEqual(
             coder_session_id(workflow_id, "router", source_node.payload["role_session_generation"]),
             coder_session_id(workflow_id, "router", target_node.payload["role_session_generation"]),
         )
-        self.assertEqual(
+        self.assertNotEqual(
             module_verifier_session_id(
                 workflow_id,
                 "router",
@@ -2852,11 +2937,19 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 target_node.payload["role_session_generation"],
             ),
         )
-        self.assertEqual(implementation.read_text(encoding="utf-8"), "int route() { return 7; }\n")
-        self.assertIn("src/router.cpp", _git(module_worktree, "status", "--porcelain"))
+        self.assertEqual(
+            implementation.read_text(encoding="utf-8"),
+            "// implementation skeleton\n",
+        )
+        self.assertEqual(_git(module_worktree, "status", "--porcelain"), "")
         self.assertEqual(
             target_epoch.payload["module_identity_delta"],
-            {"preserved": ["router"], "added": [], "deleted": []},
+            {
+                "preserved": [],
+                "replaced": ["router"],
+                "added": [],
+                "deleted": [],
+            },
         )
         scheduled = DagScheduler(self.repository).schedule_ready_nodes(
             workflow_id=workflow_id,
@@ -2864,7 +2957,10 @@ class MinionV2SkeletonTests(unittest.TestCase):
             max_new_nodes=1,
         )
         self.assertEqual(scheduled, (target_node.aggregate_id,))
-        self.assertEqual(implementation.read_text(encoding="utf-8"), "int route() { return 7; }\n")
+        self.assertEqual(
+            implementation.read_text(encoding="utf-8"),
+            "// implementation skeleton\n",
+        )
 
     def test_replan_deletes_and_readds_module_as_a_new_identity(self) -> None:
         workflow_id = "delete-readd-module"
@@ -2921,13 +3017,36 @@ class MinionV2SkeletonTests(unittest.TestCase):
         retired_branch = source_transport.payload["worktree_branch"]
 
         without_transport = self._submission()
-        revised_workspace = self._provision_complete_workspace(workflow_id, "without-transport")
+        source_artifact = self.artifacts.read_json(source_manifest)
+        removal_finding = {
+            "findings": [
+                {
+                    "finding_kind": "architecture_defect",
+                    "summary": "Remove the obsolete transport Module.",
+                    "affected_modules": ["transport"],
+                    "locations": [{"path": "include/transport.h"}],
+                }
+            ]
+        }
+        revised_workspace = self.service.provision_architecture_workspace(
+            workflow_id=workflow_id,
+            revision_name="without-transport",
+            workspace={"repo_path": str(self.repo)},
+            requirements_ref=self.requirements_ref,
+            base_artifact=source_artifact,
+        )
+        (revised_workspace.worktree / "include" / "transport.h").unlink()
         revised_manifest = self.service.snapshot_architect_result(
             workflow_name=workflow_id,
             revision_name="without-transport",
             architecture_workspace=revised_workspace,
             submission=without_transport,
             requirements_ref=self.requirements_ref,
+            revision_base_artifact=source_artifact,
+            revision_scope=architecture_revision_scope(
+                source_artifact["submission"],
+                removal_finding,
+            ),
         )
         target = compiler.compile_epoch(
             workflow_id=workflow_id,
@@ -2947,7 +3066,12 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         self.assertEqual(
             target_epoch.payload["module_identity_delta"],
-            {"preserved": ["router"], "added": [], "deleted": ["transport"]},
+            {
+                "preserved": ["router"],
+                "replaced": [],
+                "added": [],
+                "deleted": ["transport"],
+            },
         )
 
         readd_workspace = self.service.provision_architecture_workspace(
@@ -3157,7 +3281,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
         candidate_ref: dict[str, object],
         candidate_digest: str,
         verification_ref: dict[str, object],
-        manager_seeded_corpus_hashes: dict[str, str] | None = None,
         output_hashes: dict[str, str] | None = None,
     ) -> None:
         sequence = [
@@ -3178,15 +3301,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
                     "candidate_ref": candidate_ref,
                     "candidate_digest": candidate_digest,
                     "workspace_fingerprint": "tree",
-                    **(
-                        {
-                            "manager_seeded_corpus_hashes": dict(
-                                manager_seeded_corpus_hashes
-                            )
-                        }
-                        if manager_seeded_corpus_hashes
-                        else {}
-                    ),
                 },
             ),
             ("START_REVIEW", {"fencing_token": 2}),
@@ -3251,7 +3365,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 "VERIFICATION_PREPARED",
                 {
                     "system_fingerprint": system_fingerprint,
-                    "system_candidate_union_ref": {"sha256": "system-union"},
+                    "system_integration_ref": {"sha256": "system-union"},
                     "system_commit_sha": "system-commit",
                     "verification_workspace_fingerprint": "system-tree",
                 },

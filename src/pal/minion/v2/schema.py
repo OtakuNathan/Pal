@@ -4,7 +4,7 @@ import json
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 22
+MINION_V2_SCHEMA_VERSION = 24
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -167,7 +167,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             manifest_sha TEXT NOT NULL,
             actor_id TEXT NOT NULL,
             active_channel_id TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'issued',
             decision TEXT NOT NULL DEFAULT '',
             action_id TEXT NOT NULL DEFAULT '',
@@ -467,6 +467,10 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
         _quiesce_candidate_scoped_verifiers_v20(connection)
     if previous_version < 22:
         _archive_pre_module_identity_workflows_v22(connection)
+    if previous_version < 23:
+        _make_human_decisions_durable_v23(connection)
+    if previous_version < 24:
+        _archive_pre_canonical_worktree_workflows_v24(connection)
     connection.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS minion_v2_role_assignments_one_open
@@ -490,6 +494,18 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, decl
     columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _make_human_decisions_durable_v23(connection: sqlite3.Connection) -> None:
+    """Human review remains valid until consumed or superseded by workflow state."""
+
+    connection.execute(
+        """
+        UPDATE minion_v2_human_decisions
+        SET expires_at = ''
+        WHERE status = 'issued'
+        """
+    )
 
 
 def _schema_version(connection: sqlite3.Connection) -> int:
@@ -564,6 +580,43 @@ def _archive_pre_module_identity_workflows_v22(
 ) -> None:
     """Retire active v4 work instead of guessing it into Module ownership."""
 
+    _archive_active_workflows_for_contract_cutover(
+        connection,
+        previous_contract_version="4",
+        required_contract_version="5",
+        reason=(
+            "archived during orchestration v5 cutover; restart as a fresh workflow "
+            "with workflow-owned Module identities"
+        ),
+        error_kind="orchestration_v5_cutover",
+    )
+
+
+def _archive_pre_canonical_worktree_workflows_v24(
+    connection: sqlite3.Connection,
+) -> None:
+    """Retire active v5 work instead of projecting it into canonical worktrees."""
+
+    _archive_active_workflows_for_contract_cutover(
+        connection,
+        previous_contract_version="5",
+        required_contract_version="6",
+        reason=(
+            "archived during orchestration v6 cutover; restart as a fresh workflow "
+            "with canonical Architecture, Module, and Integration worktrees"
+        ),
+        error_kind="orchestration_v6_cutover",
+    )
+
+
+def _archive_active_workflows_for_contract_cutover(
+    connection: sqlite3.Connection,
+    *,
+    previous_contract_version: str,
+    required_contract_version: str,
+    reason: str,
+    error_kind: str,
+) -> None:
     rows = connection.execute(
         """
         SELECT aggregate_id, payload_json
@@ -572,17 +625,14 @@ def _archive_pre_module_identity_workflows_v22(
           AND state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')
           AND COALESCE(
               json_extract(payload_json, '$.orchestration_contract_version'),
-              '4'
-          ) != '5'
-        """
+              ?
+          ) != ?
+        """,
+        (previous_contract_version, required_contract_version),
     ).fetchall()
     workflow_ids = [str(row[0]) for row in rows]
     if not workflow_ids:
         return
-    reason = (
-        "archived during orchestration v5 cutover; restart as a fresh workflow "
-        "with workflow-owned Module identities"
-    )
     for workflow_id, payload_json in rows:
         payload = json.loads(str(payload_json or "{}"))
         payload.update(
@@ -591,9 +641,10 @@ def _archive_pre_module_identity_workflows_v22(
                 "archive_reason": reason,
                 "cancel_reason": reason,
                 "retired_orchestration_contract_version": str(
-                    payload.get("orchestration_contract_version") or "4"
+                    payload.get("orchestration_contract_version")
+                    or previous_contract_version
                 ),
-                "required_orchestration_contract_version": "5",
+                "required_orchestration_contract_version": required_contract_version,
             }
         )
         payload.pop("blocker", None)
@@ -619,7 +670,7 @@ def _archive_pre_module_identity_workflows_v22(
                 '$.cancel_reason',
                 ?,
                 '$.required_orchestration_contract_version',
-                '5'
+                ?
             ),
             updated_at = CURRENT_TIMESTAMP
         WHERE workflow_id IN ({placeholders})
@@ -628,35 +679,35 @@ def _archive_pre_module_identity_workflows_v22(
               'ACCEPTED', 'REJECTED', 'SUPERSEDED', 'COMPLETED', 'CANCELLED'
           )
         """,
-        (reason, *workflow_ids),
+        (reason, required_contract_version, *workflow_ids),
     )
     connection.execute(
         f"""
         UPDATE minion_v2_outbox
         SET status = 'failed', locked_by = '', locked_until = '',
-            last_error = 'orchestration_v5_cutover',
+            last_error = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE workflow_id IN ({placeholders})
           AND status IN ('pending', 'processing', 'retry')
         """,
-        tuple(workflow_ids),
+        (error_kind, *workflow_ids),
     )
     connection.execute(
         f"""
         UPDATE minion_v2_role_assignments
         SET state = 'cancelled', active_attempt_id = '',
-            last_error = 'orchestration_v5_cutover',
+            last_error = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE workflow_id IN ({placeholders})
           AND state NOT IN ('settled', 'cancelled')
         """,
-        tuple(workflow_ids),
+        (error_kind, *workflow_ids),
     )
     connection.execute(
         f"""
         UPDATE minion_v2_role_attempts
         SET status = 'cancelled',
-            error_kind = 'orchestration_v5_cutover',
+            error_kind = ?,
             error_text = ?,
             finished_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
@@ -666,7 +717,7 @@ def _archive_pre_module_identity_workflows_v22(
         )
           AND status NOT IN ('completed', 'failed', 'lost', 'cancelled')
         """,
-        (reason, *workflow_ids),
+        (error_kind, reason, *workflow_ids),
     )
     for table in ("minion_v2_role_sessions", "minion_v2_role_invocations"):
         connection.execute(
@@ -685,6 +736,41 @@ def _archive_pre_module_identity_workflows_v22(
             SELECT session_id FROM minion_v2_role_sessions
             WHERE workflow_id IN ({placeholders})
         )
+        """,
+        tuple(workflow_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_workflow_projection
+        SET current_phase = 'cancelled',
+            workflow_state = 'CANCELLED',
+            active_aggregate_type = 'workflow',
+            active_aggregate_id = workflow_id,
+            active_worker_id = '',
+            blocker_json = '{{}}',
+            next_legal_actions_json = '[]',
+            waiting_for_user = 0,
+            liveness = 'terminal',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE workflow_id IN ({placeholders})
+        """,
+        tuple(workflow_ids),
+    )
+    connection.execute(
+        f"""
+        UPDATE minion_v2_node_projection
+        SET state = COALESCE(
+                (
+                    SELECT snapshot.state
+                    FROM minion_v2_aggregate_snapshots AS snapshot
+                    WHERE snapshot.aggregate_type = 'dag_node_run'
+                      AND snapshot.aggregate_id = minion_v2_node_projection.node_run_id
+                ),
+                state
+            ),
+            active_worker_id = '',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE workflow_id IN ({placeholders})
         """,
         tuple(workflow_ids),
     )

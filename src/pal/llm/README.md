@@ -4,6 +4,7 @@ Owns:
 - canonical llm request and outcome shapes
 - endpoint resolution
 - provider runtime boundary
+- provider-declared thinking choices and per-endpoint selection
 - provider-neutral, resident-process usage accounting
 
 Does not own:

@@ -325,7 +325,6 @@ class ArchitectureArtifactService:
         manifest_ref: ArtifactRef,
         actor_id: str,
         active_channel_id: str,
-        ttl_seconds: int = 86400,
     ) -> HumanReviewCard:
         markdown = self.compile_human_review_markdown(manifest_ref)
         token = self.repository.issue_human_decision_token(
@@ -334,7 +333,6 @@ class ArchitectureArtifactService:
             manifest_sha=manifest_ref.sha256,
             actor_id=actor_id,
             active_channel_id=active_channel_id,
-            ttl_seconds=ttl_seconds,
         )
         return HumanReviewCard(
             workflow_id=workflow_id,

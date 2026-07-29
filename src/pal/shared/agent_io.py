@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pal.foundation import EventEnvelope
 from pal.foundation.attachment import AttachmentSpec
@@ -26,8 +26,7 @@ class ResponseHandle:
 class ChannelMessageReceipt:
     endpoint_id: str
     message_id: str
-    status: str = "accepted"
-    response_text: str = ""
+    status: Literal["accepted"] = "accepted"
 
 
 @dataclass(frozen=True)

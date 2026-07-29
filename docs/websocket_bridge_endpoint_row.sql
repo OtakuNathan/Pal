@@ -3,15 +3,15 @@
 -- ============================================================
 --
 -- PURPOSE
---   Prepare the channel_endpoints table for a transport-lifecycle
+--   Prepare the channel_endpoints table for a point-to-point
 --   'websocket_bridge' endpoint owned by the WebSocket bridge provider
---   (src/pal/channel/providers/websocket_bridge/). This patch is prepared
+--   (providers/websocket_bridge/, deployed under runtime_root/channel/providers).
 --   here and applied ONLY with explicit user approval.
 --
 -- NON-GOALS
---   * This introduces NO new message semantics. The bridge reuses the existing
---     socket channel for all message ingress/egress; it only owns the WebSocket
---     sidecar subprocess lifecycle.
+--   * This introduces no new core EventKind or L1 message kind. The endpoint
+--     owns a dedicated local socket under data/channel/<endpoint_id>/ and never
+--     routes peer traffic through the TTY pal.sock.
 --   * No other table or IPC contract is altered.
 --
 -- ============================================================
@@ -79,7 +79,7 @@ INSERT INTO channel_endpoints (
   0,
   0,
   -- json: transport configuration
-  '{"bind_host":"0.0.0.0","bind_port":8765,"peer_url":null,"reconnect_initial_delay_seconds":1.0,"reconnect_max_delay_seconds":30.0,"message_timeout_seconds":3000.0}',
+  '{"bind_host":"0.0.0.0","bind_port":8765,"peer_url":null,"reconnect_initial_delay_seconds":1.0,"reconnect_max_delay_seconds":30.0}',
   -- json: send policy overrides (empty = inherit socket channel semantics)
   '{}',
   strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),

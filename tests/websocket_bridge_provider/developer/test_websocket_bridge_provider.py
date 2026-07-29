@@ -24,13 +24,14 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
-from pal.channel.contracts import EndpointConfig, ResponseHandle
+from pal.channel.contracts import EndpointConfig
 from pal.channel.provider_manager import ChannelProviderContext
 from pal.channel.runtime import ChannelRuntime
 from pal.shared import RuntimeStatus
 
-from pal.channel.providers.websocket_bridge.runtime import (
+from websocket_bridge.runtime import (
     ENDPOINT_TYPE,
     PROVIDER_ID,
     WebSocketBridgeEndpoint,
@@ -119,9 +120,12 @@ def _make_endpoint(
     binding_metadata: dict[str, Any] | None = None,
     endpoint_id: str = "wb_main",
 ) -> WebSocketBridgeEndpoint:
-    endpoint = WebSocketBridgeEndpoint(endpoint=_endpoint_config(endpoint_id))
+    endpoint = WebSocketBridgeEndpoint(
+        endpoint=_endpoint_config(endpoint_id),
+        socket_path=Path(runtime_root) / "data" / "channel" / endpoint_id / "channel.sock",
+    )
     endpoint.runtime_root = runtime_root
-    endpoint.socket_channel_path = Path(runtime_root) / "pal.sock"
+    endpoint.data_root = Path(runtime_root) / "data" / "channel" / endpoint_id
     endpoint.binding_metadata = dict(
         binding_metadata
         or {"bind_host": "0.0.0.0", "bind_port": 8765, "peer_url": "ws://peer:8765"}
@@ -140,7 +144,9 @@ from pal.foundation.sidecar import (
 
 payload = json.loads(os.environ["PAL_WEBSOCKET_BRIDGE_CONFIG"])
 endpoint = SidecarEndpoint(
-    runtime_root=pathlib.Path(payload["runtime_root"]), name="websocket_bridge"
+    runtime_root=pathlib.Path(payload["runtime_root"]),
+    name="websocket_bridge",
+    runtime_dir_override=pathlib.Path(payload["data_root"]),
 )
 stop = asyncio.Event()
 
@@ -212,7 +218,10 @@ class CreateEndpointTests(unittest.TestCase):
         self.assertEqual(endpoint.endpoint.endpoint_id, "wb_main")
         self.assertEqual(endpoint.endpoint.channel_kind, ENDPOINT_TYPE)
         self.assertEqual(endpoint.runtime_root, self.runtime_root)
-        self.assertEqual(endpoint.socket_channel_path, self.runtime_root / "pal.sock")
+        self.assertEqual(
+            endpoint.socket_path,
+            self.runtime_root / "data" / "channel" / "wb_main" / "channel.sock",
+        )
         self.assertEqual(endpoint.binding_metadata["bind_port"], 9000)
         self.assertTrue(endpoint.paired)
         self.assertTrue(endpoint.enabled)
@@ -224,21 +233,16 @@ class CreateEndpointTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# No ingress
+# Dedicated ingress
 # ---------------------------------------------------------------------------
 
 
-class NoIngressTests(unittest.TestCase):
-    def test_normalize_raw_returns_empty_regardless_of_payload(self) -> None:
+class DedicatedIngressTests(unittest.TestCase):
+    def test_normalize_raw_appends_receiver_owned_peer_identity(self) -> None:
         endpoint = WebSocketBridgeEndpoint(endpoint=_endpoint_config())
-        self.assertEqual(endpoint.normalize_raw({"text": "hello", "from": "peer"}), {})
-        self.assertEqual(endpoint.normalize_raw(None), {})
-
-    def test_send_reply_is_a_noop_without_raising(self) -> None:
-        endpoint = WebSocketBridgeEndpoint(endpoint=_endpoint_config())
-        # Must not raise and must not enqueue any channel output.
-        endpoint.send_reply(ResponseHandle(endpoint_id="wb_main"), "a reply")
-        self.assertEqual(len(endpoint.outbox), 0)
+        normalized = endpoint.normalize_raw({"text": "  hello  ", "from": "spoofed"})
+        self.assertEqual(normalized["text"], "  hello  \n\n--wb_main")
+        self.assertNotIn("from", normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -349,8 +353,18 @@ class SidecarConfigShapeTests(unittest.TestCase):
         command = endpoint._sidecar_command()
         self.assertEqual(command[0], sys.executable)
         self.assertEqual(command[1], "-c")
+        self.assertIn("configure_process_logging", command[2])
         self.assertIn("from sidecar import serve, SidecarConfig", command[2])
         self.assertIn("asyncio.run(serve(", command[2])
+
+    @patch("websocket_bridge.runtime.subprocess.Popen")
+    def test_spawn_inherits_stdout_and_stderr_for_service_logging(self, popen: Any) -> None:
+        endpoint = _make_endpoint(self.runtime_root)
+        endpoint._spawn_sidecar()
+
+        kwargs = popen.call_args.kwargs
+        self.assertNotIn("stdout", kwargs)
+        self.assertNotIn("stderr", kwargs)
 
     def test_config_payload_carries_runtime_root_and_binding(self) -> None:
         endpoint = _make_endpoint(
@@ -359,17 +373,25 @@ class SidecarConfigShapeTests(unittest.TestCase):
         )
         payload = endpoint._sidecar_config_payload()
         self.assertEqual(payload["runtime_root"], str(self.runtime_root))
-        self.assertEqual(payload["socket_channel_path"], str(self.runtime_root / "pal.sock"))
+        self.assertEqual(
+            payload["bridge_socket_path"],
+            str(self.runtime_root / "data" / "channel" / "wb_main" / "channel.sock"),
+        )
+        self.assertNotIn("socket_channel_path", payload)
         self.assertEqual(payload["bind_host"], "0.0.0.0")
         self.assertEqual(payload["bind_port"], 8765)
         self.assertEqual(payload["peer_url"], "ws://peer:8765")
         self.assertIn("reconnect_initial_delay_seconds", payload)
         self.assertIn("reconnect_max_delay_seconds", payload)
+        self.assertNotIn("message_timeout_seconds", payload)
 
     def test_manager_endpoint_uses_repo_sidecar_convention(self) -> None:
         endpoint = _make_endpoint(self.runtime_root)
         manager = endpoint._manager_endpoint()
-        self.assertEqual(manager.runtime_dir, self.runtime_root / "data" / "websocket_bridge")
+        self.assertEqual(
+            manager.runtime_dir,
+            self.runtime_root / "data" / "channel" / "wb_main",
+        )
         self.assertEqual(manager.socket_path, manager.runtime_dir / "manager.sock")
 
 
@@ -382,7 +404,7 @@ class SidecarLifecycleAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_async_without_runtime_root_records_error(self) -> None:
         endpoint = WebSocketBridgeEndpoint(endpoint=_endpoint_config())
         endpoint.runtime_root = None
-        endpoint.socket_channel_path = None
+        endpoint.socket_path = None
         await endpoint.start_async()
         self.assertIsNone(endpoint._process)
         self.assertIn("missing", endpoint._startup_error)

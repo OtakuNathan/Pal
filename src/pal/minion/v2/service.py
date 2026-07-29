@@ -371,6 +371,7 @@ class MinionV2WorkflowService:
                 raise ValueError(
                     "software review_and_repair requires a bounded single-module ArchitectureSkeletonArtifact"
                 )
+        skill_refs = _normalize_skill_refs(data.get("skill_refs"))
         request_payload = {
             "schema_version": "1",
             "workflow_id": workflow_id,
@@ -383,6 +384,7 @@ class MinionV2WorkflowService:
             "requirements_ref": requirements_ref,
             "constraints": data.get("constraints") or [],
             "approved_evidence": list(data.get("approved_evidence") or []),
+            **({"skill_refs": skill_refs} if skill_refs else {}),
             "workspace": workspace,
             "references": _normalize_references(
                 [*list(task_revision.get("references") or []), *list(data.get("references") or [])]
@@ -425,7 +427,7 @@ class MinionV2WorkflowService:
                     "active_channel": source_channel,
                     "control_route": dict(data.get("control_route") or {}),
                     "desired_state": "ACTIVE",
-                    "orchestration_contract_version": "5",
+                    "orchestration_contract_version": "6",
                 },
             )
         )
@@ -721,6 +723,11 @@ class MinionV2WorkflowService:
             "metrics": projection["metrics"],
             "last_progress_event": dict(latest_event or {}),
         }
+        result_ref = dict((workflow.payload if workflow is not None else {}).get("result_artifact_ref") or {})
+        if result_ref.get("sha256"):
+            record = self.repository.read_artifact_record(str(result_ref["sha256"]))
+            if record and str(record.get("artifact_type") or "") == "DeliveryReceiptArtifact":
+                result["delivery"] = dict(self.artifacts.read_json(result_ref))
         if normalized_view == "human_review":
             if active is None or active.state != "HUMAN_REVIEW":
                 raise ValueError("workflow is not waiting for architecture human review")
@@ -1395,6 +1402,7 @@ def workflow_request_from_snapshot(
     request = dict(service.artifacts.read_json(request_ref))
     request["workspace"] = _normalize_workspace(request.get("workspace"))
     request["references"] = _normalize_references(request.get("references"))
+    request["skill_refs"] = _normalize_skill_refs(request.get("skill_refs"))
     return request
 
 
@@ -1410,6 +1418,7 @@ def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
         "constraints",
         "approved_evidence",
         "references",
+        "skill_refs",
     ):
         value = data.get(field_name)
         if value is not None and not isinstance(value, (list, tuple)):
@@ -1427,6 +1436,24 @@ def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
     task_spec = data.get("task_spec")
     if task_spec is not None and not isinstance(task_spec, Mapping):
         raise ValueError("workflow task_spec must be an object")
+
+
+def _normalize_skill_refs(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("workflow skill_refs must be an array")
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        skill_id = str(raw or "").strip()
+        if not skill_id:
+            continue
+        if skill_id in seen:
+            continue
+        seen.add(skill_id)
+        result.append(skill_id)
+    return result
 
 
 def _normalize_workspace(value: Any) -> dict[str, Any]:

@@ -47,14 +47,20 @@ def _fake_endpoint(endpoint_id: str, model_id: str):
 
 class _MemorySettingsRepository:
     def __init__(self) -> None:
-        self.think_level = "balanced"
+        self.think_levels: dict[str, str] = {}
         self.active_endpoint_id: str | None = None
 
-    def get_think_level(self) -> str:
-        return self.think_level
+    def get_think_level(self, endpoint_id: str) -> str | None:
+        return self.think_levels.get(endpoint_id)
 
-    def set_think_level(self, think_level: str) -> None:
-        self.think_level = str(think_level)
+    def set_think_level(self, endpoint_id: str, think_level: str) -> None:
+        self.think_levels[endpoint_id] = str(think_level)
+
+    def get_legacy_think_level(self) -> str | None:
+        return None
+
+    def delete_legacy_think_level(self) -> bool:
+        return False
 
     def get_active_llm_endpoint_id(self) -> str | None:
         return self.active_endpoint_id

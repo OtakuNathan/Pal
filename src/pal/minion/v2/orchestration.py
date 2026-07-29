@@ -17,9 +17,10 @@ from pal.minion.v2.contracts import (
     PermanentEffectError,
 )
 from pal.minion.v2.execution import DagScheduler, ExecutionCompiler, workspace_content_fingerprint
-from pal.minion.v2.integration import CandidateUnionConflict, CandidateUnionService
+from pal.minion.v2.integration import IntegrationOwnershipDefect, IntegrationService
 from pal.minion.v2.machine_dsl import ControlDisposition, ControlIntent
 from pal.minion.v2.machines import machine_spec_for
+from pal.minion.v2.paths import cleanup_workflow_worktrees
 from pal.minion.v2.replan import collect_architecture_finding_batch
 from pal.minion.v2.service import MinionV2WorkflowService, workflow_request_from_snapshot
 from pal.minion.v2.sessions import (
@@ -63,6 +64,7 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "freeze_epoch_for_replan",
     "create_replan_revision",
     "submit_workflow_completion",
+    "cleanup_terminal_worktrees",
     "submit_standalone_completion",
     "start_review_repair_execution",
     "submit_workflow_rejection",
@@ -350,6 +352,19 @@ class MinionV2OutboxProcessor:
                 )
             )
             self.repository.complete_workflow_role_sessions(epoch.workflow_id)
+            return {}
+        if effect_type == "cleanup_terminal_worktrees":
+            epoch = self._effect_snapshot(effect)
+            manifest_ref = ArtifactRef.from_mapping(
+                dict(epoch.payload.get("architecture_manifest_ref") or {})
+            )
+            manifest = dict(self.service.artifacts.read_json(manifest_ref))
+            repository_layout = dict(manifest.get("repository_layout") or {})
+            if repository_layout:
+                cleanup_workflow_worktrees(
+                    self.service.runtime_root,
+                    repository_layout=repository_layout,
+                )
             return {}
         if effect_type == "submit_standalone_completion":
             review = self._effect_snapshot(effect)
@@ -1403,6 +1418,7 @@ class MinionV2OutboxProcessor:
                 raise ValueError("system verification dependency has no accepted Candidate")
             dependencies.append(
                 {
+                    "node_run_id": dependency.aggregate_id,
                     "module_name": str(dependency.payload.get("module_name") or dependency.payload.get("unit_id") or ""),
                     "candidate_ref": candidate_ref,
                     "candidate_digest": candidate_digest,
@@ -1419,16 +1435,22 @@ class MinionV2OutboxProcessor:
         workspace = Path(str(node.payload.get("workspace_path") or ""))
         if not workspace.is_dir() or not skeleton_sha:
             raise ValueError("system verification requires its accepted Skeleton worktree")
-        _reset_scenario_worktree(workspace, skeleton_sha)
         try:
-            union_ref, union_commit_sha = CandidateUnionService(self.service.artifacts).compose(
-                publish_worktree=workspace,
+            integration_ref, integration_commit_sha = IntegrationService(
+                self.service.artifacts
+            ).integrate_candidates(
+                integration_worktree=workspace,
                 ordered_candidates=dependencies,
-                architecture_skeleton_ref=dict(node.payload.get("architecture_manifest_ref") or {}),
+                architecture_manifest_sha=str(
+                    dict(node.payload.get("architecture_manifest_ref") or {}).get(
+                        "sha256"
+                    )
+                    or ""
+                ),
             )
-        except CandidateUnionConflict as exc:
+        except IntegrationOwnershipDefect as exc:
             raise ValueError(
-                "system Candidate union exposed an undeclared ownership dependency"
+                "system integration exposed an undeclared ownership dependency"
             ) from exc
         fingerprint_payload = {
             "verification_name": "system_delivery",
@@ -1436,7 +1458,9 @@ class MinionV2OutboxProcessor:
             "dependencies": dependencies,
             "scenarios": scenarios,
             "environment_fingerprint": str(node.payload.get("environment_fingerprint") or ""),
-            "system_tree_sha": _git_output(workspace, "rev-parse", f"{union_commit_sha}^{{tree}}"),
+            "system_tree_sha": _git_output(
+                workspace, "rev-parse", f"{integration_commit_sha}^{{tree}}"
+            ),
         }
         system_fingerprint = hashlib.sha256(
             json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1472,7 +1496,7 @@ class MinionV2OutboxProcessor:
             artifact_type="SystemVerificationWorkViewArtifact",
             child_refs=(
                 (str(catalog_ref.get("sha256") or ""), "scenario_catalog"),
-                (union_ref.sha256, "system_candidate_union"),
+                (integration_ref.sha256, "integration_candidate"),
                 (str(requirements_ref.get("sha256") or ""), "task_ledger"),
             ),
         )
@@ -1489,8 +1513,8 @@ class MinionV2OutboxProcessor:
                 payload={
                     "system_fingerprint": system_fingerprint,
                     "system_work_view_ref": work_view_ref.to_dict(),
-                    "system_candidate_union_ref": union_ref.to_dict(),
-                    "system_commit_sha": union_commit_sha,
+                    "system_integration_ref": integration_ref.to_dict(),
+                    "system_commit_sha": integration_commit_sha,
                     "verification_workspace_fingerprint": workspace_content_fingerprint(workspace),
                 },
             )

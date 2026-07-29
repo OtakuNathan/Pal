@@ -18,6 +18,8 @@ from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
 from pal.stream_events import NormalizedLLMStreamEvent
 
+from .interaction_store import TelegramInteractionStore
+
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +207,7 @@ def _safe_int(value: Any) -> int | None:
 @dataclass
 class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     runtime_root: Any = None
+    data_root: Path | None = None
     bot_token: str = ""
     base_url: str = "https://api.telegram.org"
     poll_timeout_seconds: int = 30
@@ -231,10 +234,20 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _reconnecting: bool = False
     _last_get_updates_activity_at: float = 0.0
     _get_updates_in_flight_started_at: float = 0.0
+    _interaction_store: TelegramInteractionStore | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.binding.chat_id and not self.binding.user_id and self.endpoint.binding_key:
             self.binding = TelegramBinding.parse(self.endpoint.binding_key)
+        if self.data_root is None and self.runtime_root is not None:
+            self.data_root = (
+                Path(self.runtime_root)
+                / "data"
+                / "channel"
+                / self.endpoint.endpoint_id
+            )
+        if self.data_root is not None:
+            self._interaction_store = TelegramInteractionStore(self.data_root)
 
     def normalize_raw(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -669,7 +682,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         interaction_id, button_token = self.parse_interaction_callback_data(data)
         if not interaction_id or not button_token:
             return None
-        metadata = self._interactive_messages.get(interaction_id)
+        metadata = self._restore_interaction(interaction_id)
         if not metadata:
             return None
         if self.is_interaction_metadata_expired(metadata):
@@ -686,6 +699,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     ),
                     clear_keyboard=True,
                 )
+            if self._interaction_store is not None:
+                self._interaction_store.set_state(interaction_id, "expired")
             return None
         return self.interaction_result_from_token(interaction_id, button_token)
 
@@ -968,28 +983,34 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         if self.application is None:
             return
         await self._prune_interactive_messages_async()
-        existing = self._interactive_messages.get(spec.interaction_id)
-        if allow_update and existing is not None:
+        existing = self._restore_interaction(spec.interaction_id)
+        max_chars = max(int(self.endpoint.send_policy.get("max_message_chars") or 4096), 1)
+        if allow_update and existing is not None and len(spec.text) <= max_chars:
             if await self._edit_interaction_message_async(existing, spec=spec):
-                self.remember_interaction_message(spec, existing)
+                self._remember_interaction(spec, existing)
                 return
-            self.forget_interaction_message(spec.interaction_id)
+            super().forget_interaction_message(spec.interaction_id)
         chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
         thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
         if chat_id is None:
             return
-        kwargs: dict[str, Any] = {"chat_id": chat_id, "text": spec.text}
-        if thread_id is not None:
-            kwargs["message_thread_id"] = thread_id
         markup = self._build_interaction_markup(spec)
-        if markup is not None:
-            kwargs["reply_markup"] = markup
-        try:
-            sent = await self.application.bot.send_message(**kwargs)
-        except Exception as exc:
-            self.last_delivery_error = str(exc)
+        sent = None
+        parts = _segment_text(spec.text, limit=max_chars)
+        for index, part in enumerate(parts):
+            kwargs: dict[str, Any] = {"chat_id": chat_id, "text": part}
+            if thread_id is not None:
+                kwargs["message_thread_id"] = thread_id
+            if index == len(parts) - 1 and markup is not None:
+                kwargs["reply_markup"] = markup
+            try:
+                sent = await self.application.bot.send_message(**kwargs)
+            except Exception as exc:
+                self.last_delivery_error = str(exc)
+                return
+        if sent is None:
             return
-        self.remember_interaction_message(
+        self._remember_interaction(
             spec,
             {
                 "chat_id": chat_id,
@@ -1000,10 +1021,13 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     async def _resolve_interaction_async(self, spec: InteractionMessageSpec) -> None:
         if self.application is None:
             return
-        target = self._interactive_messages.pop(spec.interaction_id, None)
+        target = self._restore_interaction(spec.interaction_id)
         if target is None:
             return
         await self._edit_interaction_message_async(target, spec=spec, clear_keyboard=True)
+        super().forget_interaction_message(spec.interaction_id)
+        if self._interaction_store is not None:
+            self._interaction_store.set_state(spec.interaction_id, "resolved")
 
     async def _edit_interaction_message_async(
         self,
@@ -1055,9 +1079,13 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 ),
                 clear_keyboard=True,
             )
+            if self._interaction_store is not None:
+                self._interaction_store.set_state(interaction_id, "expired")
 
     def _forget_interactive_message(self, interaction_id: str) -> None:
-        self.forget_interaction_message(interaction_id)
+        super().forget_interaction_message(interaction_id)
+        if self._interaction_store is not None:
+            self._interaction_store.set_state(interaction_id, "resolved")
 
     def _expired_interaction_text(self, interaction_kind: str) -> str:
         return self.expired_interaction_text(interaction_kind)
@@ -1067,6 +1095,50 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
 
     def _parse_interaction_callback_data(self, data: str) -> tuple[str, str]:
         return self.parse_interaction_callback_data(data)
+
+    def _remember_interaction(
+        self,
+        spec: InteractionMessageSpec,
+        target: dict[str, Any],
+    ) -> None:
+        super().remember_interaction_message(spec, target)
+        if self._interaction_store is None:
+            return
+        metadata = self._interactive_messages.get(spec.interaction_id) or {}
+        self._interaction_store.put_open(
+            interaction_id=spec.interaction_id,
+            interaction_kind=spec.interaction_kind,
+            target=dict(target),
+            actions=dict(metadata.get("actions") or {}),
+            expires_at=spec.expires_at,
+        )
+
+    def _restore_interaction(self, interaction_id: str) -> dict[str, Any] | None:
+        metadata = self._interactive_messages.get(interaction_id)
+        if metadata is not None:
+            return metadata
+        if self._interaction_store is None:
+            return None
+        stored = self._interaction_store.get_open(interaction_id)
+        if stored is None:
+            return None
+        expires_at_monotonic = None
+        if stored.expires_at:
+            expires_at_monotonic = self.interaction_expiry_monotonic(
+                InteractionMessageSpec(
+                    interaction_id=stored.interaction_id,
+                    interaction_kind=stored.interaction_kind,
+                    expires_at=stored.expires_at,
+                )
+            )
+        metadata = {
+            **dict(stored.target),
+            "interaction_kind": stored.interaction_kind,
+            "expires_at_monotonic": expires_at_monotonic,
+            "actions": dict(stored.actions),
+        }
+        self._interactive_messages[interaction_id] = metadata
+        return metadata
 
     async def _apply_control_catalog_async(self, payload: dict[str, Any]) -> None:
         commands = self.normalize_control_commands(payload)
@@ -1137,7 +1209,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
 @dataclass(frozen=True)
 class TelegramChannelEndpointFactory:
     channel_kind: str = "telegram"
-    reload_modules: tuple[str, ...] = ("pal.channel.factory", "pal.channel.endpoints.telegram_endpoint")
+    reload_modules: tuple[str, ...] = ()
 
     def create(self, record: Any, *, runtime_root: Any) -> TelegramChannelEndpoint | None:
         metadata = dict(record.binding_metadata or {})
@@ -1155,6 +1227,12 @@ class TelegramChannelEndpointFactory:
         runtime_endpoint = TelegramChannelEndpoint(
             endpoint=endpoint,
             runtime_root=runtime_root,
+            data_root=(
+                Path(runtime_root)
+                / "data"
+                / "channel"
+                / str(record.endpoint_id)
+            ),
             bot_token=str(metadata.get("bot_token") or ""),
             base_url=str(metadata.get("base_url") or "https://api.telegram.org"),
             poll_timeout_seconds=int(metadata.get("poll_timeout_seconds") or 30),

@@ -9,7 +9,7 @@ import sys
 import types
 from typing import Any, ClassVar
 
-from pal.llm.contracts import CanonicalLLMRequest
+from pal.llm.contracts import CanonicalLLMRequest, ThinkingChoice, ThinkingContract
 from pal.llm.models import LLMEndpointModel
 
 LLM_PROVIDER_ADAPTER_ENTRY_POINT_GROUP = "pal.llm_provider_adapters"
@@ -17,6 +17,34 @@ RUNTIME_PROVIDER_ADAPTER_DIR = "llm/adapters"
 LEGACY_RUNTIME_PROVIDER_ADAPTER_DIR = "llm_provider_adapters"
 OPENAI_CHAT_COMPLETIONS_SHAPE = "chat_completions"
 OPENAI_RESPONSES_SHAPE = "responses"
+
+OPENAI_THINKING_CONTRACT = ThinkingContract(
+    choices=(
+        ThinkingChoice("off", "off", aliases=("none",)),
+        ThinkingChoice("minimal", "minimal"),
+        ThinkingChoice("low", "low"),
+        ThinkingChoice("medium", "medium", aliases=("balanced",)),
+        ThinkingChoice("high", "high", aliases=("deep",)),
+        ThinkingChoice("xhigh", "xhigh"),
+    ),
+    default_choice_id="medium",
+)
+OPENAI_MAX_THINKING_CONTRACT = ThinkingContract(
+    choices=(
+        *OPENAI_THINKING_CONTRACT.choices,
+        ThinkingChoice("max", "max", aliases=("maximum",)),
+    ),
+    default_choice_id="medium",
+)
+ANTHROPIC_THINKING_CONTRACT = ThinkingContract(
+    choices=(
+        ThinkingChoice("off", "off", aliases=("none",)),
+        ThinkingChoice("low", "low", aliases=("minimal",)),
+        ThinkingChoice("medium", "medium", aliases=("balanced",)),
+        ThinkingChoice("high", "high", aliases=("deep", "xhigh", "max", "maximum")),
+    ),
+    default_choice_id="medium",
+)
 
 
 @dataclass
@@ -121,6 +149,21 @@ class LLMProviderAdapter:
 
     def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:
         return None
+
+    def provider_thinking_contract(self) -> ThinkingContract | None:
+        return None
+
+    def thinking_contract(self) -> ThinkingContract | None:
+        return _thinking_contract_from_capabilities(
+            self.endpoint,
+            default=self.provider_thinking_contract(),
+        )
+
+    def resolve_think_level(self, value: Any) -> str | None:
+        contract = self.thinking_contract()
+        if contract is None:
+            return None
+        return contract.resolve(value)
 
 
 class LLMProviderRegistry:
@@ -357,6 +400,79 @@ def _capabilities(endpoint: LLMEndpointModel) -> dict[str, Any]:
     return dict(getattr(endpoint, "capabilities_blob", None) or {})
 
 
+def openai_thinking_contract_for_endpoint(endpoint: LLMEndpointModel) -> ThinkingContract:
+    capabilities = _capabilities(endpoint)
+    max_support = capabilities.get("supports_max_reasoning_effort")
+    if max_support is True:
+        return OPENAI_MAX_THINKING_CONTRACT
+    if max_support is False:
+        return OPENAI_THINKING_CONTRACT
+    model_id = _normalize_key(getattr(endpoint, "model_id", ""))
+    if "gpt-5.6" in model_id:
+        return OPENAI_MAX_THINKING_CONTRACT
+    return OPENAI_THINKING_CONTRACT
+
+
+def _thinking_contract_from_capabilities(
+    endpoint: LLMEndpointModel,
+    *,
+    default: ThinkingContract | None,
+) -> ThinkingContract | None:
+    capabilities = _capabilities(endpoint)
+    declaration = capabilities.get("thinking_contract")
+    if declaration is None:
+        return default
+    if declaration is False:
+        return None
+    if not isinstance(declaration, dict):
+        raise ValueError("endpoint thinking_contract must be an object or false")
+    if default is None:
+        raise ValueError("endpoint cannot declare thinking choices when its provider has no thinking contract")
+    raw_choices = declaration.get("choices")
+    if not isinstance(raw_choices, list) or not raw_choices:
+        raise ValueError("endpoint thinking_contract.choices must be a non-empty list")
+    choices: list[ThinkingChoice] = []
+    for item in raw_choices:
+        if isinstance(item, str):
+            canonical_id = default.resolve(item)
+            if canonical_id is None:
+                raise ValueError(f"endpoint thinking choice is not supported by its provider: {item}")
+            provider_choice = default.choice(canonical_id)
+            assert provider_choice is not None
+            choices.append(
+                ThinkingChoice(
+                    choice_id=canonical_id,
+                    label=provider_choice.label,
+                    aliases=provider_choice.aliases,
+                )
+            )
+            continue
+        if not isinstance(item, dict):
+            raise ValueError("endpoint thinking_contract choices must be strings or objects")
+        choice_id = str(item.get("id") or item.get("choice_id") or "").strip()
+        canonical_id = default.resolve(choice_id)
+        if canonical_id is None:
+            raise ValueError(f"endpoint thinking choice is not supported by its provider: {choice_id}")
+        provider_choice = default.choice(canonical_id)
+        assert provider_choice is not None
+        aliases = item.get("aliases") or ()
+        if not isinstance(aliases, (list, tuple)):
+            raise ValueError("endpoint thinking choice aliases must be a list")
+        choices.append(
+            ThinkingChoice(
+                choice_id=canonical_id,
+                label=str(item.get("label") or provider_choice.label),
+                aliases=tuple(dict.fromkeys((*provider_choice.aliases, *(str(alias) for alias in aliases)))),
+            )
+        )
+    default_choice_id = str(declaration.get("default") or declaration.get("default_choice_id") or "").strip()
+    if not default_choice_id:
+        default_choice_id = choices[0].choice_id
+    else:
+        default_choice_id = default.resolve(default_choice_id) or default_choice_id
+    return ThinkingContract(choices=tuple(choices), default_choice_id=default_choice_id)
+
+
 def _think_level_to_completion_reasoning_effort(value: Any) -> str | None:
     text = str(value or "").strip().lower()
     mapping = {
@@ -368,6 +484,7 @@ def _think_level_to_completion_reasoning_effort(value: Any) -> str | None:
         "deep": "high",
         "high": "high",
         "xhigh": "xhigh",
+        "max": "max",
     }
     return mapping.get(text, "medium" if text else None)
 

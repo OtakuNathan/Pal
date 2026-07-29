@@ -1520,7 +1520,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 "system-verification",
                 payload={
                     "system_fingerprint": "union-b",
-                    "system_candidate_union_ref": {"sha256": "union-ref"},
+                    "system_integration_ref": {"sha256": "union-ref"},
                     "system_commit_sha": "commit-b",
                     "verification_workspace_fingerprint": "workspace-b",
                 },

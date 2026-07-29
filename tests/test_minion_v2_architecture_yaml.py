@@ -181,7 +181,7 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
             {"requirements": {}, "modules": {}, "scenarios": {}},
         )
         text = path.read_text(encoding="utf-8")
-        self.assertIn("schema_version: 4", text)
+        self.assertIn("schema_version: 5", text)
         self.assertIn("requirements: {}", text)
         self.assertIn("modules: {}", text)
         self.assertIn("BEGIN COMPLETE VALID EXAMPLE", text)
@@ -210,7 +210,7 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
                 example_lines.append(line[2:] if line.startswith("# ") else "")
         example = yaml.safe_load("\n".join(example_lines))
         validated = ArchitectureDraft.model_validate(example, strict=True)
-        self.assertEqual(validated.schema_version, 4)
+        self.assertEqual(validated.schema_version, 5)
         self.assertEqual(
             validated.modules["frame_protocol"].state_machine.states[
                 "reading_header"
@@ -245,7 +245,7 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
     def test_duplicate_keys_are_rejected_instead_of_overwritten(self) -> None:
         path = prepare_architecture_draft_file(self.workspace)
         path.write_text(
-            "schema_version: 4\nrequirements: {}\nmodules: {}\nmodules: {}\nscenarios: {}\n",
+            "schema_version: 5\nrequirements: {}\nmodules: {}\nmodules: {}\nscenarios: {}\n",
             encoding="utf-8",
         )
 
@@ -259,11 +259,11 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
         path = prepare_architecture_draft_file(self.workspace)
         for text, code in (
             (
-                "schema_version: 4\nrequirements: {}\nmodules: &mods {}\nscenarios: *mods\n",
+                "schema_version: 5\nrequirements: {}\nmodules: &mods {}\nscenarios: *mods\n",
                 "unsupported_yaml_feature",
             ),
             (
-                "schema_version: 4\nrequirements: {}\nmodules: {}\nscenarios: {}\n---\n{}\n",
+                "schema_version: 5\nrequirements: {}\nmodules: {}\nscenarios: {}\n---\n{}\n",
                 "multiple_yaml_documents",
             ),
         ):
@@ -276,7 +276,7 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
     def test_schema_errors_return_exact_yaml_path(self) -> None:
         path = prepare_architecture_draft_file(self.workspace)
         path.write_text(
-            "schema_version: 4\nrequirements: {}\nmodules:\n  bad-name:\n    module_kind: implementation\n"
+            "schema_version: 5\nrequirements: {}\nmodules:\n  bad-name:\n    module_kind: implementation\n"
             "    paths:\n      contract_mode: movable\n"
             "      contract_paths: []\n      implementation_scopes: []\n      reference_only: []\n"
             "scenarios: {}\n",
@@ -300,7 +300,7 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
             "on",
         )
 
-    def test_pack_binding_names_the_preseeded_file_and_fixed_shape(self) -> None:
+    def test_pack_binding_defers_preseeded_file_until_design_is_settled(self) -> None:
         pack = MinionInvocationPack(
             invocation_id="inv_yaml",
             goal="Design the skeleton.",
@@ -316,9 +316,14 @@ class ArchitectureYamlDraftTests(unittest.TestCase):
         draft_path = Path(str(bound.workspace["architecture_draft_path"]))
         self.assertEqual(load_architecture_draft(bound.workspace), _submission())
         self.assertIn(str(draft_path), bound.instruction)
-        self.assertIn("stable snake_case", bound.instruction)
-        self.assertIn("complete Module Protocol", bound.instruction)
-        self.assertIn("contract_flow", bound.instruction)
+        self.assertIn("not a discovery input or design checklist", bound.instruction)
+        self.assertIn("First read task.yaml", bound.instruction)
+        self.assertIn("Only after that design is settled", bound.instruction)
+        self.assertIn("immediately begin edit_file/write_file calls", bound.instruction)
+        self.assertIn("do not spend another response restating", bound.instruction)
+        self.assertNotIn("Its fixed YAML shape is", bound.instruction)
+        self.assertIn("stable snake_case", draft_path.read_text(encoding="utf-8"))
+        self.assertIn("contract_flow", draft_path.read_text(encoding="utf-8"))
 
     def test_module_output_contract_must_be_nonempty(self) -> None:
         submission = _submission()

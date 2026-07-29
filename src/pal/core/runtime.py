@@ -526,7 +526,7 @@ class TurnManager:
 
     def _build_turn_settings_snapshot(self) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
-        think_level = None
+        think_levels: dict[str, str] = {}
         if llm_runtime is not None:
             refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
             if callable(refresh):
@@ -534,9 +534,14 @@ class TurnManager:
                     refresh()
                 except Exception:
                     pass
-            think_level = str(getattr(llm_runtime, "think_level", "") or "").strip() or None
+            snapshot = getattr(llm_runtime, "thinking_levels_snapshot", None)
+            if callable(snapshot):
+                try:
+                    think_levels = dict(snapshot())
+                except Exception:
+                    think_levels = {}
         return {
-            "think_level": think_level or "balanced",
+            "think_levels": think_levels,
             "prompt_log_enabled": bool(self.state.prompt_log_enabled),
         }
 
@@ -1233,21 +1238,36 @@ class PalCore:
         refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
         if callable(refresh):
             refresh()
-        think_level = str(getattr(llm_runtime, "think_level", "balanced") or "balanced")
-        await self._deliver_control_delivery_async(control_interactions.think_panel_delivery(action.route, think_level))
+        status_builder = getattr(llm_runtime, "thinking_status", None)
+        think_status = status_builder() if callable(status_builder) else {
+            "available": False,
+            "endpoint_id": getattr(llm_runtime, "active_endpoint_id", None),
+            "current": None,
+            "choices": [],
+        }
+        await self._deliver_control_delivery_async(
+            control_interactions.think_panel_delivery(action.route, think_status)
+        )
 
     async def _handle_set_think_async(self, action: ControlAction) -> None:
-        requested = str(action.args.get("think_level") or "").strip() or "balanced"
+        requested = str(action.args.get("think_level") or "").strip()
         llm_runtime = self.context.require_port("llm:llm")
-        settings_repository = getattr(llm_runtime, "settings_repository", None)
-        if settings_repository is not None:
-            settings_repository.set_think_level(requested)
-        refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
-        if callable(refresh):
-            refresh()
+        setter = getattr(llm_runtime, "set_think_level", None)
+        if not callable(setter):
+            await self._complete_action_reply_async(action, "Think-level configuration is unavailable.")
+            return
+        try:
+            resolved = setter(requested)
+        except ValueError as exc:
+            await self._complete_action_reply_async(action, str(exc))
+            return
+        status_builder = getattr(llm_runtime, "thinking_status", None)
+        status = status_builder() if callable(status_builder) else {}
+        endpoint_id = str(status.get("endpoint_id") or getattr(llm_runtime, "active_endpoint_id", "") or "")
         await self._complete_action_reply_async(
             action,
-            f"Think level updated to {requested}. This applies to new turns only.",
+            f"Think level for {endpoint_id or 'the active endpoint'} updated to {resolved}. "
+            "This applies to new turns only.",
         )
 
     async def _handle_show_model_async(self, action: ControlAction) -> None:
@@ -1289,9 +1309,29 @@ class PalCore:
                 return
             set_active_setting(requested)
         self._refresh_llm_runtime_settings(llm_runtime)
+        model_message = (
+            f"Model updated to {self._llm_model_label(endpoint)}. "
+            "This applies to new turns only."
+        )
+        status_builder = getattr(llm_runtime, "thinking_status", None)
+        think_status = (
+            status_builder(requested)
+            if callable(status_builder)
+            else {"available": False, "choices": []}
+        )
+        if control_interactions.is_interaction_action(action) and list(think_status.get("choices") or []):
+            await self._deliver_control_delivery_async(
+                control_interactions.think_panel_delivery(
+                    action.route,
+                    think_status,
+                    banner=model_message,
+                    back_to_models=True,
+                )
+            )
+            return
         await self._complete_action_reply_async(
             action,
-            f"Model updated to {self._llm_model_label(endpoint)}. This applies to new turns only.",
+            model_message,
         )
 
     async def _handle_refresh_llm_endpoint_async(self, action: ControlAction) -> None:

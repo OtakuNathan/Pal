@@ -20,6 +20,7 @@ from pal.minion.v2.architecture_yaml import (
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
     empty_review_draft,
+    partition_findings,
     structured_findings,
 )
 from pal.minion.v2.submission_preflight import (
@@ -58,7 +59,7 @@ SKELETON_BUILDER_CAPABILITIES = (*ARCHITECTURE_SKELETON_CAPABILITIES, *SKELETON_
 SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_ask_question": {
         "alias": "ask_question",
-        "description": "Use this tool proactively before architecture design or revision when task.yaml contains or may contain a contradiction, material ambiguity, incorrect or infeasible requirement, or missing decision; when the result depends on user preference; or when a choice would materially change product behavior, compatibility, architecture, modification scope, or implementation scope. Do not silently choose precedence, repair or reinterpret a requirement, or widen or narrow scope. Ask one decisive question without ending the Architect invocation: identify the exact issue and the decision needed, then supply a short title, precise question, and three option strings. Each option contains a readable choice and its impact or tradeoff. The channel also permits a custom free-text answer. Calling suspends the current tool call until the user answers, the long timeout expires, or the invocation is paused, cancelled, or restarted. Before the answer is returned to you, the Manager appends the exact question and answer to the immutable task.yaml ledger; no follow-up task-edit or submit action is allowed or required. Continue architecture work using that answer as the newest and therefore highest-priority task revision.",
+        "description": "Use this tool proactively before architecture design or revision when task.yaml contains or may contain a contradiction, material ambiguity, incorrect or infeasible requirement, or missing decision; when the result depends on user preference; or when a choice would materially change product behavior, compatibility, architecture, modification scope, or implementation scope. Do not silently choose precedence, repair or reinterpret a requirement, or widen or narrow scope. Ask one decisive question without ending the Architect invocation: identify the exact issue and the decision needed, then supply a short title, precise question, and three option strings. Each option contains a readable choice and its impact or tradeoff. The channel also permits a custom free-text answer. Calling suspends the current tool call until the user answers or the logical invocation is paused, cancelled, restarted, or superseded; wall-clock time never expires a pending question. Before the answer is returned to you, the Manager appends the exact question and answer to the immutable task.yaml ledger; no follow-up task-edit or submit action is allowed or required. Continue architecture work using that answer as the newest and therefore highest-priority task revision.",
         "InputModel": MinionV2SkeletonBuilderOpMinionAskQuestionInput,
     },
     "op_minion_architecture_submit": {
@@ -68,7 +69,7 @@ SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_architecture_review_pass": {
         "alias": "architecture_review_pass",
-        "description": "Submit PASS with no arguments only after a breadth-first semantic review finds no material defect or unresolved public semantic ambiguity. Confirm the ordered task ledger maps to the architecture, every module protocol is complete, ownership and lifecycle close, provider outputs satisfy consumer dependencies, scenario contract graphs can produce the required success and failure observations, and declarations/comments agree with architecture.yaml. Every observable input edge, partial-success failure path, and operation on public stateful values must have one declared result or an explicit set of outcomes safe for every consumer. Compilation is only supporting evidence that contracts compose; API presence, a successful probe, review_guarded implementation freedom, or hypothetical implementation behavior is not semantic proof.",
+        "description": "Submit PASS with no arguments only after a breadth-first semantic review finds no blocking defect or unresolved public semantic ambiguity. Advisory p2 findings may remain. Confirm the ordered task ledger maps to the architecture, every module protocol is complete, ownership and lifecycle close, provider outputs satisfy consumer dependencies, scenario contract graphs can produce the required success and failure observations, and declarations/comments agree with architecture.yaml. Every observable input edge, partial-success failure path, and operation on public stateful values must have one declared result or an explicit set of outcomes safe for every consumer. Compilation is only supporting evidence that contracts compose; API presence, a successful probe, review_guarded implementation freedom, or hypothetical implementation behavior is not semantic proof.",
         "InputModel": EmptyToolInput,
     },
     "op_minion_architecture_review_fail": {
@@ -121,7 +122,8 @@ def compile_architecture_review_invocation_tool_contract(
             "for public stateful values in initial, partial, and failed states. If two conforming implementations could make observably different choices that a consumer must know, "
             "record a finding instead of selecting one. A compile probe cannot establish that its test value is contractually legal, and review_guarded private implementation freedom "
             "cannot supply missing public behavior. "
-            "Do not submit positive audit rows or partial findings. PASS takes no arguments."
+            "Do not submit positive audit rows or partial findings. Advisory p2 findings may remain; "
+            "PASS is forbidden only while a blocking finding remains. PASS takes no arguments."
         )},
     }
     return {
@@ -142,7 +144,7 @@ async def ask_question_tool_result(
     workspace: dict[str, Any],
     produced_artifacts: list[dict[str, Any]],
     *,
-    request_user: Callable[[dict[str, Any], float | None], Awaitable[dict[str, Any]]] | None,
+    request_user: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None,
 ) -> CanonicalToolResult:
     del workspace, produced_artifacts
     if request_user is None:
@@ -167,8 +169,6 @@ async def ask_question_tool_result(
             if not option:
                 raise ValueError(f"ask_question requires option_{index}")
             normalized_options.append({"label": option, "description": option})
-        timeout_raw = args.get("timeout_seconds")
-        timeout = float(timeout_raw) if timeout_raw is not None else None
         response = await request_user(
             {
                 "title": title,
@@ -181,7 +181,6 @@ async def ask_question_tool_result(
                     }
                 ],
             },
-            timeout,
         )
         answers = [dict(item or {}) for item in list(response.get("answers") or [])]
         answer = str(answers[0].get("answer") or "") if answers else ""
@@ -352,7 +351,7 @@ def _compile_architecture_review(
         context,
         seed=_architecture_review_seed(),
     )
-    findings = structured_findings(snapshot.payload)
+    findings, advisories = partition_findings(structured_findings(snapshot.payload))
     verdict = "FAIL" if name == "op_minion_architecture_review_fail" else "PASS"
     if verdict == "FAIL" and not findings:
         raise ValueError("architecture_review_fail requires at least one add_finding call")
@@ -366,6 +365,7 @@ def _compile_architecture_review(
         "schema_version": "4",
         "verdict": verdict,
         "findings": findings,
+        "advisories": advisories,
         "review_scope": _compiled_review_scope(workspace),
     }
     _validate_review_shape(output)
@@ -517,12 +517,17 @@ def _git_output(repo_path: Path, *args: str) -> str:
 def _validate_review_shape(payload: Mapping[str, Any]) -> None:
     verdict = str(payload.get("verdict") or "")
     findings = structured_findings(payload)
+    _blocking_advisories, advisories = partition_findings(
+        structured_findings({"findings": list(payload.get("advisories") or [])})
+    )
     if verdict not in {"PASS", "FAIL"}:
         raise ValueError("verdict must be PASS or FAIL")
     if verdict == "PASS" and findings:
         raise ValueError("PASS cannot contain findings")
     if verdict == "FAIL" and not findings:
         raise ValueError("FAIL requires findings")
+    if len(advisories) != len(list(payload.get("advisories") or [])):
+        raise ValueError("architecture review advisories must use disposition=advisory")
 
 
 def _preflight_review_submission(

@@ -11,6 +11,7 @@ _V2_RUNNER_METADATA_KEYS = frozenset(
         "control_route",
         "debug_log",
         "heartbeat_interval_seconds",
+        "initial_skill_injections",
         "llm_round_timeout_seconds",
         "manager_turn_timeout_seconds",
         "max_output_tokens",

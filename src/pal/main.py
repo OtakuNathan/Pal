@@ -14,9 +14,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pal")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # -- setup (no --runtime-root; wizard asks for it) ----------------------
+    # -- setup ---------------------------------------------------------------
     setup_parser = subparsers.add_parser("setup", aliases=("wizard", "wizzard"), help="Interactive setup wizard")
     setup_parser.add_argument("--check", action="store_true", help="Check local runtime dependencies without provisioning")
+    setup_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help="Use this runtime root instead of prompting for one",
+    )
     setup_parser.set_defaults(command="setup")
 
     subparsers.add_parser("doctor", help="Check local Pal runtime dependencies")
@@ -109,7 +115,7 @@ def main() -> int:
         if getattr(args, "check", False):
             from pal.wizard.cli import run_dependency_doctor
             return run_dependency_doctor()
-        return run_setup_wizard()
+        return run_setup_wizard(runtime_root=getattr(args, "runtime_root", None))
 
     if args.command == "browser-service":
         return run_browser_service_cli(

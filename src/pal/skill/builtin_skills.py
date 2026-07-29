@@ -239,7 +239,13 @@ Keep adapter code small and deterministic. It should translate Pal's canonical r
 Minimal adapter:
 
 ```python
-from pal.llm import CanonicalLLMRequest, LLMProviderAdapter, OpenAIChatCompletionDraft
+from pal.llm import (
+    CanonicalLLMRequest,
+    LLMProviderAdapter,
+    OpenAIChatCompletionDraft,
+    ThinkingChoice,
+    ThinkingContract,
+)
 
 
 class MyProviderAdapter(LLMProviderAdapter):
@@ -248,8 +254,18 @@ class MyProviderAdapter(LLMProviderAdapter):
     model_provider_prefix = "openai"
     model_provider_aliases = frozenset({"openai"})
 
+    def provider_thinking_contract(self) -> ThinkingContract:
+        return ThinkingContract(
+            choices=(
+                ThinkingChoice("off", "off"),
+                ThinkingChoice("high", "high", aliases=("deep",)),
+            ),
+            default_choice_id="high",
+        )
+
     def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:
-        if request.metadata.get("think_level") == "off":
+        choice_id = self.resolve_think_level(request.metadata.get("think_level"))
+        if choice_id == "off":
             draft.extra_body["thinking"] = {"type": "disabled"}
 ```
 
@@ -304,7 +320,12 @@ Use this skill when Pal needs to add, review, repair, or explain a channel integ
 
 ## Boundary
 
-Channel providers belong to the `channel` subsystem. They are not ordinary Pal plugins, even though built-in channels can be packaged by first-party plugins. The `ChannelEndpointProviderManager` is the single LLM/core-facing management entrypoint. A provider owns the concrete endpoint lifecycle and endpoint-specific introspection.
+Channel providers belong to the `channel` subsystem. They are not Pal plugins
+and are not loaded from `site-packages`. The recovery socket is the only
+concrete endpoint kept in Pal core. Every detachable provider is loaded from the
+selected runtime root by `ChannelEndpointProviderManager`, which is the single
+LLM/core-facing management entrypoint. A provider owns the concrete endpoint
+lifecycle and endpoint-specific introspection.
 
 Keep these boundaries:
 
@@ -326,6 +347,20 @@ Runtime-root channel providers live under:
 ```
 
 Do not create a second discovery layout unless the channel manager explicitly supports it.
+The provider directory is loaded as a Python package through `importlib`, so
+helper modules should normally use relative imports.
+
+Provider-owned mutable state belongs under:
+
+```text
+<runtime_root>/data/channel/<endpoint_id>/
+```
+
+Use `context.endpoint_data_root(record.endpoint_id)` to derive it. Keep only the
+thin endpoint registration, lifecycle projection, binding key, and management
+metadata in Pal's central channel repository. Native callback maps, sidecar
+sockets, checkpoints, and other provider-private state stay in the provider's
+endpoint data directory.
 
 Minimal `provider.toml`:
 

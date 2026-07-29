@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import socket
 import tempfile
 import unittest
@@ -9,77 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from pal.channel import EndpointConfig
-from pal.channel.providers.websocket_bridge.runtime import WebSocketBridgeEndpoint
-from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
-
-
-class _FinalReplySocket:
-    """Small real Unix-socket peer that speaks Pal's existing socket protocol."""
-
-    def __init__(self, path: Path, final_reply: str) -> None:
-        self.path = path
-        self.final_reply = final_reply
-        self.received: list[dict[str, Any]] = []
-        self.server: asyncio.Server | None = None
-
-    async def start(self) -> None:
-        self.server = await asyncio.start_unix_server(self._handle, path=str(self.path))
-
-    async def stop(self) -> None:
-        if self.server is None:
-            return
-        self.server.close()
-        await self.server.wait_closed()
-        self.server = None
-
-    async def _handle(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            request = await read_sidecar_message(reader)
-            self.received.append(request)
-            request_id = str(request.get("request_id") or "")
-            events = [
-                {
-                    "type": "reasoning_delta",
-                    "request_id": request_id,
-                    "reasoning_text": "private reasoning",
-                },
-                {
-                    "type": "text_delta",
-                    "request_id": request_id,
-                    "text": "intermediate content",
-                },
-                {
-                    "type": "op_tool_call",
-                    "request_id": request_id,
-                    "op_tool_call": {"name": "test_tool", "args": {}},
-                },
-                {
-                    "type": "llm_done",
-                    "request_id": request_id,
-                    "finish_reason": "tool_calls",
-                },
-                {
-                    "type": "text_delta",
-                    "request_id": request_id,
-                    "text": self.final_reply,
-                },
-                {
-                    "type": "llm_done",
-                    "request_id": request_id,
-                    "finish_reason": "stop",
-                },
-            ]
-            for event in events:
-                writer.write(pack_sidecar_message(event))
-            await writer.drain()
-        finally:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
+from websocket_bridge.protocol import PEER_END_SENTINEL
+from websocket_bridge.runtime import WebSocketBridgeEndpoint
 
 
 def _free_loopback_port() -> int:
@@ -100,39 +30,34 @@ def _endpoint(
             endpoint_id=endpoint_id,
             channel_kind="websocket_bridge",
             binding_key=f"lan:{endpoint_id}",
-        )
+        ),
+        socket_path=runtime_root / "data" / "channel" / endpoint_id / "channel.sock",
     )
     endpoint.runtime_root = runtime_root
-    endpoint.socket_channel_path = runtime_root / "pal.sock"
+    endpoint.data_root = runtime_root / "data" / "channel" / endpoint_id
     endpoint.binding_metadata = {
         "bind_host": "127.0.0.1",
         "bind_port": bind_port,
         "peer_url": peer_url,
         "reconnect_initial_delay_seconds": 0.05,
         "reconnect_max_delay_seconds": 0.1,
-        "message_timeout_seconds": 10.0,
     }
-    endpoint.message_timeout_seconds = 10.0
     return endpoint
 
 
 class TwoPalBridgeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_two_sidecars_exchange_final_messages_in_both_directions(self) -> None:
+    async def test_dedicated_channels_tag_identity_and_sentinel_stops_exchange(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_ws_a_") as raw_a, tempfile.TemporaryDirectory(
             prefix="pal_ws_b_"
         ) as raw_b:
             root_a = Path(raw_a)
             root_b = Path(raw_b)
-            socket_a = _FinalReplySocket(root_a / "pal.sock", "reply from A")
-            socket_b = _FinalReplySocket(root_b / "pal.sock", "reply from B")
-            await socket_a.start()
-            await socket_b.start()
-
             port_b = _free_loopback_port()
-            endpoint_b = _endpoint(root_b, "pal-b", bind_port=port_b)
+            # On Pal A the endpoint is the remote Petra; on Petra B it is Pal.
+            endpoint_b = _endpoint(root_b, "pal", bind_port=port_b)
             endpoint_a = _endpoint(
                 root_a,
-                "pal-a",
+                "petra",
                 bind_port=0,
                 peer_url=f"ws://127.0.0.1:{port_b}",
             )
@@ -143,23 +68,28 @@ class TwoPalBridgeTests(unittest.IsolatedAsyncioTestCase):
                 await self._wait_for_health(endpoint_a, connected=True)
                 await self._wait_for_health(endpoint_b, connected=True)
 
-                from_a = await endpoint_a.send_message("hello from A")
-                self.assertEqual(from_a.status, "completed")
-                self.assertEqual(from_a.response_text, "reply from B")
-                self.assertNotIn("private reasoning", from_a.response_text)
-                self.assertNotIn("intermediate content", from_a.response_text)
-                self.assertEqual(socket_b.received[0]["text"], "hello from A")
-                self.assertEqual(socket_a.received, [])
+                receipt = await endpoint_a.send_message("hello from Pal")
+                self.assertEqual(receipt.status, "accepted")
 
-                from_b = await endpoint_b.send_message("hello from B")
-                self.assertEqual(from_b.status, "completed")
-                self.assertEqual(from_b.response_text, "reply from A")
-                self.assertEqual(socket_a.received[0]["text"], "hello from B")
+                at_petra = await self._wait_for_ingress(endpoint_b)
+                self.assertEqual(at_petra.event.payload["text"], "hello from Pal\n\n--pal")
+                endpoint_b.send_reply(at_petra.response_handle, "hello from Petra")
+
+                at_pal = await self._wait_for_ingress(endpoint_a)
+                self.assertEqual(at_pal.event.payload["text"], "hello from Petra\n\n--petra")
+                endpoint_a.send_reply(at_pal.response_handle, PEER_END_SENTINEL)
+
+                await self._wait_for_exchange_idle(endpoint_a)
+                await asyncio.sleep(0.1)
+                self.assertEqual(endpoint_b.poll(), [])
             finally:
                 await endpoint_a.stop_async()
                 await endpoint_b.stop_async()
-                await socket_a.stop()
-                await socket_b.stop()
+
+            self.assertFalse((root_a / "pal.sock").exists())
+            self.assertFalse((root_b / "pal.sock").exists())
+            self.assertFalse((root_a / "data" / "channel" / "petra" / "channel.sock").exists())
+            self.assertFalse((root_b / "data" / "channel" / "pal" / "channel.sock").exists())
 
     async def _wait_for_health(
         self,
@@ -183,6 +113,30 @@ class TwoPalBridgeTests(unittest.IsolatedAsyncioTestCase):
                 return
             await asyncio.sleep(0.05)
         self.fail(f"websocket sidecar did not become ready: {last!r}")
+
+    async def _wait_for_ingress(self, endpoint: WebSocketBridgeEndpoint):
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while asyncio.get_running_loop().time() < deadline:
+            messages = endpoint.poll()
+            if messages:
+                return messages[0]
+            await asyncio.sleep(0.05)
+        self.fail(f"endpoint {endpoint.endpoint.endpoint_id} received no peer message")
+
+    async def _wait_for_exchange_idle(self, endpoint: WebSocketBridgeEndpoint) -> None:
+        deadline = asyncio.get_running_loop().time() + 10.0
+        last: dict[str, Any] = {}
+        while asyncio.get_running_loop().time() < deadline:
+            last = await endpoint._rpc_client(
+                request_timeout_seconds=1.0
+            ).request("health")
+            if (
+                int(last.get("active_message_count") or 0) == 0
+                and int(last.get("sentinel_drop_count") or 0) >= 1
+            ):
+                return
+            await asyncio.sleep(0.05)
+        self.fail(f"peer exchange did not return to idle: {last!r}")
 
 
 if __name__ == "__main__":

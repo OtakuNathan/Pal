@@ -187,6 +187,7 @@ class WizardService(WizardServicePort):
         )
         self.register(registration)
         self.provision_builtin_plugins(registration)
+        self.provision_runtime_channel_providers(registration)
         return registration
 
     def create_database(
@@ -237,6 +238,28 @@ class WizardService(WizardServicePort):
         sentinel = builtin_root / ".managed"
         if not sentinel.exists():
             sentinel.write_text("# Managed by Pal. Do not modify manually.\n", encoding="utf-8")
+
+    def provision_runtime_channel_providers(
+        self,
+        registration: PalRegistration,
+    ) -> None:
+        """Seed missing detachable channel providers without overwriting local edits."""
+        source_root = Path(__file__).resolve().parents[3] / "providers"
+        if not source_root.is_dir():
+            return
+        target_root = registration.runtime.runtime_root / "channel" / "providers"
+        target_root.mkdir(parents=True, exist_ok=True)
+        for source_dir in sorted(source_root.iterdir()):
+            if not source_dir.is_dir() or not (source_dir / "provider.toml").is_file():
+                continue
+            target_dir = target_root / source_dir.name
+            if target_dir.exists():
+                continue
+            shutil.copytree(
+                source_dir,
+                target_dir,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
 
     def provision_stub_runtime(self, runtime_root: Path) -> ProvisionedRuntime:
         registration = self.provision_runtime(

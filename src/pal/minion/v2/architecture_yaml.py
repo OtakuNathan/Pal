@@ -19,7 +19,7 @@ from pal.minion.v2.module_protocol import (
 )
 
 
-ARCHITECTURE_DRAFT_SCHEMA_VERSION = 4
+ARCHITECTURE_DRAFT_SCHEMA_VERSION = 5
 ARCHITECTURE_DRAFT_FILENAME = "architecture.yaml"
 _MAX_ARCHITECTURE_DRAFT_BYTES = 2 * 1024 * 1024
 _SEMANTIC_NAME = SemanticName
@@ -86,7 +86,7 @@ YAML and scalar rules:
 - Lists are YAML lists, maps are YAML maps, booleans are true/false, and null is null. Quote flow-style text containing commas or colons.
 
 Top-level schema and closure:
-- schema_version is the integer 4.
+- schema_version is the integer 5.
 - requirements, modules, and scenarios are maps; each must be non-empty at submission.
 - Names are unique across requirements, modules, and scenarios where they represent semantic graph nodes.
 - Every requirement is consumed by at least one scenario. Its owner is exactly one declared module or scenario.
@@ -118,7 +118,8 @@ Path schema and policy:
 - implementation_scopes is a list of {kind, path}; kind enum: file | directory. contract_only modules require an empty list.
 - reference_only is a list of repository-relative read-only paths.
 - Writable scopes, contract ownership, and reference-only paths must not conflict or overlap. Paths must stay below the repository root.
-- Do not declare test_scopes. The Manager owns tests/<module_name>/developer and tests/<module_name>/verification.
+- Do not declare test_scopes. The Manager owns tests/<module_name>/developer and tests/<module_name>/verifier.
+- `system` is reserved for the Manager-owned system verification corpus.
 
 Scenario schema:
 - modules: non-empty implementation-module list with the dependency-closure rule above.

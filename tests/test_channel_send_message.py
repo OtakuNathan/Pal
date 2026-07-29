@@ -12,10 +12,13 @@ from pal.channel import (
 )
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelDeliveryError
-from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpoint
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.llm import CanonicalToolCall
+from tests.runtime_channel_providers import telegram_endpoint_module
+
+
+TelegramChannelEndpoint = telegram_endpoint_module().TelegramChannelEndpoint
 
 
 class _ActiveMessageEndpoint(ChannelEndpointQueueBase):
@@ -171,6 +174,11 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result.ok)
         self.assertEqual(result.status, "ok")
+        self.assertEqual(
+            set(result.structured),
+            {"channel_id", "message_id", "status"},
+        )
+        self.assertEqual(result.structured["status"], "accepted")
         runtime.sync_endpoints()
         self.assertEqual(endpoint.sent[0][1], "hello from Pal")
 
@@ -188,6 +196,43 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.status, "invalid")
         self.assertEqual(endpoint.sent, [])
+
+    async def test_current_websocket_peer_reply_must_use_normal_final(self) -> None:
+        core, runtime, _ = self._build_core()
+        peer_endpoint = _ActiveMessageEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="petra",
+                channel_kind="websocket_bridge",
+                binding_key="lan:peer",
+            )
+        )
+        runtime.register_endpoint(peer_endpoint)
+        core.state.active_turns["peer-turn"] = SimpleNamespace(
+            channel_envelope=SimpleNamespace(endpoint=peer_endpoint.endpoint)
+        )
+
+        result = await core.context.execution_runtime.execute_tool_async(
+            CanonicalToolCall(
+                name="call_tool",
+                args={
+                    "name": "channel_send_message",
+                    "args": {
+                        "channel_id": "petra",
+                        "message": "this would recursively start another peer turn",
+                    },
+                },
+            ),
+            turn_id="peer-turn",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "forbidden")
+        self.assertEqual(
+            result.structured["details"]["reason"],
+            "peer_reply_must_use_final",
+        )
+        runtime.sync_endpoints()
+        self.assertEqual(peer_endpoint.sent, [])
 
 
 if __name__ == "__main__":

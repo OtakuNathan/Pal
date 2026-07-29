@@ -34,20 +34,39 @@ class SocketSession:
 
     async def send(self, text: str) -> str:
         request_id = str(self.request_id_factory())
+        message_type = "slash_command" if text.startswith("/") else "user_message"
+        await self._write(
+            {
+                "type": message_type,
+                "request_id": request_id,
+                "text": text,
+            }
+        )
+        return request_id
+
+    async def send_interaction_result(
+        self,
+        *,
+        interaction_id: str,
+        button_token: str,
+    ) -> str:
+        request_id = str(self.request_id_factory())
+        await self._write(
+            {
+                "type": "interaction_result",
+                "request_id": request_id,
+                "interaction_id": str(interaction_id),
+                "button_token": str(button_token),
+            }
+        )
+        return request_id
+
+    async def _write(self, payload: dict[str, Any]) -> None:
         try:
-            self.writer.write(
-                self.pack_message(
-                    {
-                        "type": "slash_command" if text.startswith("/") else "user_message",
-                        "request_id": request_id,
-                        "text": text,
-                    }
-                )
-            )
+            self.writer.write(self.pack_message(payload))
             await self.writer.drain()
         except (ConnectionError, OSError) as exc:
             raise SocketDisconnected(f"socket write failed: {exc}") from exc
-        return request_id
 
     async def stream_response(
         self,

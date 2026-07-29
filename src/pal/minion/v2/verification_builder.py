@@ -26,6 +26,7 @@ from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
     finding_severity,
+    partition_findings,
     structured_findings,
 )
 from pal.minion.v2.semantic_evidence import (
@@ -425,7 +426,7 @@ def compile_verification_invocation_tool_contract(
     if historical_regressions:
         overrides["op_minion_verification_run_historical_regression"] = {"use_when": (
             "Replay one Manager-bound historical RepairBill case before new adversarial or diff-risk exploration. "
-            "Use an exact case name from the checklist and a command that executes its preserved reproducer or promoted project regression. "
+            "Use an exact case name from the checklist and a command that executes its preserved reproducer or committed project regression. "
             "Every listed case must be recorded before new risk exploration and before verification_submit. A repeated "
             "FAIL blocks PASS but must not skip the current Candidate diff-risk audit; finish that audit, batch all "
             "findings, and then submit one outcome. Required historical regressions: "
@@ -590,7 +591,7 @@ def _draft_status(
     context, store = _store_context(workspace, draft_kind=draft_kind)
     snapshot = store.read(context, seed=_empty_payload())
     cases = recorded_cases(snapshot.payload)
-    findings = structured_findings(snapshot.payload)
+    findings, advisories = partition_findings(structured_findings(snapshot.payload))
     tags = {
         str(tag)
         for item in cases
@@ -627,6 +628,15 @@ def _draft_status(
                 "summary": str(item.get("summary") or ""),
             }
             for item in findings
+        ],
+        "advisories": [
+            {
+                "finding_key": str(item.get("finding_key") or ""),
+                "finding_kind": str(item.get("finding_kind") or ""),
+                "priority": str(item.get("priority") or ""),
+                "summary": str(item.get("summary") or ""),
+            }
+            for item in advisories
         ],
         "remaining_policy_obligations": sorted(required_tags - tags),
     }
@@ -775,7 +785,9 @@ def _submit(
     cases = recorded_cases(snapshot.payload)
     if not cases:
         raise ValueError("submit requires at least one recorded verification case")
-    findings = [dict(item) for item in list(snapshot.payload.get("findings") or [])]
+    findings, advisories = partition_findings(
+        structured_findings(snapshot.payload)
+    )
     summary = dict(snapshot.payload.get("summary") or {})
     _validate_case_references(cases, workspace=workspace, standalone=standalone)
     if standalone:
@@ -790,6 +802,7 @@ def _submit(
             "reviewed_surfaces": list(summary.get("reviewed") or []),
             "cases": [_case_declaration(item) for item in cases],
             "findings": [_public_finding(item) for item in findings],
+            "advisories": [_public_finding(item) for item in advisories],
             "commands_or_lsp_evidence": [str(item.get("name")) for item in cases],
             "test_gaps": list(summary.get("test_gap") or []),
             "unreviewed_surfaces": list(summary.get("unreviewed") or []),
@@ -805,6 +818,7 @@ def _submit(
         output = {
             "cases": [_case_declaration(item) for item in cases],
             "findings": [_public_finding(item) for item in findings],
+            "advisories": [_public_finding(item) for item in advisories],
             "reviewer_summary": _default_summary(cases, findings),
             **(
                 {"reviewer_notes": str(summary.get("reviewer_summary") or "")}
@@ -904,6 +918,13 @@ def validate_semantic_verification_plan_shape(value: Mapping[str, Any], *, stand
         raise ValueError("compiled review artifact requires cases")
     if not isinstance(value.get("findings"), list):
         raise ValueError("compiled review findings must be an array")
+    if not isinstance(value.get("advisories", []), list):
+        raise ValueError("compiled review advisories must be an array")
+    _unexpected_blocking, advisories = partition_findings(
+        structured_findings({"findings": list(value.get("advisories") or [])})
+    )
+    if len(advisories) != len(list(value.get("advisories") or [])):
+        raise ValueError("compiled review advisories must use disposition=advisory")
     if not isinstance(value.get("recorded_results"), list) or len(value["recorded_results"]) != len(value["cases"]):
         raise ValueError("every case requires one Manager-recorded result")
     if standalone and str(value.get("verdict") or "") not in {"approved", "changes_requested", "blocked"}:
@@ -995,10 +1016,11 @@ def semantic_verification_draft_errors(
     """Return policy errors for the current assignment-local verifier Draft."""
 
     cases = recorded_cases(payload)
+    findings, _advisories = partition_findings(structured_findings(payload))
     errors, _warnings = _verification_submission_errors(
         {
             "recorded_results": cases,
-            "findings": structured_findings(payload),
+            "findings": findings,
             "policy_exceptions": _policy_exceptions(cases),
         },
         workspace,

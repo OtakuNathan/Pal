@@ -1,13 +1,12 @@
 # Pal-to-Pal LAN WebSocket Bridge Provider
 
-This directory ships the **runtime-root channel provider** that exposes the
-Pal-to-Pal LAN WebSocket bridge as a single **transport-lifecycle** channel
-endpoint through `ChannelEndpointProviderManager`.
+This directory is the source of the **runtime-root channel provider** that exposes
+the Pal-to-Pal LAN WebSocket bridge as a point-to-point channel endpoint through
+`ChannelEndpointProviderManager`.
 
-> The bridge is **intentionally not a parallel WebSocket channel.** It reuses the
-> existing socket channel for **all** message semantics. The only thing this
-> provider owns is the WebSocket **sidecar subprocess** lifecycle plus the
-> provider-owned introspection surface.
+The endpoint owns both the WebSocket sidecar lifecycle and a dedicated local
+channel socket at `<runtime_root>/data/channel/<endpoint_id>/channel.sock`. Peer
+traffic never enters the TTY socket at `<runtime_root>/pal.sock`.
 
 ## Files
 
@@ -20,23 +19,23 @@ endpoint through `ChannelEndpointProviderManager`.
 
 ## How it fits
 
-* `ChannelEndpointProviderManager` scans `<runtime_root>/channel/providers/`,
+* Packaging deploys this directory to `<runtime_root>/channel/providers/`, and
+  `ChannelEndpointProviderManager` scans that runtime-owned location,
   reads `provider.toml`, and calls `build_channel_provider(context)`, which
   returns a `WebSocketBridgeProvider`.
 * `attach_endpoint` builds a `WebSocketBridgeEndpoint` from the endpoint's
   `channel_endpoints` row and registers it with `ChannelRuntime`.
-* When the runtime starts, the endpoint's `start_async` **spawns and supervises**
-  the WebSocket sidecar as a subprocess. The sidecar bridges WebSocket text
-  frames into the existing socket channel and back — it is the sole WebSocket
-  wire implementation (`websockets` library).
+* When the runtime starts, the endpoint's `start_async` binds its private channel
+  socket and **spawns and supervises** the WebSocket sidecar as a subprocess.
+  The sidecar is the sole WebSocket wire implementation (`websockets` library).
 * `stop_async` cleanly shuts the sidecar down (manager-socket shutdown RPC, then
-  process termination) and releases the manager socket.
+  process termination) and releases both provider-owned sockets.
 
 ### Manager socket + subprocess conventions
 
 The provider owns the subprocess handle and supervises it over the repo
 `SidecarEndpoint` manager socket located at
-`<runtime_root>/data/websocket_bridge/manager.sock` (the established repo
+`<runtime_root>/data/channel/<endpoint_id>/manager.sock` (the provider-owned
 sidecar convention, mirroring the LSP manager). It:
 
 * spawns the sidecar with `python_subprocess_env()` plus this provider directory
@@ -45,29 +44,38 @@ sidecar convention, mirroring the LSP manager). It:
   `PAL_WEBSOCKET_BRIDGE_CONFIG` environment variable (the child reconstructs the
   config and runs the declared `serve` entrypoint),
 * probes `health` and `shutdown` over the manager socket,
-* accepts the endpoint-private `send_message` RPC used by
+* accepts the endpoint-private fire-and-forget `send_message` RPC used by
   `channel_send_message(channel_id, message)`,
 * force-terminates the process group if a clean shutdown does not return in time.
 
-The sidecar process **exclusively owns** its WebSocket connections and its socket
-channel client sessions. The provider owns neither.
+The sidecar process exclusively owns its WebSocket connections and opens
+short-lived clients of the provider's dedicated local channel socket.
 
 ## Message path
 
-The provider endpoint performs **no direct** message ingress and adds no new
-wire-level channel semantics:
+The provider reuses the ordinary socket framing implementation on its private
+socket while keeping peer semantics endpoint-owned:
 
-* `normalize_raw` returns an empty dict for every inbound payload.
-* `send_reply` is a no-op — replies flow back over the existing socket channel.
-* `send_message(message)` asks the sidecar to send an existing socket-protocol
-  `user_message` frame to its single configured peer and waits for the matching
-  final response.
+* `normalize_raw` appends the local endpoint identity to inbound text as
+  `--<endpoint_id>`. The suffix is mechanical provenance, not model-authored
+  content.
+* `send_reply` streams this turn's normal final response to the waiting sidecar
+  client. Reasoning, tool calls, and intermediate model rounds are not sent to
+  the peer.
+* `send_message(message)` starts a new peer exchange and returns as soon as the
+  connected WebSocket accepts the root frame.
+* Calling `channel_send_message` for the same endpoint while handling its current
+  peer turn is forbidden. The model replies with its normal final response.
 
-Inbound WebSocket messages are delivered by the sidecar into the existing socket
-channel user-message path. WebSocket response frames are correlated by the
-existing `request_id`; reasoning, tool progress, and text from intermediate
-tool-call rounds are filtered rather than redelivered as messages. The manager
-RPC is private sidecar IPC and does not add a WebSocket wire protocol.
+Every peer frame carries an exchange UUID and one-based message count. Messages
+1 through 8 may enter Pal; an attempted ninth message is dropped before ingress.
+An exact entire final of `[[peer_end]]` is also dropped before ingress. Sentinel,
+limit, invalid context, delivery error, or disconnect terminates the exchange
+and clears process-local exchange state. The next explicit
+`channel_send_message` begins a fresh exchange at count 1.
+
+Legacy socket response frames received from a peer are discarded. They are never
+reinterpreted as new user input.
 
 ## Health
 
@@ -79,7 +87,8 @@ RPC is private sidecar IPC and does not add a WebSocket wire protocol.
 | `listener_bound`  | The sidecar reports its WebSocket listener is bound.                |
 | `connected_peers` | Number of currently connected peers (from the sidecar health RPC).  |
 | `last_error`      | The most recent startup/probe error (empty when healthy).           |
-| `healthy`         | `process_running` **and** `listener_bound`.                         |
+| `channel_socket_bound` | The provider-owned local channel socket is accepting clients. |
+| `healthy`         | Process, WebSocket listener, and private channel socket are live. |
 
 Sidecar startup or health failure marks the endpoint health as **unhealthy**
 rather than raising — the runtime keeps running and surfaces the failure via
@@ -101,8 +110,7 @@ Binding metadata on the row carries the transport configuration, e.g.:
   "bind_port": 8765,
   "peer_url": "ws://peer-host:8765",
   "reconnect_initial_delay_seconds": 1.0,
-  "reconnect_max_delay_seconds": 30.0,
-  "message_timeout_seconds": 3000.0
+  "reconnect_max_delay_seconds": 30.0
 }
 ```
 
@@ -133,12 +141,12 @@ scope** for both the provider and the sidecar:
 
 The following architectural non-goals also apply:
 
-* **Not a new channel.** This is a transport-lifecycle adapter over the existing
-  socket channel — it does not introduce message kinds, envelopes, or semantics.
-* **No message ingress in the provider.** All ingress is owned by the sidecar and
-  delivered through the socket channel.
-* **No parallel reply semantics.** Replies retain the existing socket response
-  shapes and request ids; the sidecar only correlates them for the active sender.
+* **No new core event kind.** The dedicated endpoint still emits the normal
+  channel envelope and L1 user-message path.
+* **No TTY coupling.** The WebSocket bridge must not open, depend on, or inject
+  peer traffic through `<runtime_root>/pal.sock`.
+* **No response-frame reinjection.** Only peer `user_message` frames can become
+  local input; response frames are transport output and are discarded on input.
 * **No schema mutation without approval.** Production `channel_endpoints` row or
   schema changes are prepared as a patch (`docs/`) and applied only with explicit
   user approval.

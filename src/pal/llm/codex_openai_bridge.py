@@ -23,6 +23,11 @@ _BRIDGE_DEVELOPER_GUARD = (
     "Those actions are available only through Pal-provided dynamic tools when present. "
     "If a dynamic tool such as shell is provided, it is the authorized shell path for this turn; use it instead of claiming shell access is unavailable. "
     "If a needed dynamic tool is absent, use Pal discovery tools when provided, or state that the specific Pal capability is unavailable only after checking the current tool surface. "
+    "When requested work requires an available Pal dynamic tool, call that tool in the same turn. "
+    "Do not end the turn with a promise, intention, plan, or statement of future action. "
+    "A commentary-only turn is incomplete when a permitted dynamic tool is available and the next action is clear. "
+    "A short progress update is allowed only when followed by the actual tool call in the same turn. "
+    "Continue until the requested action is complete, or report the exact blocker after confirming that no permitted tool can make progress. "
     "Answer from the provided conversation or request one of the provided dynamic tools."
 )
 DEFAULT_CODEX_BRIDGE_API_KEY_ENV = "PAL_CODEX_BRIDGE_API_KEY"
@@ -38,7 +43,7 @@ DEFAULT_CODEX_BRIDGE_MODELS = (
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
 )
-_CODEX_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+_CODEX_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 
 class CodexBridgeError(RuntimeError):
@@ -138,7 +143,7 @@ def _codex_effort_from_payload(payload: dict[str, Any]) -> str | None:
 
 def _codex_cli_config_effort(effort: str | None) -> str:
     normalized = str(effort or "").strip().lower()
-    if normalized in {"high", "xhigh"}:
+    if normalized in {"high", "xhigh", "max"}:
         return normalized
     if normalized in {"none", "minimal", "low"}:
         return "low"
@@ -701,11 +706,17 @@ class CodexCliBridge:
         developer_instructions: str,
         dynamic_tools: list[dict[str, Any]],
         effort: str | None,
+        timeout_seconds: float | None = None,
         input_text: str = "",
         input_items: list[dict[str, Any]] | None = None,
         messages: list[dict[str, Any]] | None = None,
     ) -> CodexCompletion:
         with self._lock:
+            turn_timeout_seconds = (
+                max(1.0, float(timeout_seconds))
+                if timeout_seconds is not None
+                else max(1.0, float(self.timeout_seconds))
+            )
             proc = self._ensure_process(effort=effort)
             try:
                 if self._pending_tool_request is not None:
@@ -717,7 +728,7 @@ class CodexCliBridge:
                         )
                     if self._active_turn is None:
                         raise CodexBridgeError("Codex app-server lost active turn after tool response")
-                    deadline = time.time() + max(1, int(self.timeout_seconds))
+                    deadline = time.time() + turn_timeout_seconds
                     return self._continue_process_turn(proc, self._active_turn, deadline=deadline)
                 return self._invoke_process(
                     proc,
@@ -727,6 +738,7 @@ class CodexCliBridge:
                     input_items=input_items,
                     dynamic_tools=dynamic_tools,
                     effort=effort,
+                    timeout_seconds=turn_timeout_seconds,
                 )
             except Exception:
                 self._reset_process()
@@ -868,6 +880,7 @@ class CodexCliBridge:
         input_items: list[dict[str, Any]] | None,
         dynamic_tools: list[dict[str, Any]],
         effort: str | None,
+        timeout_seconds: float | None = None,
     ) -> CodexCompletion:
         thread_params: dict[str, Any] = {
             "ephemeral": True,
@@ -880,7 +893,10 @@ class CodexCliBridge:
         turn_id_request: int | None = None
         thread_id: str | None = None
         turn_id: str | None = None
-        deadline = time.time() + max(1, int(self.timeout_seconds))
+        deadline = time.time() + max(
+            1.0,
+            float(self.timeout_seconds if timeout_seconds is None else timeout_seconds),
+        )
 
         while time.time() < deadline:
             item = self._read_message(proc, deadline=deadline)

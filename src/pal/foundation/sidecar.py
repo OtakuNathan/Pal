@@ -56,9 +56,12 @@ class SidecarEndpoint:
     name: str
     socket_filename: str = "manager.sock"
     port_filename: str = "manager.port"
+    runtime_dir_override: Path | None = None
 
     @property
     def runtime_dir(self) -> Path:
+        if self.runtime_dir_override is not None:
+            return Path(self.runtime_dir_override)
         return Path(self.runtime_root) / "data" / self.name
 
     @property

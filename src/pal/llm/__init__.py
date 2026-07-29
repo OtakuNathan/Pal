@@ -6,6 +6,8 @@ from pal.llm.contracts import (
     CanonicalToolCall,
     CanonicalToolResult,
     LLMRuntimePort,
+    ThinkingChoice,
+    ThinkingContract,
 )
 from pal.llm.codex_auth_protocol import (
     CodexAuthMessages,
@@ -40,7 +42,7 @@ from pal.llm.capabilities import (
     register_with_core,
 )
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
-from pal.llm.repository import DEFAULT_THINK_LEVEL, LLMEndpointRepository, RuntimeSettingRepository
+from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.secret_store import EncryptedFileSecretStore, InMemorySecretStore, KeyringSecretStore, SecretRef, SecretStorePort
 from pal.llm.runtime import (
     AnthropicMessagesEndpointInvoker,
@@ -72,7 +74,6 @@ __all__ = [
     "CodexBridgeError",
     "CodexToolCall",
     "EndpointResolver",
-    "DEFAULT_THINK_LEVEL",
     "LEGACY_RUNTIME_PROVIDER_ADAPTER_DIR",
     "LLM_PROVIDER_ADAPTER_ENTRY_POINT_GROUP",
     "RUNTIME_PROVIDER_ADAPTER_DIR",
@@ -101,6 +102,8 @@ __all__ = [
     "LLMModelSnapshot",
     "LLMRuntime",
     "LLMRuntimePort",
+    "ThinkingChoice",
+    "ThinkingContract",
     "NormalizedLLMStreamEvent",
     "LLMThinkLevelSnapshot",
     "LLMUsage",

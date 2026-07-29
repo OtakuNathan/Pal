@@ -248,8 +248,10 @@ class ChannelIntrospectionProvider:
                 "obtain channel_id from channel_list."
             ),
             do_not_use_when=(
-                "Do not use for the normal reply to the current user turn, attachments, slash commands, "
-                "channel management, or provider-specific target addressing."
+                "Do not use for the normal reply to the current turn, including a websocket peer turn: "
+                "reply with the normal final response, or exactly [[peer_end]] when no peer reply is needed. "
+                "Do not use for attachments, slash commands, channel management, or provider-specific "
+                "target addressing."
             ),
             failure_next_steps=(
                 "For not-found, detached, or disabled endpoints inspect channel_list and repair endpoint state. "
@@ -292,6 +294,24 @@ class ChannelIntrospectionProvider:
                 structured={"channel_id": channel_id, "reason": "slash_command_not_allowed"},
                 llm_text="channel_send_message accepts ordinary text, not slash commands.",
             )
+        if self._is_current_peer_reply(
+            turn_id=str(call.meta.get("turn_id") or ""),
+            channel_id=channel_id,
+        ):
+            payload = {
+                "channel_id": channel_id,
+                "reason": "peer_reply_must_use_final",
+            }
+            return IntrospectionResult(
+                status=RuntimeStatus.FORBIDDEN,
+                text="reply to the current peer with this turn's final response",
+                structured=payload,
+                llm_text=(
+                    "Do not call channel_send_message to reply to the peer that started "
+                    "this turn. Use the normal final response, or output [[peer_end]] "
+                    "exactly when no reply should be sent."
+                ),
+            )
         try:
             receipt = await self.runtime.send_message(channel_id, message)
         except ChannelDeliveryError as exc:
@@ -319,13 +339,27 @@ class ChannelIntrospectionProvider:
             "channel_id": receipt.endpoint_id,
             "message_id": receipt.message_id,
             "status": receipt.status,
-            "response": receipt.response_text or None,
         }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="channel message accepted",
             structured=payload,
             llm_text=render_titled_structured_for_llm("Channel message accepted", payload),
+        )
+
+    def _is_current_peer_reply(self, *, turn_id: str, channel_id: str) -> bool:
+        if not turn_id or self.main_context is None:
+            return False
+        try:
+            core = self.main_context.require_port("core:core")
+            continuation = core.state.active_turns.get(turn_id)
+            envelope = continuation.channel_envelope
+            endpoint = envelope.endpoint
+        except (AttributeError, KeyError, TypeError):
+            return False
+        return (
+            str(endpoint.channel_kind or "") == "websocket_bridge"
+            and str(endpoint.endpoint_id or "") == channel_id
         )
 
     @capability_action(

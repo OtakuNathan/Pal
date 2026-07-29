@@ -315,6 +315,27 @@ class ContractBuilderTests(unittest.TestCase):
         self.assertIn("Valid example:", provider["description"])
         self.assertNotIn("Input schema:", provider["description"])
 
+    def test_add_finding_advisory_is_non_blocking_p2_only(self) -> None:
+        self.workspace["minion_v2"].update(
+            {"role": "verifier", "mode": "module"}
+        )
+        rejected = add_finding_tool_result(
+            CanonicalToolCall(
+                name=ADD_FINDING_CAPABILITY,
+                args={
+                    "finding_key": "avoidable_copy",
+                    "finding_kind": "module_defect",
+                    "priority": "p1",
+                    "disposition": "advisory",
+                    "summary": "One copy can be avoided without changing behavior.",
+                },
+            ),
+            self.workspace,
+        )
+
+        self.assertFalse(rejected.ok)
+        self.assertIn("advisory findings must use priority p2", rejected.llm_text)
+
     def test_authoring_enums_are_named_in_tool_descriptions(self) -> None:
         gaps: list[str] = []
 

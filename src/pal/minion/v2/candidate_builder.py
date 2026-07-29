@@ -403,12 +403,7 @@ def _live_worktree_delta(workspace: Mapping[str, Any], *, work_view: Mapping[str
         return []
     tracked = _git_paths(repo_path, "diff", "--name-only", "--no-renames", "-z", "HEAD", "--")
     untracked = _git_paths(repo_path, "ls-files", "--others", "--exclude-standard", "-z")
-    manager_seeded = {
-        str(item).replace("\\", "/").strip().lstrip("./")
-        for item in list(workspace.get("manager_seeded_candidate_paths") or [])
-        if str(item).strip()
-    }
-    actual = sorted(set(tracked + untracked) - manager_seeded)
+    actual = sorted(set(tracked + untracked))
     _validate_reported_changed_paths(actual, work_view=work_view)
     return actual
 

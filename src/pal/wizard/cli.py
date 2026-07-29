@@ -19,14 +19,12 @@ from pal.wizard.prompts import ask, ask_yes_no, run_interactive_wizard
 from pal.wizard.runtime import DEFAULT_DB_FILENAME, DEFAULT_PAL_ENTRYPOINT, WizardService
 
 
-_BANNER = r"""
-  ____          _       ____            _
- |  _ \ ___  __| |_   _/ ___| ___  _ __| |_
- | |_) / _ \/ _` | | | \___ \/ _ \| '__| __|
- |  __/  __/ (_| | |_| |___) | (_) | |  | |_
- |_|   \___|\__,_|\__, |____/ \___/|_|   \__|
-                   |___/
-  Interactive Setup Wizard
+_PAL_LOGO = r"""
+  ____   _    _
+ |  _ \ / \  | |
+ | |_) / _ \ | |
+ |  __/ ___ \| |___
+ |_| /_/   \_\_____|
 """
 
 _SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
@@ -404,7 +402,8 @@ def _render_dependency_check(check: WizardDependencyCheck) -> str:
 
 
 def run_dependency_doctor() -> int:
-    print("\n=== Pal Setup Doctor ===\n")
+    print(_PAL_LOGO)
+    print("  Dependency Doctor\n")
     checks = collect_dependency_checks()
     for check in checks:
         print(_render_dependency_check(check))
@@ -416,11 +415,15 @@ def run_dependency_doctor() -> int:
     return 0 if not blocking else 2
 
 
-def run_setup_wizard() -> int:
-    print(_BANNER)
+def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
+    print(_PAL_LOGO)
+    print("  Interactive Setup Wizard")
 
     service = WizardService()
-    result = run_interactive_wizard(existing_loader=service.load_existing_wizard_data)
+    result = run_interactive_wizard(
+        existing_loader=service.load_existing_wizard_data,
+        runtime_root=runtime_root,
+    )
     if result is None:
         print("\n  Setup cancelled.")
         return 1

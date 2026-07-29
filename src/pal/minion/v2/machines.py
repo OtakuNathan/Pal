@@ -1041,7 +1041,17 @@ def _execution_transitions() -> list[TransitionSpec]:
             guard=_required("accepted_candidate_refs", "verification_artifact_refs"),
             effects=_effect("publish_final_deliverable"),
         ),
-        _spec(kind, S.FINALIZING, "FINAL_DELIVERABLE_PUBLISHED", S.COMPLETED, guard=_required("published_deliverable_ref"), effects=_effect("submit_workflow_completion")),
+        _spec(
+            kind,
+            S.FINALIZING,
+            "FINAL_DELIVERABLE_PUBLISHED",
+            S.COMPLETED,
+            guard=_required("published_deliverable_ref"),
+            effects=_effects(
+                "submit_workflow_completion",
+                "cleanup_terminal_worktrees",
+            ),
+        ),
         _spec(
             kind,
             S.RUNNING,
@@ -1308,7 +1318,7 @@ def _node_transitions() -> list[TransitionSpec]:
             S.QUEUED,
             guard=_required(
                 "system_fingerprint",
-                "system_candidate_union_ref",
+                "system_integration_ref",
                 "system_commit_sha",
                 "verification_workspace_fingerprint",
             ),

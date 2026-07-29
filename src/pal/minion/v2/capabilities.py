@@ -25,7 +25,8 @@ from typing import TYPE_CHECKING, Any, Callable, Literal
 from pydantic import Field
 
 from pal.execution.contracts import CapabilityCall, CapabilityResult
-from pal.execution.tool_facade import StrictToolModel
+from pal.execution.tool_facade import StrictToolModel, ToolGuidance
+from pal.execution.tool_semantics import DIRECT_CONTROL
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -40,6 +41,43 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
+
+
+MINION_START_WORKFLOW_PURPOSE = (
+    "Start one durable Minion workflow and bind it to the current actor/channel. Before calling this action, search "
+    "active Pal skills for an operation manual relevant to the requested work. If one or more relevant skills are "
+    "found, ask the user whether to provide them to the workflow and wait for the answer. When the user agrees, pass "
+    "the exact approved IDs in skill_refs; when the user declines, omit skill_refs. Never infer consent. The Manager "
+    "reuses the existing skill_inject projection and places each approved manual in the first user-side context of "
+    "every logical role session as a system reminder; foreground Pal must not copy manuals into task_spec. For a new "
+    "Task, supply its canonical profile, short goal, workspace, and complete structured task_spec. The Manager stores "
+    "task_spec as original in one immutable append-only task.yaml ledger, derives the problem-domain Family from the "
+    "profile, pins the full FamilyBinding for the Task, and creates all internal identities. Use review_then_execute "
+    "with artifact for a named external architecture, execute_trusted only for a Manager-trusted named artifact, "
+    "standalone_review for review-only, and review_and_repair for bounded repair. Never inspect or implement the target "
+    "in the foreground first. After the workflow is accepted, do not repeatedly inspect workflow status or create a "
+    "proactive polling task: completion, clarification, and human-review events return through system callbacks. Tell "
+    "the user the workflow will notify them, then wait; inspect status only when the user asks or when diagnosing or "
+    "recovering a missing callback."
+)
+
+MINION_START_WORKFLOW_GUIDANCE = ToolGuidance(
+    purpose=MINION_START_WORKFLOW_PURPOSE,
+    use_when=(
+        "Use when the requested work is identity-light executor work: a medium-to-large or long-running project, work "
+        "that benefits from architect/coder/verifier gates, or a task the user explicitly asks Minion to perform. "
+        "Choose by identity binding and task nature, not by prose length or step count."
+    ),
+    do_not_use_when=(
+        "Do not use for work strongly bound to Pal's relationship with the user, including conversation, Q&A, "
+        "check-ins, quizzes, personal technical discussion, a single-point code investigation, or reading code and "
+        "giving conclusions. In the gray area Pal handles the task directly unless the user explicitly requests Minion."
+    ),
+    failure_next_steps=(
+        "Correct invalid task, profile, workspace, operation, artifact, or approved skill input. If creation may have "
+        "succeeded, reconcile with minion_workflow_status before retrying; do not start a duplicate workflow."
+    ),
+)
 
 
 class MinionV2StartWorkflowWorkspace(StrictToolModel):
@@ -86,6 +124,14 @@ class MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput(StrictToolMod
             "Complete structured task specification for new_requirement. This becomes "
             "original in the immutable task.yaml ledger; later user-authorized changes "
             "are append-only revisions."
+        ),
+    )
+    skill_refs: list[str] | None = Field(
+        default=None,
+        description=(
+            "Exact active Pal skill IDs that the user explicitly approved for this "
+            "workflow. The Manager injects their manuals as user-side system reminders "
+            "when each logical role session is first spawned."
         ),
     )
     constraints: list[Any] | None = Field(
@@ -389,18 +435,11 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="start_workflow",
-        description=(
-            "Start one durable Minion workflow and bind it to the current actor/channel. Before calling this action, search active Pal skills for an operation manual relevant to the requested work. "
-            "If one or more relevant skills are found and have not already been injected into the current Pal turn, ask the user whether to inject them and wait for the answer. "
-            "When the user agrees, call skill_inject for every approved skill and use those manuals when compiling task_spec; when the user declines, proceed without them. Never infer consent or inject skills into the Minion role context. "
-            "For a new Task, supply its canonical profile, short goal, workspace, and complete structured task_spec. "
-            "The Manager stores task_spec as original in one immutable append-only task.yaml ledger, "
-            "derives the problem-domain Family from the profile, pins the full FamilyBinding for the Task, and creates all internal identities. Use "
-            "review_then_execute with artifact for a named external architecture, execute_trusted only for a Manager-trusted named artifact, "
-            "standalone_review for review-only, and review_and_repair for bounded repair. Never inspect or implement the target in the foreground first."
-        ),
+        description=MINION_START_WORKFLOW_PURPOSE,
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
         aliases=("minion_start_workflow",),
+        guidance=MINION_START_WORKFLOW_GUIDANCE,
+        execution=DIRECT_CONTROL,
     )
     def start_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -408,6 +447,7 @@ class MinionV2PublicProvider:
             args = dict(call.args or {})
             task_selector = str(args.pop("task", "") or "").strip()
             artifact_name = str(args.pop("artifact", "") or "").strip()
+            args["skill_refs"] = _dedupe_strings(args.get("skill_refs"))
             if task_selector:
                 args["task_id"] = self.service.resolve_task_selector(selector=task_selector, actor=actor)
             if artifact_name:
@@ -805,6 +845,17 @@ class MinionV2PublicProvider:
         if self.manager_request is None:
             raise RuntimeError("minion sidecar request transport is not configured")
         return self.manager_request(method, dict(params or {}))
+
+
+def _dedupe_strings(value: Any) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in list(value or []):
+        text = str(item or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
 
 
 def _public_result(title: str, payload: dict[str, Any]) -> CapabilityResult:
