@@ -35,6 +35,8 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
     purpose=SHELL_EXEC_DESCRIPTION,
     use_when=(
         "Use for tests, builds, scripts, package commands, process probes, and bounded directory listings. "
+        "For shell-based repository discovery, prefer rg for text search and rg --files for file enumeration; "
+        "fall back to find, grep, or ls only when rg is unavailable or unsuitable. "
         "Run long-lived tests and builds directly so their complete stdout and stderr remain available."
     ),
     do_not_use_when=(

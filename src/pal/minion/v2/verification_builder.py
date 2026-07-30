@@ -65,6 +65,87 @@ _RUN_TO_KIND_TAG = {
     "op_minion_verification_run_platform_probe": ("platform_assumption", "platform_probe"),
 }
 
+# Short, risk-directed action scripts.  These are deliberately data, rather
+# than another role prompt: the Manager binds only the scripts applicable to
+# this verification node and draft_status exposes the next unfinished one.
+_VERIFICATION_ACTION_TEMPLATES: dict[str, dict[str, Any]] = {
+    "historical_regressions": {
+        "when": "A prior RepairBill or regression reproducer is bound.",
+        "steps": [
+            "Replay the exact preserved reproducer first.",
+            "Record the result even when it fails; do not skip the current Candidate audit.",
+        ],
+    },
+    "candidate_delta_review": {
+        "when": "A new Candidate assignment has a changed Git review range.",
+        "steps": [
+            "Inspect git log/show/diff and the changed contract neighborhood.",
+            "Run one targeted check for a defect introduced by this Candidate.",
+        ],
+    },
+    "focused_tests": {
+        "when": "The module protocol needs local behavioral coverage.",
+        "steps": [
+            "Run the smallest focused corpus covering normal, boundary, error, and relevant lifecycle paths.",
+            "Add a durable verifier case only for a demonstrated coverage gap.",
+        ],
+    },
+    "consumer_probe": {
+        "when": "A public API or static contract is consumed by another unit.",
+        "steps": [
+            "Compile or run a minimal external consumer against the actual public surface.",
+            "For static constraints, check both an accepted and a rejected use.",
+        ],
+    },
+    "public_surface_dogfood": {
+        "when": "The system exposes a declared CLI, service, TTY, or delivery surface.",
+        "steps": [
+            "Launch the real public surface and exercise a representative success path.",
+            "Exercise one invalid, failure, or recovery path and inspect the observed boundary result.",
+        ],
+    },
+    "platform_probe": {
+        "when": "Correctness depends on a bound platform or runtime assumption.",
+        "steps": [
+            "Run the smallest real platform probe that demonstrates the assumption.",
+            "Record UNKNOWN only when the environment genuinely prevents the probe.",
+        ],
+    },
+    "warning_clean": {
+        "when": "The policy requires warning-clean compilation.",
+        "steps": [
+            "Run the repository's ordinary warning/type/lint check for the changed surface.",
+            "Treat warnings as evidence, not as a replacement for behavior tests.",
+        ],
+    },
+    "compile": {
+        "when": "The candidate has a compile-time or declaration obligation.",
+        "steps": [
+            "Run the smallest real compile/type check for the changed public surface.",
+            "Continue to behavioral or consumer checks; compilation alone cannot establish PASS.",
+        ],
+    },
+    "lsp": {
+        "when": "A prepared language-server check is available or required.",
+        "steps": [
+            "Run diagnostics for the changed source or public symbols.",
+            "Use the result as supporting evidence alongside build and behavior checks.",
+        ],
+    },
+}
+
+_ACTION_TEMPLATE_ORDER = (
+    "historical_regressions",
+    "candidate_delta_review",
+    "focused_tests",
+    "consumer_probe",
+    "public_surface_dogfood",
+    "platform_probe",
+    "warning_clean",
+    "compile",
+    "lsp",
+)
+
 _COMMON_VERIFICATION_CAPABILITIES = frozenset(
     {
         "op_minion_verification_scratch_write",
@@ -181,7 +262,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_draft_status": {
         "alias": "verification_draft_status",
-        "description": "Read a compact status of the current verification Draft, including case names, statuses, active findings, and remaining policy obligations.",
+        "description": "Read a compact status of the current verification Draft, including case names, statuses, active findings, remaining policy obligations, and the next risk-directed action templates.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationDraftStatusInput,
     },
     "op_minion_verification_remove_case": {
@@ -260,6 +341,12 @@ def effective_verification_policy(
             {"consumer_probe", "public_surface_dogfood", "platform_probe"}
         )
 
+    action_templates = {
+        tag: dict(_VERIFICATION_ACTION_TEMPLATES[tag])
+        for tag in sorted(allowed_obligations)
+        if tag in _VERIFICATION_ACTION_TEMPLATES
+    }
+
     return {
         "mode": mode,
         "require_focused_tests": bool(source.get("require_focused_tests", False)),
@@ -275,6 +362,7 @@ def effective_verification_policy(
         "unknown_policy": str(source.get("unknown_policy") or "strict"),
         "case_timeout_seconds": int(source.get("case_timeout_seconds") or 300),
         "allowed_obligations": sorted(allowed_obligations),
+        "action_templates": action_templates,
     }
 
 
@@ -402,6 +490,13 @@ def compile_verification_invocation_tool_contract(
             "consumes a verifier scratch file so exact evidence reuse is invalidated only by that file. "
             f"Bound verification context: {boundary_text}."
         )}
+    overrides["op_minion_verification_draft_status"] = {
+        "use_when": (
+            "Use at the start of an assignment and after each verification phase to select the next unfinished "
+            "risk-directed action template. Follow only the returned next_actions that apply to this bound scope; "
+            "do not invent extra evidence or repeat unchanged passing cases."
+        )
+    }
     if not standalone:
         overrides["op_minion_verification_run_diff_risk"] = {
             "use_when": (
@@ -613,6 +708,12 @@ def _draft_status(
     }
     if str(policy.get("lsp_policy") or "") == "when_available":
         required_tags.add("lsp")
+    remaining_obligations = [
+        tag
+        for tag in _ACTION_TEMPLATE_ORDER
+        if tag in required_tags and tag not in tags
+    ]
+    action_templates = dict(policy.get("action_templates") or {})
     result = {
         "draft_version": snapshot.version,
         "status": snapshot.status,
@@ -638,7 +739,14 @@ def _draft_status(
             }
             for item in advisories
         ],
-        "remaining_policy_obligations": sorted(required_tags - tags),
+        "remaining_policy_obligations": remaining_obligations,
+        "next_actions": [
+            {
+                "obligation": tag,
+                **dict(action_templates.get(tag) or _VERIFICATION_ACTION_TEMPLATES.get(tag) or {}),
+            }
+            for tag in remaining_obligations[:3]
+        ],
     }
     return _ok(call, "verification Draft status", result)
 

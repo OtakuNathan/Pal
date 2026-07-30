@@ -58,7 +58,8 @@ MINION_START_WORKFLOW_PURPOSE = (
     "in the foreground first. After the workflow is accepted, do not repeatedly inspect workflow status or create a "
     "proactive polling task: completion, clarification, and human-review events return through system callbacks. Tell "
     "the user the workflow will notify them, then wait; inspect status only when the user asks or when diagnosing or "
-    "recovering a missing callback."
+    "recovering a missing callback. Later status and control tools address the Task by its human-readable title; the "
+    "Manager resolves its single current workflow. Internal Manager IDs are never exposed or accepted."
 )
 
 MINION_START_WORKFLOW_GUIDANCE = ToolGuidance(
@@ -75,7 +76,7 @@ MINION_START_WORKFLOW_GUIDANCE = ToolGuidance(
     ),
     failure_next_steps=(
         "Correct invalid task, profile, workspace, operation, artifact, or approved skill input. If creation may have "
-        "succeeded, reconcile with minion_workflow_status before retrying; do not start a duplicate workflow."
+        "succeeded, reconcile with minion_task_status before retrying; do not start a duplicate workflow."
     ),
 )
 
@@ -160,7 +161,13 @@ class MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput(StrictToolMod
 class MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput(StrictToolModel):
     """Reloadable public contract for the architecture human-review decision."""
 
-    task: str | None = None
+    task: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable Task title. Omit it to use the Task bound to the "
+            "current channel."
+        ),
+    )
     decision: Literal["accept", "edit", "reject"]
     edit_instruction: str | None = Field(
         default=None,
@@ -514,9 +521,12 @@ class MinionV2PublicProvider:
     def search_tasks(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
             actor, channel = self._actor_and_channel(call)
+            args = dict(call.args or {})
+            family = str(args.pop("family", "") or "").strip()
             payload = self.service.search_task_ledger(
                 {
-                    **dict(call.args or {}),
+                    **args,
+                    "family_id": family,
                     "actor": actor,
                     "source_channel": channel,
                 }
@@ -551,34 +561,43 @@ class MinionV2PublicProvider:
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
-        scope="minion_workflow",
+        scope="minion_task",
         action_name="status",
         description=(
-            "Read the current channel-bound workflow, or select one by natural-language Task title. Returns phase, active module/role, blocker, "
-            "next legal actions, user-wait flag, timings, last progress, and liveness without exposing Manager identities. When human_review_available "
-            "is true, call this same tool with view=human_review to read the durable Architecture Markdown, reviewer verdict/findings, and available actions."
+            "Read a Task by natural-language title, then mechanically attach its single current workflow when one exists. Returns Task state plus "
+            "workflow phase, every module's Coder/Verifier state, blockers, next legal actions, timings, last progress, and liveness without exposing "
+            "Manager identities. When workflow.human_review_available is true, call this same tool with view=human_review to read the durable review."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderStatusInput,
-        aliases=("minion_workflow_status",),
+        aliases=("minion_task_status",),
     )
     def workflow_status(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
-            workflow_id = self.service.resolve_workflow_selector(
-                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            task_id, workflow_id = self.service.resolve_task_workflow_selector(
+                selector=str(call.args.get("task") or ""),
+                actor=actor,
+                source_channel=channel,
+                include_terminal=True,
             )
             view = str(call.args.get("view") or "status")
+            if view == "human_review" and not workflow_id:
+                raise ValueError("Task has no workflow waiting for human review")
             payload = (
                 self.manager_request(
-                    "v2_workflow_status",
-                    {"workflow_id": workflow_id, "view": view},
+                    "v2_task_status",
+                    {"task_id": task_id, "workflow_id": workflow_id, "view": view},
                 )
                 if self.manager_request is not None
-                else self.service.workflow_status(workflow_id, view=view)
+                else self.service.task_status(
+                    task_id,
+                    workflow_id=workflow_id,
+                    view=view,
+                )
             )
-            return _public_result("minion workflow status", payload)
+            return _public_result("minion task status", payload)
         except ValueError as exc:
-            return _invalid("minion workflow selection invalid", exc)
+            return _invalid("minion task selection invalid", exc)
         except Exception as exc:
             return _error("minion V2 workflow status failed", exc)
 
@@ -596,9 +615,14 @@ class MinionV2PublicProvider:
     def resume_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
-            workflow_id = self.service.resolve_workflow_selector(
-                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            _, workflow_id = self.service.resolve_task_workflow_selector(
+                selector=str(call.args.get("task") or ""),
+                actor=actor,
+                source_channel=channel,
+                include_terminal=False,
             )
+            if not workflow_id:
+                raise ValueError("Task has no active workflow to resume")
             payload = self.service.resume_workflow(
                 workflow_id=workflow_id,
                 actor=actor,
@@ -627,9 +651,14 @@ class MinionV2PublicProvider:
     def restart_execution(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
-            workflow_id = self.service.resolve_workflow_selector(
-                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            _, workflow_id = self.service.resolve_task_workflow_selector(
+                selector=str(call.args.get("task") or ""),
+                actor=actor,
+                source_channel=channel,
+                include_terminal=False,
             )
+            if not workflow_id:
+                raise ValueError("Task has no active workflow to restart")
             payload = self.service.restart_execution_from_architecture(
                 workflow_id=workflow_id,
                 actor=actor,
@@ -659,9 +688,14 @@ class MinionV2PublicProvider:
     def resolve_triage(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
-            workflow_id = self.service.resolve_workflow_selector(
-                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            _, workflow_id = self.service.resolve_task_workflow_selector(
+                selector=str(call.args.get("task") or ""),
+                actor=actor,
+                source_channel=channel,
+                include_terminal=False,
             )
+            if not workflow_id:
+                raise ValueError("Task has no active workflow in triage")
             payload = self.service.resolve_triage(
                 workflow_id=workflow_id,
                 actor=actor,
@@ -690,12 +724,21 @@ class MinionV2PublicProvider:
     def submit_human_decision(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
-            workflow_id = self.service.resolve_workflow_selector(
-                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            _, workflow_id = self.service.resolve_task_workflow_selector(
+                selector=str(call.args.get("task") or ""),
+                actor=actor,
+                source_channel=channel,
+                include_terminal=False,
             )
+            if not workflow_id:
+                raise ValueError("Task has no active workflow awaiting a decision")
             payload = self.service.submit_human_decision(
                 {
-                    **dict(call.args or {}),
+                    **{
+                        key: value
+                        for key, value in dict(call.args or {}).items()
+                        if key != "task"
+                    },
                     "workflow_id": workflow_id,
                     "actor": actor,
                     "source_channel": channel,
@@ -724,9 +767,14 @@ class MinionV2PublicProvider:
     def answer_question(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
-            workflow_id = self.service.resolve_workflow_selector(
-                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            _, workflow_id = self.service.resolve_task_workflow_selector(
+                selector=str(call.args.get("task") or ""),
+                actor=actor,
+                source_channel=channel,
+                include_terminal=False,
             )
+            if not workflow_id:
+                raise ValueError("Task has no active workflow question")
             if self.manager_request is None:
                 raise RuntimeError("minion sidecar request path is unavailable")
             payload = self.manager_request(
@@ -753,9 +801,14 @@ class MinionV2PublicProvider:
     def control_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
-            workflow_id = self.service.resolve_workflow_selector(
-                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            _, workflow_id = self.service.resolve_task_workflow_selector(
+                selector=str(call.args.get("task") or ""),
+                actor=actor,
+                source_channel=channel,
+                include_terminal=False,
             )
+            if not workflow_id:
+                raise ValueError("Task has no active workflow to control")
             payload = self.service.control_workflow(
                 workflow_id=workflow_id,
                 command=str(call.args.get("command") or ""),
@@ -781,9 +834,14 @@ class MinionV2PublicProvider:
     def archive_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
-            workflow_id = self.service.resolve_workflow_selector(
-                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            _, workflow_id = self.service.resolve_task_workflow_selector(
+                selector=str(call.args.get("task") or ""),
+                actor=actor,
+                source_channel=channel,
+                include_terminal=True,
             )
+            if not workflow_id:
+                raise ValueError("Task has no workflow to archive")
             payload = self.service.archive_workflow(
                 workflow_id=workflow_id,
                 actor=actor,
@@ -882,6 +940,7 @@ def _public_payload(value: Any) -> Any:
         "active_aggregate_id",
         "active_aggregate_type",
         "active_worker",
+        "workflow_name",
         "decision_token",
         "actor_id",
         "active_channel_id",
@@ -892,7 +951,7 @@ def _public_payload(value: Any) -> Any:
         "last_progress_event_id",
     }
     aliases = {
-        "task_title": "task",
+        "task_name": "task",
         "current_phase": "phase",
         "workflow_state": "state",
         "active_node_state": "active_state",

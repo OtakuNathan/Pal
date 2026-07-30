@@ -295,7 +295,7 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
 
     def test_gateway_has_a_closed_method_allowlist(self) -> None:
         for method in (
-            "v2_workflow_status",
+            "v2_task_status",
             "task_revision_authority_record",
             "task_revision_append",
         ):

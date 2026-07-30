@@ -171,6 +171,7 @@ class RoleAssignmentGateway:
                 digest=str(payload.get("digest") or ""),
                 total_lines=int(payload.get("total_lines") or 0),
                 complete=bool(payload.get("complete")),
+                source=str(payload.get("source") or "mutation"),
             )
             return {"ok": True}
         if method == "execution_invalidate_file":

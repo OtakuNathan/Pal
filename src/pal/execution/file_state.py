@@ -193,6 +193,7 @@ class SessionFileStateCache:
             digest=content_digest(content),
             total_lines=count_text_lines(content),
             complete=bool(full_view),
+            source="mutation",
         )
 
     def get_valid(self, file_path: str | Path) -> str | None:

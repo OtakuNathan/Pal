@@ -15,7 +15,7 @@ from pal.failure.contracts import (
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult
 from pal.shared import ChannelEnvelope, EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus
 from pal.shared.payloads import extract_text_from_payload
-from pal.memory import CompactionProfile, L1MessageKind, L1TranscriptMessage
+from pal.memory import L1MessageKind, L1TranscriptMessage
 from pal.stream_events import NormalizedLLMStreamEvent
 
 
@@ -91,7 +91,6 @@ class MemoryCompactEffect(EffectRequest):
     assembly_context: PromptAssemblyContext = field(default_factory=PromptAssemblyContext)
     target_input_budget: int = 0
     reserved_output_tokens: int = 0
-    profile_override: CompactionProfile | None = None
     kind: str = EffectKind.MEMORY_COMPACT
 
 
@@ -156,6 +155,8 @@ class TurnContinuation:
     pending_compact_memory_candidate_batches: list[dict[str, Any]] = field(default_factory=list)
     budget_failure_feedback_text: str = ""
     prompt_budget_snapshot: dict[str, Any] = field(default_factory=dict)
+    l1_input_committed: bool = False
+    l1_protocol_committed_count: int = 0
     l1_exit_checkpoint_committed: bool = False
     l1_interrupted_settlement_queued: bool = False
     l1_interrupted_settlement_committed: bool = False
@@ -219,6 +220,7 @@ def agent_turn_program(
     reply_texts: list[str] = []
     retry_note = ""
     retry_count = 0
+    compact_generation_count = 0
     while True:
         frame = AgentLoopFrame(
             retry_note=retry_note,
@@ -233,6 +235,19 @@ def agent_turn_program(
             tools_override=tools_override,
         )
         if getattr(advice.payload, "status", "") == LLMPreflightStatus.COMPACT_REQUIRED:
+            if compact_generation_count >= 3:
+                return (yield from _finish_compaction_failure_turn(
+                    turn_id=turn_id,
+                    text=(
+                        "Context remains over budget after three atomic L1 "
+                        "compactions; stopping instead of compacting the same "
+                        "logical turn again."
+                    ),
+                    emit_final_text=emit_final_text,
+                    build_commit_payload=build_commit_payload,
+                    observations=observations,
+                    reply_texts=reply_texts,
+                ))
             compact_result = yield MemoryCompactEffect(
                 assembly_context=assembly_context,
                 target_input_budget=getattr(advice.payload, "target_input_budget", 0),
@@ -247,6 +262,7 @@ def agent_turn_program(
                     observations=observations,
                     reply_texts=reply_texts,
                 ))
+            compact_generation_count += 1
             continue
         outcome_result = yield LLMRequestEffect(
             assembly_context=assembly_context,
@@ -255,6 +271,19 @@ def agent_turn_program(
         )
         outcome = _as_llm_outcome(outcome_result.payload)
         if outcome is not None and outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
+            if compact_generation_count >= 3:
+                return (yield from _finish_compaction_failure_turn(
+                    turn_id=turn_id,
+                    text=(
+                        "Context remains over budget after three atomic L1 "
+                        "compactions; stopping instead of compacting the same "
+                        "logical turn again."
+                    ),
+                    emit_final_text=emit_final_text,
+                    build_commit_payload=build_commit_payload,
+                    observations=observations,
+                    reply_texts=reply_texts,
+                ))
             compact_result = yield MemoryCompactEffect(
                 assembly_context=assembly_context,
                 target_input_budget=outcome.target_input_budget,
@@ -269,6 +298,7 @@ def agent_turn_program(
                     observations=observations,
                     reply_texts=reply_texts,
                 ))
+            compact_generation_count += 1
             continue
         if outcome is not None and outcome.tool_calls:
             retry_count = 0

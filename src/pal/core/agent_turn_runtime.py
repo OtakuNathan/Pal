@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from pal.core.prompt_compiler import PromptCompiler
+from pal.core.compaction import CompactionEngine, CompactionPolicy
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.turn_executor import TurnExecutor
@@ -37,6 +38,7 @@ class AgentTurnRuntime:
     config: RuntimeConfig
     prompt_compiler: PromptCompiler
     executor: TurnExecutor
+    compaction_engine: CompactionEngine
     state: Any
     guard_host: Any
 
@@ -60,6 +62,8 @@ class AgentTurnRuntime:
         tool_protocol_projector: Callable[[list[dict[str, Any]], int], list[dict[str, Any]]] | None = None,
         execute_tool_async: Callable[..., Awaitable[Any]] | None = None,
         handle_llm_provider_errors: bool = True,
+        compaction_policy: CompactionPolicy | None = None,
+        compaction_clock_provider: Callable[[], int] | None = None,
     ) -> "AgentTurnRuntime":
         resolved_state = state if state is not None else AgentTurnRuntimeState()
         resolved_guard_host = guard_host
@@ -68,6 +72,28 @@ class AgentTurnRuntime:
                 guard=ToolStagnationGuardProcess.from_config(config),
             )
         prompt_compiler = PromptCompiler(context)
+        if compaction_policy is None:
+            from pal.core.pal_compaction import PalCompactionPolicy
+
+            compaction_policy = PalCompactionPolicy()
+        compaction_engine = CompactionEngine(
+            policy=compaction_policy,
+            max_attempts=max(
+                1,
+                int(
+                    getattr(
+                        config,
+                        "llm_compaction_retry_attempts",
+                        3,
+                    )
+                    or 1
+                ),
+            ),
+            timeout_seconds=float(
+                getattr(config, "llm_compaction_timeout_seconds", 180.0)
+                or 180.0
+            ),
+        )
 
         def build_canonical_prompt(
             assembly_context: PromptAssemblyContext,
@@ -99,12 +125,15 @@ class AgentTurnRuntime:
             tool_protocol_projector=tool_protocol_projector,
             execute_tool_async=execute_tool_async,
             config=config,
+            compaction_engine=compaction_engine,
+            compaction_clock_provider=compaction_clock_provider,
         )
         return cls(
             context=context,
             config=config,
             prompt_compiler=prompt_compiler,
             executor=executor,
+            compaction_engine=compaction_engine,
             state=resolved_state,
             guard_host=resolved_guard_host,
         )

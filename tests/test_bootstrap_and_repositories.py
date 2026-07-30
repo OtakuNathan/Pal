@@ -2243,6 +2243,52 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(invoker.requests[0].metadata["timeout_seconds"], 37.0)
 
+    def test_llm_runtime_preserves_longer_explicit_request_timeout(self) -> None:
+        endpoint_repository = LLMEndpointRepository()
+        settings_repository = RuntimeSettingRepository()
+        endpoint_repository.ensure_defaults(
+            [
+                {
+                    "endpoint_id": "stub_endpoint",
+                    "provider": "stub",
+                    "model_id": "stub-model",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/llm",
+                    "credential_ref": "stub-key",
+                    "context_window": 10000,
+                    "max_output_tokens": 1200,
+                    "priority": 0,
+                    "enabled": True,
+                }
+            ]
+        )
+
+        class CaptureInvoker:
+            def __init__(self) -> None:
+                self.requests: list[CanonicalLLMRequest] = []
+
+            def invoke(self, endpoint, request: CanonicalLLMRequest):  # type: ignore[no-untyped-def]
+                self.requests.append(request)
+                return CanonicalLLMOutcome(text="ok", finish_reason=LLMFinishReason.STOP)
+
+        invoker = CaptureInvoker()
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
+            settings_repository=settings_repository,
+            endpoint_invoker=invoker,
+            config=RuntimeConfig(llm_request_timeout_seconds=300.0),
+        )
+
+        runtime.generate(
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=256,
+                metadata={"timeout_seconds": 3000.0},
+            )
+        )
+
+        self.assertEqual(invoker.requests[0].metadata["timeout_seconds"], 3000.0)
+
     def test_compose_runtime_loads_first_party_sqlite_vec_plugin_via_plugin_host(self) -> None:
         self.wizard.seed_defaults(self.registration)
 
@@ -2330,7 +2376,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(minion_record["attached"])
         self.assertIsNotNone(handle.core.context.module_registry.get("minion"))
         self.assertIn("minion_start_workflow", handle.core.context.capability_registry.descriptors)
-        self.assertIn("minion_workflow_status", handle.core.context.capability_registry.descriptors)
+        self.assertIn("minion_task_status", handle.core.context.capability_registry.descriptors)
         self.assertNotIn("minion_dispatch_workflow", handle.core.context.capability_registry.descriptors)
         search = handle.core.context.execution_runtime.execute(
             CapabilityCall(name="op_tool_search", args={"query": "start minion workflow"})

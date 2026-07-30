@@ -943,110 +943,6 @@ def _module_declared_paths(module: Mapping[str, Any]) -> set[str]:
     return result
 
 
-def validate_architecture_revision_scope(
-    *,
-    base_submission: Mapping[str, Any],
-    revised_submission: Mapping[str, Any],
-    changed_paths: Sequence[str],
-    scope: Mapping[str, Any],
-) -> None:
-    base_modules = {
-        str(name): _revision_comparable_contract(dict(value or {}))
-        for name, value in dict(base_submission.get("modules") or {}).items()
-    }
-    revised_modules = {
-        str(name): _revision_comparable_contract(dict(value or {}))
-        for name, value in dict(revised_submission.get("modules") or {}).items()
-    }
-    base_module_names = set(base_modules)
-    revised_module_names = set(revised_modules)
-    added_modules = revised_module_names - base_module_names
-    removed_modules = base_module_names - revised_module_names
-    updated_modules = {
-        name
-        for name in base_module_names & revised_module_names
-        if base_modules.get(name) != revised_modules.get(name)
-    }
-    affected_modules = set(scope.get("affected_modules") or [])
-    allow_topology_changes = bool(scope.get("allow_topology_changes"))
-    unexpected_modules = sorted(
-        (updated_modules | removed_modules) - affected_modules
-    )
-    if not allow_topology_changes:
-        unexpected_modules.extend(sorted(added_modules))
-    unexpected_paths = sorted(
-        path
-        for path in set(str(item) for item in changed_paths)
-        if not _revision_path_is_allowed(
-            path,
-            base_modules=base_modules,
-            revised_modules=revised_modules,
-            added_modules=added_modules,
-            removed_modules=removed_modules,
-            affected_modules=affected_modules,
-            explicit_paths=set(scope.get("allowed_paths") or []),
-            allow_topology_changes=allow_topology_changes,
-        )
-    )
-    if unexpected_modules:
-        raise ValueError(
-            "revision changes modules outside the finding scope: " + ", ".join(unexpected_modules)
-        )
-    if unexpected_paths:
-        raise ValueError(
-            "revision changes source paths outside the finding scope: " + ", ".join(unexpected_paths)
-        )
-
-
-def _revision_comparable_contract(value: Mapping[str, Any]) -> dict[str, Any]:
-    return json.loads(json.dumps(dict(value)))
-
-
-def _revision_path_is_allowed(
-    path: str,
-    *,
-    base_modules: Mapping[str, Any],
-    revised_modules: Mapping[str, Any],
-    added_modules: set[str],
-    removed_modules: set[str],
-    affected_modules: set[str],
-    explicit_paths: set[str],
-    allow_topology_changes: bool,
-) -> bool:
-    if path in explicit_paths:
-        return True
-    if not allow_topology_changes:
-        return False
-    if any(
-        _module_declares_writable_skeleton_path(dict(revised_modules[name] or {}), path)
-        for name in added_modules
-    ):
-        return True
-    if any(
-        _module_declares_writable_skeleton_path(dict(base_modules[name] or {}), path)
-        for name in removed_modules & affected_modules
-    ):
-        return True
-    for name in affected_modules & (set(base_modules) & set(revised_modules)):
-        before = _module_declares_writable_skeleton_path(dict(base_modules[name] or {}), path)
-        after = _module_declares_writable_skeleton_path(dict(revised_modules[name] or {}), path)
-        if after and not before:
-            return True
-    return False
-
-
-def _module_declares_writable_skeleton_path(module: Mapping[str, Any], path: str) -> bool:
-    paths = dict(module.get("paths") or {})
-    if path in set(str(item) for item in list(paths.get("contract_paths") or [])):
-        return True
-    return any(
-        PathScope(str(item.get("kind") or ""), str(item.get("path") or "")).matches(path)
-        for item in [
-            *list(paths.get("implementation_scopes") or []),
-        ]
-    )
-
-
 def _module_declares_path(module: Mapping[str, Any], path: str) -> bool:
     paths = dict(module.get("paths") or {})
     if path in set(str(item) for item in list(paths.get("contract_paths") or [])):
@@ -1164,9 +1060,6 @@ class GitBackedSkeletonService:
         requirements_ref: ArtifactRef,
         reference_roots: Mapping[str, Path] | None = None,
         evidence_catalog_ref: ArtifactRef | None = None,
-        revision_base_artifact: Mapping[str, Any] | None = None,
-        revision_scope: Mapping[str, Any] | None = None,
-        revision_base_path_states: Mapping[str, str] | None = None,
     ) -> ArtifactRef:
         submitted = dict(submission)
         requirements = validate_task_ledger(self.artifacts.read_json(requirements_ref))
@@ -1181,35 +1074,6 @@ class GitBackedSkeletonService:
         validation.raise_for_errors()
         normalized = dict(validation.normalized_submission)
         changed_paths = _git_changed_paths(architecture_workspace.worktree, architecture_workspace.base_sha)
-        architect_authored_paths = changed_paths
-        if revision_base_artifact is not None:
-            if revision_scope is None:
-                raise ValueError("architecture revision snapshot requires an explicit semantic scope")
-            scope_changed_paths = (
-                architecture_revision_changed_paths_since(
-                    architecture_workspace.worktree,
-                    architecture_workspace.base_sha,
-                    revision_base_path_states,
-                )
-                if revision_base_path_states is not None
-                else changed_paths
-            )
-            validate_architecture_revision_scope(
-                base_submission=dict(revision_base_artifact.get("submission") or {}),
-                revised_submission=normalized,
-                changed_paths=scope_changed_paths,
-                scope=revision_scope,
-            )
-            architect_authored_paths = scope_changed_paths
-        validate_architecture_changed_paths(
-            normalized,
-            architect_authored_paths,
-            base_submission=(
-                dict(revision_base_artifact.get("submission") or {})
-                if revision_base_artifact is not None
-                else None
-            ),
-        )
         _git(architecture_workspace.worktree, "add", "-A")
         submission_hash = _stable_hash(normalized)
         commit_key = hashlib.sha256(
@@ -1760,40 +1624,6 @@ def _compiled_path_policy(submission: Mapping[str, Any]) -> dict[str, Any]:
             "reference_only": list(paths.get("reference_only") or []),
         }
     return {"modules": modules}
-
-
-def validate_architecture_changed_paths(
-    submission: Mapping[str, Any],
-    changed_paths: Sequence[str],
-    *,
-    base_submission: Mapping[str, Any] | None = None,
-) -> tuple[str, ...]:
-    normalized_paths = tuple(
-        sorted({_normalized_repo_path(str(path)) for path in changed_paths if str(path).strip()})
-    )
-    undeclared = [
-        path
-        for path in normalized_paths
-        if not _architect_path_is_declared(path, submission)
-        and not (
-            base_submission is not None
-            and _architect_path_is_declared(path, base_submission)
-        )
-    ]
-    if undeclared:
-        raise ValueError(
-            "Architect changed paths outside declared contract skeleton paths: "
-            + ", ".join(undeclared)
-        )
-    return normalized_paths
-
-
-def _architect_path_is_declared(path: str, submission: Mapping[str, Any]) -> bool:
-    for module in dict(submission.get("modules") or {}).values():
-        paths = dict(dict(module).get("paths") or {})
-        if path in set(str(item) for item in list(paths.get("contract_paths") or [])):
-            return True
-    return False
 
 
 def _path_scopes_overlap(left: PathScope, right: PathScope) -> bool:

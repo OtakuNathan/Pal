@@ -259,6 +259,14 @@ class FileReadTool:
         full_view = start == 1 and (total_lines == 0 or end == total_lines)
         version = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+        # A logical-session read is authorized only after its result is
+        # delivered into L1. Retire an older snapshot now when the observed
+        # bytes differ, so the new delivery can replace it. If the snapshot
+        # already names these bytes, preserve it (including mutation authority)
+        # and avoid downgrading a complete view on a partial reread.
+        if self.defer_delivery and self.cache.get_valid_state(resolved) is None:
+            self.cache.invalidate(resolved)
+
         already_visible = self.visibility_cache.covers(
             self.visibility_scope,
             resolved,

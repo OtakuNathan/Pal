@@ -47,7 +47,7 @@ Storage boundary:
 
 `Memory` 是 `Pal` 的分层记忆系统：
 
-- `L1` 保存压缩后的近端对话
+- `L1` 保存当前逻辑会话的完整工作集，以及预算触发后替换该工作集的 compact continuity
 - `L2` 保存当前 runtime 真正需要的 hot context
 - `L3` 保存长期可检索的 durable memory
 
@@ -55,43 +55,42 @@ Storage boundary:
 
 ```mermaid
 flowchart LR
-    TURN["Raw Turn"] --> L1["L1\ncompressed turns + summaries"]
-    L1 -->|compact| L2["L2\nhot working set"]
+    TURN["Input + closed tool protocol + replies"] --> L1["L1\ncomplete logical working set"]
+    L1 -->|compact: atomic replace| L1
+    L3 -->|recall| L2["L2\nhot recall cache"]
     L2 -->|retire| L3["L3\nsearchable durable store"]
-    L3 -->|recall| L2
 ```
 
 ## L1
 
 ### 定义
 
-`L1` 是对话本身，但不是 raw transcript append-only log。
-
-每轮结束后，需要做一次极低温、近无损的语义压缩，将压缩后的 turn transcript 放入 `L1`。
-
-这里的目标不是抽象总结，而是保留尽可能完整的角色顺序与语义内容，同时削去明显噪音和冗余 payload。
+`L1` 是当前 logical conversation / role session 的完整工作集。输入、闭合的
+tool call/result 批次和回复增量进入 L1；只有真实 context budget 要求时才做
+semantic compact，并原子地以一个 continuity checkpoint 替换冻结的旧 L1。
 
 ### 内容
 
-- compressed turns
-- conversation summaries
+- current input and completed turns
+- closed tool protocol
+- compact continuity checkpoint（发生 compact 后）
 
 ### 边界
 
 - `L1` 属于 runtime memory
 - `L1` 只存在 RAM
-- 进程重启后 `L1` 丢失
+- Pal 进程重启后 `L1` 丢失；durable Minion role session 会完整序列化并恢复 L1
 - `L1` 不属于 Core durable state
 - `L1` 不是 summary bucket
 
 ### Runtime Shape
 
-`L1` 更接近 recent turn stream / bounded transcript buffer，而不是业务队列。
+`L1` 更接近 logical process working set，而不是业务队列。
 
 它的职责是：
 
-- 承接每轮结束后的压缩 turn
-- 为后续 `compact` 提供近端上下文源
+- 承接当前逻辑会话的完整执行连续性
+- 作为 `compact` 唯一语义输入
 
 它不应被建模成：
 
@@ -733,16 +732,20 @@ embedding provider 不可用时退化为原有 hash 去重。
 
 `compact` 表示：
 
-- 从 `L1` 提炼到 `L2`
-- 去掉冗余上下文
-- 保留当前工作真正需要的 distilled content
+- 冻结当前 L1
+- 从该 L1 生成结构化 continuity
+- 原子替换 L1，并清理依赖该旧 prompt generation 的投影
 
 `compact` 不是 durable write。
 
-当前实现区分两类结构化 compact：
+当前实现由 Core 的共享 compaction engine 负责预算防护、原子历史单元裁剪、模型尝试、结果校验和提交编排。Memory 只接收已经由 host policy 校验并渲染好的 `summary_entry`，然后原子替换 L1、清理依赖的 L2 projection；提交失败时必须整体回滚。
 
-- `pal.compaction.pal.v2`：本体会话连续性。按 committed turn 分层保留近端原文、轻压缩中端上下文、退役远端上下文；内部 payload 是结构化 dict，但 prompt 渲染为 XML 包裹 Markdown。允许提出 `memory_candidates`，但自动和手动 compact 的候选都必须 approval 后才可进入 L3。
-- `pal.compaction.minion.v1`：minion 任务恢复参考包。minion compact 不使用 LLM 摘要 prompt；它是机械 compact：只收集当前 active turn 之前已经提交的 user/task inputs，并把它们渲染为 already-handled/superseded history。work order、milestone、checkpoint、repair、todo/checklist、cursor 等事实仍以 minion 账本/仓库为 source of truth，不重复写进 compact。不生成 `memory_candidates`。
+host policy 区分两类结构化 compact：
+
+- `pal.compaction.pal.v2`：本体会话连续性。保留当前焦点、用户请求、操作约束、决策、问题和近期对话。允许提出 `memory_candidates`，但自动和手动 compact 的候选都必须 approval 后才可进入 L3。
+- `pal.compaction.minion.v3`：只保存工作现场，包括技术路线、当前工作、活跃错误、活跃问题和下一步动作。角色任务由 `task.yaml` 或绑定的 `ModuleWorkView` 机械投影，不能由 compactor 重写。闭合的 tool protocol 增量进入 L1，冻结的 L1 是 compact 唯一输入；不再维护第二份 protocol journal，不生成 `memory_candidates`，也不保存原始思维链。
+
+自动 compact 只由真实 context budget 触发；Pal 的 committed user-turn clock 和 Minion 的 successful consumable LLM-round clock 仅用于 hot tail、checkpoint 和诊断。
 
 ## retire
 
@@ -879,9 +882,11 @@ LLM 不应逐字段消费 `L2` 内部 schema。
 
 - `L1/L2` 只存在 RAM。
 - `L3` 是唯一 durable memory layer。
-- `L1` 是近无损压缩 transcript，不是 summary。
+- `L1` 是当前 logical process 的完整工作集，也是 compact 唯一真相源。
+- L1 中每个 tool-call batch 必须在同一 transcript 内闭合；orphan、
+  incomplete 或 late unmatched tool result 不得进入 L1。
 - `L2` 的真相结构以 entry metadata + lifecycle state 为主。
-- `L1 -> L2` 叫 compact。
+- `L1 -> compact continuity -> L1` 叫 compact。
 - `L2 -> L3` 叫 retire。
 - `L3 -> L2` 叫 recall。
 - `commit` 是显式写入，不带 `level`。

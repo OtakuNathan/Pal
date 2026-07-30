@@ -365,6 +365,7 @@ def _architecture_worker_started_reducer(
         "workspace_fingerprint",
         "workspace_lock_path",
         "pending_architecture_submission_ref",
+        "architect_checklist_ref",
     ):
         updated.pop(field, None)
     return updated

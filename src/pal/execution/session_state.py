@@ -266,6 +266,7 @@ class FileSnapshot:
     complete: bool
     created_user_turn: int
     expires_at_user_turn: int
+    source: str = "delivery"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -275,6 +276,7 @@ class FileSnapshot:
             "complete": self.complete,
             "created_user_turn": self.created_user_turn,
             "expires_at_user_turn": self.expires_at_user_turn,
+            "source": self.source,
         }
 
     @classmethod
@@ -286,6 +288,11 @@ class FileSnapshot:
             complete=bool(value.get("complete")),
             created_user_turn=max(0, int(value.get("created_user_turn") or 0)),
             expires_at_user_turn=max(0, int(value.get("expires_at_user_turn") or 0)),
+            source=(
+                "mutation"
+                if str(value.get("source") or "") == "mutation"
+                else "delivery"
+            ),
         )
 
 
@@ -351,6 +358,7 @@ class LogicalExecutionStateBackend(Protocol):
         digest: str,
         total_lines: int,
         complete: bool,
+        source: str = "mutation",
     ) -> None:
         ...
 
@@ -549,6 +557,7 @@ class InMemoryLogicalExecutionState:
         digest: str,
         total_lines: int,
         complete: bool,
+        source: str = "mutation",
     ) -> None:
         with self._lock:
             state = self._sessions.setdefault(logical_session_id, _SessionState())
@@ -561,6 +570,9 @@ class InMemoryLogicalExecutionState:
                 created_user_turn=state.current_user_turn,
                 expires_at_user_turn=(
                     state.current_user_turn + state.retention_user_turns
+                ),
+                source=(
+                    "mutation" if str(source) == "mutation" else "delivery"
                 ),
             )
 
@@ -642,6 +654,19 @@ class InMemoryLogicalExecutionState:
         )
         previous_snapshot = state.snapshots.get(manifest.file_key)
         delivered_grant = state.grants[key]
+        if (
+            previous_snapshot is not None
+            and previous_snapshot.source == "mutation"
+            and previous_snapshot.digest != manifest.digest
+        ):
+            return
+        if (
+            previous_snapshot is not None
+            and previous_snapshot.digest == manifest.digest
+            and previous_snapshot.complete
+            and not delivered_grant.complete
+        ):
+            return
         state.snapshots[manifest.file_key] = FileSnapshot(
             file_key=manifest.file_key,
             digest=manifest.digest,
@@ -658,6 +683,7 @@ class InMemoryLogicalExecutionState:
             expires_at_user_turn=(
                 state.current_user_turn + state.retention_user_turns
             ),
+            source="delivery",
         )
 
 

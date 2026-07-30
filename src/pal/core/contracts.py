@@ -49,5 +49,6 @@ class CoreRuntimeState:
     channel_turn_transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     prompt_log_enabled: bool = False
     mode: str = "default"
+    compaction_user_turn_count: int = 0
     detached_modules: set[str] = field(default_factory=set)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)

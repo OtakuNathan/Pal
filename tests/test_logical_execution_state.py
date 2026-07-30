@@ -13,6 +13,7 @@ from pal.execution.session_state import (
     PagerHandleManifest,
 )
 from pal.minion.scoped_execution import MinionScopedExecutionRuntime
+from pal.minion.v2.execution_state import _apply_delivery as _apply_manager_delivery
 from pal.llm.contracts import CanonicalToolCall
 
 
@@ -335,6 +336,90 @@ class LogicalExecutionStateTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         self.assertTrue(snapshot.complete)
 
+    def test_historical_delivery_does_not_replace_mutation_snapshot(self) -> None:
+        old_delivery = FileDeliveryManifest(
+            file_key="/workspace/input.txt",
+            digest="digest-old",
+            total_lines=1,
+            spans=(
+                FileDeliverySpan(
+                    start_offset=0,
+                    end_offset=5,
+                    start_line=1,
+                    end_line=1,
+                    visible_end_in_line=5,
+                    line_length=5,
+                ),
+            ),
+        )
+        self.backend.reconcile_projection(
+            logical_session_id="session-a",
+            projection=("old-read",),
+            deliveries=(old_delivery.to_dict(),),
+        )
+        self.backend.set_file_snapshot(
+            logical_session_id="session-a",
+            file_key="/workspace/input.txt",
+            digest="digest-after-own-edit",
+            total_lines=1,
+            complete=True,
+            source="mutation",
+        )
+
+        self.backend.reconcile_projection(
+            logical_session_id="session-a",
+            projection=("old-read", "edit-result"),
+            deliveries=(old_delivery.to_dict(),),
+        )
+
+        snapshot = self.backend.file_snapshot(
+            logical_session_id="session-a",
+            file_key="/workspace/input.txt",
+            digest="digest-after-own-edit",
+        )
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.source, "mutation")
+
+    def test_manager_projection_preserves_mutation_snapshot(self) -> None:
+        state = {
+            "current_user_turn": 2,
+            "context_epoch": 1,
+            "retention_user_turns": 5,
+            "grants": {},
+            "snapshots": {
+                "/workspace/input.txt": {
+                    "file_key": "/workspace/input.txt",
+                    "digest": "digest-after-own-edit",
+                    "total_lines": 1,
+                    "complete": True,
+                    "created_user_turn": 2,
+                    "expires_at_user_turn": 7,
+                    "source": "mutation",
+                }
+            },
+        }
+        historical = FileDeliveryManifest(
+            file_key="/workspace/input.txt",
+            digest="digest-old",
+            total_lines=1,
+            spans=(
+                FileDeliverySpan(
+                    start_offset=0,
+                    end_offset=5,
+                    start_line=1,
+                    end_line=1,
+                    visible_end_in_line=5,
+                    line_length=5,
+                ),
+            ),
+        )
+
+        _apply_manager_delivery(state, historical.to_dict())
+
+        snapshot = state["snapshots"]["/workspace/input.txt"]
+        self.assertEqual(snapshot["digest"], "digest-after-own-edit")
+        self.assertEqual(snapshot["source"], "mutation")
+
     def test_file_snapshot_expires_after_five_new_semantic_inputs(self) -> None:
         self.backend.set_file_snapshot(
             logical_session_id="session-a",
@@ -462,6 +547,79 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 "omega\nbeta\n",
             )
 
+    def test_historical_read_delivery_cannot_roll_back_self_mutation_snapshot(
+        self,
+    ) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        runtime = core.context.execution_runtime
+        runtime.begin_tool_result_turn(
+            turn_id="turn-self-mutation",
+            scope_key="logical-file-session",
+            input_id="assignment-1",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "input.txt"
+            path.write_text("alpha\nbeta\n", encoding="utf-8")
+            read = runtime.execute_tool(
+                CanonicalToolCall(
+                    name="read_file",
+                    args={"file_path": str(path)},
+                    call_id="read-1",
+                ),
+                turn_id="turn-self-mutation",
+            )
+            tool_message = {
+                "role": "tool",
+                "tool_call_id": "read-1",
+                "content": read.llm_text,
+            }
+            delivery = {"read-1": dict(read.context_delivery or {})}
+            runtime.reconcile_tool_context(
+                turn_id="turn-self-mutation",
+                original_messages=[tool_message],
+                projected_messages=[tool_message],
+                delivery_records=delivery,
+            )
+            first = runtime.execute_tool(
+                CanonicalToolCall(
+                    name="edit_file",
+                    args={
+                        "file_path": str(path),
+                        "old_string": "alpha",
+                        "new_string": "omega",
+                    },
+                    call_id="edit-1",
+                ),
+                turn_id="turn-self-mutation",
+            )
+            self.assertTrue(first.ok)
+
+            # The old read result remains in L1 on the next round. Replaying
+            # its delivery must not replace the mutation-advanced snapshot.
+            runtime.reconcile_tool_context(
+                turn_id="turn-self-mutation",
+                original_messages=[tool_message],
+                projected_messages=[tool_message],
+                delivery_records=delivery,
+            )
+            second = runtime.execute_tool(
+                CanonicalToolCall(
+                    name="edit_file",
+                    args={
+                        "file_path": str(path),
+                        "old_string": "beta",
+                        "new_string": "gamma",
+                    },
+                    call_id="edit-2",
+                ),
+                turn_id="turn-self-mutation",
+            )
+
+            self.assertTrue(second.ok, second.llm_text)
+            self.assertEqual(path.read_text(encoding="utf-8"), "omega\ngamma\n")
+
     def test_context_compaction_rebuilds_only_exact_retained_file_ranges(
         self,
     ) -> None:
@@ -540,6 +698,93 @@ class LogicalExecutionStateTests(unittest.TestCase):
             self.assertIsNotNone(compacted)
             self.assertFalse(compacted.complete)
             self.assertEqual(compacted.covered_ranges, ((1, 1),))
+
+    def test_compaction_projection_clears_file_visibility_without_expiring_pager(
+        self,
+    ) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        runtime = core.context.execution_runtime
+        context = runtime.begin_tool_result_turn(
+            turn_id="turn-pager-compact",
+            scope_key="pager-compact-session",
+            input_id="assignment-pager-compact",
+            retention_user_turns=5,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "pager-compact.txt"
+            path.write_text("alpha\nbeta\n", encoding="utf-8")
+            read = runtime.execute_tool(
+                CanonicalToolCall(
+                    name="read_file",
+                    args={"file_path": str(path)},
+                    call_id="read-pager-compact",
+                ),
+                turn_id="turn-pager-compact",
+            )
+            tool_message = {
+                "role": "tool",
+                "tool_call_id": "read-pager-compact",
+                "content": read.llm_text,
+            }
+            runtime.reconcile_tool_context(
+                turn_id="turn-pager-compact",
+                original_messages=[tool_message],
+                projected_messages=[tool_message],
+                delivery_records={
+                    "read-pager-compact": dict(
+                        read.context_delivery or {}
+                    )
+                },
+            )
+            manifest = runtime.tool_result_pager.store(
+                runtime_root=None,
+                turn_id="turn-pager-compact",
+                result_ref="pager-before-compact",
+                tool_name="read_file",
+                status="ok",
+                ok=True,
+                rendered=read.llm_text,
+                page_size=256,
+                context_delivery=dict(read.context_delivery or {}),
+            )
+
+            runtime.reconcile_tool_context(
+                turn_id="turn-pager-compact",
+                original_messages=[tool_message],
+                projected_messages=[],
+                delivery_records={
+                    "read-pager-compact": dict(
+                        read.context_delivery or {}
+                    )
+                },
+            )
+
+            page = runtime.read_tool_result_page(
+                result_ref=manifest.result_ref,
+                turn_id="turn-pager-compact",
+            )
+            self.assertIsNotNone(page)
+            self.assertEqual(page.state, "ok")
+            self.assertEqual(page.current_user_turn, context.current_user_turn)
+            self.assertEqual(
+                page.expires_at_user_turn,
+                context.current_user_turn + 5,
+            )
+            reread = runtime.execute_tool(
+                CanonicalToolCall(
+                    name="read_file",
+                    args={"file_path": str(path)},
+                    call_id="read-after-compact",
+                ),
+                turn_id="turn-pager-compact",
+            )
+            self.assertTrue(reread.ok)
+            self.assertFalse(
+                bool((reread.structured or {}).get("unchanged"))
+            )
+            self.assertIn("alpha", reread.llm_text)
 
 
 if __name__ == "__main__":

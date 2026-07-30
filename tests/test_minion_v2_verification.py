@@ -2221,6 +2221,86 @@ class MinionV2VerificationTests(unittest.TestCase):
             ],
         )
 
+    def test_manager_appends_verifier_findings_to_coder_checklist(self) -> None:
+        work_view = self.runtime_root / "repair-work-view.json"
+        work_view.write_text(
+            json.dumps(
+                {
+                    "module_name": "font_backend",
+                    "requirements": {"sections": {}},
+                    "implementation_scopes": [{"kind": "directory", "path": "src/font"}],
+                    "verification_corpus": {
+                        "kind": "directory",
+                        "path": "tests/font_backend",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        repair_bill = self.runtime_root / "repair-bill.json"
+        repair_bill.write_text(
+            json.dumps(
+                {
+                    "module_name": "font_backend",
+                    "findings": [
+                        {
+                            "finding_key": "preserve_empty_input",
+                            "finding_kind": "module_defect",
+                            "priority": "p1",
+                            "summary": "Empty input loses the existing state.",
+                        },
+                        {
+                            "finding_key": "release_native_handle",
+                            "finding_kind": "module_defect",
+                            "priority": "p1",
+                            "summary": "The shutdown path leaks the native handle.",
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        workspace = self._bind_workspace(
+            {
+                "reference_paths": [
+                    {"name": "module_work_view", "path": str(work_view)},
+                    {"name": "repair_bill", "path": str(repair_bill)},
+                ],
+            },
+            role="implementation",
+        )
+
+        planned = self._candidate_call(
+            workspace,
+            "op_minion_candidate_update_checklist",
+            {
+                "plan": [
+                    {
+                        "step": "apply the local repair",
+                        "status": "completed",
+                    }
+                ]
+            },
+        )
+        self.assertTrue(planned.ok, planned.text)
+        self.assertEqual(
+            planned.structured["checklist"]["plan"],
+            [
+                {
+                    "step": "apply the local repair",
+                    "status": "completed",
+                },
+                {
+                    "step": "resolve finding: preserve_empty_input",
+                    "status": "pending",
+                },
+                {
+                    "step": "resolve finding: release_native_handle",
+                    "status": "pending",
+                },
+            ],
+        )
+
     def test_candidate_checklist_contract_is_reloadable_and_evidence_free(self) -> None:
         self.assertEqual(
             MinionV2CandidateUpdateChecklistInput.__module__,

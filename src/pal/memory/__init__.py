@@ -1,5 +1,4 @@
 from pal.memory.contracts import (
-    CompactionProfile,
     L1Store,
     L1MessageKind,
     L1TranscriptMessage,
@@ -54,7 +53,6 @@ __all__ = [
     "DEFAULT_OLLAMA_MODEL_NAME",
     "DEFAULT_OLLAMA_PROVIDER_ID",
     "DEFAULT_OLLAMA_REMOTE_TIMEOUT_SECONDS",
-    "CompactionProfile",
     "EmbeddingProviderPort",
     "EmbeddingRuntimePort",
     "HashingEmbedder",

@@ -43,9 +43,18 @@ Wizard (outside runtime — provisions databases, first-run setup)
 
 Pal has three memory layers, modeled after how you actually think:
 
-- **L1** — the current conversation. Fleeting, gone when the turn ends.
+- **L1** — the complete working set of the current logical conversation or
+  role session. It is runtime state; durable Minion sessions checkpoint and
+  restore it across worker-process restarts.
 - **L2** — recent context (128 items, 8 top-of-mind). Runtime-only, with hot/ghost/dormant heat states.
 - **L3** — durable long-term memory. Pluggable backends (default: `sqlite-vec` with Ollama vector embeddings + FTS). This is where Pal remembers your preferences, project facts, and lessons learned.
+
+Context compaction is split across explicit ownership boundaries: Core owns
+budgeting, history-unit selection, retries, validation, and commit ordering;
+Memory owns only the atomic L1 replacement plus dependent L2
+cleanup/rollback; each agent host policy owns the semantic checkpoint schema
+and rendering. Automatic compaction is driven by the real context budget, not
+a fixed turn interval.
 
 ### Capability Forest
 

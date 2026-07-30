@@ -285,6 +285,54 @@ class MinionV2Repository:
                 },
             )
 
+    def list_workflow_node_projections(
+        self,
+        workflow_id: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return the Manager-owned semantic node projection for one workflow."""
+        self.ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minion_v2_node_projection
+                WHERE workflow_id = ?
+                ORDER BY updated_at, node_run_id
+                """,
+                (str(workflow_id),),
+            ).fetchall()
+        return tuple(
+            _decode_json_columns(
+                row,
+                {
+                    "dependency_node_ids_json": "dependency_node_ids",
+                    "blocker_json": "blocker",
+                },
+            )
+            for row in rows
+        )
+
+    def list_workflow_role_invocations(
+        self,
+        workflow_id: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return role lifecycle rows used to build a public semantic status."""
+        self.ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT invocation_id, workflow_id, aggregate_type, aggregate_id,
+                       role, mode, status, last_completed_turn,
+                       total_input_tokens, total_output_tokens,
+                       total_latency_ms, total_tool_latency_ms,
+                       total_wall_latency_ms, created_at, updated_at
+                FROM minion_v2_role_invocations
+                WHERE workflow_id = ?
+                ORDER BY created_at, invocation_id
+                """,
+                (str(workflow_id),),
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
+
     def bind_channel_workflow(self, *, actor_id: str, channel_id: str, workflow_id: str) -> None:
         self.ensure_schema()
         actor = str(actor_id or "").strip()
@@ -342,7 +390,10 @@ class MinionV2Repository:
             clauses.append("s.state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')")
         text = str(query or "").strip().lower()
         if text:
-            clauses.append("(lower(coalesce(t.title, '')) LIKE ? OR lower(coalesce(t.objective, '')) LIKE ?)")
+            clauses.append(
+                "(lower(coalesce(json_extract(s.payload_json, '$.workflow_name'), t.title, '')) LIKE ? "
+                "OR lower(coalesce(t.objective, '')) LIKE ?)"
+            )
             pattern = f"%{text}%"
             parameters.extend((pattern, pattern))
         parameters.append(max(1, min(int(limit), 100)))
@@ -351,6 +402,7 @@ class MinionV2Repository:
                 """
                 SELECT s.aggregate_id AS workflow_id, s.state AS workflow_state,
                        s.updated_at, coalesce(t.title, '') AS task_title,
+                       coalesce(json_extract(s.payload_json, '$.workflow_name'), t.title, '') AS workflow_name,
                        coalesce(t.objective, '') AS task_objective
                 FROM minion_v2_aggregate_snapshots AS s
                 LEFT JOIN minion_v2_task_projection AS t

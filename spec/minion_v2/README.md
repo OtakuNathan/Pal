@@ -46,6 +46,11 @@ the Python worker spine implements it.
   relation used by `TransitionEngine` and checks exhaustive classification,
   finite dynamic targets, recovery actions, control settlement, triage
   refresh, and paused-state resume.
+- `FileMutationAuthorization.tla` models one logical session's read-before-
+  mutate authorization. It proves that a successful self-mutation advances
+  the snapshot atomically, historical read deliveries cannot roll it back,
+  external writes require a fresh read, and partial reads never authorize a
+  mutation.
 
 The models intentionally abstract prompts, artifact contents, Git, and provider
 details. Those are values carried by transitions, not additional lifecycle

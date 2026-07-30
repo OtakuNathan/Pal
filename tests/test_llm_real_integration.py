@@ -20,7 +20,14 @@ from pal.bootstrap import compose_runtime
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import EndpointConfig, ResponseHandle
 from pal.core.runtime_config import RuntimeConfig
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core import (
+    CompactionClockKind,
+    CompactionEngine,
+    CompactionSnapshot,
+    PalCore,
+    register_with_core as register_core_with_core,
+)
+from pal.core.pal_compaction import PalCompactionPolicy
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import EventEnvelope, PalV2Database
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
@@ -31,6 +38,7 @@ from pal.llm.runtime import OpenAIChatEndpointInvoker
 from pal.llm.secret_store import EncryptedFileSecretStore, InMemorySecretStore, SecretRef
 from pal.minion.ipc import open_manager_connection
 from pal.minion.runner import MinionRunner, MinionRuntimeBundle, build_slim_minion_runtime
+from pal.memory import L1TranscriptMessage, MemoryService
 from pal.shared import EventKind, LLMFinishReason, PromptAssemblyContext, RuntimeStatus, MinionInvocationPack
 from pal.skill import SkillRepository, SkillService, register_with_core as register_skill_with_core
 from pal.skill.prompt import SkillPromptFragmentProvider
@@ -525,57 +533,64 @@ class RealLLMIntegrationTests(unittest.TestCase):
         self.assertIn("PAL_ONLINE", (outcome.text or outcome.reasoning_text))
         self.assertEqual(runtime.last_endpoint_id, "real-openai_chat-test")
 
-    def test_real_llm_summarize_compaction_returns_text(self) -> None:
+    def test_real_llm_shared_compaction_engine_returns_valid_checkpoint(self) -> None:
         runtime = _real_runtime(max_output_tokens=4096)
-
-        summary = runtime.summarize_compaction(
-            (
-                "User prefers concise Chinese answers. "
-                "Pal debugged a Telegram no-response incident and added SIGUSR1 async task dumps. "
-                "The next task is to validate compact stability with a real LLM."
-            ),
-            max_output_tokens=1024,
+        memory = MemoryService()
+        memory.l1_store.items = [
+            [
+                L1TranscriptMessage(
+                    role="user",
+                    content="L3 is already fine; do not change it for compact.",
+                ),
+                L1TranscriptMessage(
+                    role="assistant",
+                    content="Agreed to keep L3 untouched.",
+                ),
+            ],
+            [
+                L1TranscriptMessage(
+                    role="user",
+                    content=(
+                        "Implement Pal compact v2 and validate compact stability "
+                        "with a real LLM."
+                    ),
+                )
+            ],
+            [
+                L1TranscriptMessage(
+                    role="user",
+                    content="Run the real shared compaction engine test.",
+                )
+            ],
+        ]
+        snapshot = CompactionSnapshot.capture(
+            memory,
+            target_input_budget=8_192,
+            reserved_output_tokens=2_048,
+            clock_kind=CompactionClockKind.USER_TURN,
+            clock_value=2,
+        )
+        run_result = asyncio.run(
+            CompactionEngine(PalCompactionPolicy()).run(
+                snapshot,
+                llm_runtime=runtime,
+                memory_service=memory,
+            )
         )
 
-        self.assertGreater(len(summary.strip()), 10)
-
-    def test_real_llm_structured_compaction_returns_summary_object(self) -> None:
-        runtime = _real_runtime(max_output_tokens=4096)
-
-        result = runtime.compact_memory_structured(
-            (
-                "<compact_source kind=\"pal\" schema_target=\"pal.compaction.pal.v2\">\n"
-                "## Previous Compact Seed\n"
-                "- Active operating instruction: answer concisely in Chinese when the user writes Chinese.\n"
-                "- Retired context: an older plan to modify minion L3 storage was cancelled.\n"
-                "\n"
-                "## Warm Turns To Compress\n"
-                "user: L3 is already fine; do not change it for compact.\n"
-                "assistant: Agreed to keep L3 untouched.\n"
-                "\n"
-                "## Hot Raw Turns\n"
-                "user: Implement Pal compact v2. Preserve active operating instructions, active requests, temporary task state, and retired context.\n"
-                "assistant: Implemented the compact v2 source and renderer.\n"
-                "user: Run a real LLM compact test and make compact temperature very low.\n"
-                "</compact_source>"
-            ),
-            max_output_tokens=2048,
-        )
-
-        self.assertIsInstance(result, dict)
-        self.assertIsInstance(result.get("summary"), dict)
-        self.assertTrue(str(result["summary"].get("summary") or "").strip())
-        self.assertEqual(result.get("schema"), "pal.compaction.pal.v2")
-        self.assertEqual(result.get("kind"), "pal")
-        continuity = result.get("continuity")
+        self.assertTrue(run_result.success)
+        self.assertIsNotNone(run_result.summary_entry)
+        result = run_result.summary_entry.payload
+        self.assertEqual(result["schema"], "pal.compaction.pal.v2")
+        self.assertEqual(result["kind"], "pal")
+        continuity = result["continuity"]
         self.assertIsInstance(continuity, dict)
-        assert isinstance(continuity, dict)
         self.assertTrue(continuity.get("primary_request_and_intent") or continuity.get("current_focus"))
         self.assertIsInstance(continuity.get("active_operating_instructions"), list)
         self.assertIsInstance(continuity.get("active_requests"), list)
         self.assertIsInstance(continuity.get("temporary_task_state"), list)
         self.assertIsInstance(continuity.get("retired_or_superseded_context"), list)
-        self.assertIsInstance(result.get("memory_candidates"), list)
+        self.assertIsInstance(result["memory_candidates"], list)
 
     def test_real_runtime_channel_turn_replies_through_pal_core(self) -> None:
         runtime_root = Path(tempfile.mkdtemp(prefix="pal_real_e2e_"))

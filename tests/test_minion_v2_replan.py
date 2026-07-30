@@ -284,6 +284,44 @@ class MinionV2ReplanTests(unittest.TestCase):
 
         self.assertEqual(view["finding_count"], 1)
         self.assertEqual(view["findings"][0]["summary"], "ABI declaration is invalid")
+        self.assertRegex(view["findings"][0]["finding_key"], r"^finding_[0-9a-f]{16}$")
+        self.assertEqual(view["findings"][0]["priority"], "p1")
+        self.assertEqual(view["findings"][0]["disposition"], "blocking")
+
+    def test_architecture_finding_view_preserves_reviewer_semantic_identity(self) -> None:
+        view = architecture_finding_semantic_view(
+            {
+                "findings": [
+                    {
+                        "finding_key": "missing_static_contract",
+                        "finding_kind": "contract_defect",
+                        "priority": "p2",
+                        "disposition": "blocking",
+                        "summary": "The public overload remains well-formed for an invalid type.",
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(
+            view["findings"][0],
+            {
+                "finding_key": "missing_static_contract",
+                "finding_kind": "contract_defect",
+                "priority": "p2",
+                "disposition": "blocking",
+                "summary": "The public overload remains well-formed for an invalid type.",
+                "severity": "error",
+                "module_name": "",
+                "affected_modules": [],
+                "requirements": [],
+                "locations": [],
+                "suggested_repair_boundary": [],
+                "revision_targets": [],
+                "expected": None,
+                "actual": None,
+            },
+        )
 
     def test_same_fingerprint_preserves_both_repair_bills(self) -> None:
         self._create_reviewing_node("node_a", "module_a")

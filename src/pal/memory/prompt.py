@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 
 from pal.memory.compact import strip_persistent_system_reminders
 from pal.memory.contracts import MemoryPack
-from pal.memory.rendering import is_compaction_payload, render_compact_context_for_llm
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
 
 if TYPE_CHECKING:
@@ -199,9 +198,6 @@ def _render_current_summary_context(pack: MemoryPack) -> str:
         return ""
     entry = pack.current_summary
     summary = entry.summary.strip()
-    payload = dict(entry.payload or {})
-    if is_compaction_payload(payload):
-        return render_compact_context_for_llm(summary=summary, payload=payload)
     text = entry.rendered.strip() or summary
     if text.startswith("<conversation_summary") or text.startswith("<compact_context"):
         return text

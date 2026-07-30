@@ -4,6 +4,7 @@ import ast
 import asyncio
 import contextlib
 import importlib
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -24,6 +25,8 @@ from pal.channel import (
 )
 from pal.control import ControlPlane, register_with_core as register_control_with_core
 from pal.core import (
+    CompactionClockKind,
+    CompactionSnapshot,
     MainLoop,
     PalCore,
     ToolExecutionRecord,
@@ -47,6 +50,7 @@ from pal.execution.tool_facade import (
     ToolGuidance,
     ToolHandlerResult,
 )
+from pal.core.pal_compaction import PalCompactionPolicy
 from tests.capability_fixture import mount_test_capability
 from pal.failure import (
     FAILURE_VERIFICATION_FAILED,
@@ -595,11 +599,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.publish_module_capabilities("minion")
 
             result = core.context.execution_runtime.execute(
-                CapabilityCall(name="minion_workflow_status", args={})
+                CapabilityCall(name="minion_task_status", args={})
             )
 
             self.assertEqual(result.status, RuntimeStatus.INVALID)
-            self.assertIn("No Minion workflow", result.llm_text)
+        self.assertIn("No active Minion Task", result.llm_text)
 
     def test_execution_compiles_one_facade_generation_without_legacy_tool_registrations(self) -> None:
         core = PalCore()
@@ -915,6 +919,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(capability["alias"], "run_shell")
         self.assertIn("shell", result.llm_text)
         self.assertIn("bounded directory listings", capability["description"])
+        self.assertIn(
+            "prefer rg for text search and rg --files for file enumeration",
+            capability["description"],
+        )
         self.assertIn(
             "Pal runtime, module, capability, or Minion state",
             capability["description"],
@@ -1560,14 +1568,17 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             processed = core.run_until_idle()
 
             self.assertIn("proactive.trigger", [item.event_kind for item in processed])
-            self.assertEqual(len(memory_service.l1_store.items), 1)
-            transcript = memory_service.l1_store.items[0]
+            transcript = [
+                message
+                for item in memory_service.l1_store.items
+                for message in item
+            ]
             self.assertEqual(transcript[0].role, "user")
             self.assertIn("<proactive_trigger>", transcript[0].content)
             self.assertIn("</proactive_trigger>", transcript[0].content)
             self.assertIn("Goal: Summarize repository updates", transcript[0].content)
-            self.assertEqual(transcript[1].role, "assistant")
-            self.assertEqual(transcript[1].content, "Daily digest complete.")
+            self.assertEqual(transcript[-1].role, "assistant")
+            self.assertEqual(transcript[-1].content, "Daily digest complete.")
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -1687,8 +1698,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             latest = proactive_repository.latest_run("daily_digest")
             self.assertIsNotNone(latest)
             self.assertEqual(latest.output_summary, "Starting digest.\n\nDaily digest complete.")
-            self.assertEqual(len(memory_service.l1_store.items), 1)
-            assistant_messages = [item.content for item in memory_service.l1_store.items[0] if item.role == "assistant"]
+            assistant_messages = [
+                message.content
+                for transcript in memory_service.l1_store.items
+                for message in transcript
+                if message.role == "assistant"
+            ]
             self.assertEqual(assistant_messages, ["Starting digest.", "Daily digest complete."])
         finally:
             database.close()
@@ -1829,23 +1844,23 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             register_minion_with_core(core.context, runtime_root=Path(tmp))
             core.publish_module_capabilities("minion")
             try:
-                self.assertIn("minion_workflow_status", core.context.capability_registry.descriptors)
+                self.assertIn("minion_task_status", core.context.capability_registry.descriptors)
                 self.assertIn("minion.manager", core.context.event_source_registry.sources)
 
                 detached = core.detach_module("minion")
                 self.assertEqual(detached, "ok")
-                self.assertNotIn("minion_workflow_status", core.context.capability_registry.descriptors)
+                self.assertNotIn("minion_task_status", core.context.capability_registry.descriptors)
                 self.assertNotIn("minion.manager", core.context.event_source_registry.sources)
 
                 reattached = core.reattach_module("minion")
                 self.assertEqual(reattached, "ok")
-                self.assertIn("minion_workflow_status", core.context.capability_registry.descriptors)
+                self.assertIn("minion_task_status", core.context.capability_registry.descriptors)
                 self.assertIn("minion.manager", core.context.event_source_registry.sources)
                 observed = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_workflow_status", args={})
+                    CapabilityCall(name="minion_task_status", args={})
                 )
                 self.assertEqual(observed.status, RuntimeStatus.INVALID)
-                self.assertIn("No Minion workflow", observed.llm_text)
+                self.assertIn("No active Minion Task", observed.llm_text)
             finally:
                 with contextlib.suppress(Exception):
                     core.detach_module("minion")
@@ -2533,12 +2548,17 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertEqual(outcome.final_reply, "final answer")
         self.assertEqual(len(channel_runtime.outbox), 1)
+        transcript = [
+            message
+            for item in memory_service.l1_store.items
+            for message in item
+        ]
         self.assertEqual(
-            memory_service.l1_store.items,
-            [[
-                L1TranscriptMessage(role="user", content="hello", kind=L1MessageKind.USER_REQUEST),
-                L1TranscriptMessage(role="assistant", content="final answer", kind=L1MessageKind.ASSISTANT_REPLY),
-            ]],
+            [(message.role, message.content, message.kind) for message in transcript],
+            [
+                ("user", "hello", L1MessageKind.USER_REQUEST),
+                ("assistant", "final answer", L1MessageKind.ASSISTANT_REPLY),
+            ],
         )
 
     def test_turn_runtime_keeps_reasoning_out_of_final_reply_and_l1(self) -> None:
@@ -2562,11 +2582,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertEqual(outcome.final_reply, "final answer")
         self.assertNotIn("thinking here", outcome.final_reply)
+        transcript = [
+            message
+            for item in memory_service.l1_store.items
+            for message in item
+        ]
         self.assertEqual(
-            memory_service.l1_store.items[-1],
+            [(message.role, message.content, message.kind) for message in transcript],
             [
-                L1TranscriptMessage(role="user", content="hello", kind=L1MessageKind.USER_REQUEST),
-                L1TranscriptMessage(role="assistant", content="final answer", kind=L1MessageKind.ASSISTANT_REPLY),
+                ("user", "hello", L1MessageKind.USER_REQUEST),
+                ("assistant", "final answer", L1MessageKind.ASSISTANT_REPLY),
             ],
         )
 
@@ -2921,36 +2946,40 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     )
                 return CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop")
 
-            async def acompact_memory_structured(
-                self,
-                source_text,
-                *,
-                max_output_tokens,
-                preferred_endpoint_id=None,
-                preferred_model_id=None,
-                profile=None,
-            ):
-                self.requests.append(
-                    (
-                        "compact",
+            async def agenerate(self, request):
+                self.requests.append(("agenerate", request))
+                if "compaction" not in str(
+                    request.metadata.get("purpose") or ""
+                ):
+                    return self.generate(request)
+                return CanonicalLLMOutcome(
+                    text=json.dumps(
                         {
-                            "source_text": source_text,
-                            "max_output_tokens": max_output_tokens,
-                            "preferred_endpoint_id": preferred_endpoint_id,
-                            "preferred_model_id": preferred_model_id,
-                            "profile": profile,
-                        },
-                    )
+                            "schema": "pal.compaction.pal.v2",
+                            "kind": "pal",
+                            "summary": {
+                                "summary": "Compacted fallback context.",
+                                "search_text": "Compacted fallback context.",
+                            },
+                            "continuity": {
+                                "current_focus": "resume after compaction",
+                                "primary_request_and_intent": "finish the active turn",
+                                "active_operating_instructions": [],
+                                "active_requests": [],
+                                "temporary_task_state": [],
+                                "key_decisions": [],
+                                "pending_questions": [],
+                                "recent_raw_turns": [],
+                                "warm_compressed_turns": [],
+                                "retired_or_superseded_context": [],
+                                "optional_next_step": "retry the active request",
+                            },
+                            "memory_candidates": [],
+                        }
+                    ),
+                    tool_calls=[],
+                    finish_reason="stop",
                 )
-                return {
-                    "schema": "pal.compaction.pal.v2",
-                    "kind": "pal",
-                    "summary": {
-                        "summary": "Compacted fallback context.",
-                        "search_text": "Compacted fallback context.",
-                    },
-                    "continuity": {},
-                }
 
         core = PalCore()
         register_core_with_core(core)
@@ -3244,36 +3273,40 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     )
                 return CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop")
 
-            async def acompact_memory_structured(
-                self,
-                source_text,
-                *,
-                max_output_tokens,
-                preferred_endpoint_id=None,
-                preferred_model_id=None,
-                profile=None,
-            ):
-                self.requests.append(
-                    (
-                        "compact",
+            async def agenerate(self, request):
+                self.requests.append(("agenerate", request))
+                if "compaction" not in str(
+                    request.metadata.get("purpose") or ""
+                ):
+                    return self.generate(request)
+                return CanonicalLLMOutcome(
+                    text=json.dumps(
                         {
-                            "source_text": source_text,
-                            "max_output_tokens": max_output_tokens,
-                            "preferred_endpoint_id": preferred_endpoint_id,
-                            "preferred_model_id": preferred_model_id,
-                            "profile": profile,
-                        },
-                    )
+                            "schema": "pal.compaction.pal.v2",
+                            "kind": "pal",
+                            "summary": {
+                                "summary": "Compacted fallback context.",
+                                "search_text": "Compacted fallback context.",
+                            },
+                            "continuity": {
+                                "current_focus": "resume after compaction",
+                                "primary_request_and_intent": "finish the active turn",
+                                "active_operating_instructions": [],
+                                "active_requests": [],
+                                "temporary_task_state": [],
+                                "key_decisions": [],
+                                "pending_questions": [],
+                                "recent_raw_turns": [],
+                                "warm_compressed_turns": [],
+                                "retired_or_superseded_context": [],
+                                "optional_next_step": "retry the active request",
+                            },
+                            "memory_candidates": [],
+                        }
+                    ),
+                    tool_calls=[],
+                    finish_reason="stop",
                 )
-                return {
-                    "schema": "pal.compaction.pal.v2",
-                    "kind": "pal",
-                    "summary": {
-                        "summary": "Compacted fallback context.",
-                        "search_text": "Compacted fallback context.",
-                    },
-                    "continuity": {},
-                }
 
         core = PalCore()
         register_core_with_core(core)
@@ -3376,7 +3409,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[1].tool_call_id, "call_1")
 
-    def test_l1_commit_stores_orphan_tool_result_as_trusted_history(self) -> None:
+    def test_l1_commit_rejects_orphan_tool_result(self) -> None:
         service = MemoryService()
 
         result = service.commit_l1(
@@ -3389,12 +3422,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.status, RuntimeStatus.OK)
-        self.assertEqual([item.role for item in result.committed_transcript], ["user", "tool"])
-        self.assertEqual([item.role for item in service.l1_store.items[0]], ["user", "tool"])
-        self.assertEqual(service.l1_store.items[0][1].tool_call_id, "call_missing")
+        self.assertEqual(result.status, RuntimeStatus.INVALID)
+        self.assertEqual(result.committed_transcript, [])
+        self.assertEqual(service.l1_store.items, [])
 
-    def test_l1_commit_stores_complete_batch_plus_extra_tool_result_as_trusted_history(self) -> None:
+    def test_l1_commit_rejects_extra_tool_result(self) -> None:
         service = MemoryService()
 
         result = service.commit_l1(
@@ -3412,12 +3444,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.status, RuntimeStatus.OK)
-        self.assertEqual([item.role for item in result.committed_transcript], ["assistant", "tool", "tool"])
-        self.assertEqual(service.l1_store.items[0][0].tool_calls[0]["id"], "call_1")
-        self.assertEqual(service.l1_store.items[0][2].tool_call_id, "call_extra")
+        self.assertEqual(result.status, RuntimeStatus.INVALID)
+        self.assertEqual(result.committed_transcript, [])
+        self.assertEqual(service.l1_store.items, [])
 
-    def test_l1_commit_stores_incomplete_tool_call_header_as_trusted_history(self) -> None:
+    def test_l1_commit_rejects_incomplete_tool_call_header(self) -> None:
         service = MemoryService()
 
         result = service.commit_l1(
@@ -3433,9 +3464,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.status, RuntimeStatus.OK)
-        self.assertEqual([item.role for item in result.committed_transcript], ["assistant"])
-        self.assertEqual(service.l1_store.items[0][0].tool_calls[0]["id"], "call_missing")
+        self.assertEqual(result.status, RuntimeStatus.INVALID)
+        self.assertEqual(result.committed_transcript, [])
+        self.assertEqual(service.l1_store.items, [])
 
     def test_memory_pack_preserves_existing_l1_protocol_shape_without_rewriting(self) -> None:
         service = MemoryService()
@@ -3449,9 +3480,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         pack = service.build_pack(MemoryPackRequest(turn_kind="chat"))
 
-        self.assertEqual([item.role for item in pack.l1_recent_context], ["user", "tool", "user"])
-        self.assertEqual([item.content for item in pack.l1_recent_context], ["valid context", "orphan result", "fresh valid context"])
-        self.assertEqual(pack.l1_recent_context[1].tool_call_id, "call_missing")
+        self.assertEqual([item.role for item in pack.l1_recent_context], ["user"])
+        self.assertEqual(
+            [item.content for item in pack.l1_recent_context],
+            ["fresh valid context"],
+        )
 
     def test_memory_prompt_preserves_complete_tool_protocol_batch(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
@@ -3713,7 +3746,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("op_memory_recall", rules.content)
         self.assertNotIn("op_memory_write", rules.content)
 
-    def test_memory_service_compact_uses_semantic_summary_and_projects_to_l2(self) -> None:
+    def test_memory_service_compact_commits_validated_summary_entry_atomically(self) -> None:
         service = MemoryService()
         service.l1_store.append(
             [
@@ -3722,11 +3755,45 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             ]
         )
 
+        snapshot = CompactionSnapshot.capture(
+            service,
+            target_input_budget=512,
+            reserved_output_tokens=128,
+            clock_kind=CompactionClockKind.USER_TURN,
+            clock_value=1,
+        )
+        entry = PalCompactionPolicy().validate_checkpoint(
+            json.dumps(
+                {
+                    "schema": "pal.compaction.pal.v2",
+                    "kind": "pal",
+                    "continuity": {
+                        "current_focus": "concise replies",
+                        "primary_request_and_intent": "preserve the user's preference",
+                        "active_operating_instructions": [],
+                        "active_requests": [],
+                        "temporary_task_state": [],
+                        "key_decisions": [],
+                        "pending_questions": [],
+                        "recent_raw_turns": [],
+                        "warm_compressed_turns": [],
+                        "retired_or_superseded_context": [],
+                        "optional_next_step": "",
+                    },
+                    "summary": {
+                        "summary": "The user prefers concise replies.",
+                        "search_text": "concise replies",
+                    },
+                    "memory_candidates": [],
+                }
+            ),
+            snapshot,
+        )
         result = service.compact(
             MemoryCompactRequest(
                 target_input_budget=512,
                 reserved_output_tokens=128,
-                metadata={"semantic_summary": "The user prefers concise replies."},
+                summary_entry=entry,
             )
         )
         self.assertEqual(result.summary, "The user prefers concise replies.")

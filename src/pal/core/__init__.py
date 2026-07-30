@@ -1,4 +1,11 @@
 from pal.core.agent_turn_runtime import AgentTurnGuardHost, AgentTurnRuntime, AgentTurnRuntimeState
+from pal.core.compaction import (
+    CompactionClockKind,
+    CompactionEngine,
+    CompactionPolicy,
+    CompactionRunResult,
+    CompactionSnapshot,
+)
 from pal.core.contracts import CoreRuntimeState
 from pal.core.control_handler import CoreControlActionHandler
 from pal.core.dispatcher import EventDispatcher
@@ -46,6 +53,11 @@ __all__ = [
     "AgentTurnGuardHost",
     "AgentTurnRuntime",
     "AgentTurnRuntimeState",
+    "CompactionClockKind",
+    "CompactionEngine",
+    "CompactionPolicy",
+    "CompactionRunResult",
+    "CompactionSnapshot",
     "CoreControlActionHandler",
     "CoreRuntimeState",
     "CoreSnapshot",

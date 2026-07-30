@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Callable
 
 from pal.foundation import HeatPolicy, HeatStateMachine, utc_now
 from pal.memory.contracts import (
@@ -26,24 +26,20 @@ from pal.memory.contracts import (
     MAX_RENEWAL_COUNT,
     MemoryCommitRequest,
     MemoryCommitResult,
-    MemoryCompactionPolicy,
     MemoryCompactRequest,
     MemoryCompactResult,
-    CompactionProfile,
     MemoryPack,
     MemoryPackRequest,
     MemoryServicePort,
 )
 from pal.memory.compact import (
     SUMMARY_ENTRY_ID,
-    SUMMARY_TITLE,
-    build_pal_compaction_source_text,
-    coerce_structured_compaction_payload,
     current_summary_from_l1,
     flatten_l1_context,
     normalize_l1_transcript,
 )
 from pal.memory.repository import L3ProviderSelector
+from pal.memory.tool_protocol import l1_tool_protocol_validation_error
 from pal.shared import RuntimeStatus
 
 L2_WORKING_SET_CAPACITY = 128
@@ -94,6 +90,9 @@ class InMemoryL1Store(L1Store):
 
     def append(self, item: list[L1TranscriptMessage] | str) -> None:
         normalized = normalize_l1_transcript(item)
+        protocol_error = l1_tool_protocol_validation_error(normalized)
+        if protocol_error:
+            raise ValueError(f"invalid L1 tool protocol: {protocol_error}")
         if normalized:
             self.items.append(normalized)
 
@@ -236,27 +235,21 @@ class MemoryService(MemoryServicePort):
     l3_selector: L3ProviderSelector | None = None
     failed_commits: list[MemoryCommitRequest] = field(default_factory=list)
     failed_retirements: list[L2Entry] = field(default_factory=list)
-    compaction_policies: dict[CompactionProfile, MemoryCompactionPolicy] = field(
-        default_factory=dict
-    )
 
     def __post_init__(self) -> None:
         if self.l3_selector is None:
             self.l3_selector = L3ProviderSelector(resolver=lambda provider_id: DetachedL3Provider(provider_id=provider_id))
 
     def compact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
-        policy = self.compaction_policies.get(request.profile)
-        if policy is not None:
-            return policy.compact(self, request)
-        if not request.metadata.get("structured_compaction") and not str(request.metadata.get("semantic_summary") or "").strip():
-            raise ValueError("memory compact requires structured_compaction or semantic_summary")
-        payload = coerce_structured_compaction_payload(
-            request.metadata.get("structured_compaction"),
-            fallback_summary=str(request.metadata.get("semantic_summary") or "").strip(),
-            existing_summary=current_summary_from_l1(self.l1_store.items),
-            profile=request.profile,
-        )
-        summary_entry = payload["summary_entry"]
+        summary_entry = request.summary_entry
+        if not isinstance(summary_entry, L2Entry):
+            raise ValueError(
+                "memory compact requires a validated and rendered summary_entry"
+            )
+        if not str(summary_entry.summary or "").strip():
+            raise ValueError("memory compact summary_entry is empty")
+        if not str(summary_entry.rendered or "").strip():
+            raise ValueError("memory compact summary_entry is not rendered")
         projected_entries = [summary_entry]
         previous_l1_items = list(self.l1_store.items)
         previous_l2_items = dict(self.l2_store.items)
@@ -290,6 +283,40 @@ class MemoryService(MemoryServicePort):
             },
         )
 
+    def compact_transactionally(
+        self,
+        request: MemoryCompactRequest,
+        *,
+        after_commit: Callable[[], None],
+    ) -> MemoryCompactResult:
+        """Commit memory and its dependent projection as one rollback boundary."""
+
+        previous_l1_items = list(self.l1_store.items)
+        previous_l2_items = dict(self.l2_store.items)
+        previous_top_of_mind_refs = list(self.l2_store.top_of_mind_refs)
+        previous_heat_registry = dict(self.l2_store.heat_registry)
+        try:
+            result = self.compact(request)
+            after_commit()
+            return result
+        except Exception:
+            self.l1_store.items = previous_l1_items
+            self.l2_store.items = previous_l2_items
+            self.l2_store.top_of_mind_refs = previous_top_of_mind_refs
+            self.l2_store.heat_registry = previous_heat_registry
+            raise
+
+    async def acompact_transactionally(
+        self,
+        request: MemoryCompactRequest,
+        *,
+        after_commit: Callable[[], None],
+    ) -> MemoryCompactResult:
+        return self.compact_transactionally(
+            request,
+            after_commit=after_commit,
+        )
+
     async def acompact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
         return self.compact(request)
 
@@ -297,6 +324,18 @@ class MemoryService(MemoryServicePort):
         committed_transcript = normalize_l1_transcript(request.transcript)
         if not committed_transcript:
             return MemoryCommitResult(status=RuntimeStatus.SKIPPED, committed_transcript=[])
+        protocol_error = l1_tool_protocol_validation_error(
+            committed_transcript
+        )
+        if protocol_error:
+            return MemoryCommitResult(
+                status=RuntimeStatus.INVALID,
+                committed_transcript=[],
+                metadata={
+                    "turn_id": request.turn_id,
+                    "error": protocol_error,
+                },
+            )
         try:
             self.l1_store.append(committed_transcript)
         except Exception:
@@ -320,49 +359,40 @@ class MemoryService(MemoryServicePort):
             return MemoryPack(metadata={"turn_kind": request.turn_kind})
         current_summary = current_summary_from_l1(self.l1_store.items)
         hot_entries = self.l2_store.list_hot_entries()
+        active_input_id = str(request.active_input_id or "").strip()
+        valid_l1_items = [
+            transcript
+            for transcript in self.l1_store.items
+            if not l1_tool_protocol_validation_error(transcript)
+        ]
+        l1_recent_context = [
+            message
+            for message in flatten_l1_context(valid_l1_items)
+            if not (
+                active_input_id
+                and str(
+                    dict(getattr(message, "payload", {}) or {}).get(
+                        "_pal_input_id"
+                    )
+                    or ""
+                ).strip()
+                == active_input_id
+            )
+        ]
         return MemoryPack(
-            l1_recent_context=flatten_l1_context(self.l1_store.items),
+            l1_recent_context=l1_recent_context,
             current_summary=current_summary,
             l2_working_memory=hot_entries,
             metadata={
                 "turn_kind": request.turn_kind,
                 "task_id": request.task_id,
                 "work_order_id": request.work_order_id,
+                "active_input_id": active_input_id,
             },
         )
 
     async def abuild_pack(self, request: MemoryPackRequest) -> MemoryPack:
         return self.build_pack(request)
-
-    def build_compaction_source_text(
-        self,
-        *,
-        target_input_budget: int,
-        profile: CompactionProfile = CompactionProfile.PAL,
-    ) -> str:
-        policy = self.compaction_policies.get(profile)
-        if policy is not None:
-            return policy.build_source_text(
-                self,
-                target_input_budget=target_input_budget,
-            )
-        return build_pal_compaction_source_text(self.l1_store.items, target_input_budget=target_input_budget)
-
-    def build_compaction_payload(
-        self,
-        *,
-        target_input_budget: int,
-        reserved_output_tokens: int = 0,
-        profile: CompactionProfile = CompactionProfile.PAL,
-    ) -> dict[str, Any]:
-        policy = self.compaction_policies.get(profile)
-        if policy is None:
-            return {}
-        return policy.build_payload(
-            self,
-            target_input_budget=target_input_budget,
-            reserved_output_tokens=reserved_output_tokens,
-        )
 
     def project_l3_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = True) -> None:
         self.project_l2_entries(entries, touch=touch, top_of_mind=top_of_mind)

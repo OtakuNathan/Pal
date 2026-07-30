@@ -1781,9 +1781,6 @@ class UnitWorkViewBuilder:
             "global_constraints": _semantic_contract_value(fragments.get("global_constraints")),
             "assumptions": _semantic_contract_value(fragments.get("assumption_ledger")),
             "historical_repair_bills": list(node.payload.get("historical_repair_bill_refs") or []),
-            "node_run_journal": dict(
-                (self.architecture.repository.read_node_journal(node.aggregate_id) or {}).get("journal") or {}
-            ),
         }
         return self.architecture.artifacts.put_json(
             payload,
@@ -1882,9 +1879,6 @@ class UnitWorkViewBuilder:
             "historical_repair_bills": [
                 repair_bill_semantic_view(self.architecture.artifacts, item) for item in historical_refs
             ],
-            "node_run_journal": dict(
-                (self.architecture.repository.read_node_journal(node.aggregate_id) or {}).get("journal") or {}
-            ),
         }
         return self.architecture.artifacts.put_json(
             payload,

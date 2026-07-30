@@ -6,12 +6,14 @@ from pal.execution.generated_tool_models import (
     MinionV2SkeletonBuilderOpMinionArchitectureSubmitInput,
 )
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping, Sequence
+from typing import Annotated, Any, Awaitable, Callable, Literal, Mapping, Sequence
 
-from pal.execution.tool_facade import EmptyToolInput
+from pydantic import Field, model_validator
+from pal.execution.tool_facade import EmptyToolInput, StrictToolModel
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.architecture_yaml import (
     ArchitectureDraftFileError,
@@ -32,21 +34,145 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftStore,
     assert_authoring_schema_budget,
 )
+from pal.minion.v2.work_checklist import (
+    normalize_work_checklist,
+    render_work_checklist,
+    unfinished_work_checklist_steps,
+)
 from pal.minion.v2.skeleton import (
     ArchitectureValidationError,
     ArchitectureValidationResult,
     SemanticReferenceError,
     analyze_architecture_submission,
     architecture_revision_changed_paths_since,
-    validate_architecture_revision_scope,
-    validate_architecture_changed_paths,
 )
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
 
+ARCHITECTURE_CHECKLIST_STEPS = (
+    "read requirements and settle the module design",
+    "write the declaration skeleton without product behavior",
+    "project the settled design into architecture.yaml and reconcile it",
+)
+
+_ARCHITECTURE_ACTION_TEMPLATES: tuple[dict[str, Any], ...] = (
+    {
+        "phase": "design",
+        "steps": [
+            "Read the ordered task ledger and perform one bounded consistency pass.",
+            "Settle module responsibilities, ownership, lifecycle, and public contract edges.",
+        ],
+    },
+    {
+        "phase": "declare",
+        "steps": [
+            "Write only the module declaration skeleton and normative contract comments.",
+            "Defer product behavior, build details, and implementation experiments.",
+        ],
+    },
+    {
+        "phase": "reconcile",
+        "steps": [
+            "Read the preseeded architecture.yaml and encode the settled design into its schema.",
+            "Reconcile YAML with declarations, complete the fixed checklist, and submit.",
+        ],
+    },
+    {
+        "phase": "submit",
+        "steps": [
+            "All three design phases are complete.",
+            "Call architecture_submit; the Architecture Reviewer owns semantic acceptance.",
+        ],
+    },
+)
+
+
+def _validate_architecture_phase_order(
+    statuses: Sequence[str],
+) -> None:
+    phase = "completed"
+    for status in statuses:
+        if phase == "completed":
+            if status == "in_progress":
+                phase = "in_progress"
+            elif status == "pending":
+                phase = "pending"
+        elif phase == "in_progress":
+            if status != "pending":
+                raise ValueError(
+                    "Architect checklist phases must progress in order"
+                )
+            phase = "pending"
+        elif status != "pending":
+            raise ValueError(
+                "Architect checklist phases must progress in order"
+            )
+
+
+def _validate_architecture_checklist_shape(
+    checklist: Mapping[str, Any],
+) -> None:
+    plan = [dict(item or {}) for item in list(checklist.get("plan") or [])]
+    steps = [str(item.get("step") or "") for item in plan]
+    if tuple(steps[: len(ARCHITECTURE_CHECKLIST_STEPS)]) != ARCHITECTURE_CHECKLIST_STEPS:
+        raise ValueError("Architect checklist must preserve the three fixed ordered phase steps")
+    if any(not step.startswith("resolve finding: ") for step in steps[len(ARCHITECTURE_CHECKLIST_STEPS) :]):
+        raise ValueError("Architect checklist may append only `resolve finding: <finding_key>` steps")
+    _validate_architecture_phase_order(
+        [str(item["status"]) for item in plan]
+    )
+
+
+class MinionV2ArchitectureChecklistItem(StrictToolModel):
+    """One fixed Architect phase and its current state."""
+
+    step: Annotated[str, Field(min_length=1, max_length=240)]
+    status: Literal["pending", "in_progress", "completed"]
+
+
+class MinionV2ArchitectureUpdateChecklistInput(StrictToolModel):
+    """Complete replacement for the Architect's phase and finding checklist."""
+
+    plan: list[MinionV2ArchitectureChecklistItem] = Field(
+        min_length=3,
+        max_length=67,
+    )
+
+    @model_validator(mode="after")
+    def validate_plan(
+        self,
+    ) -> "MinionV2ArchitectureUpdateChecklistInput":
+        checklist = normalize_work_checklist(
+            self.model_dump(mode="python"),
+            require_nonempty=True,
+            owner="Architect",
+        )
+        _validate_architecture_checklist_shape(checklist)
+        return self
+
+
+_ARCHITECTURE_CHECKLIST_EXAMPLE = {
+    "plan": [
+        {
+            "step": ARCHITECTURE_CHECKLIST_STEPS[0],
+            "status": "completed",
+        },
+        {
+            "step": ARCHITECTURE_CHECKLIST_STEPS[1],
+            "status": "in_progress",
+        },
+        {
+            "step": ARCHITECTURE_CHECKLIST_STEPS[2],
+            "status": "pending",
+        },
+    ]
+}
+
+
 ARCHITECTURE_SKELETON_CAPABILITIES = (
     "op_minion_ask_question",
+    "op_minion_architecture_update_checklist",
     "op_minion_architecture_submit",
 )
 SKELETON_REVIEW_CAPABILITIES = (
@@ -62,14 +188,35 @@ SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": "Use this tool proactively before architecture design or revision when task.yaml contains or may contain a contradiction, material ambiguity, incorrect or infeasible requirement, or missing decision; when the result depends on user preference; or when a choice would materially change product behavior, compatibility, architecture, modification scope, or implementation scope. Do not silently choose precedence, repair or reinterpret a requirement, or widen or narrow scope. Ask one decisive question without ending the Architect invocation: identify the exact issue and the decision needed, then supply a short title, precise question, and three option strings. Each option contains a readable choice and its impact or tradeoff. The channel also permits a custom free-text answer. Calling suspends the current tool call until the user answers or the logical invocation is paused, cancelled, restarted, or superseded; wall-clock time never expires a pending question. Before the answer is returned to you, the Manager appends the exact question and answer to the immutable task.yaml ledger; no follow-up task-edit or submit action is allowed or required. Continue architecture work using that answer as the newest and therefore highest-priority task revision.",
         "InputModel": MinionV2SkeletonBuilderOpMinionAskQuestionInput,
     },
+    "op_minion_architecture_update_checklist": {
+        "alias": "update_checklist",
+        "description": (
+            "Replace the complete Architect checklist. Preserve the three exact "
+            "ordered phase steps from the example, then append one exact "
+            "`resolve finding: <finding_key>` step for every bound revision finding. Set each to "
+            "pending, in_progress, or completed; at most one may be "
+            "in_progress. Work only on the current phase: first settle the "
+            "requirements and module design without editing product files or "
+            "reading architecture.yaml; then write declaration skeletons "
+            "without product behavior; finally read the preseeded template, "
+            "project the settled design into architecture.yaml, reconcile it "
+            "with declarations, and submit. This checklist is an observable "
+            "work cursor, not architecture truth or review evidence. The result includes the next phase action "
+            "template; follow it without working ahead or adding implementation process."
+        ),
+        "InputModel": MinionV2ArchitectureUpdateChecklistInput,
+        "examples": (_ARCHITECTURE_CHECKLIST_EXAMPLE,),
+        "idempotency": "idempotent",
+        "retry_policy": "automatic",
+    },
     "op_minion_architecture_submit": {
         "alias": "architecture_submit",
-        "description": "Validate and submit the complete Manager-preseeded architecture.yaml together with the declaration skeleton. Takes no arguments. Its requirements, modules, and scenarios are dynamic snake_case maps. Define each module's responsibility, behavior kind, semantic dependencies and consumed provider outputs, input/output/error/invariant contract, ownership, lifecycle, optional state machine, and physical paths. Map each binding requirement to one owner and public contract path. Define end-to-end contract flows and success/failure observations. Submit performs strict YAML/schema validation, requirement closure, dependency output and scenario composition checks, path safety, Git-state checks, revision-scope checks, fencing, and snapshot stability. A rejected submit does not advance the workflow; correct the exact structured error path in architecture.yaml and retry. Architecture Reviewer owns semantic review.",
+        "description": "Validate and submit the complete Manager-preseeded architecture.yaml together with the declaration skeleton after all three fixed phases and every bound `resolve finding: <finding_key>` checklist item are completed. Takes no arguments. Its requirements, modules, and scenarios are dynamic snake_case maps. Define each module's responsibility, behavior kind, semantic dependencies and consumed provider outputs, input/output/error/invariant contract, ownership, lifecycle, optional state machine, and physical paths. Map each binding requirement to one owner and public contract path. Define end-to-end contract flows and success/failure observations. Submit mechanically checks checklist closure, strict YAML/schema validity, structural graph closure, path safety, Git state, fencing, snapshot stability, and that a revision made an actual source or semantic change. It does not decide whether a claimed finding repair is correct; Architecture Reviewer owns semantic regression and acceptance.",
         "InputModel": MinionV2SkeletonBuilderOpMinionArchitectureSubmitInput,
     },
     "op_minion_architecture_review_pass": {
         "alias": "architecture_review_pass",
-        "description": "Submit PASS with no arguments only after a breadth-first semantic review finds no blocking defect or unresolved public semantic ambiguity. Advisory p2 findings may remain. Confirm the ordered task ledger maps to the architecture, every module protocol is complete, ownership and lifecycle close, provider outputs satisfy consumer dependencies, scenario contract graphs can produce the required success and failure observations, and declarations/comments agree with architecture.yaml. Every observable input edge, partial-success failure path, and operation on public stateful values must have one declared result or an explicit set of outcomes safe for every consumer. Compilation is only supporting evidence that contracts compose; API presence, a successful probe, review_guarded implementation freedom, or hypothetical implementation behavior is not semantic proof.",
+        "description": "Submit PASS with no arguments only after a complete breadth-first semantic review finds no blocking defect or unresolved public semantic ambiguity. Do not stop auditing after the first counterexample. Priority and disposition are independent: a real p2 defect is blocking and requires FAIL; only a genuinely optional p2 advisory whose omission still satisfies every requirement and contract may accompany PASS. Confirm the ordered task ledger maps to the architecture, every module protocol is complete, ownership and lifecycle close, provider outputs satisfy consumer dependencies, scenario contract graphs can produce the required success and failure observations, and declarations/comments agree with architecture.yaml. Every observable input edge, partial-success failure path, and operation on public stateful values must have one declared result or an explicit set of outcomes safe for every consumer. Compilation is only supporting evidence that contracts compose; API presence, a successful probe, review_guarded implementation freedom, or hypothetical implementation behavior is not semantic proof.",
         "InputModel": EmptyToolInput,
     },
     "op_minion_architecture_review_fail": {
@@ -84,6 +231,8 @@ for _tool_name, _tool_spec in SKELETON_BUILDER_TOOL_SPECS.items():
         _tool_spec["InputModel"].model_json_schema(mode="validation", union_format="primitive_type_array"),
         owner=_tool_name,
     )
+    for _example in tuple(_tool_spec.get("examples") or ()):
+        _tool_spec["InputModel"].model_validate(_example, strict=True)
 
 
 def compile_architecture_review_invocation_tool_contract(
@@ -102,7 +251,11 @@ def compile_architecture_review_invocation_tool_contract(
             "Record one actionable architecture-review defect. Use requirements_defect for contradictory or "
             "unimplementable task-ledger semantics, contract_defect for an invalid public shape, and "
             "architecture_defect for topology, ownership, lifecycle, or scenario defects. Complete the "
-            "breadth-first audit first, then issue all independent add_finding calls in one tool batch when possible. "
+            "complete breadth-first audit first; do not fail fast after the first defect. Continue through every "
+            "required module, edge, scenario, and changed risk surface, then issue all independent add_finding calls "
+            "in one tool batch when possible. Priority and disposition are independent: every real defect, including "
+            "priority p2, is blocking; advisory is only for a genuinely optional improvement whose omission still "
+            "satisfies all binding requirements and contracts. "
             "Available modules="
             f"{json.dumps(module_names, ensure_ascii=False)}; scenarios="
             f"{json.dumps(sorted(str(name) for name in scenarios), ensure_ascii=False)}; requirements="
@@ -122,8 +275,9 @@ def compile_architecture_review_invocation_tool_contract(
             "for public stateful values in initial, partial, and failed states. If two conforming implementations could make observably different choices that a consumer must know, "
             "record a finding instead of selecting one. A compile probe cannot establish that its test value is contractually legal, and review_guarded private implementation freedom "
             "cannot supply missing public behavior. "
-            "Do not submit positive audit rows or partial findings. Advisory p2 findings may remain; "
-            "PASS is forbidden only while a blocking finding remains. PASS takes no arguments."
+            "Do not submit positive audit rows or partial findings. Never stop the audit merely because one defect "
+            "already proves FAIL. A genuine p2 defect is blocking and cannot accompany PASS; only a truly optional "
+            "p2 advisory may remain. PASS is forbidden while any blocking finding remains. PASS takes no arguments."
         )},
     }
     return {
@@ -238,8 +392,13 @@ def skeleton_builder_tool_result(
 ) -> CanonicalToolResult:
     try:
         name = str(call.name or "")
+        if name == "op_minion_architecture_update_checklist":
+            return _replace_architecture_checklist(call, workspace)
         if name == "op_minion_architecture_submit":
-            output, version = _compile_architecture_submission(call, workspace)
+            output, version = _compile_architecture_submission(
+                call,
+                workspace,
+            )
             filename, title, draft_kind = "architecture_submission.json", "V2 architecture skeleton submission", "architecture"
         elif name in {
             "op_minion_architecture_review_pass",
@@ -308,6 +467,94 @@ def skeleton_builder_tool_result(
             status=RuntimeStatus.INVALID,
         )
 
+
+def architecture_checklist_context(
+    workspace: Mapping[str, Any],
+) -> str:
+    """Render the latest fenced Architect phase cursor for prompt assembly."""
+
+    metadata = dict(workspace.get("minion_v2") or {})
+    if str(metadata.get("role") or "") != "architect":
+        return ""
+    try:
+        context = SubmissionDraftContext.from_workspace(
+            workspace,
+            draft_kind="architecture",
+        )
+        snapshot = SubmissionDraftStore(
+            Path(str(workspace["runtime_root"]))
+        ).read(
+            context,
+            seed=_architecture_seed(workspace),
+        )
+        checklist = _normalize_architecture_checklist(
+            snapshot.payload.get("checklist"),
+        )
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    return _render_architecture_checklist(
+        checklist,
+    )
+
+
+def _replace_architecture_checklist(
+    call: CanonicalToolCall,
+    workspace: Mapping[str, Any],
+) -> CanonicalToolResult:
+    args = dict(call.args or {})
+    checklist = _normalize_architecture_checklist(args)
+    _validate_architecture_finding_checklist(checklist, workspace)
+    context = SubmissionDraftContext.from_workspace(
+        workspace,
+        draft_kind="architecture",
+    )
+    store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
+
+    def reducer(
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], Mapping[str, Any]]:
+        payload["checklist"] = checklist
+        return payload, {
+            "updated": True,
+            "checklist": checklist,
+            "unfinished_count": len(
+                unfinished_work_checklist_steps(checklist)
+            ),
+        }
+
+    result = store.mutate(
+        context,
+        operation_key=str(
+            call.call_id
+            or "replace-architecture-checklist:"
+            + hashlib.sha256(
+                json.dumps(
+                    args,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        ),
+        request=args,
+        reducer=reducer,
+        seed=_architecture_seed(workspace),
+    )
+    next_action = _next_architecture_action(checklist)
+    result = dict(result)
+    result["next_action"] = next_action
+    text = _render_architecture_checklist(checklist, next_action=next_action)
+    return CanonicalToolResult(
+        name=call.name,
+        ok=True,
+        text=text,
+        llm_text=text,
+        structured=dict(result),
+        call_id=call.call_id,
+        status=RuntimeStatus.OK,
+    )
+
+
 def _compile_architecture_submission(
     call: CanonicalToolCall,
     workspace: Mapping[str, Any],
@@ -319,6 +566,17 @@ def _compile_architecture_submission(
         context,
         seed=_architecture_seed(workspace),
     )
+    checklist = _normalize_architecture_checklist(
+        snapshot.payload.get("checklist"),
+    )
+    _validate_architecture_finding_checklist(checklist, workspace)
+    unfinished = unfinished_work_checklist_steps(checklist)
+    if unfinished:
+        raise ValueError(
+            "architecture_submit requires every fixed Architect checklist "
+            "phase to be completed; unfinished: "
+            + ", ".join(unfinished)
+        )
     output = load_architecture_draft(workspace)
     errors: list[Any] = []
     report: ArchitectureValidationResult | None = None
@@ -331,10 +589,6 @@ def _compile_architecture_submission(
         changed_paths = _architecture_revision_changed_paths(workspace)
         if output == base and not changed_paths:
             errors.append("architecture revision makes no source or semantic change")
-        try:
-            _validate_revision_scope(output, workspace, changed_paths=changed_paths)
-        except ValueError as exc:
-            errors.append(exc)
     raise_submission_errors(errors, owner="architecture_submit")
     compiled = dict(report.normalized_submission) if report is not None else output
     return compiled, snapshot.version
@@ -387,8 +641,29 @@ def _compiled_review_scope(workspace: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _architecture_seed(workspace: Mapping[str, Any]) -> dict[str, Any]:
-    del workspace
+    finding_steps = [
+        {
+            "step": step,
+            "status": "pending",
+        }
+        for step in _required_architecture_finding_steps(workspace)
+    ]
     return {
+        "checklist": {
+            "plan": [
+                {
+                    "step": step,
+                    "status": (
+                        "in_progress"
+                        if index == 0
+                        else "pending"
+                    ),
+                }
+                for index, step in enumerate(
+                    ARCHITECTURE_CHECKLIST_STEPS
+                )
+            ] + finding_steps
+        },
         "definitions": {"submission": {}},
         "evidence": {},
         "findings": [],
@@ -396,26 +671,102 @@ def _architecture_seed(workspace: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_revision_scope(
-    merged: Mapping[str, Any],
-    workspace: Mapping[str, Any],
-    *,
-    changed_paths: Sequence[str] | None = None,
-) -> None:
-    base = dict(workspace.get("architecture_revision_base_submission") or {})
-    scope = dict(workspace.get("architecture_revision_scope") or {})
-    if not base:
-        raise ValueError("architecture revision has no bound base submission")
-    if not scope:
-        return
-    if changed_paths is None:
-        changed_paths = _architecture_revision_changed_paths(workspace)
-    validate_architecture_revision_scope(
-        base_submission=base,
-        revised_submission=merged,
-        changed_paths=changed_paths,
-        scope=scope,
+def _normalize_architecture_checklist(
+    value: Any,
+) -> dict[str, Any]:
+    checklist = normalize_work_checklist(
+        value,
+        require_nonempty=True,
+        owner="Architect",
     )
+    _validate_architecture_checklist_shape(checklist)
+    return checklist
+
+
+def _required_architecture_finding_steps(
+    workspace: Mapping[str, Any],
+) -> tuple[str, ...]:
+    payload = bound_reference_payload(workspace, "revision_finding", required=False)
+    keys = sorted(
+        {
+            str(dict(item or {}).get("finding_key") or "").strip()
+            for item in list(payload.get("findings") or [])
+            if str(dict(item or {}).get("finding_key") or "").strip()
+        }
+    )
+    return tuple(f"resolve finding: {key}" for key in keys)
+
+
+def _validate_architecture_finding_checklist(
+    checklist: Mapping[str, Any],
+    workspace: Mapping[str, Any],
+) -> None:
+    actual = tuple(
+        str(dict(item or {}).get("step") or "")
+        for item in list(checklist.get("plan") or [])[len(ARCHITECTURE_CHECKLIST_STEPS) :]
+    )
+    expected = _required_architecture_finding_steps(workspace)
+    if actual != expected:
+        raise ValueError(
+            "Architect checklist must contain exactly the bound revision findings: "
+            + (", ".join(expected) if expected else "none")
+        )
+
+
+def _next_architecture_action(checklist: Mapping[str, Any]) -> dict[str, Any]:
+    plan = [dict(item or {}) for item in list(checklist.get("plan") or [])]
+    unfinished = [item for item in plan if item.get("status") != "completed"]
+    if not unfinished:
+        return dict(_ARCHITECTURE_ACTION_TEMPLATES[-1])
+    index = next(
+        (
+            position
+            for position, item in enumerate(plan)
+            if item.get("status") == "in_progress"
+        ),
+        next(
+            (position for position, item in enumerate(plan) if item.get("status") != "completed"),
+            0,
+        ),
+    )
+    return {
+        **dict(_ARCHITECTURE_ACTION_TEMPLATES[min(index, len(_ARCHITECTURE_ACTION_TEMPLATES) - 2)]),
+        "current_step": str(plan[index].get("step") or ""),
+    }
+
+
+def _render_architecture_checklist(
+    checklist: Mapping[str, Any],
+    *,
+    next_action: Mapping[str, Any] | None = None,
+) -> str:
+    rendered = render_work_checklist(
+        checklist,
+        owner="Architect",
+        purpose="durable phase cursor; not architecture truth or review evidence",
+    )
+    action = dict(next_action or _next_architecture_action(checklist))
+    return "\\n".join(
+        [
+            rendered,
+            "",
+            f"Next action ({action.get('phase') or 'design'}):",
+            *[f"- {step}" for step in list(action.get("steps") or [])],
+        ]
+    )
+
+
+def architecture_work_checklist_artifact(
+    value: Any,
+) -> dict[str, Any]:
+    """Compile the durable Architect Draft cursor into its review projection."""
+
+    return {
+        "schema_version": "1",
+        "kind": "architect_work_checklist",
+        "authority": "work_cursor_only",
+        "checklist": _normalize_architecture_checklist(value),
+    }
 
 
 def _architecture_revision_changed_paths(
@@ -494,10 +845,6 @@ def _preflight_submission(
             raise ValueError(
                 "Architect changed Git HEAD; commits, merges, rebases, checkouts, and resets are manager-owned operations"
             )
-        validate_architecture_changed_paths(
-            normalized,
-            _revision_changed_paths(repo_path, base_sha),
-        )
     return result
 
 

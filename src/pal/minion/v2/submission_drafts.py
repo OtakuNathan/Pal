@@ -513,6 +513,49 @@ class SubmissionDraftStore:
             ).fetchone()
         return _snapshot_from_row(row) if row is not None else None
 
+    def submitted_for_invocation(
+        self,
+        *,
+        workflow_id: str,
+        invocation_id: str,
+        role: str,
+        mode: str,
+        draft_kind: str,
+        input_fingerprint: str,
+    ) -> SubmissionDraftSnapshot | None:
+        """Resolve a completed invocation receipt across contract upgrades.
+
+        This is a recovery lookup, not a compatibility decision. The caller
+        must bind the returned Draft to the durable assignment receipt before
+        consuming its role-local state.
+        """
+
+        self._ensure_schema()
+        with sqlite3.connect(str(self.db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT * FROM minion_v2_submission_drafts
+                WHERE workflow_id = ? AND invocation_id = ? AND role = ? AND mode = ?
+                  AND draft_kind = ? AND input_fingerprint = ?
+                  AND status = ?
+                  AND submitted_artifact_ref_json != '{}'
+                  AND submission_payload_hash != ''
+                ORDER BY submitted_at DESC, updated_at DESC
+                LIMIT 1
+                """,
+                (
+                    str(workflow_id),
+                    str(invocation_id),
+                    str(role),
+                    str(mode),
+                    str(draft_kind),
+                    str(input_fingerprint),
+                    SUBMITTED_DRAFT_STATUS,
+                ),
+            ).fetchone()
+        return _snapshot_from_row(row) if row is not None else None
+
     def attach_submission_artifact(
         self,
         draft_key: str,

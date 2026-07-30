@@ -1,86 +1,307 @@
 from __future__ import annotations
 
-import json
-import re
 import hashlib
+import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
-from pal.foundation import utc_now
-from pal.memory.compact import SUMMARY_ENTRY_ID, SUMMARY_TITLE, normalize_l1_message_kind, normalize_l1_transcript
-from pal.memory.contracts import L1MessageKind, L1TranscriptMessage, L2Entry, MemoryCompactRequest, MemoryCompactResult
-
-COMPACTION_SCHEMA_MINION_V2 = "pal.compaction.minion.v2"
-
-MINION_COMPACT_MIN_PRIOR_USER_INPUT_BUDGET = 4096
-
-_MINION_MANAGEMENT_LINE_RE = re.compile(
-    r"""^\s*(?:[-*]\s*)?(?:["']?)"""
-    r"(?:workflow_id|invocation_id|run_id|minion_id|correlation_id|task_id|unit_id)"
-    r"""(?:["']?)\s*[:=]""",
-    re.IGNORECASE,
+from pal.core.compaction import (
+    CompactionClockKind,
+    CompactionSnapshot,
+    CompactionUnit,
+    extract_json_object,
 )
-_MINION_MANAGEMENT_KEYS = frozenset({
-    "workflow_id",
-    "invocation_id",
-    "run_id",
-    "minion_id",
-    "correlation_id",
-    "task_id",
-    "unit_id",
-})
+from pal.foundation import utc_now
+from pal.memory.compact import SUMMARY_ENTRY_ID, SUMMARY_TITLE
+from pal.memory.contracts import L2Entry
+
+COMPACTION_SCHEMA_MINION_V3 = "pal.compaction.minion.v3"
+
+MINION_COMPACTION_SYSTEM_PROMPT = (
+    "You are the Minion work-checkpoint compactor.\n"
+    "Return one valid JSON object only, using schema pal.compaction.minion.v3.\n"
+    "The checkpoint records the exact working cursor, not the role's source-of-truth assignment and not private chain-of-thought.\n"
+    "Do not reconstruct or replay the role assignment; record only execution continuity.\n"
+    "Required top-level fields:\n"
+    '- "schema": "pal.compaction.minion.v3"\n'
+    '- "kind": "minion"\n'
+    '- "continuity": an object containing all five fields below\n'
+    '- "summary": {"summary": non-empty string, "search_text": non-empty string}\n'
+    "continuity fields:\n"
+    "- technical_route: current technical route and the evidence-based reason for it.\n"
+    "- active_work: current goal, concrete file/symbol target, action, and status.\n"
+    "- active_errors: symptom, latest evidence, and current hypothesis.\n"
+    "- active_issues: issue, known facts, status, and paths already excluded.\n"
+    "- next_actions: next concrete action, target, and expected result.\n"
+    "Every continuity field is an array. Every item must contain exactly the keys named above; empty arrays are valid.\n"
+    'Valid minimal example: {"schema":"pal.compaction.minion.v3","kind":"minion","continuity":{"technical_route":[],"active_work":[],"active_errors":[],"active_issues":[],"next_actions":[]},"summary":{"summary":"No active work remains.","search_text":"no active work"}}\n'
+    "Do not emit memory_candidates. Do not include hidden reasoning, internal deliberation, chain-of-thought, or a prose replay of the role assignment.\n"
+    "Failed, rejected, unknown-effect, and incomplete tool batches are recovery state: retain the evidence and do not claim their side effects succeeded.\n"
+    "Closed successful tool batches may be compressed into verified work state. Never invent a tool result.\n"
+    "Checklist state is the macro plan; this checkpoint is the precise cursor within it.\n"
+    "Keep the final visible JSON checkpoint at or below 20,000 tokens. This limit applies to the JSON, not private reasoning.\n"
+    "Output JSON only, without markdown fences."
+)
+
+_CONTINUITY_FIELDS = (
+    "technical_route",
+    "active_work",
+    "active_errors",
+    "active_issues",
+    "next_actions",
+)
+_CONTINUITY_ITEM_FIELDS = {
+    "technical_route": frozenset({"route", "rationale"}),
+    "active_work": frozenset({"goal", "target", "action", "status"}),
+    "active_errors": frozenset(
+        {"symptom", "latest_evidence", "current_hypothesis"}
+    ),
+    "active_issues": frozenset(
+        {"issue", "known_facts", "status", "excluded_paths"}
+    ),
+    "next_actions": frozenset({"action", "target", "expected_result"}),
+}
+_MINION_TOP_LEVEL_FIELDS = frozenset(
+    {"schema", "kind", "continuity", "summary", "degraded"}
+)
+_FORBIDDEN_REASONING_KEYS = frozenset(
+    {
+        "chain_of_thought",
+        "chain-of-thought",
+        "cot",
+        "hidden_reasoning",
+        "internal_reasoning",
+        "deliberation",
+    }
+)
 
 
 @dataclass(frozen=True)
-class MinionMemoryCompactionPolicy:
-    """Mechanical Minion compaction plugged into the shared MemoryService."""
+class MinionCompactionPolicy:
+    policy_id: str = COMPACTION_SCHEMA_MINION_V3
+    clock_kind: CompactionClockKind = CompactionClockKind.LLM_ROUND
+    accepts_memory_candidates: bool = False
 
-    def build_source_text(
+    def system_prompt(self, snapshot: CompactionSnapshot) -> str:
+        _ = snapshot
+        return MINION_COMPACTION_SYSTEM_PROMPT
+
+    def build_source(
         self,
-        memory_service: Any,
+        snapshot: CompactionSnapshot,
+        units: Sequence[CompactionUnit],
         *,
-        target_input_budget: int,
+        validation_error: str = "",
     ) -> str:
-        items = getattr(getattr(memory_service, "l1_store", None), "items", [])
-        return build_minion_prior_user_inputs_source_text(
-            items,
-            target_input_budget=target_input_budget,
+        lines = [
+            '<compact_source kind="minion" schema_target="pal.compaction.minion.v3">',
+            "## Source Semantics",
+            "",
+            "- Frozen L1 below is the only compaction truth source.",
+            "- External module contracts, checklist files, code, and recalled memory remain projected outside compact.",
+            "- The previous compact seed, when present, is already part of frozen L1.",
+            "- Atomic L1 units may not be split. Recovery-required units must retain recovery affordances.",
+            "- Preserve exact files, symbols, commands, latest error evidence, excluded paths, and the next executable action.",
+        ]
+        if validation_error:
+            lines.extend(
+                [
+                    "",
+                    "## Previous Output Validation Error",
+                    validation_error,
+                    "Return a complete corrected JSON object.",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "## Previous Compact Seed",
+                _previous_seed(snapshot.previous_summary),
+                "",
+                "## Frozen L1 Work History",
+            ]
         )
+        if not units:
+            lines.append("No ordinary work-history units remain.")
+        for unit in units:
+            state = (
+                "recovery_required"
+                if unit.recovery_required
+                else "closed_success"
+            )
+            lines.extend(
+                [
+                    "",
+                    f"### {unit.unit_id} source={unit.source} state={state}",
+                    unit.text or "[empty unit]",
+                ]
+            )
+        lines.append("</compact_source>")
+        return "\n".join(lines).strip()
 
-    def build_payload(
+    def validate_checkpoint(
         self,
-        memory_service: Any,
+        raw_text: str,
+        snapshot: CompactionSnapshot,
+    ) -> L2Entry:
+        _ = snapshot
+        payload = extract_json_object(raw_text)
+        if str(payload.get("schema") or "").strip() != self.policy_id:
+            raise ValueError(f"schema must be {self.policy_id}")
+        if str(payload.get("kind") or "").strip().lower() != "minion":
+            raise ValueError("kind must be minion")
+        if "memory_candidates" in payload:
+            raise ValueError("minion checkpoints must not contain memory_candidates")
+        forbidden = _find_forbidden_reasoning_key(payload)
+        if forbidden:
+            raise ValueError(f"forbidden reasoning field: {forbidden}")
+        _reject_extra_fields(payload, _MINION_TOP_LEVEL_FIELDS, "checkpoint")
+        continuity = payload.get("continuity")
+        if not isinstance(continuity, dict):
+            raise ValueError("continuity must be an object")
+        missing = [
+            key for key in _CONTINUITY_FIELDS if key not in continuity
+        ]
+        if missing:
+            raise ValueError(
+                "continuity missing fields: " + ", ".join(missing)
+            )
+        _reject_extra_fields(
+            continuity,
+            frozenset(_CONTINUITY_FIELDS),
+            "continuity",
+        )
+        for key in _CONTINUITY_FIELDS:
+            _validate_continuity_items(key, continuity.get(key))
+        summary = payload.get("summary")
+        if not isinstance(summary, dict):
+            raise ValueError("summary must be an object")
+        _reject_extra_fields(
+            summary,
+            frozenset({"summary", "search_text"}),
+            "summary",
+        )
+        summary_text = _require_nonempty_string(summary, "summary", "summary")
+        search_text = _require_nonempty_string(
+            summary,
+            "search_text",
+            "summary",
+        )
+        if "degraded" in payload and not isinstance(payload.get("degraded"), bool):
+            raise ValueError("degraded must be a boolean")
+        normalized_payload: dict[str, Any] = {
+            "schema": self.policy_id,
+            "kind": "minion",
+            "continuity": {
+                key: _normalize_checkpoint_field(continuity.get(key))
+                for key in _CONTINUITY_FIELDS
+            },
+            "summary": {
+                "summary": summary_text,
+                "search_text": search_text,
+            },
+        }
+        if bool(payload.get("degraded")):
+            normalized_payload["degraded"] = True
+        return _make_minion_summary_entry(normalized_payload)
+
+    def degraded_checkpoint(
+        self,
+        snapshot: CompactionSnapshot,
+        units: Sequence[CompactionUnit],
         *,
-        target_input_budget: int,
-        reserved_output_tokens: int,
-    ) -> dict[str, Any]:
-        _ = reserved_output_tokens
-        items = getattr(getattr(memory_service, "l1_store", None), "items", [])
-        return build_minion_prior_user_inputs_compaction_payload(
-            items,
-            target_input_budget=target_input_budget,
+        failures: Sequence[str],
+    ) -> L2Entry:
+        recovery = [unit for unit in units if unit.recovery_required]
+        recent = list(units)[-3:]
+        safe_tail = _dedupe_units([*recovery, *recent])
+        previous = _previous_minion_continuity(snapshot.previous_summary)
+        payload: dict[str, Any] = {
+            "schema": self.policy_id,
+            "kind": "minion",
+            "degraded": True,
+            "continuity": {
+                "technical_route": [
+                    *list(previous.get("technical_route") or ()),
+                    {
+                        "route": "continue from frozen L1 and external module contract",
+                        "rationale": "semantic compaction did not produce a valid checkpoint",
+                    },
+                ],
+                "active_work": list(previous.get("active_work") or ()) + [
+                    {
+                        "goal": "recover precise work cursor",
+                        "target": unit.source,
+                        "action": _bounded_text(unit.text, limit=1200),
+                        "status": (
+                            "recovery_required"
+                            if unit.recovery_required
+                            else "recent_safe_tail"
+                        ),
+                    }
+                    for unit in safe_tail
+                ],
+                "active_errors": list(previous.get("active_errors") or ()) + [
+                    {
+                        "symptom": "recovery-required tool batch",
+                        "latest_evidence": _bounded_text(
+                            unit.text,
+                            limit=1200,
+                        ),
+                        "current_hypothesis": "effect must be reconciled before retry",
+                    }
+                    for unit in recovery
+                ],
+                "active_issues": [
+                    *list(previous.get("active_issues") or ()),
+                    {
+                        "issue": "semantic checkpoint generation failed",
+                        "known_facts": [
+                            str(item)[:240] for item in failures[-3:]
+                        ],
+                        "status": "degraded",
+                        "excluded_paths": [
+                            "do not infer success from missing or truncated output"
+                        ],
+                    }
+                ],
+                "next_actions": [
+                    *list(previous.get("next_actions") or ()),
+                    {
+                        "action": "consult the external module contract and reconcile recovery-required L1 work",
+                        "target": "current workspace and frozen L1 checkpoint",
+                        "expected_result": "a verified precise cursor before the next side effect",
+                    }
+                ],
+            },
+            "summary": {
+                "summary": (
+                    "Degraded Minion work checkpoint: recent safe work and all "
+                    "recovery-required batches were retained mechanically."
+                ),
+                "search_text": "\n".join(
+                    unit.text for unit in safe_tail
+                ).strip()
+                or "degraded minion work checkpoint",
+            },
+        }
+        return self.validate_checkpoint(
+            json.dumps(payload, ensure_ascii=False),
+            snapshot,
         )
-
-    def compact(
-        self,
-        memory_service: Any,
-        request: MemoryCompactRequest,
-    ) -> MemoryCompactResult:
-        return compact_minion_memory_service(memory_service, request)
 
 
 def project_minion_tool_protocol(
     messages: list[dict[str, Any]],
     max_chars: int,
 ) -> list[dict[str, Any]]:
-    """Bound a Minion protocol without inventing partial business outputs.
+    """Bound a prompt projection while preserving recovery batches verbatim."""
 
-    Closed successful batches may leave the active prompt. Failed, rejected,
-    or unknown-effect batches remain verbatim so recovery stays possible. The
-    complete raw protocol is owned by the durable journal, not this projection.
-    """
-
-    source = [dict(message) for message in messages if isinstance(message, dict)]
+    source = [
+        dict(message)
+        for message in messages
+        if isinstance(message, dict)
+    ]
     budget = max(4_096, int(max_chars or 0))
     if _protocol_chars(source) <= budget:
         return source
@@ -114,14 +335,202 @@ def project_minion_tool_protocol(
             ),
         ]
         if omitted:
-            lines.append(f"{omitted} older continuity entries omitted from this bounded projection.")
+            lines.append(
+                f"{omitted} older continuity entries omitted from this bounded projection."
+            )
         lines.extend(f"- {line}" for line in continuity)
         lines.append("</minion_tool_continuity>")
         result.insert(0, {"role": "user", "content": "\n".join(lines)})
     return result
 
 
-def _protocol_batches(messages: list[dict[str, Any]]) -> list[list[int]]:
+def render_minion_compact_context_for_llm(
+    *,
+    summary: str,
+    payload: dict[str, object],
+) -> str:
+    continuity = (
+        payload.get("continuity")
+        if isinstance(payload.get("continuity"), dict)
+        else {}
+    )
+    lines = [
+        '<compact_context kind="minion" authority="work_checkpoint">',
+        "## Minion Work Checkpoint",
+        "",
+        "This is a compact work cursor, not the role assignment and not hidden reasoning.",
+        "The mechanically projected role input, bound work view, contracts, checklist, workspace, and durable protocol journal remain authoritative.",
+    ]
+    for title, key in (
+        ("Technical Route", "technical_route"),
+        ("Active Work", "active_work"),
+        ("Active Errors", "active_errors"),
+        ("Active Issues", "active_issues"),
+        ("Next Actions", "next_actions"),
+    ):
+        rendered = _render_markdown_value(continuity.get(key))
+        if rendered:
+            lines.extend(["", f"### {title}", rendered])
+    summary_text = str(summary or "").strip()
+    if summary_text:
+        lines.extend(["", "### Summary", summary_text])
+    if bool(payload.get("degraded")):
+        lines.extend(
+            [
+                "",
+                "### Checkpoint Quality",
+                "degraded: reconcile against first-hand role inputs and the journal before repeating side effects.",
+            ]
+        )
+    lines.append("</compact_context>")
+    return "\n".join(lines).strip()
+
+
+def is_minion_compaction_payload(payload: object) -> bool:
+    return (
+        isinstance(payload, dict)
+        and str(payload.get("schema") or "").strip()
+        == COMPACTION_SCHEMA_MINION_V3
+    )
+
+
+def _make_minion_summary_entry(payload: dict[str, Any]) -> L2Entry:
+    summary_payload = dict(payload.get("summary") or {})
+    summary = str(summary_payload.get("summary") or "").strip()
+    search_text = str(summary_payload.get("search_text") or "").strip()
+    return L2Entry(
+        entry_id=SUMMARY_ENTRY_ID,
+        kind="summary",
+        scope="system",
+        title=SUMMARY_TITLE,
+        summary=summary,
+        source_kind="l1_compaction",
+        candidate_state="stable",
+        touched_at=utc_now(),
+        rendered=render_minion_compact_context_for_llm(
+            summary=summary,
+            payload=payload,
+        ),
+        search_text=search_text or summary,
+        payload=dict(payload),
+    )
+
+
+def _previous_seed(entry: L2Entry | None) -> str:
+    if entry is None:
+        return "No previous compact seed."
+    payload = dict(entry.payload or {})
+    if payload:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+    return entry.rendered or entry.summary or "Previous seed was empty."
+
+
+def _previous_minion_continuity(entry: L2Entry | None) -> dict[str, list[Any]]:
+    if entry is None:
+        return {}
+    continuity = dict(entry.payload or {}).get("continuity")
+    if not isinstance(continuity, dict):
+        return {}
+    return {
+        key: _normalize_checkpoint_field(continuity.get(key))
+        for key in _CONTINUITY_FIELDS
+    }
+
+
+def _normalize_checkpoint_field(value: Any) -> list[Any]:
+    return [_copy_json_value(item) for item in list(value or ())]
+
+
+def _copy_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _copy_json_value(item)
+            for key, item in value.items()
+            if str(key).strip()
+        }
+    if isinstance(value, list):
+        return [_copy_json_value(item) for item in value]
+    return value
+
+
+def _validate_continuity_items(key: str, value: Any) -> None:
+    if not isinstance(value, list):
+        raise ValueError(f"continuity.{key} must be an array")
+    allowed = _CONTINUITY_ITEM_FIELDS[key]
+    for index, item in enumerate(value):
+        label = f"continuity.{key}[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{label} must be an object")
+        _reject_extra_fields(item, allowed, label)
+        missing = sorted(allowed - set(item))
+        if missing:
+            raise ValueError(f"{label} missing fields: " + ", ".join(missing))
+        for field_name in allowed:
+            field_value = item.get(field_name)
+            if key == "active_issues" and field_name in {
+                "known_facts",
+                "excluded_paths",
+            }:
+                if not isinstance(field_value, list) or not all(
+                    isinstance(entry, str) and entry.strip()
+                    for entry in field_value
+                ):
+                    raise ValueError(
+                        f"{label}.{field_name} must be an array of non-empty strings"
+                    )
+                continue
+            if not isinstance(field_value, str) or not field_value.strip():
+                raise ValueError(
+                    f"{label}.{field_name} must be a non-empty string"
+                )
+
+
+def _require_nonempty_string(
+    value: dict[str, Any],
+    key: str,
+    label: str,
+) -> str:
+    item = value.get(key)
+    if not isinstance(item, str) or not item.strip():
+        raise ValueError(f"{label}.{key} must be a non-empty string")
+    return item.strip()
+
+
+def _reject_extra_fields(
+    value: dict[str, Any],
+    allowed: frozenset[str],
+    label: str,
+) -> None:
+    extras = sorted(str(key) for key in set(value) - set(allowed))
+    if extras:
+        raise ValueError(f"{label} has extra fields: " + ", ".join(extras))
+
+
+def _find_forbidden_reasoning_key(value: Any) -> str:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = str(key or "").strip().lower()
+            if normalized in _FORBIDDEN_REASONING_KEYS:
+                return normalized
+            nested = _find_forbidden_reasoning_key(item)
+            if nested:
+                return nested
+    elif isinstance(value, list):
+        for item in value:
+            nested = _find_forbidden_reasoning_key(item)
+            if nested:
+                return nested
+    return ""
+
+
+def _protocol_batches(
+    messages: list[dict[str, Any]],
+) -> list[list[int]]:
     batches: list[list[int]] = []
     index = 0
     while index < len(messages):
@@ -130,7 +539,10 @@ def _protocol_batches(messages: list[dict[str, Any]]) -> list[list[int]]:
         if role == "assistant" and message.get("tool_calls"):
             batch = [index]
             cursor = index + 1
-            while cursor < len(messages) and str(messages[cursor].get("role") or "").strip() == "tool":
+            while (
+                cursor < len(messages)
+                and str(messages[cursor].get("role") or "").strip() == "tool"
+            ):
                 batch.append(cursor)
                 cursor += 1
             batches.append(batch)
@@ -142,28 +554,54 @@ def _protocol_batches(messages: list[dict[str, Any]]) -> list[list[int]]:
     return batches
 
 
-def _belongs_to_tool_batch(index: int, batches: list[list[int]]) -> bool:
+def _belongs_to_tool_batch(
+    index: int,
+    batches: list[list[int]],
+) -> bool:
     return any(index in batch for batch in batches)
 
 
 def _batch_requires_recovery(batch: list[dict[str, Any]]) -> bool:
+    assistant = next(
+        (
+            message
+            for message in batch
+            if str(message.get("role") or "") == "assistant"
+            and message.get("tool_calls")
+        ),
+        None,
+    )
+    if assistant is not None:
+        expected = len(list(assistant.get("tool_calls") or ()))
+        observed = sum(
+            1
+            for message in batch
+            if str(message.get("role") or "") == "tool"
+        )
+        if observed < expected:
+            return True
     for message in batch:
         if str(message.get("role") or "").strip() != "tool":
             continue
         state = dict(message.get("_pal_result_state") or {})
-        if state:
-            if not bool(state.get("ok")):
-                return True
-            if str(state.get("kind") or "") in {"failed", "rejected"}:
-                return True
-            if str(state.get("effect") or "") == "unknown":
-                return True
+        if not state:
+            continue
+        if not bool(state.get("ok")):
+            return True
+        if str(state.get("kind") or "") in {"failed", "rejected"}:
+            return True
+        if str(state.get("effect") or "") == "unknown":
+            return True
     return False
 
 
 def _batch_continuity_line(batch: list[dict[str, Any]]) -> str:
     assistant = next(
-        (message for message in batch if str(message.get("role") or "") == "assistant"),
+        (
+            message
+            for message in batch
+            if str(message.get("role") or "") == "assistant"
+        ),
         {},
     )
     names = [
@@ -177,315 +615,30 @@ def _batch_continuity_line(batch: list[dict[str, Any]]) -> str:
         if str(message.get("role") or "") == "tool"
     ]
     digest = hashlib.sha256(
-        json.dumps(batch, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(
+            batch,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
     ).hexdigest()[:12]
     tools = ", ".join(name for name in names if name) or "tool"
     outcome = "; ".join(item for item in observations if item) or "completed"
     return f"{tools}: {outcome} [journal:{digest}]"
 
 
-def _protocol_chars(messages: list[dict[str, Any]]) -> int:
+def _protocol_chars(messages: Sequence[dict[str, Any]]) -> int:
     return sum(
-        len(json.dumps(message, ensure_ascii=False, sort_keys=True, default=str))
+        len(
+            json.dumps(
+                message,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        )
         for message in messages
     )
-
-
-def build_minion_prior_user_inputs_source_text(
-    items: list[list[L1TranscriptMessage]],
-    *,
-    target_input_budget: int,
-) -> str:
-    user_inputs, dropped_count = _bounded_minion_prior_user_inputs(
-        collect_minion_prior_user_inputs(items),
-        target_input_budget=target_input_budget,
-    )
-    if not user_inputs and dropped_count <= 0:
-        return ""
-    lines = [
-        '<compact_source kind="minion" mode="prior_completed_user_inputs">',
-        "## Source Rules",
-        "- This source is mechanically assembled from committed minion turns before the current active turn.",
-        "- It contains only prior user/task inputs. Assistant replies, tool results, aggregate state, worker journal state, and current turn state are excluded.",
-        "- Treat these prior inputs as already handled or superseded unless current source-of-truth artifacts say otherwise.",
-        "- Continue from the current active role invocation; current user message and current tool protocol are not compacted here.",
-        "",
-        "## Prior Completed User Inputs",
-    ]
-    if dropped_count > 0:
-        lines.append(f"Older prior user inputs omitted for budget: {dropped_count}.")
-        lines.append("")
-    if user_inputs:
-        for index, text in enumerate(user_inputs, start=1):
-            lines.extend([f"### Prior Input {index}", text])
-    else:
-        lines.append("No prior completed user inputs retained.")
-    lines.append("</compact_source>")
-    return "\n\n".join(str(line or "").strip() for line in lines if str(line or "").strip()).strip()
-
-
-def build_minion_prior_user_inputs_compaction_payload(
-    items: list[list[L1TranscriptMessage]],
-    *,
-    target_input_budget: int,
-) -> dict[str, Any]:
-    user_inputs, dropped_count = _bounded_minion_prior_user_inputs(
-        collect_minion_prior_user_inputs(items),
-        target_input_budget=target_input_budget,
-    )
-    has_inputs = bool(user_inputs)
-    summary_text = (
-        "Minion run memory was compacted mechanically: prior user inputs are retained as already-handled history. "
-        "Continue from the current active role invocation."
-        if has_inputs
-        else "Minion run memory was compacted mechanically: no prior user inputs were retained. "
-        "Continue from the current active role invocation."
-    )
-    continuity: dict[str, Any] = {
-        "history_rule": (
-            "Prior user inputs are background only: treat them as already handled or superseded unless canonical "
-            "artifacts, aggregate state, workspace, or the current invocation says otherwise."
-        ),
-        "current_turn_rule": (
-            "The current active role invocation user message and tool protocol are authoritative and are intentionally "
-            "not compacted."
-        ),
-    }
-    if has_inputs:
-        continuity["prior_completed_user_inputs"] = user_inputs
-    if dropped_count > 0:
-        continuity["retired_prior_user_input_count"] = dropped_count
-    search_text = "\n\n".join(user_inputs).strip()
-    return {
-        "schema": COMPACTION_SCHEMA_MINION_V2,
-        "kind": "minion",
-        "continuity": continuity,
-        "summary": {
-            "summary": summary_text,
-            "search_text": search_text or summary_text,
-        },
-    }
-
-
-def compact_minion_memory_service(memory_service: Any, request: MemoryCompactRequest) -> MemoryCompactResult:
-    if not request.metadata.get("structured_compaction") and not str(request.metadata.get("semantic_summary") or "").strip():
-        raise ValueError("minion compact requires structured_compaction or semantic_summary")
-    summary_entry = coerce_minion_compaction_summary_entry(
-        request.metadata.get("structured_compaction"),
-        fallback_summary=str(request.metadata.get("semantic_summary") or "").strip(),
-    )
-    l1_store = getattr(memory_service, "l1_store", None)
-    if l1_store is None or not hasattr(l1_store, "items"):
-        raise ValueError("minion compact requires an underlying memory service with l1_store.items")
-    l2_store = getattr(memory_service, "l2_store", None)
-    previous_l1_items = list(getattr(l1_store, "items", []) or [])
-    previous_l2_items = dict(getattr(l2_store, "items", {}) or {}) if l2_store is not None else None
-    previous_top_of_mind_refs = list(getattr(l2_store, "top_of_mind_refs", []) or []) if l2_store is not None else None
-    previous_heat_registry = dict(getattr(l2_store, "heat_registry", {}) or {}) if l2_store is not None else None
-    try:
-        l1_store.items = [[
-            L1TranscriptMessage(
-                role="assistant",
-                content=summary_entry.rendered or summary_entry.summary,
-                kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
-                payload=dict(summary_entry.payload or {}),
-            )
-        ]]
-        remover = getattr(memory_service, "remove_projected_entries", None)
-        if callable(remover):
-            remover([SUMMARY_ENTRY_ID])
-    except Exception:
-        l1_store.items = previous_l1_items
-        if l2_store is not None and previous_l2_items is not None:
-            l2_store.items = previous_l2_items
-        if l2_store is not None and previous_top_of_mind_refs is not None:
-            l2_store.top_of_mind_refs = previous_top_of_mind_refs
-        if l2_store is not None and previous_heat_registry is not None:
-            l2_store.heat_registry = previous_heat_registry
-        raise
-    return MemoryCompactResult(
-        summary=summary_entry.summary,
-        projected_entries=[summary_entry],
-        metadata={
-            "target_input_budget": request.target_input_budget,
-            "reserved_output_tokens": request.reserved_output_tokens,
-            "projected_entry_count": 0,
-            "compact_summary_count": 1,
-            "retired_count": 0,
-        },
-    )
-
-
-def coerce_minion_compaction_summary_entry(raw: Any, *, fallback_summary: str) -> L2Entry:
-    payload = raw if isinstance(raw, dict) else {}
-    schema = str(payload.get("schema") or "").strip()
-    if schema != COMPACTION_SCHEMA_MINION_V2 and not fallback_summary:
-        raise ValueError("minion structured compaction payload missing recognized schema")
-    summary_payload = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-    continuity = payload.get("continuity") if isinstance(payload.get("continuity"), dict) else {}
-    summary_text = str(summary_payload.get("summary") or "").strip() or str(fallback_summary or "").strip()
-    if not summary_text:
-        raise ValueError("minion compact summary is empty")
-    search_text = str(summary_payload.get("search_text") or "").strip() or summary_text
-    summary_payload_blob = {
-        "schema": COMPACTION_SCHEMA_MINION_V2,
-        "kind": "minion",
-        "continuity": dict(continuity),
-        "summary": {
-            "summary": summary_text,
-            "search_text": search_text,
-        },
-    }
-    return L2Entry(
-        entry_id=SUMMARY_ENTRY_ID,
-        kind="summary",
-        scope="system",
-        title=SUMMARY_TITLE,
-        summary=summary_text,
-        source_kind="l1_compaction",
-        candidate_state="stable",
-        touched_at=utc_now(),
-        rendered=render_minion_compact_context_for_llm(summary=summary_text, payload=summary_payload_blob),
-        search_text=search_text,
-        payload=summary_payload_blob,
-    )
-
-
-def is_minion_compaction_payload(payload: object) -> bool:
-    return isinstance(payload, dict) and str(payload.get("schema") or "").strip() == COMPACTION_SCHEMA_MINION_V2
-
-
-def render_minion_compact_context_for_llm(*, summary: str, payload: dict[str, object]) -> str:
-    continuity = payload.get("continuity") if isinstance(payload.get("continuity"), dict) else {}
-    lines = [
-        '<compact_context kind="minion" authority="reference_only">',
-        "## Minion Task Continuity Reference",
-        "",
-        "This compact context is a continuity reference only, not source of truth.",
-        "Verify against the canonical workflow artifacts, current aggregate, worker journal, and workspace before acting.",
-        "",
-    ]
-    rendered = _render_minion_continuity(dict(continuity))
-    if rendered:
-        lines.append(rendered)
-    summary_text = str(summary or "").strip()
-    if summary_text:
-        lines.extend(["", "### Summary", summary_text])
-    lines.append("</compact_context>")
-    return "\n".join(lines).strip()
-
-
-def collect_minion_prior_user_inputs(items: list[list[L1TranscriptMessage]]) -> list[str]:
-    result: list[str] = []
-    for transcript in items:
-        normalized = normalize_l1_transcript(transcript)
-        if not normalized:
-            continue
-        if any(
-            normalize_l1_message_kind(
-                message.kind,
-                role=str(message.role or "").strip(),
-                tool_calls=message.tool_calls,
-                tool_call_id=message.tool_call_id,
-            )
-            == L1MessageKind.RUNTIME_CONTEXT_SUMMARY
-            for message in normalized
-        ):
-            continue
-        for message in normalized:
-            role = str(message.role or "").strip()
-            kind = normalize_l1_message_kind(
-                message.kind,
-                role=role,
-                tool_calls=message.tool_calls,
-                tool_call_id=message.tool_call_id,
-            )
-            if role != "user" or kind != L1MessageKind.USER_REQUEST:
-                continue
-            content = _scrub_minion_management_info(str(message.content or "").strip())
-            if content:
-                result.append(content)
-    return result
-
-
-def _bounded_minion_prior_user_inputs(
-    inputs: list[str],
-    *,
-    target_input_budget: int,
-) -> tuple[list[str], int]:
-    limit = max(MINION_COMPACT_MIN_PRIOR_USER_INPUT_BUDGET, int(target_input_budget or 0))
-    result = [str(text or "").strip() for text in inputs if str(text or "").strip()]
-    dropped = 0
-    while result and len("\n\n".join(result)) > limit and len(result) > 1:
-        result.pop(0)
-        dropped += 1
-    if result and len("\n\n".join(result)) > limit:
-        result[0] = result[0][-limit:].lstrip()
-        dropped += 1
-    return result, dropped
-
-
-def _scrub_minion_management_info(text: str) -> str:
-    lines = []
-    for line in str(text or "").splitlines():
-        stripped = line.strip()
-        if _MINION_MANAGEMENT_LINE_RE.match(stripped):
-            continue
-        scrubbed_json = _scrub_json_line(stripped)
-        if scrubbed_json is not None:
-            if scrubbed_json:
-                lines.append(scrubbed_json)
-            continue
-        lines.append(line.rstrip())
-    return "\n".join(lines).strip()
-
-
-def _scrub_json_line(text: str) -> str | None:
-    if not text or text[0] not in "[{":
-        return None
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    scrubbed = _scrub_management_keys(parsed)
-    if scrubbed in ({}, []):
-        return ""
-    try:
-        return json.dumps(scrubbed, ensure_ascii=False, sort_keys=True)
-    except TypeError:
-        return None
-
-
-def _scrub_management_keys(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _scrub_management_keys(item)
-            for key, item in value.items()
-            if str(key).strip().lower() not in _MINION_MANAGEMENT_KEYS
-        }
-    if isinstance(value, list):
-        return [_scrub_management_keys(item) for item in value]
-    return value
-
-
-def _render_minion_continuity(continuity: dict[str, object]) -> str:
-    fields = (
-        ("Prior Completed User Inputs", "prior_completed_user_inputs"),
-        ("History Rule", "history_rule"),
-        ("Current Turn Rule", "current_turn_rule"),
-        ("Retired Prior User Input Count", "retired_prior_user_input_count"),
-    )
-    return _render_compact_sections(fields=fields, continuity=continuity)
-
-
-def _render_compact_sections(*, fields: tuple[tuple[str, str], ...], continuity: dict[str, object]) -> str:
-    sections: list[str] = []
-    for title, key in fields:
-        value = continuity.get(key)
-        rendered = _render_markdown_value(value)
-        if rendered:
-            sections.extend([f"### {title}", rendered])
-    return "\n\n".join(sections).strip()
 
 
 def _render_markdown_value(value: object) -> str:
@@ -493,28 +646,63 @@ def _render_markdown_value(value: object) -> str:
         return ""
     if isinstance(value, list):
         items = []
-        for item in value[:12]:
+        for item in value[:16]:
             text = _markdown_item_text(item)
             if text:
                 items.append(f"- {text}")
         return "\n".join(items)
-    if isinstance(value, dict):
-        items = []
-        for key, item in value.items():
-            text = _markdown_item_text(item)
-            if text:
-                items.append(f"- {key}: {text}")
-        return "\n".join(items)
-    return str(value).strip()
+    return _markdown_item_text(value)
 
 
 def _markdown_item_text(value: object) -> str:
     if value in (None, "", []):
         return ""
     if isinstance(value, dict):
-        for key in ("summary", "title", "text", "path", "id"):
-            text = str(value.get(key) or "").strip()
-            if text:
-                return text
-        return ", ".join(f"{key}={item}" for key, item in value.items() if item not in (None, "", []))
+        return "; ".join(
+            f"{key}: {_markdown_item_text(item)}"
+            for key, item in value.items()
+            if item not in (None, "", [])
+        )
+    if isinstance(value, list):
+        return ", ".join(
+            text
+            for item in value
+            if (text := _markdown_item_text(item))
+        )
     return str(value).strip()
+
+
+def _bounded_text(value: str, *, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    head = max(1, limit // 2)
+    tail = max(1, limit - head)
+    return (
+        text[:head].rstrip()
+        + f"\n[... omitted {len(text) - head - tail} chars ...]\n"
+        + text[-tail:].lstrip()
+    )
+
+
+def _dedupe_units(
+    units: Sequence[CompactionUnit],
+) -> list[CompactionUnit]:
+    result: list[CompactionUnit] = []
+    seen: set[str] = set()
+    for unit in units:
+        if unit.unit_id in seen:
+            continue
+        seen.add(unit.unit_id)
+        result.append(unit)
+    return result
+
+
+__all__ = [
+    "COMPACTION_SCHEMA_MINION_V3",
+    "MINION_COMPACTION_SYSTEM_PROMPT",
+    "MinionCompactionPolicy",
+    "is_minion_compaction_payload",
+    "project_minion_tool_protocol",
+    "render_minion_compact_context_for_llm",
+]

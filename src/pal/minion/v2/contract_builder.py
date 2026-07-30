@@ -22,14 +22,11 @@ import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Annotated, Any, Literal, Mapping, Sequence
 
+from pydantic import Field, model_validator
+from pal.execution.tool_facade import StrictToolModel
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
-from pal.minion.v2.architecture import (
-    contract_revision_changes,
-    normalize_revision_targets,
-    revision_target_allows,
-)
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
     empty_review_draft,
@@ -41,11 +38,103 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftStore,
     assert_authoring_schema_budget,
 )
+from pal.minion.v2.submission_preflight import bound_reference_payload
+from pal.minion.v2.work_checklist import (
+    normalize_work_checklist,
+    render_work_checklist,
+    unfinished_work_checklist_steps,
+)
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
 
+CONTRACT_ARCHITECT_CHECKLIST_STEPS = (
+    "read requirements and settle the unit design",
+    "encode units, directional contracts, ownership, and lifecycle",
+    "reconcile topology and end-to-end integration against the task",
+)
+
+_CONTRACT_ARCHITECT_ACTION_TEMPLATES: tuple[dict[str, Any], ...] = (
+    {
+        "phase": "design",
+        "steps": [
+            "Read the ordered task ledger and perform one bounded consistency pass.",
+            "Settle unit responsibilities, ownership, lifecycle, and directional boundaries.",
+            "Immediately update the checklist before authoring Contract fields.",
+        ],
+    },
+    {
+        "phase": "encode",
+        "steps": [
+            "Write settled semantic units and related contract fields to the durable Draft now.",
+            "Batch independent tool calls in one response; sequence only calls that depend on an earlier definition.",
+        ],
+    },
+    {
+        "phase": "reconcile",
+        "steps": [
+            "Close topology, integration, assumptions, risks, and task coverage.",
+            "Correct only discovered gaps instead of rebuilding the complete Contract.",
+        ],
+    },
+    {
+        "phase": "submit",
+        "steps": [
+            "All checklist items are complete and the durable Contract is reconciled.",
+            "Call contract_submit now; the Architecture Reviewer owns semantic acceptance.",
+        ],
+    },
+)
+
+
+class MinionV2ContractArchitectChecklistItem(StrictToolModel):
+    """One fixed Contract Architect phase or Manager-bound finding."""
+
+    step: Annotated[str, Field(min_length=1, max_length=240)]
+    status: Literal["pending", "in_progress", "completed"]
+
+
+class MinionV2ContractArchitectUpdateChecklistInput(StrictToolModel):
+    """Complete replacement for the Contract Architect's durable work cursor."""
+
+    plan: list[MinionV2ContractArchitectChecklistItem] = Field(
+        min_length=3,
+        max_length=67,
+    )
+
+    @model_validator(mode="after")
+    def validate_plan(
+        self,
+    ) -> "MinionV2ContractArchitectUpdateChecklistInput":
+        checklist = normalize_work_checklist(
+            self.model_dump(mode="python"),
+            require_nonempty=True,
+            owner="Architect",
+        )
+        _validate_contract_architect_checklist_shape(checklist)
+        return self
+
+
+_CONTRACT_CHECKLIST_EXAMPLE = {
+    "plan": [
+        {
+            "step": CONTRACT_ARCHITECT_CHECKLIST_STEPS[0],
+            "status": "completed",
+        },
+        {
+            "step": CONTRACT_ARCHITECT_CHECKLIST_STEPS[1],
+            "status": "in_progress",
+        },
+        {
+            "step": CONTRACT_ARCHITECT_CHECKLIST_STEPS[2],
+            "status": "pending",
+        },
+    ]
+}
+
+
 CONTRACT_SKETCH_BUILDER_CAPABILITIES = (
+    "op_minion_contract_update_checklist",
     "op_minion_contract_unit_upsert",
     "op_minion_contract_unit_add_interface",
     "op_minion_contract_unit_set_ownership",
@@ -203,21 +292,86 @@ _RISK = _schema(
     },
     required=("name", "risk", "severity"),
 )
+
+
+def _validate_contract_architect_phase_order(
+    statuses: Sequence[str],
+) -> None:
+    phase = "completed"
+    for status in statuses:
+        if phase == "completed":
+            if status == "in_progress":
+                phase = "in_progress"
+            elif status == "pending":
+                phase = "pending"
+        elif phase == "in_progress":
+            if status != "pending":
+                raise ValueError(
+                    "Architect checklist phases must progress in order"
+                )
+            phase = "pending"
+        elif status != "pending":
+            raise ValueError(
+                "Architect checklist phases must progress in order"
+            )
+
+
+def _validate_contract_architect_checklist_shape(
+    checklist: Mapping[str, Any],
+) -> None:
+    plan = [dict(item or {}) for item in list(checklist.get("plan") or [])]
+    steps = [str(item.get("step") or "") for item in plan]
+    if (
+        tuple(steps[: len(CONTRACT_ARCHITECT_CHECKLIST_STEPS)])
+        != CONTRACT_ARCHITECT_CHECKLIST_STEPS
+    ):
+        raise ValueError(
+            "Architect checklist must preserve the three fixed ordered phase steps"
+        )
+    if any(
+        not step.startswith("resolve finding: ")
+        for step in steps[len(CONTRACT_ARCHITECT_CHECKLIST_STEPS) :]
+    ):
+        raise ValueError(
+            "Architect checklist may append only `resolve finding: <finding_key>` steps"
+        )
+    _validate_contract_architect_phase_order(
+        [str(item["status"]) for item in plan]
+    )
+
+
 CONTRACT_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
+    "op_minion_contract_update_checklist": {
+        "alias": "update_checklist",
+        "description": (
+            "Replace the complete durable Contract Architect checklist. Preserve the three exact "
+            "ordered phase steps and every Manager-bound `resolve finding: <finding_key>` suffix. "
+            "Each item status is pending, in_progress, or completed; phases must advance in order. "
+            "After reading the task, immediately mark the design phase completed and the encode "
+            "phase in_progress before calling Contract authoring tools. The checklist is a work "
+            "cursor, never product truth or review evidence. The result supplies the next bounded "
+            "action; follow it and externalize each settled phase instead of privately completing "
+            "the whole design first."
+        ),
+        "InputModel": MinionV2ContractArchitectUpdateChecklistInput,
+        "examples": (_CONTRACT_CHECKLIST_EXAMPLE,),
+        "idempotency": "idempotent",
+        "retry_policy": "automatic",
+    },
     "op_minion_contract_unit_upsert": {"alias": "contract_unit_upsert", "description": "Create or update one semantic unit shell and its construction dependencies. behavior_kind is stateless, resource_owner, service, workflow, or adapter. owned_area names this unit's boundary; reference_only_paths are readable truth sources. Do not include implementation steps.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitUpsertInput},
     "op_minion_contract_unit_add_interface": {"alias": "contract_unit_add_interface", "description": "Add one provided or consumed interface contract to one unit. direction is provided or consumed; data_shape, valid_when, lifetime, ownership, error_behavior, and compatibility describe the boundary.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitAddInterfaceInput},
     "op_minion_contract_unit_set_ownership": {"alias": "contract_unit_set_ownership", "description": "Set one unit's ownership rule as a semantic statement.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitSetOwnershipInput},
     "op_minion_contract_unit_set_lifecycle": {"alias": "contract_unit_set_lifecycle", "description": "Set one unit's lifecycle model. Stateless units may state process/import lifetime.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitSetLifecycleInput},
     "op_minion_contract_unit_set_state": {"alias": "contract_unit_set_state", "description": "Set one unit's state model. Stateless units must use description=stateless.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitSetStateInput},
     "op_minion_contract_unit_add_rule": {"alias": "contract_unit_add_rule", "description": "Add one rule. kind is invariant, error_behavior, compatibility, dependency_constraint, verification_obligation, or split_condition; statement is required and condition/expected are optional.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitAddRuleInput},
-    "op_minion_contract_unit_remove": {"alias": "contract_unit_remove", "description": "Remove one semantic unit during a scoped revision.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitRemoveInput},
+    "op_minion_contract_unit_remove": {"alias": "contract_unit_remove", "description": "Remove one semantic unit when revision consistency requires it.", "InputModel": MinionV2ContractBuilderOpMinionContractUnitRemoveInput},
     "op_minion_contract_add_constraint": {"alias": "contract_add_constraint", "description": "Add or replace one named global constraint.", "InputModel": MinionV2ContractBuilderOpMinionContractAddConstraintInput},
     "op_minion_contract_add_gate_check": {"alias": "contract_add_gate_check", "description": "Add or replace one module-boundary or end-to-end gate, not an implementation checklist.", "InputModel": MinionV2ContractBuilderOpMinionContractAddGateCheckInput},
     "op_minion_contract_add_cross_unit_contract": {"alias": "contract_add_cross_unit_contract", "description": "Add or replace one directional cross-unit data/lifecycle contract.", "InputModel": MinionV2ContractBuilderOpMinionContractAddCrossUnitContractInput},
     "op_minion_contract_set_integration": {"alias": "contract_set_integration", "description": "Set the real end-to-end delivery entrypoint, dataflow, completion, and failure behavior.", "InputModel": MinionV2ContractBuilderOpMinionContractSetIntegrationInput},
     "op_minion_contract_add_assumption": {"alias": "contract_add_assumption", "description": "Add or replace one named assumption with owner, impact, and verification plan.", "InputModel": MinionV2ContractBuilderOpMinionContractAddAssumptionInput},
     "op_minion_contract_add_risk": {"alias": "contract_add_risk", "description": "Add or replace one named risk and mitigation. severity is low, medium, high, or critical.", "InputModel": MinionV2ContractBuilderOpMinionContractAddRiskInput},
-    "op_minion_contract_submit": {"alias": "contract_submit", "description": "Submit the current Architecture Contract Draft. Takes no arguments; Manager checks only names, topology, and structural safety.", "InputModel": MinionV2ContractBuilderOpMinionContractSubmitInput},
+    "op_minion_contract_submit": {"alias": "contract_submit", "description": "Submit the current Architecture Contract Draft after every update_checklist item is completed. Takes no arguments; Manager checks checklist closure, names, topology, and structural safety. Architecture Reviewer owns semantic acceptance.", "InputModel": MinionV2ContractBuilderOpMinionContractSubmitInput},
     "op_minion_architecture_review_submit": {"alias": "architecture_review_submit", "description": "Submit the review. Takes no arguments; verdict is PASS with no findings and FAIL otherwise.", "InputModel": MinionV2ContractBuilderOpMinionArchitectureReviewSubmitInput},
 }
 
@@ -226,6 +380,8 @@ for _tool_name, _tool_spec in CONTRACT_BUILDER_TOOL_SPECS.items():
         _tool_spec["InputModel"].model_json_schema(mode="validation", union_format="primitive_type_array"),
         owner=_tool_name,
     )
+    for _example in tuple(_tool_spec.get("examples") or ()):
+        _tool_spec["InputModel"].model_validate(_example, strict=True)
 
 
 def is_contract_builder_capability(name: str) -> bool:
@@ -240,6 +396,8 @@ def contract_builder_tool_result(
     try:
         stage = _stage(workspace)
         name = str(call.name or "")
+        if name == "op_minion_contract_update_checklist":
+            return _replace_contract_architect_checklist(call, workspace)
         if name == "op_minion_contract_submit":
             output, version = _compile_contract(call, workspace)
             return _publish(call, workspace, produced_artifacts, output, version=version, draft_kind="contract", filename="architecture_bundle.json")
@@ -268,12 +426,14 @@ def _mutate_contract(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> C
         raise ValueError(f"unknown Contract authoring capability: {name}")
     args = dict(call.args or {})
     context, store = _store(workspace, "contract")
+    _require_contract_authoring_phase(
+        store.read(context, seed=_contract_seed(workspace)).payload
+    )
 
     def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
         definitions = dict(payload.get("definitions") or {})
         contract = deepcopy(dict(definitions.get("contract") or _empty_contract()))
         _apply_contract_operation(contract, name, args, workspace=workspace)
-        _assert_revision_scope(workspace, contract)
         definitions["contract"] = contract
         payload["definitions"] = definitions
         return payload, {"updated": True, "counts": _contract_counts(contract)}
@@ -409,9 +569,18 @@ def _compile_contract(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> 
     _require_no_args(call)
     context, store = _store(workspace, "contract")
     snapshot = store.read(context, seed=_contract_seed(workspace))
+    checklist = _normalize_contract_architect_checklist(
+        snapshot.payload.get("checklist"),
+        workspace=workspace,
+    )
+    unfinished = unfinished_work_checklist_steps(checklist)
+    if unfinished:
+        raise ValueError(
+            "contract_submit requires every Architect checklist item completed: "
+            + ", ".join(unfinished)
+        )
     contract = deepcopy(dict(dict(snapshot.payload.get("definitions") or {}).get("contract") or {}))
     _validate_contract(contract)
-    _assert_revision_scope(workspace, contract)
     base = workspace.get("contract_revision_base_payload")
     if isinstance(base, Mapping) and contract == dict(base):
         raise ValueError("Architecture Contract revision makes no semantic change")
@@ -474,22 +643,12 @@ def _publish(
 def seed_contract_builder_draft(
     workspace: Mapping[str, Any],
     payload: Mapping[str, Any],
-    *,
-    revision_scope: Mapping[str, Any] | None = None,
 ) -> None:
     if not isinstance(workspace, dict):
         raise TypeError("contract revision workspace must be mutable")
     candidate = deepcopy(dict(payload))
     _validate_contract(candidate)
     workspace["contract_revision_base_payload"] = candidate
-    if revision_scope is not None:
-        normalized = normalize_revision_targets(dict(revision_scope).get("write_targets") or [])
-        if not normalized:
-            raise ValueError("revision scope requires at least one write target")
-        workspace["contract_revision_scope"] = {
-            **dict(revision_scope),
-            "write_targets": [item.to_dict() for item in normalized],
-        }
 
 
 def _validate_contract(payload: Mapping[str, Any]) -> None:
@@ -534,21 +693,6 @@ def _validate_contract(payload: Mapping[str, Any]) -> None:
     _reject_implementation_fields(payload)
 
 
-def _assert_revision_scope(workspace: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
-    base = workspace.get("contract_revision_base_payload")
-    scope = dict(workspace.get("contract_revision_scope") or {})
-    if not isinstance(base, Mapping) or not scope:
-        return
-    allowed = normalize_revision_targets(scope.get("write_targets") or [])
-    forbidden = [
-        item.to_dict()
-        for item in contract_revision_changes(dict(base), payload)
-        if not revision_target_allows(item, allowed)
-    ]
-    if forbidden:
-        raise ValueError("revision changed a semantic target outside its bound scope: " + json.dumps(forbidden, sort_keys=True))
-
-
 def _empty_contract() -> dict[str, Any]:
     return {
         "global_constraints": [],
@@ -586,7 +730,253 @@ def _empty_unit(name: str) -> dict[str, Any]:
 def _contract_seed(workspace: Mapping[str, Any]) -> dict[str, Any]:
     base = workspace.get("contract_revision_base_payload")
     contract = deepcopy(dict(base)) if isinstance(base, Mapping) else _empty_contract()
-    return {"definitions": {"contract": contract}, "evidence": {}, "findings": [], "summary": {}}
+    return {
+        "checklist": _contract_architect_checklist_seed(workspace),
+        "definitions": {"contract": contract},
+        "evidence": {},
+        "findings": [],
+        "summary": {},
+    }
+
+
+def _contract_architect_finding_keys(
+    workspace: Mapping[str, Any],
+) -> tuple[str, ...]:
+    keys: set[str] = set()
+    for reference_name in ("revision_scope", "revision_finding"):
+        payload = bound_reference_payload(
+            workspace,
+            reference_name,
+            required=False,
+        )
+        keys.update(
+            str(dict(item or {}).get("finding_key") or "").strip()
+            for item in list(payload.get("findings") or [])
+            if str(dict(item or {}).get("finding_key") or "").strip()
+        )
+    return tuple(sorted(keys))
+
+
+def _contract_architect_required_steps(
+    workspace: Mapping[str, Any],
+) -> tuple[str, ...]:
+    return (
+        *CONTRACT_ARCHITECT_CHECKLIST_STEPS,
+        *(
+            f"resolve finding: {key}"
+            for key in _contract_architect_finding_keys(workspace)
+        ),
+    )
+
+
+def _contract_architect_checklist_seed(
+    workspace: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "plan": [
+            {
+                "step": step,
+                "status": "in_progress" if index == 0 else "pending",
+            }
+            for index, step in enumerate(
+                _contract_architect_required_steps(workspace)
+            )
+        ]
+    }
+
+
+def _normalize_contract_architect_checklist(
+    value: Any,
+    *,
+    workspace: Mapping[str, Any],
+) -> dict[str, Any]:
+    checklist = normalize_work_checklist(
+        value,
+        require_nonempty=True,
+        owner="Architect",
+    )
+    _validate_contract_architect_checklist_shape(checklist)
+    actual = tuple(
+        str(dict(item or {}).get("step") or "")
+        for item in list(checklist.get("plan") or [])
+    )
+    expected = _contract_architect_required_steps(workspace)
+    if actual != expected:
+        raise ValueError(
+            "Architect checklist must contain exactly the fixed phases and "
+            "Manager-bound findings: "
+            + ", ".join(expected)
+        )
+    return checklist
+
+
+def _next_contract_architect_action(
+    checklist: Mapping[str, Any],
+) -> dict[str, Any]:
+    plan = [dict(item or {}) for item in list(checklist.get("plan") or [])]
+    unfinished = [item for item in plan if item.get("status") != "completed"]
+    if not unfinished:
+        return dict(_CONTRACT_ARCHITECT_ACTION_TEMPLATES[-1])
+    index = next(
+        (
+            position
+            for position, item in enumerate(plan)
+            if item.get("status") == "in_progress"
+        ),
+        next(
+            (
+                position
+                for position, item in enumerate(plan)
+                if item.get("status") != "completed"
+            ),
+            0,
+        ),
+    )
+    template_index = min(
+        index,
+        len(_CONTRACT_ARCHITECT_ACTION_TEMPLATES) - 2,
+    )
+    return {
+        **dict(_CONTRACT_ARCHITECT_ACTION_TEMPLATES[template_index]),
+        "current_step": str(plan[index].get("step") or ""),
+    }
+
+
+def _render_contract_architect_checklist(
+    checklist: Mapping[str, Any],
+) -> str:
+    rendered = render_work_checklist(
+        checklist,
+        owner="Architect",
+        purpose="durable phase cursor; not contract truth or review evidence",
+    )
+    action = _next_contract_architect_action(checklist)
+    return "\n".join(
+        [
+            rendered,
+            "",
+            f"Next action ({action.get('phase') or 'design'}):",
+            *[f"- {step}" for step in list(action.get("steps") or [])],
+        ]
+    )
+
+
+def contract_architect_checklist_context(
+    workspace: Mapping[str, Any],
+) -> str:
+    """Render the latest Contract Architect cursor for prompt assembly."""
+
+    metadata = dict(workspace.get("minion_v2") or {})
+    if str(metadata.get("role") or "") != "architect":
+        return ""
+    try:
+        context, store = _store(workspace, "contract")
+        snapshot = store.read(
+            context,
+            seed=_contract_seed(workspace),
+        )
+        checklist = _normalize_contract_architect_checklist(
+            snapshot.payload.get("checklist"),
+            workspace=workspace,
+        )
+    except (OSError, RuntimeError, ValueError):
+        return (
+            "Architect checklist is not initialized. Read the ordered task "
+            "ledger, then immediately call update_checklist with the three "
+            "fixed phases before authoring Contract fields."
+        )
+    return _render_contract_architect_checklist(checklist)
+
+
+def _replace_contract_architect_checklist(
+    call: CanonicalToolCall,
+    workspace: Mapping[str, Any],
+) -> CanonicalToolResult:
+    args = dict(call.args or {})
+    checklist = _normalize_contract_architect_checklist(
+        args,
+        workspace=workspace,
+    )
+    context, store = _store(workspace, "contract")
+
+    def reducer(
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], Mapping[str, Any]]:
+        payload["checklist"] = checklist
+        return payload, {
+            "updated": True,
+            "checklist": checklist,
+            "unfinished_count": len(
+                unfinished_work_checklist_steps(checklist)
+            ),
+        }
+
+    result = store.mutate(
+        context,
+        operation_key=str(
+            call.call_id
+            or "replace-contract-architect-checklist:"
+            + hashlib.sha256(
+                json.dumps(
+                    args,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        ),
+        request=args,
+        reducer=reducer,
+        seed=_contract_seed(workspace),
+    )
+    next_action = _next_contract_architect_action(checklist)
+    return _ok(
+        call,
+        _render_contract_architect_checklist(checklist),
+        {
+            **dict(result),
+            "next_action": next_action,
+        },
+    )
+
+
+def _require_contract_authoring_phase(
+    payload: Mapping[str, Any],
+) -> None:
+    raw = payload.get("checklist")
+    if not isinstance(raw, Mapping):
+        raise ValueError(
+            "Read the ordered task ledger, then call update_checklist before "
+            "authoring Contract fields"
+        )
+    plan = [dict(item or {}) for item in list(raw.get("plan") or [])]
+    if (
+        len(plan) < len(CONTRACT_ARCHITECT_CHECKLIST_STEPS)
+        or str(plan[0].get("status") or "") != "completed"
+    ):
+        raise ValueError(
+            "Complete the requirements/design checklist phase before "
+            "authoring Contract fields"
+        )
+
+
+def contract_work_checklist_artifact(
+    value: Any,
+) -> dict[str, Any]:
+    """Compile the Contract Architect cursor into its review projection."""
+
+    checklist = normalize_work_checklist(
+        value,
+        require_nonempty=True,
+        owner="Architect",
+    )
+    _validate_contract_architect_checklist_shape(checklist)
+    return {
+        "schema_version": "1",
+        "kind": "architect_work_checklist",
+        "authority": "work_cursor_only",
+        "checklist": checklist,
+    }
 
 
 def _review_seed() -> dict[str, Any]:

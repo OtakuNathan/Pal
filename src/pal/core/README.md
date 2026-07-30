@@ -11,6 +11,9 @@ Owns:
 - prompt fragment registry and prompt assembly seam
 - the shared `AgentTurnRuntime` prompt/turn-execution kernel used by Pal and
   Minion hosts
+- shared compaction orchestration: immutable snapshots, atomic history units,
+  budget preflight, an independently configured model-attempt budget,
+  validation, degraded checkpoints, and commit ordering
 - stagnation guard orchestration
 
 Does not own:
@@ -28,12 +31,25 @@ Exposes:
 - event and handler registries
 - `PromptFragmentRegistry`
 - `AgentTurnRuntime`
+- `CompactionEngine`, `CompactionPolicy`, `CompactionSnapshot`, and
+  `CompactionRunResult`
 - mailbox and turn-effect contracts
 
 Interaction rule:
 - `PalCore` is the only governance center
 - Pal and Minion supply host policy and ports to the same `AgentTurnRuntime`;
   they do not maintain separate prompt compilers or turn executors
+- automatic compaction is requested only by the real model context-budget
+  path; host clocks annotate snapshots but never trigger fixed-round compact
+- the immutable L1 snapshot is compaction's sole semantic input. Current input
+  and each closed tool batch are committed to L1 before compaction; provider
+  projections, recall caches, and role anchors are not parallel truth sources
+- one logical turn may create at most three compact generations. Semantic
+  generation gets three attempts before a mechanical checkpoint, and the
+  prompt plus local validator cap visible checkpoint JSON at an estimated
+  20,000 tokens while preserving provider-declared model reasoning headroom
+- a policy owns schema, prompt, validation, rendering, degraded semantics, and
+  whether durable-memory candidates are allowed
 - `Execution` is the only official invocation plane
 - `Pal` should call capabilities through `PalCore -> Execution`
 - turn computations yield effect requests and are resumed by `PalCore`

@@ -35,6 +35,7 @@ from pal.minion.v2.integration import IntegrationService
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.paths import cleanup_workflow_worktrees, resolve_project_git_layout
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.replan import architecture_finding_semantic_view
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
     MinionV2ReviewAddFindingInput,
@@ -51,13 +52,13 @@ from pal.minion.v2.skeleton import (
     compile_skeleton_markdown,
     compiled_module_write_scopes,
     review_architecture_skeleton,
-    validate_architecture_changed_paths,
-    validate_architecture_revision_scope,
     validate_architecture_submission,
 )
 from pal.minion.v2.task_ledger import TaskLedgerService, TaskRevisionAuthority
 from pal.minion.v2.skeleton_builder import (
+    ARCHITECTURE_CHECKLIST_STEPS,
     SKELETON_BUILDER_TOOL_SPECS,
+    architecture_checklist_context,
     ask_question_tool_result,
     compile_architecture_review_invocation_tool_contract,
     skeleton_builder_tool_result,
@@ -367,21 +368,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertFalse((self.repo / "future" / "router.cpp").exists())
         self.assertFalse((self.repo / "generated" / "router").exists())
 
-    def test_architect_changed_paths_exclude_future_implementation_scopes(self) -> None:
-        (self.repo / "include").mkdir()
-        (self.repo / "include" / "router.h").write_text(
-            _contract("router"), encoding="utf-8"
-        )
-        submission = self._submission()
-
-        with self.assertRaisesRegex(ValueError, "outside declared contract skeleton paths"):
-            validate_architecture_changed_paths(submission, ["src/router.cpp"])
-
-        self.assertEqual(
-            validate_architecture_changed_paths(submission, ["include/router.h"]),
-            ("include/router.h",),
-        )
-
     def test_top_level_implementation_directory_is_valid(self) -> None:
         (self.repo / "include").mkdir()
         (self.repo / "include" / "router.h").write_text(
@@ -539,6 +525,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 ArchitectureArtifactService(self.artifacts, self.repository)
             ).build(consumer)
         )
+        self.assertNotIn("node_run_journal", consumer_view)
         self.assertEqual(set(consumer_view["dependency_contracts"]), {"router"})
         router_axiom = consumer_view["dependency_contracts"]["router"]
         self.assertEqual(
@@ -1138,6 +1125,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertNotIn("requirements", work_view)
         self.assertNotIn("scenarios", work_view)
         self.assertEqual(work_view["schema_version"], "3")
+        self.assertNotIn("node_run_journal", work_view)
         self.assertNotIn("coverage_claims", work_view)
         self.assertNotIn("contract_consumption", work_view)
         self.assertEqual(work_view["module"]["responsibility"], self._submission()["modules"]["router"]["responsibility"])
@@ -1315,7 +1303,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "durable\n",
         )
 
-    def test_skeleton_builder_surface_contains_only_question_submit_and_review_tools(self) -> None:
+    def test_skeleton_builder_surface_contains_phase_cursor_submit_and_review_tools(self) -> None:
         projected_specs = {
             canonical_path: {
                 **{key: value for key, value in spec.items() if key != "InputModel"},
@@ -1324,6 +1312,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             for canonical_path, spec in SKELETON_BUILDER_TOOL_SPECS.items()
         }
         encoded = json.dumps(projected_specs, sort_keys=True)
+        self.assertIn("op_minion_architecture_update_checklist", encoded)
         self.assertIn("op_minion_architecture_submit", encoded)
         self.assertIn("op_minion_ask_question", encoded)
         self.assertNotIn("architecture_module_upsert", encoded)
@@ -1457,6 +1446,129 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "ask_question",
         )
 
+    def test_architect_checklist_is_durable_ordered_and_required_for_submit(
+        self,
+    ) -> None:
+        (self.repo / "include").mkdir()
+        (self.repo / "include" / "router.h").write_text(
+            _contract("router"),
+            encoding="utf-8",
+        )
+        workspace = self._bind_builder_workspace(
+            {
+                "repo_path": str(self.repo),
+                "artifact_dir": str(
+                    self.runtime_root / "checklist-artifacts"
+                ),
+                "artifact_stage_dir": str(
+                    self.runtime_root / "checklist-stage"
+                ),
+            },
+            role="architect",
+            mode="author",
+        )
+        self._author_submission(workspace, self._submission())
+
+        context = architecture_checklist_context(workspace)
+        self.assertIn("in_progress:", context)
+        self.assertIn(ARCHITECTURE_CHECKLIST_STEPS[0], context)
+        rejected = skeleton_builder_tool_result(
+            CanonicalToolCall(
+                name="op_minion_architecture_submit",
+                args={},
+                call_id="unfinished-checklist-submit",
+            ),
+            workspace,
+            [],
+        )
+        self.assertFalse(rejected.ok)
+        self.assertIn("checklist phase", rejected.text)
+
+        updated = self._builder_call(
+            workspace,
+            "op_minion_architecture_update_checklist",
+            {
+                "plan": [
+                    {"step": step, "status": "completed"}
+                    for step in ARCHITECTURE_CHECKLIST_STEPS
+                ]
+            },
+        )
+        self.assertTrue(updated.ok, updated.text)
+        self.assertEqual(updated.structured["unfinished_count"], 0)
+        self.assertEqual(
+            architecture_checklist_context(workspace).count("completed:"),
+            3,
+        )
+
+    def test_architect_revision_checklist_requires_every_bound_finding(self) -> None:
+        finding_path = self.runtime_root / "revision-finding.json"
+        finding_path.write_text(
+            json.dumps(
+                architecture_finding_semantic_view(
+                    {
+                        "findings": [
+                            {
+                                "finding_key": "repair_exception_guarantee",
+                                "finding_kind": "contract_defect",
+                                "priority": "p1",
+                                "summary": "Repair the inconsistent exception guarantee.",
+                            }
+                        ]
+                    }
+                )
+            ),
+            encoding="utf-8",
+        )
+        workspace = self._bind_builder_workspace(
+            {
+                "repo_path": str(self.repo),
+                "artifact_dir": str(self.runtime_root / "revision-checklist-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "revision-checklist-stage"),
+                "reference_paths": [
+                    {
+                        "name": "revision_finding",
+                        "path": str(finding_path),
+                        "truth_source": True,
+                    }
+                ],
+            },
+            role="architect",
+            mode="revision",
+        )
+
+        missing = self._builder_call(
+            workspace,
+            "op_minion_architecture_update_checklist",
+            {
+                "plan": [
+                    {"step": step, "status": "completed"}
+                    for step in ARCHITECTURE_CHECKLIST_STEPS
+                ]
+            },
+        )
+        self.assertFalse(missing.ok)
+        self.assertIn("resolve finding: repair_exception_guarantee", missing.text)
+
+        completed = self._builder_call(
+            workspace,
+            "op_minion_architecture_update_checklist",
+            {
+                "plan": [
+                    *[
+                        {"step": step, "status": "completed"}
+                        for step in ARCHITECTURE_CHECKLIST_STEPS
+                    ],
+                    {
+                        "step": "resolve finding: repair_exception_guarantee",
+                        "status": "completed",
+                    },
+                ]
+            },
+        )
+        self.assertTrue(completed.ok, completed.text)
+        self.assertEqual(completed.structured["unfinished_count"], 0)
+
     def test_architecture_review_pass_requires_semantic_contract_composition(self) -> None:
         description = str(
             SKELETON_BUILDER_TOOL_SPECS["op_minion_architecture_review_pass"]["description"]
@@ -1468,6 +1580,8 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertIn("provider outputs satisfy consumer dependencies", description)
         self.assertIn("success and failure observations", description)
         self.assertIn("unresolved public semantic ambiguity", description)
+        self.assertIn("Do not stop auditing after the first counterexample", description)
+        self.assertIn("a real p2 defect is blocking and requires FAIL", description)
         self.assertIn("partial-success failure path", description)
         self.assertIn("review_guarded implementation freedom", description)
         self.assertIn("hypothetical implementation behavior is not semantic proof", description)
@@ -1501,8 +1615,27 @@ class MinionV2SkeletonTests(unittest.TestCase):
             artifact["scenarios"]["router_end_to_end"]["requirement_refs"],
             ["deterministic_routing"],
         )
+        self.assertFalse(
+            (
+                Path(workspace["artifact_stage_dir"])
+                / "architecture_checklist.json"
+            ).exists()
+        )
+        draft = SubmissionDraftStore(self.runtime_root).read(
+            SubmissionDraftContext.from_workspace(
+                workspace,
+                draft_kind="architecture",
+            )
+        )
+        self.assertEqual(
+            [
+                item["status"]
+                for item in dict(draft.payload["checklist"])["plan"]
+            ],
+            ["completed", "completed", "completed"],
+        )
 
-    def test_architecture_submit_rejects_undeclared_changed_path_before_quiescing(self) -> None:
+    def test_architecture_submit_accepts_worktree_change_before_semantic_review(self) -> None:
         (self.repo / "include").mkdir()
         (self.repo / "include" / "router.h").write_text(
             _contract("router"), encoding="utf-8"
@@ -1527,17 +1660,15 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self._author_submission(workspace, self._submission())
         produced: list[dict[str, object]] = []
 
-        rejected = self._builder_call(
+        submitted = self._builder_call(
             workspace,
             "op_minion_architecture_submit",
             produced=produced,
         )
 
-        self.assertFalse(rejected.ok)
-        self.assertIn("outside declared", rejected.llm_text)
-        self.assertIn("README.md", rejected.llm_text)
-        self.assertEqual(produced, [])
-        self.assertFalse(
+        self.assertTrue(submitted.ok, submitted.llm_text)
+        self.assertEqual(len(produced), 1)
+        self.assertTrue(
             (Path(workspace["artifact_stage_dir"]) / "architecture_submission.json").exists()
         )
 
@@ -1740,7 +1871,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertIn("compile probe cannot establish", descriptions)
         self.assertNotIn("workflow_id", descriptions)
 
-    def test_revision_submit_merges_semantic_patch_and_rejects_out_of_scope_paths(self) -> None:
+    def test_revision_submit_allows_architect_owned_consistency_changes(self) -> None:
         (self.repo / "include").mkdir()
         contract_path = self.repo / "include" / "router.h"
         contract_path.write_text(_contract("router"), encoding="utf-8")
@@ -1791,18 +1922,20 @@ class MinionV2SkeletonTests(unittest.TestCase):
         (self.repo / "tests" / "test_router.cpp").write_text(
             "// unrelated revision\n", encoding="utf-8"
         )
-        rejected_workspace = self._bind_builder_workspace(
+        consistency_workspace = self._bind_builder_workspace(
             {
                 **{key: value for key, value in workspace.items() if key != "minion_v2"},
-                "artifact_dir": str(self.runtime_root / "revision-rejected-artifacts"),
-                "artifact_stage_dir": str(self.runtime_root / "revision-rejected-stage"),
+                "artifact_dir": str(self.runtime_root / "revision-consistency-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "revision-consistency-stage"),
             },
             role="architect",
             mode="revision",
         )
-        rejected = self._builder_call(rejected_workspace, "op_minion_architecture_submit")
-        self.assertFalse(rejected.ok)
-        self.assertIn("outside the finding scope", rejected.text)
+        consistency = self._builder_call(
+            consistency_workspace,
+            "op_minion_architecture_submit",
+        )
+        self.assertTrue(consistency.ok, consistency.text)
 
     def test_revision_submit_accepts_scoped_source_change_with_unchanged_dag(self) -> None:
         (self.repo / "include").mkdir()
@@ -1915,7 +2048,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("no source or semantic change", result.text)
 
-    def test_revision_scope_is_rechecked_during_stable_snapshot(self) -> None:
+    def test_revision_scope_is_guidance_during_stable_snapshot(self) -> None:
         initial = self._provision_complete_workspace("stable-revision", "initial")
         base_ref = self.service.snapshot_architect_result(
             workflow_name="stable-revision",
@@ -1925,19 +2058,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
             requirements_ref=self.requirements_ref,
         )
         base_artifact = self.artifacts.read_json(base_ref)
-        finding = {
-            "findings": [
-                {
-                    "finding_kind": "contract_defect",
-                    "summary": "Clarify the public router contract.",
-                    "affected_modules": ["router"],
-                    "locations": [
-                        {"path": "include/router.h", "section": "Compatibility"}
-                    ],
-                }
-            ]
-        }
-        scope = architecture_revision_scope(base_artifact["submission"], finding)
         revision = self.service.provision_architecture_workspace(
             workflow_id="stable-revision",
             revision_name="allowed",
@@ -1956,35 +2076,34 @@ class MinionV2SkeletonTests(unittest.TestCase):
             architecture_workspace=revision,
             submission=revised_submission,
             requirements_ref=self.requirements_ref,
-            revision_base_artifact=base_artifact,
-            revision_scope=scope,
         )
         self.assertEqual(
             self.artifacts.read_json(accepted_ref)["submission"],
             revised_submission,
         )
 
-        rejected_revision = self.service.provision_architecture_workspace(
+        consistency_revision = self.service.provision_architecture_workspace(
             workflow_id="stable-revision",
-            revision_name="rejected",
+            revision_name="consistency",
             workspace={"repo_path": str(self.repo)},
             requirements_ref=self.requirements_ref,
             base_artifact=self.artifacts.read_json(accepted_ref),
         )
-        (rejected_revision.worktree / "tests" / "test_router.cpp").write_text(
+        (consistency_revision.worktree / "tests" / "test_router.cpp").write_text(
             "// unrelated revision\n",
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(ValueError, "outside the finding scope"):
-            self.service.snapshot_architect_result(
-                workflow_name="stable-revision",
-                revision_name="rejected",
-                architecture_workspace=rejected_revision,
-                submission=revised_submission,
-                requirements_ref=self.requirements_ref,
-                revision_base_artifact=self.artifacts.read_json(accepted_ref),
-                revision_scope=scope,
-            )
+        consistency_ref = self.service.snapshot_architect_result(
+            workflow_name="stable-revision",
+            revision_name="consistency",
+            architecture_workspace=consistency_revision,
+            submission=revised_submission,
+            requirements_ref=self.requirements_ref,
+        )
+        self.assertIn(
+            "tests/test_router.cpp",
+            self.artifacts.read_json(consistency_ref)["changed_paths"],
+        )
 
     def test_replan_batch_scope_uses_repair_bill_module_and_boundary(self) -> None:
         base = self._submission()
@@ -2192,7 +2311,7 @@ class MinionV2SkeletonTests(unittest.TestCase):
             ["include/router.h"],
         )
 
-    def test_stable_snapshot_scopes_against_rejected_candidate_not_revision_origin(self) -> None:
+    def test_stable_snapshot_records_the_complete_revision_delta(self) -> None:
         initial = self._provision_complete_workspace("repair-baseline", "initial")
         base_ref = self.service.snapshot_architect_result(
             workflow_name="repair-baseline",
@@ -2216,16 +2335,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "// broad human edit\n", encoding="utf-8"
         )
         rejected_submission = json.loads(json.dumps(base_artifact["submission"]))
-        rejected_states = architecture_revision_path_states(
-            revision.worktree,
-            revision.base_sha,
-        )
-        finding = {
-            "finding_kind": "contract_defect",
-            "summary": "Clarify the frozen router contract.",
-            "affected_modules": ["router"],
-            "locations": [{"path": "include/router.h", "section": "Contract"}],
-        }
         revised_submission = json.loads(json.dumps(rejected_submission))
         (revision.worktree / "include" / "router.h").write_text(
             _contract("router") + "// local repair\n", encoding="utf-8"
@@ -2237,9 +2346,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
             architecture_workspace=revision,
             submission=revised_submission,
             requirements_ref=self.requirements_ref,
-            revision_base_artifact={"submission": rejected_submission},
-            revision_scope=architecture_revision_scope(rejected_submission, finding),
-            revision_base_path_states=rejected_states,
         )
 
         accepted = self.artifacts.read_json(accepted_ref)
@@ -3018,16 +3124,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
         without_transport = self._submission()
         source_artifact = self.artifacts.read_json(source_manifest)
-        removal_finding = {
-            "findings": [
-                {
-                    "finding_kind": "architecture_defect",
-                    "summary": "Remove the obsolete transport Module.",
-                    "affected_modules": ["transport"],
-                    "locations": [{"path": "include/transport.h"}],
-                }
-            ]
-        }
         revised_workspace = self.service.provision_architecture_workspace(
             workflow_id=workflow_id,
             revision_name="without-transport",
@@ -3042,11 +3138,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
             architecture_workspace=revised_workspace,
             submission=without_transport,
             requirements_ref=self.requirements_ref,
-            revision_base_artifact=source_artifact,
-            revision_scope=architecture_revision_scope(
-                source_artifact["submission"],
-                removal_finding,
-            ),
         )
         target = compiler.compile_epoch(
             workflow_id=workflow_id,
@@ -3528,6 +3619,24 @@ class MinionV2SkeletonTests(unittest.TestCase):
         args: dict[str, object] | None = None,
         produced: list[dict[str, object]] | None = None,
     ):
+        if name == "op_minion_architecture_submit":
+            checklist_call = CanonicalToolCall(
+                name="op_minion_architecture_update_checklist",
+                args={
+                    "plan": [
+                        {"step": step, "status": "completed"}
+                        for step in ARCHITECTURE_CHECKLIST_STEPS
+                    ]
+                },
+                call_id=f"builder-checklist-{self.builder_call_index + 1}",
+            )
+            checklist_result = skeleton_builder_tool_result(
+                checklist_call,
+                workspace,
+                [],
+            )
+            if not checklist_result.ok:
+                return checklist_result
         self.builder_call_index += 1
         call = CanonicalToolCall(
             name=name,

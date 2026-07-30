@@ -1,13 +1,5 @@
 from __future__ import annotations
 
-from pal.memory.compact import (
-    COMPACTION_SCHEMA_PAL_V2,
-    COMPACTION_SCHEMAS,
-    is_compaction_payload,
-    render_compact_context_for_llm,
-    render_pal_compact_context_for_llm,
-    render_pal_v2_compact_context_for_llm,
-)
 from pal.memory.contracts import L3MutationResult, L3RecallResult, L3RecallView, MemoryQuery
 
 _MAX_RECALL_ITEMS = 3

@@ -189,7 +189,7 @@ the canonical artifact before allowing the worker to exit.
 Authoring Drafts are durable, lease-fenced, versioned, and operation-idempotent.
 The Architecture YAML is an author-visible file projection, not an aggregate or
 workflow truth source; submit rechecks the active lease, fencing token, complete
-schema, semantic graph, revision scope, Git state, and snapshot stability before
+schema, semantic graph, Git state, and snapshot stability before
 advancing the state machine. Duplicate YAML keys, aliases, custom tags, merges,
 unknown fields, and stale invocations are rejected.
 A replacement role invocation with the same immutable input fingerprint inherits only
@@ -218,14 +218,18 @@ preferably batching independent calls in one tool round. It then submits once:
 PASS with no arguments and an empty finding Draft, or FAIL with the structured
 Draft. It never emits Markdown as its machine contract.
 
-Each module work view contains the full Module Protocol, direct dependency
-definitions and edges, direct consumer edges, relevant requirements and
-scenarios, both test scopes, dependency availability, RepairBills, and the
-durable node journal. Coder and Verifier derive tests from those semantics and
-store executable cases in their respective corpora. `verification_pass` has no
-manually maintained coverage payload; Manager mechanically requires a
-Verifier-owned test delta and a successful final shell or LSP receipt after the
-last edit.
+Each immutable module work view contains only semantic module input: the full
+Module Protocol, direct dependency contract slices, direct consumer obligations,
+both corpus paths, and RepairBills. Manager node journals remain private recovery
+state and never enter a work view. The exact immutable view is shared by Coder
+and Verifier. The role fragment and assignment provide the work playbook; the
+checklist is the durable execution cursor and never contract truth or evidence.
+Coder also receives the immutable task ledger as a final fallback for
+exact product intent that the local contract cannot resolve, not as its first
+implementation input. Coder and Verifier derive tests from the module semantics
+and store executable cases in their respective corpora. `verification_pass` has
+no model-authored coverage envelope; Manager records actual tool results and
+requires the policy-selected focused checks.
 
 Sandboxed role processes cannot mount Minion's database or content-addressed store.
 They receive only an assignment-scoped gateway endpoint and an opaque attempt
@@ -433,13 +437,19 @@ Pal sees ten workflow capabilities:
 - `op_minion_start_workflow`
 - `op_minion_submit_artifact`
 - `intro_minion_task_search`
-- `intro_minion_workflow_status`
+- `intro_minion_task_status`
 - `op_minion_resume_workflow`
 - `op_minion_restart_execution`
 - `op_minion_resolve_triage`
 - `op_minion_submit_human_decision`
 - `op_minion_control_workflow`
 - `op_minion_archive_workflow`
+
+The public workflow identity is the stable human-readable name returned by
+`op_minion_start_workflow`. Later status and control tools accept that name, or
+use the workflow bound to the current channel when it is omitted. Durable
+Manager UUIDs remain internal and are never exposed or accepted by the LLM
+facade.
 
 `resume_workflow` only resumes a deliberately paused workflow. Operator triage is
 resolved explicitly with `resolve_triage`, an auditable semantic module/phase

@@ -9,6 +9,12 @@ from functools import singledispatchmethod
 from typing import Any, Awaitable, Callable
 
 from pal.execution.contracts import ToolCallBudget
+from pal.core.compaction import (
+    CompactionClockKind,
+    CompactionEngine,
+    CompactionRunResult,
+    CompactionSnapshot,
+)
 from pal.core.prompt_compiler import normalize_prompt_messages
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import (
@@ -29,7 +35,16 @@ from pal.core.turns import (
 from pal.failure import FailureSignal
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolResult, LLMPreflightRequest
 from pal.memory.compact import memory_candidates_from_compact_result
-from pal.memory.contracts import CompactionProfile, MemoryCommitRequest, MemoryCompactRequest, MemoryPackRequest
+from pal.memory.contracts import (
+    L1MessageKind,
+    L1TranscriptMessage,
+    MemoryCommitRequest,
+    MemoryPackRequest,
+)
+from pal.memory.tool_protocol import (
+    l1_tool_protocol_transcript,
+    l1_tool_protocol_validation_error,
+)
 from pal.shared import (
     GuardAction,
     LLMFinishReason,
@@ -75,6 +90,8 @@ class TurnExecutor:
         tool_protocol_projector: Callable[[list[dict[str, Any]], int], list[dict[str, Any]]] | None = None,
         execute_tool_async: Callable[..., Awaitable[Any]] | None = None,
         config: RuntimeConfig | None = None,
+        compaction_engine: CompactionEngine | None = None,
+        compaction_clock_provider: Callable[[], int] | None = None,
     ) -> None:
         self.context = context
         self.state = state
@@ -92,6 +109,10 @@ class TurnExecutor:
         self._handle_llm_provider_errors = handle_llm_provider_errors
         self._tool_protocol_projector = tool_protocol_projector
         self._execute_tool_async = execute_tool_async
+        self._compaction_engine = compaction_engine
+        self._compaction_clock_provider = (
+            compaction_clock_provider or (lambda: 0)
+        )
 
         self._stream_accumulators = {
             LLMStreamEventKind.TEXT_DELTA: self._accumulate_text_delta,
@@ -122,6 +143,10 @@ class TurnExecutor:
 
     @_dispatch_effect.register(LLMPreflightEffect)
     async def _handle_llm_preflight(self, effect, continuation):
+        await self._settle_l1_working_set_async(
+            continuation,
+            effect.assembly_context,
+        )
         llm_runtime = self.context.require_port("llm:llm")
         tools = self._resolve_llm_tools(continuation, effect.tools_override)
         prompt = self.build_turn_prompt(
@@ -169,40 +194,50 @@ class TurnExecutor:
 
     @_dispatch_effect.register(MemoryCompactEffect)
     async def _handle_memory_compact(self, effect, continuation):
+        settled = await self._settle_l1_working_set_async(
+            continuation,
+            effect.assembly_context,
+        )
+        if not settled:
+            return EffectResult(
+                status=RuntimeStatus.ERROR,
+                text=(
+                    "Memory compaction requires a fully committed L1 working "
+                    "set; the current input or closed tool protocol could not "
+                    "be committed."
+                ),
+            )
         memory_service = self.context.require_port("memory:memory")
-        metadata = dict(effect.assembly_context.metadata)
-        profile = _compaction_profile_for_effect(effect)
-        metadata.update(await self.build_compaction_metadata_async(
+        run_result = await self.compact_memory_async(
             memory_service,
             target_input_budget=effect.target_input_budget,
             reserved_output_tokens=effect.reserved_output_tokens,
-            preferred_endpoint_id=metadata.get("preferred_endpoint_id"),
-            preferred_model_id=metadata.get("preferred_model_id"),
-            profile=profile,
-        ))
-        if not metadata.get("structured_compaction") and not str(metadata.get("semantic_summary") or "").strip():
+            assembly_context=effect.assembly_context,
+            continuation=continuation,
+        )
+        if not run_result.success:
             return EffectResult(
                 status=RuntimeStatus.ERROR,
-                text="Memory compaction failed after retries; the current turn cannot safely continue.",
+                text=(
+                    "Memory compaction could not reduce the non-removable current context."
+                    if run_result.status == "uncompactable_hard_context"
+                    else "Memory compaction failed; memory and active protocol were left unchanged."
+                ),
+                payload=run_result,
             )
-        try:
-            compact_result = await self._call_port_async(
-                memory_service,
-                "acompact",
-                "compact",
-                MemoryCompactRequest(
-                    target_input_budget=effect.target_input_budget,
-                    reserved_output_tokens=effect.reserved_output_tokens,
-                    profile=profile,
-                    metadata=metadata,
-                )
+        compact_result = run_result.memory_result
+        accepts_candidates = bool(
+            getattr(
+                getattr(self._compaction_engine, "policy", None),
+                "accepts_memory_candidates",
+                False,
             )
-        except Exception as exc:
-            return EffectResult(
-                status=RuntimeStatus.ERROR,
-                text=f"Memory compaction failed; the current turn cannot safely continue. {type(exc).__name__}: {exc}",
-            )
-        candidates = memory_candidates_from_compact_result(compact_result) if _profile_accepts_memory_candidates(profile) else []
+        )
+        candidates = (
+            memory_candidates_from_compact_result(compact_result)
+            if accepts_candidates
+            else []
+        )
         if candidates:
             continuation.pending_compact_memory_candidate_batches.append(
                 {
@@ -415,6 +450,7 @@ class TurnExecutor:
             continuation.pending_tool_results.append(tool_result)
             if len(continuation.pending_tool_results) >= len(continuation.pending_tool_call_batch):
                 self._flush_tool_protocol_messages(continuation)
+                await self._settle_l1_protocol_async(continuation)
         return EffectResult(
             status=RuntimeStatus.OK if tool_result.ok else RuntimeStatus.ERROR,
             payload=tool_result,
@@ -677,6 +713,15 @@ class TurnExecutor:
                             turn_kind=assembly_context.turn_kind,
                             task_id=assembly_context.task_id,
                             work_order_id=assembly_context.work_order_id,
+                            active_input_id=str(
+                                getattr(
+                                    getattr(assembly_context, "event", None),
+                                    "event_id",
+                                    "",
+                                )
+                                or ""
+                            )
+                            or None,
                         )
                     )
                 except Exception:
@@ -1224,10 +1269,170 @@ class TurnExecutor:
         value = base_by_mode.get(response_mode, 0.3)
         return max(0.0, min(1.0, round(value, 2)))
 
+    # ── L1 working-set settlement ───────────────────────────────────────
+
+    async def _settle_l1_working_set_async(
+        self,
+        continuation: Any,
+        assembly_context: Any,
+    ) -> bool:
+        """Commit the current input and every closed tool batch before compact."""
+
+        input_ok = await self._settle_l1_input_async(
+            continuation,
+            assembly_context,
+        )
+        protocol_ok = await self._settle_l1_protocol_async(continuation)
+        return input_ok and protocol_ok
+
+    async def _settle_l1_input_async(
+        self,
+        continuation: Any,
+        assembly_context: Any,
+    ) -> bool:
+        if bool(getattr(continuation, "l1_input_committed", False)):
+            return True
+        event = getattr(assembly_context, "event", None)
+        text = extract_text_from_payload(
+            getattr(event, "payload", None)
+        ).strip()
+        if not text:
+            text = str(
+                dict(getattr(assembly_context, "metadata", {}) or {}).get(
+                    "proactive_input"
+                )
+                or ""
+            ).strip()
+        if not text:
+            continuation.l1_input_committed = True
+            return True
+        input_id = self._active_input_id(continuation, assembly_context)
+        message = L1TranscriptMessage(
+            role="user",
+            content=text,
+            kind=L1MessageKind.USER_REQUEST,
+            payload={"_pal_input_id": input_id},
+        )
+        committed = await self._commit_l1_transcript_async(
+            continuation,
+            [message],
+            metadata={"working_set_phase": "input"},
+        )
+        if committed:
+            continuation.l1_input_committed = True
+        return committed
+
+    async def _settle_l1_protocol_async(
+        self,
+        continuation: Any,
+    ) -> bool:
+        if getattr(continuation, "pending_tool_call_batch", None):
+            return False
+        if getattr(continuation, "pending_tool_results", None):
+            return False
+        messages = list(
+            getattr(continuation, "tool_protocol_messages", ()) or ()
+        )
+        committed_count = max(
+            0,
+            int(
+                getattr(
+                    continuation,
+                    "l1_protocol_committed_count",
+                    0,
+                )
+                or 0
+            ),
+        )
+        if committed_count > len(messages):
+            return False
+        if committed_count == len(messages):
+            return True
+        suffix = [
+            dict(message)
+            for message in messages[committed_count:]
+            if isinstance(message, dict)
+        ]
+        validation_error = l1_tool_protocol_validation_error(suffix)
+        if validation_error:
+            return False
+        transcript, _ = l1_tool_protocol_transcript(suffix)
+        input_id = self._active_input_id(continuation, None)
+        tagged = [
+            L1TranscriptMessage(
+                role=message.role,
+                content=message.content,
+                kind=message.kind,
+                tool_calls=message.tool_calls,
+                tool_call_id=message.tool_call_id,
+                payload={
+                    **dict(message.payload or {}),
+                    "_pal_input_id": input_id,
+                },
+            )
+            for message in transcript
+        ]
+        if tagged and not await self._commit_l1_transcript_async(
+            continuation,
+            tagged,
+            metadata={"working_set_phase": "closed_tool_protocol"},
+        ):
+            return False
+        continuation.l1_protocol_committed_count = len(messages)
+        return True
+
+    async def _commit_l1_transcript_async(
+        self,
+        continuation: Any,
+        transcript: list[L1TranscriptMessage],
+        *,
+        metadata: dict[str, Any],
+    ) -> bool:
+        if not transcript:
+            return True
+        memory_service = self.context.port_registry.get("memory:memory")
+        if memory_service is None:
+            return False
+        try:
+            result = await self._call_port_async(
+                memory_service,
+                "acommit_l1",
+                "commit_l1",
+                MemoryCommitRequest(
+                    turn_id=str(getattr(continuation, "turn_id", "") or ""),
+                    transcript=transcript,
+                    metadata=dict(metadata),
+                ),
+            )
+        except Exception:
+            return False
+        return getattr(result, "status", "") in {
+            RuntimeStatus.OK,
+            RuntimeStatus.SKIPPED,
+        }
+
+    @staticmethod
+    def _active_input_id(
+        continuation: Any,
+        assembly_context: Any | None,
+    ) -> str:
+        event = getattr(assembly_context, "event", None)
+        if event is None:
+            event = getattr(
+                getattr(continuation, "channel_envelope", None),
+                "event",
+                None,
+            )
+        return (
+            str(getattr(event, "event_id", "") or "").strip()
+            or str(getattr(continuation, "turn_id", "") or "").strip()
+        )
+
     # ── post-turn commit ─────────────────────────────────────────────────
 
-    async def schedule_post_turn_commit_async(self, outcome) -> None:
+    async def schedule_post_turn_commit_async(self, outcome) -> Any:
         memory_service = self.context.port_registry.get("memory:memory")
+        result = None
         if memory_service is not None:
             result = await self._call_port_async(
                 memory_service,
@@ -1254,6 +1459,7 @@ class TurnExecutor:
             except Exception:
                 pass
         self._tick_behavior_lifecycle()
+        return result
 
     def _tick_behavior_lifecycle(self) -> None:
         behavior_service = self.context.port_registry.get("behavior:behavior")
@@ -1265,238 +1471,148 @@ class TurnExecutor:
         except Exception:
             pass
 
-    # ── compaction summary ───────────────────────────────────────────────
+    # ── shared compaction engine ─────────────────────────────────────────
 
-    async def summarize_compaction_async(
+    async def compact_memory_async(
         self,
-        memory_service,
+        memory_service: Any,
         *,
         target_input_budget: int,
         reserved_output_tokens: int,
+        assembly_context: Any | None = None,
+        continuation: Any | None = None,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
-        profile: CompactionProfile = CompactionProfile.PAL,
-    ) -> str:
+    ) -> CompactionRunResult:
+        engine = self._compaction_engine
+        if engine is None:
+            return CompactionRunResult(
+                status="engine_unavailable",
+                clock_kind=CompactionClockKind.USER_TURN,
+            )
         llm_runtime = self.context.port_registry.get("llm:llm")
         if llm_runtime is None:
-            return ""
-        source_text = self.build_compaction_source_text(
-            memory_service,
-            target_input_budget=target_input_budget,
-            profile=profile,
-        )
-        if not source_text:
-            return ""
-        async_method = getattr(llm_runtime, "asummarize_compaction", None)
-        if callable(async_method):
-            result = async_method(
-                source_text,
-                max_output_tokens=min(max(512, reserved_output_tokens or 0), 1024),
-                preferred_endpoint_id=preferred_endpoint_id,
-                preferred_model_id=preferred_model_id,
-                profile=profile,
+            return CompactionRunResult(
+                status="engine_unavailable",
+                clock_kind=engine.policy.clock_kind,
             )
-            if inspect.isawaitable(result):
-                try:
-                    return str((await result) or "").strip()
-                except Exception:
-                    return ""
-            return str(result or "").strip()
-        sync_method = getattr(llm_runtime, "summarize_compaction", None)
-        if callable(sync_method):
-            try:
-                result = sync_method(
-                    source_text,
-                    max_output_tokens=min(max(512, reserved_output_tokens or 0), 1024),
-                    preferred_endpoint_id=preferred_endpoint_id,
-                    preferred_model_id=preferred_model_id,
-                    profile=profile,
+        metadata = dict(
+            getattr(assembly_context, "metadata", {}) or {}
+        )
+        preferred_endpoint_id = (
+            preferred_endpoint_id
+            or metadata.get("preferred_endpoint_id")
+            or getattr(
+                continuation,
+                "preferred_llm_endpoint_id",
+                None,
+            )
+        )
+        preferred_model_id = (
+            preferred_model_id
+            or metadata.get("preferred_model_id")
+            or getattr(
+                continuation,
+                "preferred_llm_model_id",
+                None,
+            )
+        )
+        if continuation is not None:
+            if getattr(continuation, "pending_tool_call_batch", None):
+                return CompactionRunResult(
+                    status="protocol_not_closed",
+                    failures=("pending_tool_call_batch",),
+                    clock_kind=engine.policy.clock_kind,
                 )
-            except Exception:
-                return ""
-            return str(result or "").strip()
-        return ""
-
-    async def build_compaction_metadata_async(
-        self,
-        memory_service,
-        *,
-        target_input_budget: int,
-        reserved_output_tokens: int,
-        preferred_endpoint_id: str | None = None,
-        preferred_model_id: str | None = None,
-        profile: CompactionProfile = CompactionProfile.PAL,
-        retry_attempts: int = 3,
-    ) -> dict[str, Any]:
-        mechanical_payload = self.build_mechanical_compaction_payload(
+            if getattr(continuation, "pending_tool_results", None):
+                return CompactionRunResult(
+                    status="protocol_not_closed",
+                    failures=("pending_tool_results",),
+                    clock_kind=engine.policy.clock_kind,
+                )
+            original_protocol = [
+                dict(message)
+                for message in list(
+                    getattr(
+                        continuation,
+                        "tool_protocol_messages",
+                        (),
+                    )
+                    or ()
+                )
+                if isinstance(message, dict)
+            ]
+            if int(
+                getattr(
+                    continuation,
+                    "l1_protocol_committed_count",
+                    0,
+                )
+                or 0
+            ) != len(original_protocol):
+                return CompactionRunResult(
+                    status="l1_not_settled",
+                    failures=("closed_protocol_not_committed_to_l1",),
+                    clock_kind=engine.policy.clock_kind,
+                )
+        else:
+            original_protocol = []
+        try:
+            clock_value = max(
+                0,
+                int(self._compaction_clock_provider() or 0),
+            )
+        except Exception:
+            clock_value = 0
+        snapshot = CompactionSnapshot.capture(
             memory_service,
             target_input_budget=target_input_budget,
             reserved_output_tokens=reserved_output_tokens,
-            profile=profile,
+            clock_kind=engine.policy.clock_kind,
+            clock_value=clock_value,
+            metadata={
+                **metadata,
+                "preferred_endpoint_id": preferred_endpoint_id,
+                "preferred_model_id": preferred_model_id,
+            },
         )
-        if _is_valid_structured_compaction_payload(mechanical_payload):
-            return {"structured_compaction": mechanical_payload}
-        if not _profile_uses_llm_compaction(profile):
-            return {"semantic_summary": _empty_compaction_summary(profile)}
-        source_text = self.build_compaction_source_text(
-            memory_service,
-            target_input_budget=target_input_budget,
-            profile=profile,
+        reconcile = getattr(
+            self.context.execution_runtime,
+            "reconcile_tool_context",
+            None,
         )
-        if not source_text:
-            return {"semantic_summary": _empty_compaction_summary(profile)}
-        attempts = max(1, min(5, int(retry_attempts or 1)))
-        for attempt in range(attempts):
-            structured_compaction = await self.build_structured_compaction_async(
-                memory_service,
-                target_input_budget=target_input_budget,
-                reserved_output_tokens=reserved_output_tokens,
-                preferred_endpoint_id=preferred_endpoint_id,
-                preferred_model_id=preferred_model_id,
-                profile=profile,
-            )
-            if _is_valid_structured_compaction_payload(structured_compaction):
-                return {"structured_compaction": structured_compaction}
-            semantic_summary = await self.summarize_compaction_async(
-                memory_service,
-                target_input_budget=target_input_budget,
-                reserved_output_tokens=reserved_output_tokens,
-                preferred_endpoint_id=preferred_endpoint_id,
-                preferred_model_id=preferred_model_id,
-                profile=profile,
-            )
-            if semantic_summary:
-                return {"semantic_summary": semantic_summary}
-            if attempt < attempts - 1:
-                await asyncio.sleep(0)
-        return {}
 
-    def build_compaction_source_text(
-        self,
-        memory_service,
-        *,
-        target_input_budget: int,
-        profile: CompactionProfile = CompactionProfile.PAL,
-    ) -> str:
-        builder = getattr(memory_service, "build_compaction_source_text", None)
-        if not callable(builder):
-            return ""
-        try:
-            return str(
-                builder(
-                    target_input_budget=target_input_budget,
-                    profile=profile,
-                )
-                or ""
-            ).strip()
-        except TypeError:
-            try:
-                return str(
-                    builder(target_input_budget=target_input_budget) or ""
-                ).strip()
-            except Exception:
-                return ""
-        except Exception:
-            return ""
-
-    def build_mechanical_compaction_payload(
-        self,
-        memory_service,
-        *,
-        target_input_budget: int,
-        reserved_output_tokens: int,
-        profile: CompactionProfile,
-    ) -> dict[str, Any]:
-        builder = getattr(memory_service, "build_compaction_payload", None)
-        if not callable(builder):
-            return {}
-        try:
-            payload = builder(
-                target_input_budget=target_input_budget,
-                reserved_output_tokens=reserved_output_tokens,
-                profile=profile,
+        def retire_protocol_projection() -> None:
+            if not callable(reconcile):
+                return
+            reconcile(
+                turn_id=getattr(continuation, "turn_id", None),
+                original_messages=original_protocol,
+                projected_messages=[],
+                delivery_records=dict(
+                    getattr(
+                        continuation,
+                        "tool_delivery_records",
+                        {},
+                    )
+                    or {}
+                ),
             )
-        except TypeError:
-            try:
-                payload = builder(target_input_budget=target_input_budget)
-            except Exception:
-                return {}
-        except Exception:
-            return {}
-        return dict(payload or {}) if isinstance(payload, dict) else {}
 
-    async def build_structured_compaction_async(
-        self,
-        memory_service,
-        *,
-        target_input_budget: int,
-        reserved_output_tokens: int,
-        preferred_endpoint_id: str | None = None,
-        preferred_model_id: str | None = None,
-        profile: CompactionProfile = CompactionProfile.PAL,
-    ) -> dict[str, Any]:
-        if not _profile_uses_llm_compaction(profile):
-            return {}
-        llm_runtime = self.context.port_registry.get("llm:llm")
-        if llm_runtime is None:
-            return {}
-        source_text = self.build_compaction_source_text(
-            memory_service,
-            target_input_budget=target_input_budget,
-            profile=profile,
+        run_result = await engine.run(
+            snapshot,
+            llm_runtime=llm_runtime,
+            memory_service=memory_service,
+            after_commit=(
+                retire_protocol_projection
+                if continuation is not None
+                else None
+            ),
         )
-        if not source_text:
-            return {}
-        async_method = getattr(llm_runtime, "acompact_memory_structured", None)
-        if callable(async_method):
-            result = async_method(
-                source_text,
-                max_output_tokens=min(max(1536, reserved_output_tokens or 0), 4096),
-                preferred_endpoint_id=preferred_endpoint_id,
-                preferred_model_id=preferred_model_id,
-                profile=profile,
-            )
-            if inspect.isawaitable(result):
-                try:
-                    payload = await result
-                except Exception:
-                    return {}
-            else:
-                payload = result
-            return dict(payload or {}) if isinstance(payload, dict) else {}
-        return {}
+        if not run_result.success or continuation is None:
+            return run_result
 
-
-def _compaction_profile_for_effect(effect: MemoryCompactEffect) -> CompactionProfile:
-    if isinstance(effect.profile_override, CompactionProfile):
-        return effect.profile_override
-    assembly_context = effect.assembly_context
-    turn_kind = str(getattr(assembly_context, "turn_kind", "") or "").strip().lower()
-    core_mode = str(getattr(assembly_context, "core_mode", "") or "").strip().lower()
-    return CompactionProfile.MINION if "minion" in {turn_kind, core_mode} else CompactionProfile.PAL
-
-
-def _empty_compaction_summary(profile: CompactionProfile) -> str:
-    if profile == CompactionProfile.MINION:
-        return "No prior minion runtime context was retained before this compaction request."
-    return "No prior runtime context was retained before this compaction request."
-
-
-def _profile_uses_llm_compaction(profile: CompactionProfile) -> bool:
-    return profile == CompactionProfile.PAL
-
-
-def _profile_accepts_memory_candidates(profile: CompactionProfile) -> bool:
-    return profile == CompactionProfile.PAL
-
-
-def _is_valid_structured_compaction_payload(payload: object) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    schema = str(payload.get("schema") or "").strip()
-    if schema not in {"pal.compaction.pal.v2", "pal.compaction.minion.v1"}:
-        return False
-    summary = payload.get("summary")
-    if not isinstance(summary, dict):
-        return False
-    return bool(str(summary.get("summary") or "").strip())
+        continuation.tool_protocol_messages.clear()
+        continuation.tool_delivery_records.clear()
+        continuation.l1_protocol_committed_count = 0
+        return run_result

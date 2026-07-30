@@ -244,6 +244,7 @@ class ManagerLogicalExecutionState:
         digest: str,
         total_lines: int,
         complete: bool,
+        source: str = "mutation",
     ) -> None:
         def mutate(state: dict[str, Any]) -> tuple[dict[str, Any], None]:
             _ensure_active(state)
@@ -264,6 +265,9 @@ class ManagerLogicalExecutionState:
                 "complete": bool(complete),
                 "created_user_turn": current_turn,
                 "expires_at_user_turn": current_turn + retention,
+                "source": (
+                    "mutation" if str(source) == "mutation" else "delivery"
+                ),
             }
             state["snapshots"] = snapshots
             return state, None
@@ -443,6 +447,7 @@ class RoleGatewayLogicalExecutionState:
         digest: str,
         total_lines: int,
         complete: bool,
+        source: str = "mutation",
     ) -> None:
         self.client.request_sync(
             "execution_set_file_snapshot",
@@ -452,6 +457,7 @@ class RoleGatewayLogicalExecutionState:
                 "digest": str(digest),
                 "total_lines": int(total_lines),
                 "complete": bool(complete),
+                "source": str(source),
             },
         )
 
@@ -595,6 +601,19 @@ def _apply_delivery(state: dict[str, Any], delivery: dict[str, Any]) -> None:
         dict(snapshots.get(manifest.file_key) or {})
     ) if snapshots.get(manifest.file_key) else None
     delivered = _file_grant_from_dict(grants[key])
+    if (
+        previous_snapshot is not None
+        and previous_snapshot.source == "mutation"
+        and previous_snapshot.digest != manifest.digest
+    ):
+        return
+    if (
+        previous_snapshot is not None
+        and previous_snapshot.digest == manifest.digest
+        and previous_snapshot.complete
+        and not delivered.complete
+    ):
+        return
     snapshots[manifest.file_key] = FileSnapshot(
         file_key=manifest.file_key,
         digest=manifest.digest,
@@ -609,6 +628,7 @@ def _apply_delivery(state: dict[str, Any], delivery: dict[str, Any]) -> None:
         ),
         created_user_turn=current_turn,
         expires_at_user_turn=current_turn + retention,
+        source="delivery",
     ).to_dict()
     state["snapshots"] = snapshots
 

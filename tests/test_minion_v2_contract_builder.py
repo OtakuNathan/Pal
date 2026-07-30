@@ -236,25 +236,17 @@ class ContractBuilderTests(unittest.TestCase):
         self.assertEqual(artifact["findings"][0]["finding_key"], "report_ownership_incomplete")
         self.assertEqual(artifact["findings"][0]["priority"], "p1")
 
-    def test_revision_scope_rejects_unrelated_semantic_change(self) -> None:
+    def test_revision_scope_guides_but_does_not_fence_consistency_change(self) -> None:
         base = self._complete_base_contract()
         self._advance_fence()
-        seed_contract_builder_draft(
-            self.workspace,
-            base,
-            revision_scope={
-                "write_targets": [
-                    {"section": "unit", "id": "report", "fields": ["ownership"], "operation": "update"}
-                ]
-            },
-        )
+        seed_contract_builder_draft(self.workspace, base)
         allowed = self.call(
             "contract",
             "op_minion_contract_unit_set_ownership",
             {"unit": "report", "statement": "report owns construction and transfers the immutable value."},
         )
         self.assertTrue(allowed.ok, allowed.text)
-        rejected = self.call(
+        wider = self.call(
             "contract",
             "op_minion_contract_unit_add_rule",
             {
@@ -263,8 +255,9 @@ class ContractBuilderTests(unittest.TestCase):
                 "statement": "A new unrelated compatibility rule.",
             },
         )
-        self.assertFalse(rejected.ok)
-        self.assertIn("outside its bound scope", rejected.text)
+        self.assertTrue(wider.ok, wider.text)
+        submitted = self.call("contract", "op_minion_contract_submit")
+        self.assertTrue(submitted.ok, submitted.text)
 
     def test_old_document_compiler_tools_are_not_hydrated(self) -> None:
         scoped = MinionScopedExecutionRuntime(

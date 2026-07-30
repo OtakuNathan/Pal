@@ -261,7 +261,8 @@ Minion compact is a task-state recovery packet, not a Pal conversation summary a
 
 Runtime uses a dedicated minion compact schema:
 
-- `pal.compaction.minion.v1`
+- `pal.compaction.minion.v1`（历史 v1 契约；当前 runtime 使用
+  `pal.compaction.minion.v3`，不得作为新实现或恢复格式）
 
 The minion compact path and renderer are separate from Pal compact. Minion compact is mechanical and does not use an LLM compaction prompt. It collects committed user/task inputs before the current active milestone turn, scrubs management ids, and renders them as already-handled or superseded history. The current active milestone user message and current tool protocol are hard-kept by the live turn and are not compacted.
 

@@ -8,7 +8,7 @@ import json
 import os
 import re
 import shutil
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 from uuid import uuid4
@@ -31,7 +31,6 @@ from pal.core.turns import (
     L1CommitPayload,
     LLMRequestEffect,
     MemoryCompactEffect,
-    ToolCallEffect,
     TurnContinuation,
     TurnOutcome,
     agent_turn_program,
@@ -56,7 +55,6 @@ from pal.llm.request_hooks import DEFAULT_LLM_REQUEST_HOOKS
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.lsp import build_lsp_plugin
 from pal.memory import (
-    CompactionProfile,
     L1MessageKind,
     L1TranscriptMessage,
     L2Entry,
@@ -66,10 +64,11 @@ from pal.memory import (
     build_ollama_embedding_provider_from_config,
     register_with_core as register_memory_with_core,
 )
+from pal.memory.tool_protocol import l1_tool_protocol_validation_error
 from pal.memory.prompt import MemoryPromptFragmentProvider
-from pal.memory.tool_protocol import l1_tool_protocol_transcript
+from pal.memory.compact import normalize_l1_transcript
 from pal.minion.compact import (
-    MinionMemoryCompactionPolicy,
+    MinionCompactionPolicy,
     project_minion_tool_protocol,
 )
 from pal.minion.debug_log import minion_debug_log_enabled
@@ -215,12 +214,16 @@ class _MinionLLMRuntimeAdapter:
         return LLMPreflightAdvice(status=LLMPreflightStatus.READY)
 
     async def agenerate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        await self._runner._emit_progress(
-            "llm_round_started",
-            round=self._state.llm_round_count,
-            tool_call_count=self._state.tool_call_count,
-            tool_count=len(list(request.tools or [])),
-        )
+        is_compaction = "compaction" in str(
+            request.metadata.get("purpose") or ""
+        ).lower()
+        if not is_compaction:
+            await self._runner._emit_progress(
+                "llm_round_started",
+                round=self._state.llm_round_count,
+                tool_call_count=self._state.tool_call_count,
+                tool_count=len(list(request.tools or [])),
+            )
         restore_event_sink = self._install_llm_progress_sink()
         method = getattr(self._base, "agenerate", None)
         try:
@@ -229,6 +232,8 @@ class _MinionLLMRuntimeAdapter:
             else:
                 sync_method = getattr(self._base, "generate")
                 awaitable = asyncio.to_thread(sync_method, request)
+            if is_compaction:
+                return await awaitable
             return await self._runner._await_with_progress_heartbeat(
                 awaitable,
                 phase="llm_round_waiting",
@@ -304,31 +309,6 @@ class _MinionLLMRuntimeAdapter:
                     setattr(self._base, "event_sink", previous)
 
         return restore
-
-    async def acompact_memory_structured(self, *args, **kwargs) -> dict[str, Any]:
-        method = getattr(self._base, "acompact_memory_structured", None)
-        if callable(method):
-            result = method(*args, **kwargs)
-            result = await result if inspect.isawaitable(result) else result
-            return dict(result or {}) if isinstance(result, dict) else {}
-        method = getattr(self._base, "compact_memory_structured", None)
-        if callable(method):
-            result = await asyncio.to_thread(method, *args, **kwargs)
-            return dict(result or {}) if isinstance(result, dict) else {}
-        return {}
-
-    async def asummarize_compaction(self, *args, **kwargs) -> str:
-        method = getattr(self._base, "asummarize_compaction", None)
-        if callable(method):
-            result = method(*args, **kwargs)
-            result = await result if inspect.isawaitable(result) else result
-            return str(result or "").strip()
-        method = getattr(self._base, "summarize_compaction", None)
-        if callable(method):
-            result = await asyncio.to_thread(method, *args, **kwargs)
-            return str(result or "").strip()
-        return ""
-
 
 class _MinionOutputPort:
     def __init__(self, runner: "MinionRunner") -> None:
@@ -406,8 +386,6 @@ class MinionRunner:
     _cancel_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _restart_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _agent_session_checkpoint: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
-    _agent_session_protocol_prefix_count: int = field(default=0, init=False, repr=False)
-    _agent_session_journal_cursor: int = field(default=0, init=False, repr=False)
     _visible_capability_aliases: list[str] = field(default_factory=list, init=False, repr=False)
     _observed_tool_call_count: int = field(default=0, init=False, repr=False)
     _manager_submission_receipt_observed: bool = field(default=False, init=False, repr=False)
@@ -600,6 +578,7 @@ class MinionRunner:
         session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
         session_id = str(session_metadata.get("session_id") or "").strip()
         restored = self._load_agent_session_checkpoint(workspace, session_id=session_id)
+        _restore_minion_memory_state(memory_service, restored)
         initial_instruction = str(restored.get("initial_instruction") or self.pack.instruction or self.pack.goal).strip()
         current_channel_envelope = _minion_task_envelope(
             self.pack,
@@ -612,22 +591,17 @@ class MinionRunner:
                 {**self.pack.to_dict(), "goal": initial_instruction, "instruction": initial_instruction}
             )
         channel_envelope = _minion_task_envelope(prompt_pack, minion_id=self.minion_id, run_id=self.run_id)
-        tool_protocol_messages = [
-            dict(item)
-            for item in list(restored.get("tool_protocol_messages") or [])
-            if isinstance(item, dict)
-        ]
+        tool_protocol_messages: list[dict[str, Any]] = []
         response_keys = [str(item) for item in list(restored.get("response_keys") or []) if str(item)]
         previous_response_keys = set(response_keys)
         response_key = str(session_metadata.get("response_key") or "").strip()
+        response_text = ""
         if restored and response_key and response_key not in response_keys:
             response_text = self._new_session_response_message(
                 restored,
                 response_key=response_key,
                 response_text=_minion_primary_input(current_channel_envelope),
             )
-            if response_text:
-                tool_protocol_messages.append({"role": "user", "content": response_text})
             response_keys.append(response_key)
         elif not restored and response_key:
             response_keys.append(response_key)
@@ -635,6 +609,19 @@ class MinionRunner:
             not restored
             or bool(response_key and response_key not in previous_response_keys)
         )
+        if restored:
+            event_text = response_text if semantic_input_is_new else ""
+            channel_envelope = ChannelEnvelope(
+                event=EventEnvelope(
+                    event_kind=EventKind.USER_MESSAGE,
+                    source_kind=SourceKind.MINION,
+                    payload={"text": event_text},
+                    correlation_id=self.run_id,
+                    event_id=response_key or f"{self.run_id}:resume",
+                ),
+                endpoint=current_channel_envelope.endpoint,
+                response_handle=current_channel_envelope.response_handle,
+            )
         state = MinionAgentLoopState(
             execution_runtime=execution_runtime,
             memory_service=memory_service,
@@ -648,7 +635,6 @@ class MinionRunner:
             self._observed_tool_call_count,
             state.tool_call_count,
         )
-        _restore_minion_l2_projection(memory_service, restored)
         request_snapshot = dict(restored.get("request_snapshot") or {})
         max_output_tokens = max(
             1,
@@ -662,23 +648,26 @@ class MinionRunner:
 
         def build_context(frame: AgentLoopFrame):
             retry_note = str(frame.retry_note or forced_retry_note or "")
-            metadata = {
-                "retry_note": retry_note,
-            }
+            metadata = {"retry_note": retry_note}
             return _minion_prompt_context(self.pack, event=state.channel_envelope.event, metadata=metadata)
 
         def build_commit_payload(final_reply: str, observations: list[Any], reply_texts: list[str]) -> L1CommitPayload:
             _ = reply_texts
             transcript = [
                 L1TranscriptMessage(
-                    role="user",
-                    content=_minion_primary_input(state.channel_envelope),
-                    kind=L1MessageKind.USER_REQUEST,
-                ),
-                L1TranscriptMessage(
                     role="assistant",
                     content=final_reply or "minion completed",
                     kind=L1MessageKind.ASSISTANT_REPLY,
+                    payload={
+                        "_pal_input_id": str(
+                            getattr(
+                                state.channel_envelope.event,
+                                "event_id",
+                                "",
+                            )
+                            or turn_id
+                        )
+                    },
                 ),
             ]
             return L1CommitPayload(turn_id=self.run_id, transcript=transcript, tool_observations=list(observations))
@@ -713,6 +702,7 @@ class MinionRunner:
             tool_batch_count=max(0, int(restored.get("tool_batch_count") or 0)),
             preferred_llm_endpoint_id=str(restored.get("preferred_llm_endpoint_id") or "") or None,
             preferred_llm_model_id=str(restored.get("preferred_llm_model_id") or "") or None,
+            l1_input_committed=not semantic_input_is_new,
         )
         begin_tool_results = getattr(state.execution_runtime, "begin_tool_result_turn", None)
         logical_context = None
@@ -727,16 +717,6 @@ class MinionRunner:
                 state.memory_service.l2_store.tick_heat()
         agent_turn_runtime = self._build_minion_agent_runtime(bundle, state, continuation)
         executor = agent_turn_runtime.executor
-        self._persist_agent_session_checkpoint(
-            workspace,
-            state,
-            continuation,
-            executor=executor,
-            initial_instruction=initial_instruction,
-            response_keys=response_keys,
-            logical_context=logical_context,
-            max_output_tokens=max_output_tokens,
-        )
         current: EffectResult | None = None
         while True:
             await self._raise_if_cancel_requested()
@@ -748,23 +728,30 @@ class MinionRunner:
                 outcome = completed.value
                 if not isinstance(outcome, TurnOutcome):
                     raise RuntimeError("minion agent loop ended without a turn outcome")
+                settled = await executor._settle_l1_working_set_async(
+                    continuation,
+                    build_context(AgentLoopFrame()),
+                )
+                if not settled:
+                    raise RuntimeError(
+                        "Minion L1 working-set settlement failed; refusing to "
+                        "checkpoint a false completion"
+                    )
                 if not self.blocked_summary:
                     await self._emit_progress(
                         "invocation_finalizing",
                         round=state.llm_round_count,
                         tool_call_count=state.tool_call_count,
                     )
-                await self._commit_minion_l1(state, outcome.commit_payload.transcript)
+                await self._commit_minion_l1(
+                    state,
+                    outcome.commit_payload.transcript,
+                )
                 self.memory_candidates = _memory_candidates_from_sink(state.memory_candidate_sink)
-                final_reply = str(outcome.final_reply or "").strip()
-                if final_reply:
-                    continuation.tool_protocol_messages.append({"role": "assistant", "content": final_reply})
-                    self._sync_minion_state_from_continuation(state, continuation)
                 self._persist_agent_session_checkpoint(
                     workspace,
                     state,
                     continuation,
-                    executor=executor,
                     initial_instruction=initial_instruction,
                     response_keys=response_keys,
                     logical_context=logical_context,
@@ -785,7 +772,6 @@ class MinionRunner:
                     workspace,
                     state,
                     continuation,
-                    executor=executor,
                     initial_instruction=initial_instruction,
                     response_keys=response_keys,
                     logical_context=logical_context,
@@ -797,7 +783,12 @@ class MinionRunner:
 
     @staticmethod
     def _continuation_is_restart_safe(continuation: TurnContinuation) -> bool:
-        return not continuation.pending_tool_call_batch and not continuation.pending_tool_results
+        return bool(continuation.l1_input_committed) and (
+            not continuation.pending_tool_call_batch
+            and not continuation.pending_tool_results
+            and int(continuation.l1_protocol_committed_count or 0)
+            == len(continuation.tool_protocol_messages)
+        )
 
     @staticmethod
     def _new_session_response_message(
@@ -846,10 +837,10 @@ class MinionRunner:
             raise RuntimeError("manager-selected agent continuation is unreadable") from exc
         if not isinstance(value, dict) or str(value.get("session_id") or "") != session_id:
             raise RuntimeError("manager-selected agent continuation has the wrong session identity")
-        if str(value.get("schema_version") or "") != "4":
+        if str(value.get("schema_version") or "") != "5":
             raise RuntimeError(
                 "manager-selected agent continuation uses an unsupported checkpoint schema; "
-                "archive the old Minion runtime and start a fresh v25 runtime"
+                "archive the old Minion runtime and start a fresh runtime"
             )
         expected_scope = str(session_metadata.get("scope_kind") or "")
         expected_subject = str(session_metadata.get("subject_key") or "")
@@ -857,16 +848,6 @@ class MinionRunner:
             raise RuntimeError("manager-selected agent continuation has the wrong scope")
         if str(value.get("subject_key") or "") != expected_subject:
             raise RuntimeError("manager-selected agent continuation has the wrong subject")
-        self._agent_session_protocol_prefix_count = len(
-            [
-                item
-                for item in list(value.get("tool_protocol_messages") or ())
-                if isinstance(item, dict)
-            ]
-        )
-        self._agent_session_journal_cursor = max(
-            0, int(value.get("journal_cursor") or 0)
-        )
         self._agent_session_checkpoint = dict(value)
         return dict(value)
 
@@ -876,7 +857,6 @@ class MinionRunner:
         state: MinionAgentLoopState,
         continuation: TurnContinuation,
         *,
-        executor: TurnExecutor,
         initial_instruction: str,
         response_keys: list[str],
         logical_context: Any = None,
@@ -889,51 +869,11 @@ class MinionRunner:
         if not session_id or fencing_token <= 0 or not checkpoint_text:
             return
         checkpoint_path = Path(checkpoint_text)
-        if continuation.pending_tool_call_batch or continuation.pending_tool_results:
+        if not self._continuation_is_restart_safe(continuation):
             return
-        new_journal_messages = [
-            dict(item)
-            for item in continuation.tool_protocol_messages[
-                self._agent_session_protocol_prefix_count :
-            ]
-            if isinstance(item, dict)
-        ]
-        if new_journal_messages:
-            journal_path = checkpoint_path.with_name("protocol.jsonl")
-            journal_path.parent.mkdir(parents=True, exist_ok=True)
-            with journal_path.open("a", encoding="utf-8") as stream:
-                for message in new_journal_messages:
-                    self._agent_session_journal_cursor += 1
-                    stream.write(
-                        json.dumps(
-                            {
-                                "sequence": self._agent_session_journal_cursor,
-                                "message": message,
-                            },
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            default=str,
-                        )
-                        + "\n"
-                    )
-                stream.flush()
-                os.fsync(stream.fileno())
-            self._agent_session_protocol_prefix_count = len(
-                continuation.tool_protocol_messages
-            )
-        projected_protocol = [
-            {
-                key: value
-                for key, value in dict(item).items()
-                if key != "_pal_visible_source_ranges"
-            }
-            for item in executor.project_tool_protocol_for_prompt(
-                continuation.tool_protocol_messages
-            )
-        ]
         generation_hash = _registry_generation_hash(state.execution_runtime)
         payload = {
-            "schema_version": "4",
+            "schema_version": "5",
             "session_id": session_id,
             "scope_kind": str(session_metadata.get("scope_kind") or ""),
             "subject_key": str(session_metadata.get("subject_key") or ""),
@@ -941,16 +881,7 @@ class MinionRunner:
             "fencing_token": fencing_token,
             "initial_instruction": str(initial_instruction),
             "response_keys": list(response_keys),
-            "tool_protocol_messages": projected_protocol,
-            # Visibility belongs to the active prompt projection. Conservatively
-            # rebuild it after process recovery instead of claiming that
-            # compacted file text is still visible.
-            "tool_delivery_records": {},
-            "protocol_journal": {
-                "path": str(checkpoint_path.with_name("protocol.jsonl")),
-                "cursor": self._agent_session_journal_cursor,
-            },
-            "journal_cursor": self._agent_session_journal_cursor,
+            "l1_items": _serialize_minion_l1(state.memory_service),
             "llm_round_count": int(state.llm_round_count),
             "tool_call_count": int(state.tool_call_count),
             "tool_batch_count": int(continuation.tool_batch_count),
@@ -1125,6 +1056,8 @@ class MinionRunner:
                 call,
                 **kwargs,
             ),
+            compaction_policy=MinionCompactionPolicy(),
+            compaction_clock_provider=lambda: state.llm_round_count,
         )
 
     def _build_minion_prompt_fragment_registry(
@@ -1142,7 +1075,7 @@ class MinionRunner:
         prompt_fragment_registry.register(
             MemoryPromptFragmentProvider(
                 config=config,
-                include_l1_recent_context=False,
+                include_l1_recent_context=True,
             )
         )
         return prompt_fragment_registry
@@ -1160,12 +1093,12 @@ class MinionRunner:
             preflight = self._preflight_minion_llm_round(state)
             if preflight is not None:
                 return preflight
-        if isinstance(effect, MemoryCompactEffect) and effect.profile_override is None:
-            effect = replace(effect, profile_override=CompactionProfile.MINION)
-        before_protocol_len = len(state.tool_protocol_messages)
         result = await executor.execute_turn_effect_async(continuation, effect)
         self._sync_minion_state_from_continuation(state, continuation)
-        if isinstance(effect, MemoryCompactEffect):
+        if (
+            isinstance(effect, MemoryCompactEffect)
+            and result.status == RuntimeStatus.OK
+        ):
             await self._emit_progress(
                 "memory_compacted",
                 round=state.llm_round_count,
@@ -1173,16 +1106,6 @@ class MinionRunner:
             )
         if isinstance(effect, LLMRequestEffect):
             result = await self._postprocess_minion_llm_round(state, result)
-        if (
-            isinstance(effect, ToolCallEffect)
-            and len(state.tool_protocol_messages) > before_protocol_len
-            and self._persist_tool_protocol_to_l1()
-        ):
-            protocol_transcript, _ = l1_tool_protocol_transcript(state.tool_protocol_messages[before_protocol_len:])
-            await self._commit_minion_l1(
-                state,
-                protocol_transcript,
-            )
         return result
 
     def _preflight_minion_llm_round(self, state: MinionAgentLoopState) -> EffectResult | None:
@@ -1210,22 +1133,43 @@ class MinionRunner:
     async def _postprocess_minion_llm_round(self, state: MinionAgentLoopState, result: EffectResult) -> EffectResult:
         outcome = result.payload
         finish_reason = str(getattr(outcome, "finish_reason", "") or "")
-        if finish_reason == LLMFinishReason.ERROR:
+        provider_failed = finish_reason in {
+            LLMFinishReason.ERROR,
+            LLMFinishReason.COMPACT_REQUIRED,
+        }
+        truncated = _is_truncation_finish_reason(finish_reason)
+        has_consumable_output = bool(
+            str(getattr(outcome, "text", "") or "").strip()
+            or list(getattr(outcome, "tool_calls", []) or [])
+        )
+        consumed = (
+            not provider_failed
+            and not truncated
+            and has_consumable_output
+        )
+        if not consumed:
+            state.llm_round_count = max(0, state.llm_round_count - 1)
+        if provider_failed:
             # Provider exhaustion produced no assistant/tool turn.  Keep the
             # durable checkpoint at the same logical round so a later process
             # attempt retries the exact request instead of projecting phantom
             # progress into the role session.
-            state.llm_round_count = max(0, state.llm_round_count - 1)
-            if self._completion_evidence_present() or self._artifact_completion_evidence_present():
+            if (
+                finish_reason == LLMFinishReason.ERROR
+                and (
+                    self._completion_evidence_present()
+                    or self._artifact_completion_evidence_present()
+                )
+            ):
                 outcome = CanonicalLLMOutcome(
                     text=self._completion_evidence_fallback_text(str(getattr(outcome, "text", "") or "")),
                     finish_reason=LLMFinishReason.STOP,
                 )
                 finish_reason = str(LLMFinishReason.STOP)
                 result = EffectResult(status=RuntimeStatus.OK, payload=outcome)
-            else:
+            elif finish_reason == LLMFinishReason.ERROR:
                 self.blocked_summary = str(getattr(outcome, "text", "") or "LLM generation failed")
-        elif _is_truncation_finish_reason(finish_reason):
+        elif truncated:
             partial_text = str(getattr(outcome, "text", "") or "").strip()
             if partial_text:
                 await self._persist_text_deliverable_if_needed(
@@ -1235,7 +1179,7 @@ class MinionRunner:
                 )
             self.blocked_summary = self._truncated_output_blocked_summary(finish_reason)
         await self._emit_progress(
-            "llm_round_completed",
+            "llm_round_completed" if consumed else "llm_round_discarded",
             round=state.llm_round_count,
             finish_reason=finish_reason,
             input_tokens=max(0, int(getattr(outcome, "input_tokens", 0) or 0)),
@@ -1300,28 +1244,56 @@ class MinionRunner:
         sync_method = getattr(port, sync_name)
         return await asyncio.to_thread(sync_method, *args, **kwargs)
 
-    async def _commit_minion_l1(self, state: MinionAgentLoopState, transcript: list[L1TranscriptMessage]) -> None:
+    async def _commit_minion_l1(
+        self,
+        state: MinionAgentLoopState,
+        transcript: list[L1TranscriptMessage],
+    ) -> None:
         if not transcript:
             return
-        with contextlib.suppress(Exception):
-            state.memory_service.commit_l1(MemoryCommitRequest(turn_id=self.run_id, transcript=transcript))
-
-    def _persist_tool_protocol_to_l1(self) -> bool:
-        return True
+        result = state.memory_service.commit_l1(
+            MemoryCommitRequest(
+                turn_id=self.run_id,
+                transcript=transcript,
+            )
+        )
+        if result.status not in {
+            RuntimeStatus.OK,
+            RuntimeStatus.SKIPPED,
+        }:
+            raise RuntimeError(
+                "Minion final L1 settlement failed; refusing to checkpoint a "
+                "false completion"
+            )
 
     def _render_durable_role_context(self) -> str:
         binding = dict((self.pack.metadata or {}).get("minion_v2") or {})
-        if str(binding.get("role") or "") != "implementation":
-            return ""
-        from pal.minion.v2.candidate_builder import candidate_checklist_context
-
         workspace = {
             **dict(self.pack.workspace or {}),
             "runtime_root": str(self.runtime_root),
             "invocation_id": self.pack.invocation_id,
             "minion_v2": binding,
         }
-        return candidate_checklist_context(workspace)
+        role = str(binding.get("role") or "")
+        if role == "architect":
+            if bool(workspace.get("architecture_skeleton_mode")):
+                from pal.minion.v2.skeleton_builder import (
+                    architecture_checklist_context,
+                )
+
+                return architecture_checklist_context(workspace)
+            from pal.minion.v2.contract_builder import (
+                contract_architect_checklist_context,
+            )
+
+            return contract_architect_checklist_context(workspace)
+        if role == "implementation":
+            from pal.minion.v2.candidate_builder import (
+                candidate_checklist_context,
+            )
+
+            return candidate_checklist_context(workspace)
+        return ""
 
     def _requires_first_tool_call(self) -> bool:
         if bool((self.pack.metadata or {}).get("allow_text_only_completion")):
@@ -2283,9 +2255,6 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
             resolver=context.execution_runtime.l3_plugin_registry.require,
             active_provider_id="sqlite_vec_l3",
         ),
-        compaction_policies={
-            CompactionProfile.MINION: MinionMemoryCompactionPolicy(),
-        },
     )
     register_memory_with_core(context, memory_service, config=config)
     l3_plugin = SQLiteVecL3Plugin(
@@ -2401,10 +2370,63 @@ def _serialize_minion_l2_projection(memory_service: MemoryService) -> list[dict[
     ]
 
 
-def _restore_minion_l2_projection(
+def _serialize_minion_l1(
+    memory_service: MemoryService,
+) -> list[list[dict[str, Any]]]:
+    return [
+        [
+            {
+                "role": message.role,
+                "content": message.content,
+                "kind": (
+                    message.kind.value
+                    if isinstance(message.kind, L1MessageKind)
+                    else str(message.kind or "")
+                ),
+                "tool_calls": (
+                    [dict(item) for item in message.tool_calls]
+                    if message.tool_calls is not None
+                    else None
+                ),
+                "tool_call_id": message.tool_call_id,
+                "payload": dict(message.payload or {}),
+            }
+            for message in normalize_l1_transcript(list(transcript or ()))
+        ]
+        for transcript in list(memory_service.l1_store.items or ())
+        if transcript
+    ]
+
+
+def _restore_minion_memory_state(
     memory_service: MemoryService,
     checkpoint: Mapping[str, Any],
 ) -> None:
+    if checkpoint:
+        raw_l1 = checkpoint.get("l1_items")
+        if not isinstance(raw_l1, list):
+            raise RuntimeError(
+                "manager-selected agent continuation does not contain L1"
+            )
+        restored_l1 = [
+            normalize_l1_transcript(list(transcript))
+            for transcript in raw_l1
+            if isinstance(transcript, list)
+        ]
+        if len(restored_l1) != len(raw_l1):
+            raise RuntimeError(
+                "manager-selected agent continuation contains invalid L1"
+            )
+        protocol_errors = [
+            l1_tool_protocol_validation_error(transcript)
+            for transcript in restored_l1
+        ]
+        if any(protocol_errors):
+            raise RuntimeError(
+                "manager-selected agent continuation contains unpaired L1 "
+                "tool protocol"
+            )
+        memory_service.l1_store.items = restored_l1
     entries: list[L2Entry] = []
     for raw in list(checkpoint.get("l2_hot_entries") or ()):
         if not isinstance(raw, Mapping):

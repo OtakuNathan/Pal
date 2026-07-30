@@ -28,6 +28,7 @@ from pal.core.prompt_debug_log import (
     summarize_last_provider_payload,
 )
 from pal.core.prompt_compiler import PromptCompiler
+from pal.core.pal_compaction import PalCompactionPolicy
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.tool_surface import ToolSurface
 from pal.core.turn_executor import TurnExecutor
@@ -296,27 +297,25 @@ class TurnManager:
         self,
         continuation: TurnContinuation,
     ) -> list[L1TranscriptMessage]:
-        transcript: list[L1TranscriptMessage] = []
-        user_text = extract_text_from_payload(continuation.channel_envelope.event.payload).strip()
-        if user_text:
-            transcript.append(L1TranscriptMessage(role="user", content=user_text, kind=L1MessageKind.USER_REQUEST))
-
-        protocol_assistant_contents: list[str] = []
-        if self._persist_tool_protocol_to_l1(continuation):
-            safe_protocol = self._safe_tool_protocol_messages(continuation.tool_protocol_messages)
-            protocol_transcript, protocol_assistant_contents = l1_tool_protocol_transcript(
-                safe_protocol,
-                truncate_tool_result=self._truncate_tool_result_for_l1,
-            )
-            transcript.extend(protocol_transcript)
-
+        transcript, protocol_assistant_contents = self._uncommitted_l1_turn_prefix(
+            continuation,
+        )
         for text in continuation.emitted_reply_texts:
             rendered = str(text or "").strip()
             if not rendered:
                 continue
             if rendered in protocol_assistant_contents:
                 continue
-            transcript.append(L1TranscriptMessage(role="assistant", content=rendered, kind=L1MessageKind.ASSISTANT_REPLY))
+            transcript.append(
+                self._tag_l1_turn_message(
+                    continuation,
+                    L1TranscriptMessage(
+                        role="assistant",
+                        content=rendered,
+                        kind=L1MessageKind.ASSISTANT_REPLY,
+                    ),
+                )
+            )
         return transcript
 
     def _build_l1_exit_checkpoint_transcript(
@@ -327,18 +326,10 @@ class TurnManager:
         status: str,
         reason: str,
     ) -> list[L1TranscriptMessage]:
-        transcript: list[L1TranscriptMessage] = []
         user_text = extract_text_from_payload(continuation.channel_envelope.event.payload).strip()
-        if user_text:
-            transcript.append(L1TranscriptMessage(role="user", content=user_text, kind=L1MessageKind.USER_REQUEST))
-
-        protocol_assistant_contents: list[str] = []
-        if self._persist_tool_protocol_to_l1(continuation):
-            protocol_transcript, protocol_assistant_contents = self._build_l1_tool_protocol_transcript(
-                continuation,
-                diagnostic_kind="memory.exit_checkpoint.tool_protocol_invalid",
-            )
-            transcript.extend(protocol_transcript)
+        transcript, protocol_assistant_contents = self._uncommitted_l1_turn_prefix(
+            continuation,
+        )
 
         for text in continuation.emitted_reply_texts:
             rendered = str(text or "").strip()
@@ -346,7 +337,16 @@ class TurnManager:
                 continue
             if rendered in protocol_assistant_contents:
                 continue
-            transcript.append(L1TranscriptMessage(role="assistant", content=rendered, kind=L1MessageKind.ASSISTANT_REPLY))
+            transcript.append(
+                self._tag_l1_turn_message(
+                    continuation,
+                    L1TranscriptMessage(
+                        role="assistant",
+                        content=rendered,
+                        kind=L1MessageKind.ASSISTANT_REPLY,
+                    ),
+                )
+            )
 
         summary = self._render_l1_exit_checkpoint_summary(
             continuation,
@@ -355,8 +355,87 @@ class TurnManager:
             reason=reason,
             user_text=user_text,
         )
-        transcript.append(L1TranscriptMessage(role="assistant", content=summary, kind=kind))
+        transcript.append(
+            self._tag_l1_turn_message(
+                continuation,
+                L1TranscriptMessage(role="assistant", content=summary, kind=kind),
+            )
+        )
         return transcript
+
+    def _uncommitted_l1_turn_prefix(
+        self,
+        continuation: TurnContinuation,
+    ) -> tuple[list[L1TranscriptMessage], list[str]]:
+        """Return only the closed current-turn material not already in L1."""
+
+        transcript: list[L1TranscriptMessage] = []
+        user_text = extract_text_from_payload(
+            continuation.channel_envelope.event.payload
+        ).strip()
+        if user_text and not continuation.l1_input_committed:
+            transcript.append(
+                self._tag_l1_turn_message(
+                    continuation,
+                    L1TranscriptMessage(
+                        role="user",
+                        content=user_text,
+                        kind=L1MessageKind.USER_REQUEST,
+                    ),
+                )
+            )
+
+        all_safe_protocol = self._safe_tool_protocol_messages(
+            continuation.tool_protocol_messages
+        )
+        _, all_assistant_contents = l1_tool_protocol_transcript(
+            all_safe_protocol,
+            truncate_tool_result=self._truncate_tool_result_for_l1,
+        )
+        committed_count = max(
+            0,
+            min(
+                int(continuation.l1_protocol_committed_count or 0),
+                len(continuation.tool_protocol_messages),
+            ),
+        )
+        safe_suffix = self._safe_tool_protocol_messages(
+            continuation.tool_protocol_messages[committed_count:]
+        )
+        protocol_transcript, _ = l1_tool_protocol_transcript(
+            safe_suffix,
+            truncate_tool_result=self._truncate_tool_result_for_l1,
+        )
+        transcript.extend(
+            self._tag_l1_turn_message(continuation, message)
+            for message in protocol_transcript
+        )
+        return transcript, all_assistant_contents
+
+    @staticmethod
+    def _tag_l1_turn_message(
+        continuation: TurnContinuation,
+        message: L1TranscriptMessage,
+    ) -> L1TranscriptMessage:
+        input_id = str(
+            getattr(
+                getattr(continuation.channel_envelope, "event", None),
+                "event_id",
+                "",
+            )
+            or continuation.turn_id
+        )
+        return L1TranscriptMessage(
+            role=message.role,
+            content=message.content,
+            kind=message.kind,
+            tool_calls=message.tool_calls,
+            tool_call_id=message.tool_call_id,
+            payload={
+                **dict(message.payload or {}),
+                "_pal_input_id": input_id,
+            },
+        )
 
     def _render_l1_exit_checkpoint_summary(
         self,
@@ -395,27 +474,6 @@ class TurnManager:
         lines.append("</turn_checkpoint>")
         return "\n".join(lines)
 
-    def _build_l1_tool_protocol_transcript(
-        self,
-        continuation: TurnContinuation,
-        *,
-        diagnostic_kind: str,
-    ) -> tuple[list[L1TranscriptMessage], list[str]]:
-        messages = list(continuation.tool_protocol_messages)
-        if not messages:
-            return [], []
-        validation_error = self._tool_protocol_validation_error(messages)
-        if validation_error:
-            self.state.diagnostics.append(
-                {
-                    "kind": diagnostic_kind,
-                    "turn_id": continuation.turn_id,
-                    "error": validation_error,
-                }
-            )
-            return [], []
-        return l1_tool_protocol_transcript(messages, truncate_tool_result=self._truncate_tool_result_for_l1)
-
     @staticmethod
     def _safe_tool_protocol_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         safe_messages: list[dict[str, Any]] = []
@@ -449,11 +507,6 @@ class TurnManager:
                 continue
             index = cursor
         return safe_messages
-
-    @staticmethod
-    def _persist_tool_protocol_to_l1(continuation: TurnContinuation) -> bool:
-        _ = continuation
-        return True
 
     @staticmethod
     def _tool_protocol_validation_error(messages: list[dict[str, Any]]) -> str:
@@ -781,6 +834,8 @@ class PalCore:
             should_enter_failure_flow_for_tool_result=self._should_enter_failure_flow_for_tool_result,
             state=self.state,
             guard_host=self.turn_manager,
+            compaction_policy=PalCompactionPolicy(),
+            compaction_clock_provider=lambda: self.state.compaction_user_turn_count,
         )
         self.prompt_compiler = self.agent_turn_runtime.prompt_compiler
         self.turn_executor = self.agent_turn_runtime.executor
@@ -1585,38 +1640,6 @@ class PalCore:
             "Soft reset complete. L1/L2 and working memory projection were cleared.",
         )
 
-    async def _generate_compaction_summary_async(self, source_text: str) -> str:
-        llm_runtime = self.context.require_port("llm:llm")
-        generate = getattr(llm_runtime, "agenerate", None)
-        if not callable(generate):
-            generate = getattr(llm_runtime, "generate", None)
-            if not callable(generate):
-                return ""
-        request = CanonicalLLMRequest(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Summarize the recent conversation into a short, durable working-memory summary. "
-                        "Preserve user preferences, commitments, active goals, and factual context. "
-                        "Do not include markdown, speaker labels, or commentary."
-                    ),
-                },
-                {"role": "user", "content": source_text.strip()},
-            ],
-            max_output_tokens=1024,
-            temperature=0.2,
-            tools=[],
-            metadata={"response_mode_hint": "operational", "purpose": "manual_compaction"},
-        )
-        try:
-            outcome = generate(request)
-            if inspect.isawaitable(outcome):
-                outcome = await outcome
-            return str(outcome.text or "").strip()
-        except Exception:
-            return ""
-
     async def _execute_soft_reset_async(self, scope_state, request) -> None:
         async with self.state.channel_turn_transition_lock:
             if scope_state.quiescing:
@@ -1649,52 +1672,38 @@ class PalCore:
         if action.route is None:
             return
         memory_service = self.context.require_port("memory:memory")
-        builder = getattr(memory_service, "build_compaction_source_text", None)
-        if not callable(builder):
-            await self._complete_compact_reply_async(action, "Memory service does not support compaction.")
-            return
-        source_text = str(builder(target_input_budget=8192) or "").strip()
-        if not source_text:
+        l1_items = list(
+            getattr(getattr(memory_service, "l1_store", None), "items", ())
+            or ()
+        )
+        if not l1_items:
             await self._complete_compact_reply_async(action, "Nothing to compact - memory is already minimal.")
             return
-        metadata = await self.turn_executor.build_compaction_metadata_async(
+        run_result = await self.turn_executor.compact_memory_async(
             memory_service,
             target_input_budget=8192,
             reserved_output_tokens=4096,
         )
-        if not metadata:
-            await self._complete_compact_reply_async(action, "Compaction failed - could not generate structured summary.")
-            return
-        compact_method = getattr(memory_service, "acompact", None)
-        if not callable(compact_method):
-            compact_method = getattr(memory_service, "compact", None)
-            if not callable(compact_method):
-                await self._complete_compact_reply_async(action, "Compaction failed - compact method not available.")
-                return
-        from pal.memory.contracts import MemoryCompactRequest
-
-        request = MemoryCompactRequest(
-            target_input_budget=4096,
-            reserved_output_tokens=4096,
-            metadata=metadata,
-        )
-        try:
-            result = compact_method(request)
-            if inspect.isawaitable(result):
-                result = await result
-        except Exception as exc:
+        if not run_result.success:
+            detail = (
+                "the non-removable role/context anchor exceeds the model budget"
+                if run_result.status == "uncompactable_hard_context"
+                else "memory state was left unchanged"
+            )
             await self._complete_compact_reply_async(
                 action,
-                f"Compaction failed - memory state was left unchanged. {type(exc).__name__}: {exc}",
+                f"Compaction failed - {detail}.",
             )
             return
+        result = run_result.memory_result
         entry_count = getattr(result, "metadata", {}).get("projected_entry_count", 0) if result else 0
         summary_count = getattr(result, "metadata", {}).get("compact_summary_count", 0) if result else 0
         retired = getattr(result, "metadata", {}).get("retired_count", 0) if result else 0
         storage_text = "L1 compact summary updated." if summary_count else "No compact summary was stored."
+        quality_text = " Degraded mechanical checkpoint used." if run_result.degraded else ""
         await self._complete_compact_reply_async(
             action,
-            f"Context compacted. {storage_text} {entry_count} L2 entries projected, {retired} retired to L3.",
+            f"Context compacted. {storage_text} {entry_count} L2 entries projected, {retired} retired to L3.{quality_text}",
         )
         memory_candidates = memory_candidates_from_compact_result(result)
         if memory_candidates:
@@ -1872,7 +1881,10 @@ class PalCore:
                 yielded = self.turn_manager.resume(continuation, current)
                 if isinstance(yielded, TurnOutcome):
                     outcome = self._enrich_transcript_with_tool_protocol(yielded, continuation)
-                    await self._schedule_post_turn_commit_async(outcome)
+                    await self._schedule_post_turn_commit_async(
+                        outcome,
+                        event=continuation.channel_envelope.event,
+                    )
                     await self._deliver_pending_compact_memory_candidates_async(continuation)
                     return outcome
                 current = await self._execute_turn_effect_async(continuation, yielded)
@@ -1890,20 +1902,67 @@ class PalCore:
     def _enrich_transcript_with_tool_protocol(self, outcome: TurnOutcome, continuation: TurnContinuation) -> TurnOutcome:
         from pal.memory.contracts import L1MessageKind, L1TranscriptMessage
 
-        if not continuation.tool_protocol_messages:
-            return outcome
-        if not self.turn_manager._persist_tool_protocol_to_l1(continuation):
-            return outcome
         original = outcome.commit_payload.transcript
         user_msg = next((m for m in original if m.role == "user"), None)
         new_transcript: list[L1TranscriptMessage] = []
-        if user_msg:
-            new_transcript.append(user_msg)
-        protocol_transcript, protocol_assistant_contents = self.turn_manager._build_l1_tool_protocol_transcript(
-            continuation,
-            diagnostic_kind="memory.commit.tool_protocol_invalid",
+        input_id = str(
+            getattr(
+                getattr(continuation.channel_envelope, "event", None),
+                "event_id",
+                "",
+            )
+            or continuation.turn_id
         )
-        new_transcript.extend(protocol_transcript)
+        if user_msg and not continuation.l1_input_committed:
+            new_transcript.append(
+                L1TranscriptMessage(
+                    role=user_msg.role,
+                    content=user_msg.content,
+                    kind=user_msg.kind,
+                    tool_calls=user_msg.tool_calls,
+                    tool_call_id=user_msg.tool_call_id,
+                    payload={
+                        **dict(user_msg.payload or {}),
+                        "_pal_input_id": input_id,
+                    },
+                )
+            )
+        _, protocol_assistant_contents = l1_tool_protocol_transcript(
+            [
+                dict(message)
+                for message in continuation.tool_protocol_messages
+                if isinstance(message, dict)
+            ]
+        )
+        committed_count = max(
+            0,
+            int(continuation.l1_protocol_committed_count or 0),
+        )
+        if committed_count < len(continuation.tool_protocol_messages):
+            protocol_transcript, _ = l1_tool_protocol_transcript(
+                [
+                    dict(message)
+                    for message in continuation.tool_protocol_messages[
+                        committed_count:
+                    ]
+                    if isinstance(message, dict)
+                ],
+                truncate_tool_result=self.turn_manager._truncate_tool_result_for_l1,
+            )
+            new_transcript.extend(
+                L1TranscriptMessage(
+                    role=message.role,
+                    content=message.content,
+                    kind=message.kind,
+                    tool_calls=message.tool_calls,
+                    tool_call_id=message.tool_call_id,
+                    payload={
+                        **dict(message.payload or {}),
+                        "_pal_input_id": input_id,
+                    },
+                )
+                for message in protocol_transcript
+            )
         assistant_msgs = [m for m in original if m.role == "assistant"]
         for m in assistant_msgs:
             content = str(m.content or "").strip()
@@ -1914,6 +1973,10 @@ class PalCore:
                 role=m.role,
                 content=m.content,
                 kind=L1MessageKind.ASSISTANT_REPLY,
+                payload={
+                    **dict(getattr(m, "payload", {}) or {}),
+                    "_pal_input_id": input_id,
+                },
             ))
         return TurnOutcome(
             turn_id=outcome.turn_id,
@@ -2144,32 +2207,33 @@ class PalCore:
         log_path = pal_log_path(Path(root))
         append_prompt_debug_log(log_path, text)
 
-    def _schedule_post_turn_commit(self, outcome: TurnOutcome) -> None:
-        asyncio.run(self._schedule_post_turn_commit_async(outcome))
-
-    async def _schedule_post_turn_commit_async(self, outcome: TurnOutcome) -> None:
-        await self.turn_executor.schedule_post_turn_commit_async(outcome)
-
-    async def _summarize_compaction_async(
+    def _schedule_post_turn_commit(
         self,
-        memory_service,
+        outcome: TurnOutcome,
         *,
-        target_input_budget: int,
-        reserved_output_tokens: int,
-        preferred_endpoint_id: str | None = None,
-        preferred_model_id: str | None = None,
-    ) -> str:
-        return await self.turn_executor.summarize_compaction_async(
-            memory_service,
-            target_input_budget=target_input_budget,
-            reserved_output_tokens=reserved_output_tokens,
-            preferred_endpoint_id=preferred_endpoint_id,
-            preferred_model_id=preferred_model_id,
+        event: EventEnvelope | None = None,
+    ) -> None:
+        asyncio.run(
+            self._schedule_post_turn_commit_async(
+                outcome,
+                event=event,
+            )
         )
 
-    def _build_compaction_source_text(self, memory_service, *, target_input_budget: int) -> str:
-        return self.turn_executor.build_compaction_source_text(memory_service, target_input_budget=target_input_budget)
-
+    async def _schedule_post_turn_commit_async(
+        self,
+        outcome: TurnOutcome,
+        *,
+        event: EventEnvelope | None = None,
+    ) -> None:
+        result = await self.turn_executor.schedule_post_turn_commit_async(outcome)
+        if (
+            getattr(result, "status", "") == RuntimeStatus.OK
+            and event is not None
+            and str(event.event_kind or "") == EventKind.USER_MESSAGE
+            and str(event.source_kind or "") == SourceKind.CHANNEL
+        ):
+            self.state.compaction_user_turn_count += 1
 
 def effect_result_to_observation(tool_result) -> "ToolObservation":
     from pal.core.turns import ToolObservation

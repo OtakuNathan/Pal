@@ -24,6 +24,7 @@ models=(
     ReplanReuseLifecycle
     ImplementationTopology
     CanonicalWorktreeLifecycle
+    FileMutationAuthorization
 )
 
 cd "${repo_root}"

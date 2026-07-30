@@ -926,7 +926,7 @@ MinionV2CapabilitiesMinionV2PublicProviderSearchInput = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderSearchInput',
     {
         'query': (str, Field('')),
-        'family_id': (str, Field(None)),
+        'family': (str, Field(None, description='Optional semantic Family name.')),
         'include_archived': (bool, Field(False)),
         'limit': (int, Field(10, ge=1, le=50)),
     },
@@ -935,22 +935,22 @@ MinionV2CapabilitiesMinionV2PublicProviderSearchInput = _strict_model(
 MinionV2CapabilitiesMinionV2PublicProviderStatusInput = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderStatusInput',
     {
-        'task': (str, Field(None)),
-        'view': (Literal['status', 'human_review'], Field('status', description='status returns the compact projection; human_review returns the durable pending review without internal ids or tokens.')),
+        'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
+        'view': (Literal['status', 'human_review'], Field('status', description='status returns Task state plus its current workflow and per-module projection; human_review adds the durable pending review without internal ids or tokens.')),
     },
 )
 
 MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput',
     {
-        'task': (str, Field(None)),
+        'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
     },
 )
 
 MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput',
     {
-        'task': (str, Field(None)),
+        'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'reason': (str, Field(..., description='Auditable reason the current execution must be discarded and restarted.', min_length=1)),
     },
 )
@@ -958,7 +958,7 @@ MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput = _strict_model(
 MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput',
     {
-        'task': (str, Field(None)),
+        'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'subject': (str, Field(None, description='Module or phase name. Optional only when the workflow has exactly one TRIAGE_REQUIRED item.')),
         'resolution': (str, Field(..., description='Auditable summary of the external or manual action that removed the blocker.', min_length=1)),
     },
@@ -967,7 +967,7 @@ MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput = _strict_model(
 MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput',
     {
-        'task': (str, Field(None)),
+        'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'answer': (str, Field(..., min_length=1)),
     },
 )
@@ -975,7 +975,7 @@ MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput = _strict_model(
 MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput',
     {
-        'task': (str, Field(None)),
+        'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'command': (Literal['pause', 'cancel'], Field(...)),
         'reason': (str, Field(None)),
     },
@@ -984,7 +984,7 @@ MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput = _strict_model(
 MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput',
     {
-        'task': (str, Field(None)),
+        'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
         'reason': (str, Field(None)),
     },
 )

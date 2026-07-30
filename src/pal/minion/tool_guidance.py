@@ -19,8 +19,8 @@ MINION_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
         "op_exec_shell": MappingProxyType(
             {
                 "use_when": (
-                    "Use bounded workspace discovery and repository search with standard read-only commands such as "
-                    "rg --files, rg, find, grep, and ls when structure or matching locations are needed. Also use shell "
+                    "Use bounded workspace discovery and repository search. Prefer rg for text search and rg --files "
+                    "for file enumeration; fall back to find, grep, or ls only when rg is unavailable or unsuitable. Also use shell "
                     "for tests, builds, scripts, package commands, process inspection, and runtime probes required by "
                     "your assigned task. The assigned worktree is already the default working directory, so do not guess "
                     "or reconstruct a role-workspace path. Put generated build output in $PAL_BUILD_SCRATCH when the "

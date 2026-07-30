@@ -896,6 +896,15 @@ class PromptCompiler:
                     turn_kind=assembly_context.turn_kind,
                     task_id=assembly_context.task_id,
                     work_order_id=assembly_context.work_order_id,
+                    active_input_id=str(
+                        getattr(
+                            getattr(assembly_context, "event", None),
+                            "event_id",
+                            "",
+                        )
+                        or ""
+                    )
+                    or None,
                 )
             )
         except Exception:

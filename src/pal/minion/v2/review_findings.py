@@ -129,10 +129,12 @@ ADD_FINDING_TOOL_SPEC: dict[str, Any] = {
     "description": (
         "Record or replace one actionable review finding in the current fenced Draft. "
         "finding_key is a readable stable snake_case identity; reusing it corrects that finding. "
-        "priority is p0, p1, or p2. disposition is blocking or advisory; blocking findings prevent "
-        "PASS, while advisory is reserved for a worthwhile non-blocking p2 improvement. Add all "
-        "independent findings in one parallel tool batch when possible, then use the role's "
-        "no-argument terminal tool."
+        "priority is p0, p1, or p2 and is independent of disposition. Every real correctness, "
+        "contract, architecture, requirement, or delivery defect is blocking and prevents PASS, "
+        "including priority p2. Advisory is reserved only for a worthwhile optional p2 improvement "
+        "whose omission still satisfies every binding requirement and contract. Complete the whole "
+        "review scope rather than failing on the first defect; add all independent findings in one "
+        "parallel tool batch when possible, then use the role's no-argument terminal tool."
     ),
     "InputModel": MinionV2ReviewAddFindingInput,
     "examples": ADD_FINDING_EXAMPLES,

@@ -423,9 +423,10 @@ class MinionManager:
         if method == "v2_wake":
             self._v2_wake_event.set()
             return {"ok": True, "status": "woken"}
-        if method == "v2_workflow_status":
-            return self._v2_workflow_status(
-                str(params.get("workflow_id") or ""),
+        if method == "v2_task_status":
+            return self._v2_task_status(
+                str(params.get("task_id") or ""),
+                workflow_id=str(params.get("workflow_id") or ""),
                 view=str(params.get("view") or "status"),
             )
         if method == "list_runs":
@@ -690,22 +691,38 @@ class MinionManager:
                 matches.append(state)
         return matches
 
-    def _v2_workflow_status(self, workflow_id: str, *, view: str = "status") -> dict[str, Any]:
-        status = self.v2_service.workflow_status(workflow_id, view=view)
+    def _v2_task_status(
+        self,
+        task_id: str,
+        *,
+        workflow_id: str = "",
+        view: str = "status",
+    ) -> dict[str, Any]:
+        status = self.v2_service.task_status(
+            task_id,
+            workflow_id=workflow_id,
+            view=view,
+        )
+        workflow = dict(status.get("workflow") or {})
+        if workflow.get("status") != "ok" or not workflow_id:
+            return status
         matches = self._pending_clarification_runs(workflow_id)
-        if status.get("status") != "ok" or not matches:
+        if not matches:
             return status
         return {
             **status,
-            "active_worker": "",
-            "active_worker_role": "",
-            "next_legal_action": ["answer_question", "control_workflow:cancel"],
-            "waiting_for_user": True,
-            "liveness": "human_wait",
-            "pending_question_count": len(matches),
-            "pending_question": _pending_clarification_status(
-                matches[0].pending_clarification
-            ),
+            "workflow": {
+                **workflow,
+                "active_worker": "",
+                "active_worker_role": "",
+                "next_legal_action": ["answer_question", "control_workflow:cancel"],
+                "waiting_for_user": True,
+                "liveness": "human_wait",
+                "pending_question_count": len(matches),
+                "pending_question": _pending_clarification_status(
+                    matches[0].pending_clarification
+                ),
+            },
         }
 
     async def answer_workflow_question(self, payload: dict[str, Any]) -> dict[str, Any]:

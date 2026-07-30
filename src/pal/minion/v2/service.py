@@ -179,6 +179,7 @@ class MinionV2WorkflowService:
                 projection = self.repository.read_workflow_projection(str(workflow["workflow_id"])) or {}
                 workflow_items.append(
                     {
+                        "name": str(workflow.get("workflow_name") or workflow.get("task_title") or ""),
                         "state": str(workflow.get("workflow_state") or ""),
                         "phase": str(projection.get("current_phase") or ""),
                         "liveness": str(projection.get("liveness") or ""),
@@ -284,6 +285,8 @@ class MinionV2WorkflowService:
     def start_workflow(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
         _validate_start_workflow_shape(data)
+        actor = str(data.get("actor") or "pal").strip()
+        source_channel = str(data.get("source_channel") or "local").strip()
         operation = str(data.get("operation") or "new_requirement").strip().lower()
         if operation not in ROUTER_OPERATIONS:
             raise ValueError(f"unsupported artifact router operation: {operation}")
@@ -303,19 +306,38 @@ class MinionV2WorkflowService:
         task = self.repository.read_snapshot(AggregateType.TASK, task_id)
         if task is None or task.state != "ACTIVE":
             raise ValueError("start_workflow requires an active task_id")
+        workflow_id = str(data.get("workflow_id") or f"wf_{uuid4().hex}").strip()
+        active_for_task = self.repository.search_workflows(
+            actor_id=actor,
+            channel_id="",
+            task_id=task_id,
+            include_terminal=False,
+            limit=2,
+        )
+        conflicting = [
+            item
+            for item in active_for_task
+            if str(item.get("workflow_id") or "") != workflow_id
+            and str(item.get("workflow_state") or "") != "RESTARTING"
+        ]
+        if conflicting:
+            raise ValueError(
+                "Task already has an active workflow. Use the Task title with "
+                "status or control tools instead of starting another."
+            )
         if task_was_selected and data.get("workspace"):
             raise ValueError("workflow workspace is owned by Task; update the Task instead")
         if task_was_selected and data.get("profile"):
             raise ValueError("workflow profile is owned by Task; create a new Task to change it")
         task_revision_ref = dict(task.payload.get("task_revision_ref") or {})
         task_revision = dict(self.artifacts.read_json(task_revision_ref))
+        workflow_name = str(
+            task_revision.get("title") or goal or "Minion workflow"
+        ).strip()
         workspace = _normalize_workspace(task_revision.get("workspace"))
         family_binding_ref = _artifact_ref_mapping(task.payload.get("family_binding_ref"))
         if not family_binding_ref:
             raise ValueError("Task has no pinned FamilyBindingArtifact")
-        workflow_id = str(data.get("workflow_id") or f"wf_{uuid4().hex}").strip()
-        actor = str(data.get("actor") or "pal").strip()
-        source_channel = str(data.get("source_channel") or "local").strip()
         research_mode = ResearchMode(str(data.get("research_mode") or ResearchMode.LOCAL_ONLY))
         task_spec = data.get("task_spec")
         if task_spec is not None and (not isinstance(task_spec, Mapping) or not task_spec):
@@ -380,7 +402,7 @@ class MinionV2WorkflowService:
             "family_binding_ref": family_binding_ref,
             "operation": operation,
             "goal": raw_goal,
-            "workflow_name": str(task_revision.get("title") or goal or "Minion workflow"),
+            "workflow_name": workflow_name,
             "requirements_ref": requirements_ref,
             "constraints": data.get("constraints") or [],
             "approved_evidence": list(data.get("approved_evidence") or []),
@@ -419,6 +441,7 @@ class MinionV2WorkflowService:
                 payload={
                     "request_ref": request_ref.to_dict(),
                     "task_id": task_id,
+                    "workflow_name": workflow_name,
                     "task_revision_ref": task_revision_ref,
                     "family_binding_ref": family_binding_ref,
                     "operation": operation,
@@ -436,11 +459,18 @@ class MinionV2WorkflowService:
             channel_id=source_channel,
             workflow_id=workflow_id,
         )
+        task_rows = self.repository.search_tasks(
+            task_id=task_id,
+            include_archived=True,
+            limit=1,
+        )
         return {
             "status": "created",
             "workflow_id": workflow_id,
             "task_id": task_id,
-            "task_title": str(task_revision.get("title") or ""),
+            "task_name": str(task_rows[0].get("title") or "") if task_rows else "",
+            "workflow_name": workflow_name,
+            "bound_to_current_channel": True,
             "state": result.snapshot.state,
             "request_ref": request_ref.to_dict(),
             "next_action": "manager_outbox_tick",
@@ -600,51 +630,79 @@ class MinionV2WorkflowService:
         names = ", ".join(sorted({str(item.get("title") or "untitled task") for item in selected}))
         raise ValueError(f"Task name {query!r} is ambiguous. Matching tasks: {names}")
 
-    def resolve_workflow_selector(self, *, selector: str, actor: str, source_channel: str) -> str:
+    def resolve_task_workflow_selector(
+        self,
+        *,
+        selector: str,
+        actor: str,
+        source_channel: str,
+        include_terminal: bool,
+    ) -> tuple[str, str]:
+        """Resolve a public Task name to its single current workflow.
+
+        Task names are the public semantic address. Workflow identities remain
+        Manager-owned implementation details.
+        """
         query = str(selector or "").strip()
-        if not query:
-            bound = self.repository.read_channel_workflow(actor_id=actor, channel_id=source_channel)
+        task_id = ""
+        if query:
+            task_id = self.resolve_task_selector(selector=query, actor=actor)
+        else:
+            bound = self.repository.read_channel_workflow(
+                actor_id=actor,
+                channel_id=source_channel,
+            )
             if bound:
                 snapshot = self.repository.read_snapshot(AggregateType.WORKFLOW, bound)
                 if snapshot is not None:
-                    return bound
-            candidates = self.repository.search_workflows(
-                actor_id=actor,
-                channel_id=source_channel,
-                include_terminal=False,
-                limit=2,
+                    task_id = str(snapshot.payload.get("task_id") or "")
+            if not task_id:
+                channel_workflows = self.repository.search_workflows(
+                    actor_id=actor,
+                    channel_id=source_channel,
+                    include_terminal=False,
+                    limit=2,
+                )
+                if len(channel_workflows) == 1:
+                    snapshot = self.repository.read_snapshot(
+                        AggregateType.WORKFLOW,
+                        str(channel_workflows[0]["workflow_id"]),
+                    )
+                    task_id = str((snapshot.payload if snapshot else {}).get("task_id") or "")
+                elif len(channel_workflows) > 1:
+                    raise ValueError(
+                        "Current channel has multiple active Tasks; supply the Task title."
+                    )
+        if not task_id:
+            detail = f" matching {query!r}" if query else " for this channel"
+            raise ValueError(f"No active Minion Task{detail}.")
+
+        workflows = self.repository.search_workflows(
+            actor_id=actor,
+            channel_id="",
+            task_id=task_id,
+            include_terminal=True,
+            limit=20,
+        )
+        active = tuple(
+            item
+            for item in workflows
+            if str(item.get("workflow_state") or "")
+            not in {"COMPLETED", "REJECTED", "CANCELLED", "RESTARTING"}
+        )
+        if len(active) > 1:
+            raise ValueError(
+                "Task/workflow invariant violated: one Task has multiple active workflows."
             )
-        else:
-            task_id = self.resolve_task_selector(selector=query, actor=actor)
-            candidates = self.repository.search_workflows(
-                actor_id=actor,
-                channel_id="",
-                task_id=task_id,
-                include_terminal=True,
-                limit=20,
-            )
-            active = tuple(
-                item
-                for item in candidates
-                if str(item.get("workflow_state") or "") not in {"COMPLETED", "REJECTED", "CANCELLED"}
-            )
-            if active:
-                candidates = active
-            elif candidates:
-                candidates = candidates[:1]
-        if len(candidates) == 1:
-            workflow_id = str(candidates[0]["workflow_id"])
+        selected = active or (workflows[:1] if include_terminal else ())
+        workflow_id = str(selected[0]["workflow_id"]) if selected else ""
+        if workflow_id:
             self.repository.bind_channel_workflow(
                 actor_id=actor,
                 channel_id=source_channel,
                 workflow_id=workflow_id,
             )
-            return workflow_id
-        if not candidates:
-            detail = f" matching {query!r}" if query else " for this channel"
-            raise ValueError(f"No Minion workflow{detail}.")
-        names = ", ".join(sorted({str(item.get("task_title") or "untitled task") for item in candidates}))
-        raise ValueError(f"Workflow selection is ambiguous. Matching tasks: {names}")
+        return task_id, workflow_id
 
     def resolve_artifact_name(self, *, name: str, actor: str, source_channel: str) -> dict[str, Any]:
         record = self.repository.resolve_artifact_alias(
@@ -669,11 +727,13 @@ class MinionV2WorkflowService:
         workflow_state = str(projection["workflow_state"])
         active_state = active.state if active is not None else ""
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
-        task_title = ""
+        workflow_name = ""
         if workflow is not None:
+            workflow_name = str(workflow.payload.get("workflow_name") or "")
             task_id = str(workflow.payload.get("task_id") or "")
             tasks = self.repository.search_tasks(task_id=task_id, include_archived=True, limit=1) if task_id else ()
-            task_title = str(tasks[0].get("title") or "") if tasks else ""
+            if not workflow_name:
+                workflow_name = str(tasks[0].get("title") or "") if tasks else ""
         waiting_for_user = bool(projection["waiting_for_user"])
         active_worker = "" if waiting_for_user else str(projection.get("active_worker_id") or "")
         invocation = self.repository.read_role_invocation(active_worker) if active_worker else None
@@ -695,7 +755,7 @@ class MinionV2WorkflowService:
             "active_aggregate_type": projection["active_aggregate_type"],
             "active_aggregate_id": active_id,
             "active_node_state": active_state,
-            "task_title": task_title,
+            "workflow_name": workflow_name,
             "active_module": str(
                 (
                     worker_node.payload
@@ -722,6 +782,10 @@ class MinionV2WorkflowService:
             "liveness": projection["liveness"],
             "metrics": projection["metrics"],
             "last_progress_event": dict(latest_event or {}),
+            "modules": self._workflow_module_statuses(
+                workflow_id=workflow_id,
+                workflow=workflow,
+            ),
         }
         result_ref = dict((workflow.payload if workflow is not None else {}).get("result_artifact_ref") or {})
         if result_ref.get("sha256"):
@@ -732,6 +796,109 @@ class MinionV2WorkflowService:
             if active is None or active.state != "HUMAN_REVIEW":
                 raise ValueError("workflow is not waiting for architecture human review")
             result["human_review"] = self._human_review_view(active)
+        return result
+
+    def task_status(
+        self,
+        task_id: str,
+        *,
+        workflow_id: str = "",
+        view: str = "status",
+    ) -> dict[str, Any]:
+        tasks = self.repository.search_tasks(
+            task_id=str(task_id),
+            include_archived=True,
+            limit=1,
+        )
+        if not tasks:
+            return {"status": "not_found"}
+        task = dict(tasks[0])
+        workflow_status = (
+            self.workflow_status(str(workflow_id), view=view)
+            if str(workflow_id or "")
+            else None
+        )
+        return {
+            "status": "ok",
+            "task": {
+                "name": str(task.get("title") or ""),
+                "state": str(task.get("state") or ""),
+                "objective": str(task.get("objective") or ""),
+                "profile": str(task.get("profile_id") or ""),
+                "family": str(task.get("family_id") or ""),
+                "workspace": str(task.get("workspace_key") or ""),
+                "updated_at": str(task.get("updated_at") or ""),
+            },
+            "workflow": workflow_status,
+        }
+
+    def _workflow_module_statuses(
+        self,
+        *,
+        workflow_id: str,
+        workflow: AggregateSnapshot | None,
+    ) -> list[dict[str, Any]]:
+        nodes = list(self.repository.list_workflow_node_projections(workflow_id))
+        if not nodes:
+            return []
+        current_epoch = str(
+            (workflow.payload if workflow is not None else {}).get("execution_epoch_id")
+            or ""
+        )
+        if current_epoch:
+            current_nodes = [
+                item for item in nodes if str(item.get("epoch_id") or "") == current_epoch
+            ]
+            if current_nodes:
+                nodes = current_nodes
+        else:
+            latest_epoch = str(nodes[-1].get("epoch_id") or "")
+            if latest_epoch:
+                nodes = [
+                    item for item in nodes if str(item.get("epoch_id") or "") == latest_epoch
+                ]
+
+        node_names = {
+            str(item.get("node_run_id") or ""): str(item.get("unit_id") or "")
+            for item in nodes
+        }
+        invocations = self.repository.list_workflow_role_invocations(workflow_id)
+        latest_roles: dict[tuple[str, str], dict[str, Any]] = {}
+        for invocation in invocations:
+            key = (
+                str(invocation.get("aggregate_id") or ""),
+                str(invocation.get("role") or ""),
+            )
+            latest_roles[key] = dict(invocation)
+
+        result: list[dict[str, Any]] = []
+        for node in nodes:
+            node_id = str(node.get("node_run_id") or "")
+            roles: dict[str, Any] = {}
+            for (aggregate_id, role), invocation in latest_roles.items():
+                if aggregate_id != node_id:
+                    continue
+                roles[role] = {
+                    "status": str(invocation.get("status") or ""),
+                    "turns": int(invocation.get("last_completed_turn") or 0),
+                    "wall_time_ms": int(invocation.get("total_wall_latency_ms") or 0),
+                }
+            result.append(
+                {
+                    "module": str(node.get("unit_id") or ""),
+                    "kind": str(node.get("node_kind") or ""),
+                    "state": str(node.get("state") or ""),
+                    "dependencies": [
+                        node_names[str(dependency)]
+                        for dependency in list(node.get("dependency_node_ids") or [])
+                        if node_names.get(str(dependency))
+                    ],
+                    "candidate_available": bool(node.get("candidate_digest")),
+                    "blocker": dict(node.get("blocker") or {}),
+                    "roles": roles,
+                    "updated_at": str(node.get("updated_at") or ""),
+                }
+            )
         return result
 
     def _human_review_view(self, revision: AggregateSnapshot) -> dict[str, Any]:

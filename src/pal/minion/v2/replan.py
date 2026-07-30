@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -160,9 +161,17 @@ def compile_architecture_finding_markdown(payload: Mapping[str, Any]) -> str:
             f"{str(item.get('summary') or 'Architecture finding')}"
         )
         locations = [
-            str(dict(location or {}).get("path") or "")
+            str(
+                dict(location or {}).get("path")
+                or dict(location or {}).get("file")
+                or ""
+            )
             for location in list(item.get("locations") or [])
-            if str(dict(location or {}).get("path") or "")
+            if str(
+                dict(location or {}).get("path")
+                or dict(location or {}).get("file")
+                or ""
+            )
         ]
         if locations:
             lines.append(f"  - Locations: {', '.join(sorted(set(locations)))}")
@@ -214,8 +223,44 @@ def _normalized_findings(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             or raw.get("failure_reason")
             or defaults["summary"]
         )
+        raw_key = str(raw.get("finding_key") or "").strip()
+        item["finding_key"] = (
+            raw_key
+            if re.fullmatch(r"[a-z][a-z0-9_]{2,95}", raw_key)
+            else _generated_finding_key(item)
+        )
+        item["priority"] = _normalized_finding_priority(raw)
+        item["disposition"] = str(
+            raw.get("disposition") or "blocking"
+        ).strip()
         normalized.append(item)
     return normalized
+
+
+def _generated_finding_key(finding: Mapping[str, Any]) -> str:
+    """Give Manager-originated findings the same stable semantic handle as role findings."""
+
+    digest = hashlib.sha256(
+        json.dumps(
+            dict(finding),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"finding_{digest}"
+
+
+def _normalized_finding_priority(finding: Mapping[str, Any]) -> str:
+    priority = str(finding.get("priority") or "").strip().lower()
+    if priority in {"p0", "p1", "p2"}:
+        return priority
+    severity = str(finding.get("severity") or "").strip().lower()
+    if severity in {"blocker", "critical", "fatal"}:
+        return "p0"
+    if severity in {"minor", "low"}:
+        return "p2"
+    return "p1"
 
 
 def _repair_bill_case_statuses(payload: Mapping[str, Any]) -> dict[str, str]:

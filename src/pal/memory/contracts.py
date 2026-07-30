@@ -24,11 +24,6 @@ class L3RecallView(StrEnum):
     ORIGIN = "origin"
 
 
-class CompactionProfile(StrEnum):
-    PAL = "pal"
-    MINION = "minion"
-
-
 class L1MessageKind(StrEnum):
     USER_REQUEST = "user_request"
     ASSISTANT_REPLY = "assistant_reply"
@@ -156,6 +151,7 @@ class MemoryPackRequest:
     turn_kind: str = "chat"
     task_id: str | None = None
     work_order_id: str | None = None
+    active_input_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,7 +166,7 @@ class MemoryPack:
 class MemoryCompactRequest:
     target_input_budget: int
     reserved_output_tokens: int
-    profile: CompactionProfile = CompactionProfile.PAL
+    summary_entry: L2Entry | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -240,6 +236,22 @@ class MemoryServicePort(Protocol):
     async def acompact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
         ...
 
+    def compact_transactionally(
+        self,
+        request: MemoryCompactRequest,
+        *,
+        after_commit: Callable[[], None],
+    ) -> MemoryCompactResult:
+        ...
+
+    async def acompact_transactionally(
+        self,
+        request: MemoryCompactRequest,
+        *,
+        after_commit: Callable[[], None],
+    ) -> MemoryCompactResult:
+        ...
+
     def commit_l1(self, request: MemoryCommitRequest) -> MemoryCommitResult:
         ...
 
@@ -252,14 +264,6 @@ class MemoryServicePort(Protocol):
     async def abuild_pack(self, request: MemoryPackRequest) -> MemoryPack:
         ...
 
-    def build_compaction_source_text(
-        self,
-        *,
-        target_input_budget: int,
-        profile: CompactionProfile = CompactionProfile.PAL,
-    ) -> str:
-        ...
-
     def project_l2_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = True) -> None:
         ...
 
@@ -270,32 +274,4 @@ class MemoryServicePort(Protocol):
         ...
 
     async def asoft_reset(self) -> None:
-        ...
-
-
-class MemoryCompactionPolicy(Protocol):
-    """Agent-specific compaction mechanics injected into the shared service."""
-
-    def build_source_text(
-        self,
-        memory_service: Any,
-        *,
-        target_input_budget: int,
-    ) -> str:
-        ...
-
-    def build_payload(
-        self,
-        memory_service: Any,
-        *,
-        target_input_budget: int,
-        reserved_output_tokens: int,
-    ) -> dict[str, Any]:
-        ...
-
-    def compact(
-        self,
-        memory_service: Any,
-        request: MemoryCompactRequest,
-    ) -> MemoryCompactResult:
         ...
