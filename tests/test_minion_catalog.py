@@ -7,6 +7,9 @@ import unittest
 from pathlib import Path
 
 from pal.execution.contracts import CapabilityCall
+from pal.execution.generated_tool_models import (
+    MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput,
+)
 from pal.minion.capabilities import MinionManagerProvider
 from pal.minion.catalog import MinionCatalogService
 from pal.minion.catalog_store import family_override_path, profile_override_path
@@ -128,7 +131,10 @@ class MinionCatalogTests(unittest.TestCase):
                 family="software_engineering",
                 changes={
                     "role_bindings": {
-                        "implementation": "software_engineering.missing_coder"
+                        "implementation": {
+                            "executor": "profile",
+                            "profile": "software_engineering.missing_coder",
+                        }
                     }
                 },
             )
@@ -139,6 +145,107 @@ class MinionCatalogTests(unittest.TestCase):
             )
         service.reset_family_override(family="software_engineering")
         self.assertFalse(family_override_path(self.root, "software_engineering").exists())
+
+    def test_family_override_tool_uses_only_the_executor_binding_contract(self) -> None:
+        parsed = (
+            MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput.model_validate(
+                {
+                    "family": "lifestyle",
+                    "changes": {
+                        "role_bindings": {
+                            "implementation": {
+                                "executor": "null",
+                                "profile": None,
+                                "reason": "external_human_execution",
+                            }
+                        }
+                    },
+                }
+            )
+        )
+        self.assertEqual(
+            parsed.changes.role_bindings["implementation"].executor,
+            "null",
+        )
+        strategy = (
+            MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput.model_validate(
+                {
+                    "family": "lifestyle",
+                    "changes": {
+                        "execution_adapter": "artifact_bundle.v2",
+                    },
+                }
+            )
+        )
+        self.assertEqual(
+            strategy.changes.execution_adapter,
+            "artifact_bundle.v2",
+        )
+        with self.assertRaisesRegex(ValueError, "extra"):
+            MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput.model_validate(
+                {
+                    "family": "lifestyle",
+                    "changes": {
+                        "builders": {"contract": "contract_sketch.v2"}
+                    },
+                }
+            )
+
+    def test_family_override_rejects_unexecutable_role_combinations(self) -> None:
+        service = MinionCatalogService(self.root)
+        service.bootstrap()
+        with self.assertRaisesRegex(
+            ValueError,
+            "reviewer requires a profile executor",
+        ):
+            service.set_family_override(
+                family="lifestyle",
+                changes={
+                    "role_bindings": {
+                        "reviewer": {
+                            "executor": "null",
+                            "profile": None,
+                            "reason": "missing_reviewer",
+                        }
+                    }
+                },
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "implementation and verifier executors must both",
+        ):
+            service.set_family_override(
+                family="software_engineering",
+                changes={
+                    "role_bindings": {
+                        "verifier": {
+                            "executor": "null",
+                            "profile": None,
+                            "reason": "missing_verifier",
+                        }
+                    }
+                },
+            )
+        updated = service.set_family_override(
+            family="software_engineering",
+            changes={
+                "role_bindings": {
+                    role: {
+                        "executor": "null",
+                        "profile": None,
+                        "reason": "external_human_execution",
+                    }
+                    for role in ("implementation", "verifier")
+                }
+            },
+        )
+        self.assertEqual(
+            updated["definition"]["role_bindings"]["implementation"],
+            {
+                "executor": "null",
+                "reason": "external_human_execution",
+            },
+        )
 
     def test_manager_owns_catalog_rpc(self) -> None:
         manager = MinionManager(self.root)

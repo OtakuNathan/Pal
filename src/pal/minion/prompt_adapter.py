@@ -143,6 +143,29 @@ def render_minion_task_prompt(pack: MinionInvocationPack) -> str:
     if pack.acceptance_criteria:
         lines.extend(["", "## Invocation Acceptance"])
         lines.extend(f"- {item}" for item in pack.acceptance_criteria)
+    architect_path = str(pack.workspace.get("architect_path") or "").strip()
+    if architect_path:
+        read_args = json.dumps(
+            {"file_path": architect_path},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        lines.extend(
+            [
+                "",
+                "## Writable Outputs",
+                (
+                    "- architect.yaml: Manager-preseeded writable contract; "
+                    f"path={architect_path}; read_file_args={read_args}"
+                ),
+                (
+                    "- Read and edit that exact existing file. Reuse the same "
+                    "file_path for edit_file or write_file; do not guess, create, "
+                    "or search for another architect.yaml."
+                ),
+            ]
+        )
     references = [dict(item) for item in list(pack.workspace.get("reference_paths") or []) if isinstance(item, dict)]
     if references:
         lines.extend(["", "## Immutable Inputs"])
@@ -217,6 +240,7 @@ def _execution_discipline_lines(pack: MinionInvocationPack) -> list[str]:
         "- Make one bounded pass over the owned scope and only the evidence needed for this role. Once the next action is clear, act; do not reopen settled questions unless new evidence contradicts them.",
         "- Request independent reads, searches, or checks together in one response. Sequence only operations whose arguments or safety depend on an earlier result.",
         "- Reuse content and passing results already visible in this logical session. If read_file reports that content is unchanged, refer to the earlier result and do not request it again.",
+        "- Never repeat an operation when the tool, arguments, relevant state, and observed error are unchanged. First use the returned error, retry directive, and affordances to change the input or state; if no meaningful change is available, record the blocker or finding and stop. retry=safe permits a corrected retry, not an unchanged replay; effect=unknown requires reconciliation before retry.",
         "- Prefer the smallest contract-complete action. Do not add optional abstraction, evidence, or polish after this role's completion conditions are satisfied.",
     ]
     role = str(dict(dict(pack.metadata or {}).get("minion_v2") or {}).get("role") or "")
@@ -233,7 +257,7 @@ def _execution_discipline_lines(pack: MinionInvocationPack) -> list[str]:
         )
     elif role == "architect":
         lines.append(
-            "- Architecture: after one requirements-consistency pass, declare the smallest complete module and contract graph. Do not rehearse implementation; call architecture_submit as soon as the declared completion conditions hold."
+            "- Architecture: after one requirements-consistency pass, declare the smallest complete module and contract graph. Do not rehearse implementation; call contract_submit as soon as the declared completion conditions hold."
         )
     elif role == "reviewer":
         lines.append(

@@ -1,0 +1,38 @@
+{{ preamble | trim }}
+# This file is a Manager-rendered authoring form, not a JSON Schema.
+# Dynamic names use snake_case. Preserve this shape and do not add fields.
+# Type notation in comments is authoritative authoring guidance compiled from the pinned family schema.
+schema_version: "1"  # type: literal string "1"
+context:  # type: family-specific mapping; fill every displayed field
+{{ context_template | trim | indent(2, true) }}
+requirements: {}  # type: map[snake_case, Requirement], min 1
+# Requirement names must be globally distinct from module and scenario names.
+# requirement_name:
+#   claim: "One externally observable obligation."  # type: non-empty string
+#   owner: module_name  # type: snake_case string naming one module or scenario
+#   contract_path: ["module_name.output_or_surface"]  # type: unique list[non-empty string], min 1
+modules: {}  # type: map[snake_case, Module], min 1
+# module_name:
+#   responsibility: "One cohesive responsibility."  # type: non-empty string
+#   execution: produce  # type: enum produce | contract_only
+#   provides: [named_output]  # type: unique list[non-empty string]
+#   dependencies:  # type: map[provider_module_name, Dependency]
+#     provider_module:
+#       consumes: [provider_output]  # type: unique list[non-empty string], min 1
+#       purpose: "Why the output is required."  # type: non-empty string
+#       handoff: "How it is transferred, consumed, owned, and failed."  # type: non-empty string
+#   definition:  # type: family-specific mapping; use the exact shape below
+{{ module_definition_template | trim | indent(4, true) }}
+scenarios: {}  # type: map[snake_case, Scenario], min 1
+# Every requirement must be referenced by at least one scenario.
+# A scenario's modules must include the produced dependency closure of every listed module.
+# scenario_name:
+#   modules: [entry_module, dependency_module]  # type: unique list[snake_case], min 1
+#   requirement_refs: [requirement_name]  # type: unique list[snake_case], min 1
+#   entrypoint:  # type: mapping
+#     module: entry_module  # type: snake_case string
+#     surface: "Real consumer or delivery entrypoint."  # type: non-empty string
+#   contract_flow: ["input -> provider output", "provider output -> consumer observation"]  # type: ordered unique list[non-empty string], min 1
+#   observable_behavior: "Concrete success observation."  # type: non-empty string
+#   failure_behavior: "Concrete legal failure or recovery endpoint."  # type: non-empty string
+#   environment: "Relevant execution and delivery environment."  # type: non-empty string

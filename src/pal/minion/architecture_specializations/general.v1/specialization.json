@@ -1,0 +1,78 @@
+{
+  "specialization_id": "general.v1",
+  "family_id": "general",
+  "context_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["delivery_format", "global_constraints"],
+    "properties": {
+      "delivery_format": {"type": "string", "minLength": 1},
+      "global_constraints": {"$ref": "#/$defs/stringList"}
+    }
+  },
+  "module_definition_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "inputs",
+      "outputs",
+      "errors",
+      "invariants",
+      "ownership",
+      "lifecycle",
+      "deliverables"
+    ],
+    "properties": {
+      "inputs": {"$ref": "#/$defs/stringList"},
+      "outputs": {"$ref": "#/$defs/stringList"},
+      "errors": {"$ref": "#/$defs/stringList"},
+      "invariants": {"$ref": "#/$defs/stringList"},
+      "ownership": {"type": "string", "minLength": 1},
+      "lifecycle": {"type": "string", "minLength": 1},
+      "deliverables": {"$ref": "#/$defs/stringList", "minItems": 1}
+    }
+  },
+  "defs": {},
+  "example": {
+    "schema_version": "1",
+    "context": {
+      "delivery_format": "markdown",
+      "global_constraints": ["use confirmed facts"]
+    },
+    "requirements": {
+      "deliver_report": {
+        "claim": "Produce one grounded report.",
+        "owner": "report",
+        "contract_path": ["report.report"]
+      }
+    },
+    "modules": {
+      "report": {
+        "responsibility": "Produce the requested report.",
+        "execution": "produce",
+        "provides": ["report"],
+        "dependencies": {},
+        "definition": {
+          "inputs": ["task facts"],
+          "outputs": ["report"],
+          "errors": ["missing facts remain explicit"],
+          "invariants": ["never invent evidence"],
+          "ownership": "The report module owns the final document.",
+          "lifecycle": "Read facts, draft, check, deliver.",
+          "deliverables": ["report.md"]
+        }
+      }
+    },
+    "scenarios": {
+      "deliver": {
+        "modules": ["report"],
+        "requirement_refs": ["deliver_report"],
+        "entrypoint": {"module": "report", "surface": "report.md"},
+        "contract_flow": ["facts -> report"],
+        "observable_behavior": "The report is present.",
+        "failure_behavior": "Missing facts are marked as unknown.",
+        "environment": "Artifact workspace."
+      }
+    }
+  }
+}

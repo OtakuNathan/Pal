@@ -26,7 +26,9 @@ from pal.minion.v2.capabilities import (
     MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
     MinionV2PublicProvider,
 )
-from pal.minion.v2.contract_builder import ARCHITECT_BUILDER_CAPABILITIES
+from pal.minion.v2.ask_question import ASK_QUESTION_CAPABILITY
+from pal.minion.v2.architecture_templates import ArchitectureTemplateCompiler
+from pal.minion.v2.contract_submission import CONTRACT_SUBMIT_CAPABILITY
 from pal.minion.v2.execution import WorkspaceProcessHolder
 from pal.minion.v2.orchestration import (
     MinionV2OutboxProcessor,
@@ -43,7 +45,8 @@ from pal.minion.v2.sessions import (
 from pal.minion.v2.semantic_orchestration.orchestrator import (
     SemanticOrchestrator,
     _assignment_role_input_refs,
-    _architecture_submit_idempotency_key,
+    _architect_authoring_locations,
+    _contract_submit_idempotency_key,
     _bind_architecture_edit_instruction_for_review,
     _bind_role_attempt_sandbox,
     _candidate_tree_fingerprint,
@@ -55,7 +58,8 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     _role_uses_bound_durable_workspace,
     _semantic_role_input_refs,
     _skeleton_architecture_review_view,
-    _skeleton_architect_instruction,
+    _stable_architecture_preflight_finding,
+    _contract_architect_instruction,
     _recorded_role_metrics,
     _worker_event_timing,
     _workflow_skill_injections,
@@ -64,8 +68,8 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
 )
 from pal.minion.v2.role_protocol import RoleAssignmentRequest, RoleAssignmentState
 from pal.minion.v2.role_protocol import stable_hash
-from pal.minion.v2.skeleton import ArchitectureWorkspace
-from pal.minion.v2.skeleton_builder import ARCHITECTURE_CHECKLIST_STEPS
+from pal.minion.v2.skeleton import ArchitectureWorkspace, architecture_revision_scope
+from pal.minion.v2.work_items import UPDATE_CHECKLIST_CAPABILITY
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
     SubmissionDraftStore,
@@ -87,6 +91,18 @@ from pal.memory import (
     MemoryService,
 )
 from pal.shared import IntrospectionCall, LLMFinishReason, MinionInvocationPack, RuntimeStatus
+
+
+ARCHITECT_BUILDER_CAPABILITIES = (
+    UPDATE_CHECKLIST_CAPABILITY,
+    CONTRACT_SUBMIT_CAPABILITY,
+    ASK_QUESTION_CAPABILITY,
+)
+ARCHITECTURE_CHECKLIST_STEPS = (
+    "requirements design",
+    "declarations",
+    "contract projection",
+)
 
 
 class _NoopSemanticEffects:
@@ -210,202 +226,6 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
         )
         self.assertTrue(replay["payload"]["durable_receipt_replay"])
 
-    def test_architect_checklist_recovery_is_identical_for_fresh_and_replayed_receipts(
-        self,
-    ) -> None:
-        root = Path(
-            tempfile.mkdtemp(prefix="pal-v2-architect-checklist-replay-")
-        )
-        self.addCleanup(shutil.rmtree, root, True)
-        service = MinionV2WorkflowService(root)
-        workflow_id = "workflow-architect-checklist-replay"
-        revision_id = "architecture-architect-checklist-replay"
-        session_id = "session-architect-checklist-replay"
-        input_fingerprint = "architect-checklist-input"
-        service.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_WORKFLOW",
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id=workflow_id,
-                actor="test",
-                expected_version=0,
-            )
-        )
-        service.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_ARCHITECTURE_REVISION",
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                aggregate_id=revision_id,
-                actor="test",
-                expected_version=0,
-                payload={"architecture_cycle_id": revision_id},
-            )
-        )
-        service.repository.ensure_role_session(
-            session_id=session_id,
-            workflow_id=workflow_id,
-            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-            aggregate_id=revision_id,
-            role="architect",
-            mode="author",
-            executor_profile_id="software_engineering.v2_architect",
-            family_binding_sha="binding",
-            scope_kind="architecture_revision",
-            subject_key=revision_id,
-        )
-        assignment = service.repository.create_role_assignment(
-            RoleAssignmentRequest(
-                assignment_key="architect-checklist-replay-assignment",
-                session_id=session_id,
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
-                aggregate_id=revision_id,
-                role="architect",
-                mode="author",
-                executor_profile_id="software_engineering.v2_architect",
-                family_binding_sha="binding",
-                input_fingerprint=input_fingerprint,
-                required_inputs=(),
-                input_refs={},
-                execution_spec={
-                    "effect_type": "run_architect_role",
-                    "effect_key": "architect-checklist-replay-effect",
-                    "workflow_id": workflow_id,
-                    "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
-                    "aggregate_id": revision_id,
-                    "payload": {"role_mode": "author"},
-                },
-                submission_kind="architecture",
-            )
-        )
-        attempt = service.repository.claim_role_assignment(
-            str(assignment["assignment_id"])
-        )
-        lease_resource = f"assignment:{assignment['assignment_id']}"
-        lease = service.repository.claim_lease(
-            lease_resource,
-            str(attempt["attempt_id"]),
-            ttl_seconds=120,
-        )
-        prompt_ref = service.artifacts.put_json(
-            {"role": "architect"},
-            artifact_type="RolePromptPackArtifact",
-        )
-        service.repository.start_role_attempt(
-            assignment_id=str(assignment["assignment_id"]),
-            attempt_id_value=str(attempt["attempt_id"]),
-            lease_resource_key=lease_resource,
-            fencing_token=lease.fencing_token,
-            prompt_pack_ref=prompt_ref.to_dict(),
-        )
-        checklist = {
-            "plan": [
-                {"step": step, "status": "completed"}
-                for step in ARCHITECTURE_CHECKLIST_STEPS
-            ]
-        }
-        draft_context = SubmissionDraftContext(
-            workflow_id=workflow_id,
-            invocation_id=str(attempt["attempt_id"]),
-            lease_resource_key=lease_resource,
-            fencing_token=lease.fencing_token,
-            role="architect",
-            mode="author",
-            draft_kind="architecture",
-            input_fingerprint=input_fingerprint,
-        )
-        draft_store = SubmissionDraftStore(root)
-        draft = draft_store.read(
-            draft_context,
-            seed={
-                "checklist": checklist,
-                "definitions": {"submission": {}},
-                "evidence": {},
-                "findings": [],
-                "summary": {},
-            },
-        )
-        submitted = {
-            "requirements": {"r1": {}},
-            "modules": {"router": {}},
-            "scenarios": {"route": {}},
-        }
-        submission_ref = service.artifacts.put_json(
-            submitted,
-            artifact_type="ArchitectureRoleSubmissionArtifact",
-        )
-        payload_hash = stable_hash(submitted)
-        service.repository.record_role_submission(
-            assignment_id=str(assignment["assignment_id"]),
-            attempt_id_value=str(attempt["attempt_id"]),
-            fencing_token=lease.fencing_token,
-            artifact_ref=submission_ref.to_dict(),
-            payload_hash=payload_hash,
-            settlement_action={"action_type": "ARCHITECT_SUBMITTED"},
-        )
-        draft_store.mark_submitted(
-            draft_context,
-            expected_version=draft.version,
-            submission_artifact_ref=submission_ref.to_dict(),
-            submission_payload_hash=payload_hash,
-        )
-        with sqlite3.connect(str(draft_store.db_path)) as connection:
-            connection.execute(
-                """
-                UPDATE minion_v2_submission_drafts
-                SET authoring_contract_version = ?
-                WHERE draft_key = ?
-                """,
-                ("prior-contract-version", draft_context.draft_key),
-            )
-        recorded = service.repository.read_role_assignment(
-            str(assignment["assignment_id"])
-        )
-        worker = SemanticOrchestrator(service)
-        fresh = worker._terminal_from_assignment_receipt(
-            recorded,
-            primary_artifact_name="architecture_submission.json",
-            summary="fresh",
-            original_terminal={
-                "payload": {
-                    "artifacts": [
-                        {
-                            "path": "/ephemeral/architecture_checklist.json",
-                            "relative_path": "architecture_checklist.json",
-                            "role": "supporting",
-                        }
-                    ],
-                    "session_turn_index": 4,
-                }
-            },
-        )
-        replay = worker._terminal_from_assignment_receipt(
-            recorded,
-            primary_artifact_name="architecture_submission.json",
-            summary="replay",
-        )
-
-        self.assertEqual(
-            fresh["payload"]["artifacts"],
-            replay["payload"]["artifacts"],
-        )
-        self.assertEqual(len(fresh["payload"]["artifacts"]), 1)
-        expected = {
-            "schema_version": "1",
-            "kind": "architect_work_checklist",
-            "authority": "work_cursor_only",
-            "checklist": checklist,
-        }
-        self.assertEqual(
-            worker._durable_architecture_checklist_from_terminal(fresh),
-            expected,
-        )
-        self.assertEqual(
-            worker._durable_architecture_checklist_from_terminal(replay),
-            expected,
-        )
 
     def test_worker_metrics_include_provider_usage(self) -> None:
         timing = _worker_event_timing(
@@ -614,10 +434,10 @@ class MinionV2WorkerIdentityTests(unittest.TestCase):
                 {"verdict": "PASS"},
             )
 
-    def test_architecture_submit_dedup_key_distinguishes_state_machine_cycles(self) -> None:
-        first = _architecture_submit_idempotency_key("arch-1", 7, "same-submission")
-        replay = _architecture_submit_idempotency_key("arch-1", 7, "same-submission")
-        next_cycle = _architecture_submit_idempotency_key("arch-1", 12, "same-submission")
+    def test_contract_submit_dedup_key_distinguishes_state_machine_cycles(self) -> None:
+        first = _contract_submit_idempotency_key("arch-1", 7, "same-submission")
+        replay = _contract_submit_idempotency_key("arch-1", 7, "same-submission")
+        next_cycle = _contract_submit_idempotency_key("arch-1", 12, "same-submission")
 
         self.assertEqual(first, replay)
         self.assertNotEqual(first, next_cycle)
@@ -769,6 +589,74 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
+
+    def test_preflight_finding_preserves_exact_authoring_locations(self) -> None:
+        path = self.runtime_root / "architect.yaml"
+        path.write_text(
+            "schema_version: '1'\n"
+            "context: {}\n"
+            "requirements:\n"
+            "  e2e_stdio_verification:\n"
+            "    claim: observable\n"
+            "modules:\n"
+            "  frame_protocol: {}\n"
+            "  framepipe_cli: {}\n"
+            "scenarios:\n"
+            "  e2e_stdio_verification:\n"
+            "    modules: [framepipe_cli, frame_protocol]\n",
+            encoding="utf-8",
+        )
+        submission = {
+            "requirements": {
+                "e2e_stdio_verification": {
+                    "owner": "framepipe_cli",
+                }
+            },
+            "modules": {
+                "frame_protocol": {"paths": {}},
+                "framepipe_cli": {"paths": {}},
+            },
+            "scenarios": {
+                "e2e_stdio_verification": {
+                    "modules": ["framepipe_cli", "frame_protocol"],
+                }
+            },
+        }
+        locations = _architect_authoring_locations(path, submission)
+
+        finding = _stable_architecture_preflight_finding(
+            ValueError(
+                "requirement names must not conflict with module or scenario "
+                "names: e2e_stdio_verification"
+            ),
+            contract_intent={"authoring_locations": locations},
+            submission=submission,
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in finding["locations"]],
+            [
+                "requirements.e2e_stdio_verification",
+                "scenarios.e2e_stdio_verification",
+            ],
+        )
+        self.assertEqual(
+            [item["line"] for item in finding["locations"]],
+            [4, 10],
+        )
+        self.assertEqual(
+            finding["affected_modules"],
+            ["frame_protocol", "framepipe_cli"],
+        )
+        scope = architecture_revision_scope(submission, finding)
+        self.assertEqual(
+            scope["affected_modules"],
+            ["frame_protocol", "framepipe_cli"],
+        )
+        self.assertEqual(
+            scope["allowed_paths"],
+            [".pal-minion-architect/architect.yaml"],
+        )
 
     def test_execution_epoch_identity_is_semantic_not_effect_scoped(self) -> None:
         first = _execution_epoch_id(
@@ -2050,8 +1938,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         self.assertNotIn("op_minion_contract_revision_read", initial.allowed_capabilities)
         self.assertNotIn("op_minion_contract_read", initial.allowed_capabilities)
-        self.assertIn("op_minion_contract_unit_upsert", initial.allowed_capabilities)
         self.assertIn("op_minion_contract_submit", initial.allowed_capabilities)
+        self.assertIn("op_minion_update_checklist", initial.allowed_capabilities)
 
         scoped = apply_v2_revision_scope_capability_policy(initial)
         self.assertNotIn("op_minion_contract_revision_read", scoped.allowed_capabilities)
@@ -2159,7 +2047,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         (run_dir / "session-continuation-999.json").write_text(
             json.dumps(
                 {
-                    "schema_version": "3",
+                    "schema_version": "4",
                     "session_id": "inv-session-checkpoint",
                     "scope_kind": "wrong",
                     "subject_key": "wrong",
@@ -2226,7 +2114,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             read_decision=lambda: None,
         )
         with patch(
-            "pal.minion.v2.candidate_builder.candidate_checklist_context",
+            "pal.minion.v2.work_items.render_work_item_context",
             side_effect=["pending: implement", "completed: implement"],
         ) as render:
             self.assertEqual(runner._render_durable_role_context(), "pending: implement")
@@ -2255,7 +2143,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             read_decision=lambda: None,
         )
         with patch(
-            "pal.minion.v2.skeleton_builder.architecture_checklist_context",
+            "pal.minion.v2.work_items.render_work_item_context",
             side_effect=["phase 1", "phase 2"],
         ) as render:
             self.assertEqual(
@@ -2436,7 +2324,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_supporting_artifact_does_not_complete_required_primary_output(self) -> None:
         pack = MinionInvocationPack(
             invocation_id="inv-primary",
-            workspace={"output_policy": {"primary_artifact": "architecture_bundle.json"}},
+            workspace={"output_policy": {"primary_artifact": "expected.json"}},
         )
         runner = MinionRunner(
             runtime_root=self.runtime_root,
@@ -2451,7 +2339,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         ]
         self.assertFalse(runner._completion_evidence_present())
         runner.produced_artifacts.append(
-            {"role": "primary", "relative_path": "architecture_bundle.json", "path": "/tmp/architecture_bundle.json"}
+            {"role": "primary", "relative_path": "expected.json", "path": "/tmp/expected.json"}
         )
         self.assertTrue(runner._completion_evidence_present())
 
@@ -2548,7 +2436,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_completion_gate_stops_after_explicit_retry_makes_no_progress(self) -> None:
         pack = MinionInvocationPack(
             invocation_id="inv-completion-stalled",
-            workspace={"output_policy": {"primary_artifact": "architecture_submission.json"}},
+            workspace={"output_policy": {"primary_artifact": "expected.json"}},
         )
         runner = _StalledCompletionGateRunner(
             runtime_root=self.runtime_root,
@@ -2567,7 +2455,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertIn("made no capability or artifact progress", runner.blocked_summary)
 
     def test_snapshot_rejection_becomes_the_latest_architect_instruction(self) -> None:
-        instruction = _skeleton_architect_instruction(
+        instruction = _contract_architect_instruction(
             finding={
                 "summary": "Architect changed paths outside declared scopes: package/__init__.py",
                 "repair_instruction": "Declare the path without changing unrelated modules.",
@@ -2591,17 +2479,16 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertIn("## Assignment", rendered_input)
         self.assertIn("strictly module-level declaration", rendered_input)
         self.assertIn("First read the ordered read-only task ledger", instruction)
-        self.assertIn("Do not read architecture.yaml during discovery", instruction)
         self.assertIn("Use update_checklist as the fixed work cursor", instruction)
-        self.assertIn("only then read the Manager-preseeded architecture.yaml", instruction)
+        self.assertIn("only then fill the Manager-preseeded architect.yaml", instruction)
         self.assertIn("Immediately begin file-edit tool calls", instruction)
         self.assertIn("do not spend another response restating", instruction)
         self.assertIn("Read revision_finding before any other work", instruction)
         self.assertIn("package/__init__.py", instruction)
         self.assertIn("Do not report the earlier submit as completion", instruction)
-        self.assertIn("Call architecture_submit again", instruction)
+        self.assertIn("Call contract_submit again", instruction)
 
-        scoped = _skeleton_architect_instruction(
+        scoped = _contract_architect_instruction(
             finding={"summary": "One physical reference is invalid."},
             has_base_manifest=True,
             has_revision_scope=True,
@@ -3233,9 +3120,24 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         terminal_ref = service.artifacts.put_json({}, artifact_type="WorkerResponseArtifact")
         architecture_worktree = self.runtime_root / "architecture-worktree"
         architecture_worktree.mkdir()
-        submission_path = self.runtime_root / "architecture_submission.json"
+        submission_path = self.runtime_root / "architect.yaml"
+        contract_definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
         submission_path.write_text(
-            json.dumps({"modules": {"router": {}}}),
+            json.dumps(
+                {
+                    "contract_schema": "software_engineering.v1",
+                    "contract": contract_definition.example,
+                    "work_items": [
+                        {
+                            "kind": "phase",
+                            "summary": "contract projection",
+                            "status": "completed",
+                        }
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
         revision = SimpleNamespace(
@@ -3279,20 +3181,6 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.record_role_turn = lambda **_kwargs: None
         released: list[tuple[object, ...]] = []
         worker.repository.release_lease = lambda *args: released.append(args)
-        worker._durable_architecture_checklist_from_terminal = (
-            lambda _terminal: {
-                "schema_version": "1",
-                "kind": "architect_work_checklist",
-                "authority": "work_cursor_only",
-                "checklist": {
-                    "plan": [
-                        {"step": step, "status": "completed"}
-                        for step in ARCHITECTURE_CHECKLIST_STEPS
-                    ]
-                },
-            }
-        )
-
         async def run_profile(**_kwargs):
             return (
                 {
@@ -3412,26 +3300,19 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             actor="test",
             source_channel="test",
         )
-        constraints_ref = service.artifacts.put_json([], artifact_type="GlobalConstraintsArtifact")
-        gates_ref = service.artifacts.put_json([], artifact_type="ArchitectureGateChecksArtifact")
-        unit_ref = service.artifacts.put_json({"unit_id": "foundation"}, artifact_type="UnitContractArtifact")
-        topology_ref = service.artifacts.put_json({"depends_on": {"foundation": []}}, artifact_type="TopologyArtifact")
-        integration_ref = service.artifacts.put_json({"depends_on": ["foundation"]}, artifact_type="IntegrationContractArtifact")
-        assumptions_ref = service.artifacts.put_json({"assumptions": []}, artifact_type="AssumptionLedgerArtifact")
-        risks_ref = service.artifacts.put_json({"risks": []}, artifact_type="RiskLedgerArtifact")
         manifest_ref = service.artifacts.put_json(
             {
                 "requirements_ref": requirements_ref.to_dict(),
-                "global_constraints_ref": constraints_ref.to_dict(),
-                "gate_checks_ref": gates_ref.to_dict(),
-                "unit_contract_refs": [unit_ref.to_dict()],
-                "cross_unit_contract_refs": [],
-                "topology_ref": topology_ref.to_dict(),
-                "integration_contract_ref": integration_ref.to_dict(),
-                "assumption_ledger_ref": assumptions_ref.to_dict(),
-                "risk_ledger_ref": risks_ref.to_dict(),
+                "contract_schema": "general.v1",
+                "contract": {
+                    "modules": {
+                        "foundation": {
+                            "responsibility": "Own the repaired boundary."
+                        }
+                    },
+                },
             },
-            artifact_type="ArchitectureContractArtifact",
+            artifact_type="ContractArtifact",
         )
         finding_ref = service.artifacts.put_json(
             {
@@ -3468,8 +3349,11 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertNotIn("base_global_constraints", refs)
         self.assertNotIn("revision_finding", refs)
         scope = service.artifacts.read_json(refs["revision_scope"])
-        self.assertEqual(scope["context"][0]["target"]["name"], "foundation")
-        self.assertNotIn("id", scope["context"][0]["target"])
+        self.assertEqual(
+            scope["findings"][0]["summary"],
+            "repair the module boundary",
+        )
+        self.assertNotIn("contract_schema", scope)
         self.assertIn("guided revision", instruction)
         self.assertIn("repair guidance, not a write fence", instruction)
         self.assertIn("read revision_scope first", instruction)
@@ -3527,170 +3411,6 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertNotIn("repair_checklist", prompt)
         self.assertNotIn("input_read", prompt)
 
-    def test_architect_revision_seeds_the_contract_builder_draft(self) -> None:
-        worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
-        captured: dict[str, object] = {}
-        ref = worker.service.artifacts.put_json({"base": True}, artifact_type="ArchitectureContractArtifact")
-        snapshot = SimpleNamespace(
-            workflow_id="wf-seeded-revision",
-            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-            aggregate_id="arch-seeded-revision",
-            payload={"research_mode": "local_only", "base_architecture_manifest_ref": ref.to_dict()},
-        )
-        worker.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_WORKFLOW",
-                workflow_id=snapshot.workflow_id,
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id=snapshot.workflow_id,
-                actor="test",
-                expected_version=0,
-            )
-        )
-        worker.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_ARCHITECTURE_REVISION",
-                workflow_id=snapshot.workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                aggregate_id=snapshot.aggregate_id,
-                actor="test",
-                expected_version=0,
-                payload={"architecture_cycle_id": snapshot.aggregate_id},
-            )
-        )
-        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(
-            payload={"family_binding_ref": {"sha256": "binding"}}
-        )
-        worker._base_contract_builder_payload_from_manifest = lambda _ref: {"seed": "base"}
-
-        def record(**_kwargs) -> None:
-            raise RuntimeError("stop-after-seed")
-
-        identity = lambda pack, **_kwargs: pack
-        with (
-            patch("pal.minion.v2.semantic_orchestration.orchestrator.seed_contract_builder_draft") as seed,
-            patch("pal.minion.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot", return_value={"workspace": {"kind": "new_project"}}),
-            patch.object(
-                worker.service.artifacts,
-                "read_json",
-                return_value={
-                    "schema_version": "3",
-                    "policies": {},
-                    "role_bindings": {
-                        "architect": {
-                            "selector": "software_engineering.v2_architect",
-                            "executor_profile": {
-                                "profile_id": "v2_architect",
-                                "profile_group": "software_engineering",
-                                "canonical_profile_id": "software_engineering.v2_architect",
-                            },
-                        }
-                    },
-                },
-            ),
-            patch("pal.minion.v2.semantic_orchestration.orchestrator.resolve_pinned_minion_pack", lambda pack, **_kwargs: pack),
-            patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_role_capability_policy", identity),
-            patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_research_capability_policy", identity),
-            patch("pal.minion.v2.semantic_orchestration.orchestrator.sanitize_runner_session_pack", identity),
-            patch("pal.minion.v2.semantic_orchestration.orchestrator.with_minion_sandbox_metadata", lambda _root, pack, **_kwargs: pack),
-            patch.object(worker.repository, "record_role_invocation", side_effect=record),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "stop-after-seed"):
-                asyncio.run(
-                    worker._run_profile(
-                        effect={"effect_id": "eff-seed", "effect_key": "event:seed"},
-                        snapshot=snapshot,
-                        invocation_id="inv_seeded_revision",
-                        lease_resource="architecture:arch-seeded-revision:architect",
-                        fencing_token=1,
-                        profile="software_engineering.v2_architect",
-                        activation=RoleActivation(
-                            OrchestrationRole.ARCHITECT,
-                            RoleMode.REVISION,
-                        ),
-                        instruction="repair only the finding",
-                        reference_refs={},
-                        prepare_workspace=False,
-                    )
-                )
-        self.assertEqual(seed.call_count, 1)
-        self.assertEqual(seed.call_args.args[1], {"seed": "base"})
-        self.assertNotIn("revision_scope", seed.call_args.kwargs)
-
-    def test_scoped_revision_reuses_unmodified_fragment_refs(self) -> None:
-        service = MinionV2WorkflowService(self.runtime_root)
-        worker = SemanticOrchestrator(service)
-        requirements = service.task_ledger.publish(
-            title="Implement the module",
-            task_spec={"objective": "Implement the module."},
-            actor="test",
-            source_channel="test",
-        )
-
-        def unit(unit_id: str) -> dict[str, object]:
-            return {
-                "unit_id": unit_id,
-                "unit_behavior_kind": "stateless",
-                "responsibility": f"Own {unit_id}.",
-                "owned_area": [unit_id],
-                "reference_only_paths": [],
-                "provided_interfaces": [{"name": f"{unit_id}_service"}],
-                "consumed_interfaces": [],
-                "ownership": {"rule": f"{unit_id} exclusively owns its output."},
-                "lifecycle": "N/A: stateless",
-                "state_model": "stateless",
-                "invariants": ["deterministic"],
-                "error_behavior": ["Invalid input fails deterministically."],
-                "compatibility": ["The public output shape remains stable."],
-                "dependency_constraints": [],
-                "verification_obligations": [],
-                "complexity_budget": {
-                    "target_file_count": 1,
-                    "estimated_context_tokens": 100,
-                    "public_interface_count": 1,
-                    "cross_unit_contract_count": 0,
-                    "stateful_resource_count": 0,
-                    "expected_candidate_cycles": 1,
-                    "platform_dependency_level": 0,
-                },
-                "split_conditions": [],
-            }
-
-        base = {
-            "global_constraints": [{"id": "C-1", "constraint": "Keep stable."}],
-            "gate_checks": [],
-            "units": [unit("foundation"), unit("window")],
-            "cross_unit_contracts": [],
-            "topology": {"depends_on": {"foundation": [], "window": ["foundation"]}},
-            "integration_contract": {
-                "depends_on": ["foundation", "window"],
-                "entrypoint": "window_service",
-                "completion_condition": "The window consumes the foundation output.",
-                "failure_behavior": "Any rejected module output fails integration.",
-            },
-            "assumption_ledger": {"assumptions": []},
-            "risk_ledger": {"risks": []},
-        }
-        revision = SimpleNamespace(
-            aggregate_id="arch-structural-sharing",
-            payload={"requirements_ref": requirements.to_dict()},
-        )
-        base_ref = worker._publish_planning_bundle(revision, base, requirements_ref=requirements)
-        changed = deepcopy(base)
-        changed["units"][0]["ownership"] = {
-            "rule": "foundation-revised exclusively owns its output."
-        }
-        revised_ref = worker._publish_planning_bundle(
-            revision,
-            changed,
-            requirements_ref=requirements,
-            base_manifest_ref=base_ref,
-        )
-        old_manifest = service.artifacts.read_json(base_ref)
-        new_manifest = service.artifacts.read_json(revised_ref)
-        self.assertEqual(new_manifest["global_constraints_ref"], old_manifest["global_constraints_ref"])
-        self.assertNotEqual(new_manifest["unit_contract_refs"][0], old_manifest["unit_contract_refs"][0])
-        self.assertEqual(new_manifest["unit_contract_refs"][1], old_manifest["unit_contract_refs"][1])
 
     def test_profile_worker_preserves_scheduler_lease_owner_id(self) -> None:
         worker = SemanticOrchestrator(MinionV2WorkflowService(self.runtime_root))
@@ -3699,8 +3419,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self._create_role_scope(
             worker.service,
             workflow_id="wf-lease-owner",
-            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="arch-lease-owner",
+            module_name="lease_owner",
         )
 
         def capture_invocation(**kwargs) -> None:
@@ -3721,9 +3442,13 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.record_role_invocation = capture_invocation
         snapshot = SimpleNamespace(
             workflow_id="wf-lease-owner",
-            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="arch-lease-owner",
-            payload={"research_mode": "local_only"},
+            payload={
+                "research_mode": "local_only",
+                "module_name": "lease_owner",
+                "execution_adapter": "software_git.v2",
+            },
         )
         identity = lambda pack, **_kwargs: pack
 
@@ -3737,25 +3462,52 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             )
             return pack
 
+        binding = {
+            "schema_version": "5",
+            "family_id": "software_engineering",
+            "execution_adapter": "software_git.v2",
+            "architecture_definition": {
+                "specialization_id": "software_engineering.v1",
+                "family_id": "software_engineering",
+                "generation_hash": "a" * 64,
+                "schema_ref": {"sha256": "schema"},
+                "template_ref": {"sha256": "template"},
+            },
+            "policies": {},
+            "role_bindings": {
+                role: {
+                    "executor": "profile",
+                    "selector": profile,
+                    "executor_profile": {
+                        "profile_id": profile.rsplit(".", 1)[-1],
+                        "profile_group": "software_engineering",
+                        "canonical_profile_id": profile,
+                        "role": {
+                            "kind": role,
+                            "modes": {
+                                "architect": ["author", "revision"],
+                                "reviewer": ["architecture", "standalone"],
+                                "implementation": ["produce", "repair"],
+                                "verifier": ["module", "system"],
+                            }[role],
+                            "playbook": {"steps": []},
+                        },
+                    },
+                }
+                for role, profile in {
+                    "architect": "software_engineering.v2_architect",
+                    "reviewer": "software_engineering.v2_reviewer",
+                    "implementation": "software_engineering.v2_coder",
+                    "verifier": "software_engineering.v2_verifier",
+                }.items()
+            },
+        }
         with (
             patch("pal.minion.v2.semantic_orchestration.orchestrator.workflow_request_from_snapshot", return_value={"workspace": {"kind": "new_project"}}),
             patch.object(
                 worker.service.artifacts,
                 "read_json",
-                return_value={
-                    "schema_version": "3",
-                    "policies": {},
-                    "role_bindings": {
-                        "architect": {
-                            "selector": "software_engineering.v2_architect",
-                            "executor_profile": {
-                                "profile_id": "v2_architect",
-                                "profile_group": "software_engineering",
-                                "canonical_profile_id": "software_engineering.v2_architect",
-                            },
-                        }
-                    },
-                },
+                return_value=binding,
             ),
             patch("pal.minion.v2.semantic_orchestration.orchestrator.resolve_pinned_minion_pack", lambda pack, **_kwargs: pack),
             patch("pal.minion.v2.semantic_orchestration.orchestrator.apply_v2_role_capability_policy", identity),
@@ -3774,10 +3526,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                         invocation_id=leased_invocation_id,
                         lease_resource="architecture:arch-lease-owner:architect",
                         fencing_token=7,
-                        profile="software_engineering.v2_architect",
+                        profile="software_engineering.v2_coder",
                         activation=RoleActivation(
-                            OrchestrationRole.ARCHITECT,
-                            RoleMode.AUTHOR,
+                            OrchestrationRole.IMPLEMENTATION,
+                            RoleMode.PRODUCE,
                         ),
                         instruction="produce architecture",
                         reference_refs={},
@@ -4631,7 +4383,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "requirements_ref": requirements_ref,
                 "submission": {"modules": {}},
             },
-            artifact_type="ArchitectureSkeletonArtifact",
+            artifact_type="TestManifestArtifact",
         ).to_dict()
         service.start_workflow(
             {
@@ -4817,7 +4569,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         ).to_dict()
         manifest_ref = service.artifacts.put_json(
             {"requirements_ref": requirements_ref},
-            artifact_type="ArchitectureSkeletonArtifact",
+            artifact_type="TestManifestArtifact",
         ).to_dict()
         created = repository.dispatch(
             ActionEnvelope(
@@ -5111,7 +4863,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         ).to_dict()
         manifest_ref = service.artifacts.put_json(
             {"requirements_ref": requirements_ref},
-            artifact_type="ArchitectureSkeletonArtifact",
+            artifact_type="TestManifestArtifact",
         ).to_dict()
         request_ref = service.artifacts.put_json(
             {"requirements_ref": requirements_ref},
@@ -5536,7 +5288,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         manifest_ref = service.artifacts.put_json(
             {"architecture": "blocked pause"},
-            artifact_type="ArchitectureSkeletonArtifact",
+            artifact_type="TestManifestArtifact",
         ).to_dict()
         topology_ref = service.artifacts.put_json(
             {"modules": {"downstream": {"depends_on": ["upstream"]}}},
@@ -5964,7 +5716,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         manifest_ref = service.artifacts.put_json(
             {"architecture": "accepted"},
-            artifact_type="ArchitectureSkeletonArtifact",
+            artifact_type="TestManifestArtifact",
         ).to_dict()
         repository.dispatch(
             ActionEnvelope(

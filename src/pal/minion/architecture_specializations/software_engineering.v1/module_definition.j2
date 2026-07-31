@@ -1,0 +1,37 @@
+#     behavior_kind: stateless  # type: enum stateless | resource_owner | service | workflow | adapter
+#     contract:  # type: mapping
+#       inputs:  # type: map[snake_case, Port]
+#         input_name:
+#           interface: "Public type, signature, or protocol."  # type: non-empty string
+#           semantics: "Accepted values, ownership, lifetime, and boundary behavior."  # type: non-empty string
+#       outputs:  # type: map[snake_case, Port], min 1; keys exactly match provides
+#         named_output:
+#           interface: "Public type, signature, or protocol."  # type: non-empty string
+#           semantics: "Observable value, ownership, lifetime, and error relation."  # type: non-empty string
+#       errors: ["Every observable error and post-error state."]  # type: unique list[non-empty string]
+#       invariants: ["Rules every conforming implementation preserves."]  # type: unique list[non-empty string]
+#     ownership: ["Exactly one owner for each state, resource, worker, or object."]  # type: unique list[non-empty string], min 1
+#     lifecycle:  # type: mapping with exactly these five non-empty string fields
+#       creation: "How valid ownership and state begin."  # type: non-empty string
+#       operation: "Legal operations and transitions."  # type: non-empty string
+#       shutdown: "How normal completion and join close."  # type: non-empty string
+#       failure: "Failure transitions, retry or consumption semantics, and terminal state."  # type: non-empty string
+#       cleanup: "Who releases each resource and when."  # type: non-empty string
+#     state_machine: null  # type: null | StateMachine; use null only when behavior is stateless
+#     # Stateful minimum valid shape:
+#     # state_machine:
+#     #   initial: ready  # type: snake_case string naming one state
+#     #   states:  # type: map[snake_case, State], min 1
+#     #     ready:
+#     #       meaning: "Accepting legal operations."  # type: non-empty string
+#     #       transitions:  # type: map[snake_case_event, Transition]
+#     #         fail:
+#     #           to: failed  # type: snake_case string naming one state
+#     #           effect: "Enter the declared failure behavior."  # type: non-empty string
+#     paths:  # type: mapping with exactly these four fields
+#       contract_mode: review_guarded  # type: enum review_guarded | file_frozen
+#       contract_paths: ["include/project/module.hpp"]  # type: unique list[non-empty relative path], min 1
+#       implementation_scopes:  # type: list[PathScope]
+#         - kind: directory  # type: enum file | directory
+#           path: "src/module"  # type: non-empty relative path
+#       reference_only: []  # type: unique list[non-empty relative path]

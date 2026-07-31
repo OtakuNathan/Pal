@@ -796,6 +796,10 @@ def authoring_input_fingerprint(value: Mapping[str, Any]) -> str:
 
 
 def _inherited_payload(draft_kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    if draft_kind == "work_items":
+        return {
+            "items": _deepcopy_json(payload.get("items") or []),
+        }
     definitions = _deepcopy_json(payload.get("definitions") or {})
     if draft_kind not in {"verification", "standalone_review"}:
         return {

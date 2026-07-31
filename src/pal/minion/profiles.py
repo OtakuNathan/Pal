@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 import tomllib
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from pal.minion.families import MinionFamilyManifest, MinionFamilyProvider, MinionFamilyRegistry
 from pal.minion.catalog_store import load_json_objects, profile_override_root
@@ -12,29 +12,20 @@ from pal.minion.tool_guidance import normalize_tool_guidance_overrides
 from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
-from pal.minion.v2.contract_builder import (
-    ARCHITECT_BUILDER_CAPABILITIES,
-    ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
-    CONTRACT_BUILDER_CAPABILITIES,
-    CONTRACT_SKETCH_BUILDER_CAPABILITIES,
-    is_contract_builder_capability,
-)
+from pal.minion.v2.ask_question import ASK_QUESTION_CAPABILITY
 from pal.minion.v2.candidate_builder import (
     CANDIDATE_BUILDER_CAPABILITIES,
 )
-from pal.minion.v2.skeleton_builder import (
-    ARCHITECTURE_SKELETON_CAPABILITIES,
-    SKELETON_BUILDER_CAPABILITIES,
-    SKELETON_REVIEW_CAPABILITIES,
-    is_skeleton_builder_capability,
-)
 from pal.minion.v2.review_findings import ADD_FINDING_CAPABILITY
+from pal.minion.v2.contract_submission import CONTRACT_SUBMIT_CAPABILITY
+from pal.minion.v2.review_submission import REVIEW_SUBMIT_CAPABILITY
+from pal.minion.v2.role_contracts import validate_family_binding_payload
+from pal.minion.v2.work_items import UPDATE_CHECKLIST_CAPABILITY
 from pal.minion.v2.swe_verification import (
     SWE_VERIFICATION_CAPABILITIES,
     is_swe_verification_capability,
 )
 from pal.minion.v2.verification_builder import (
-    STANDALONE_REVIEW_BUILDER_CAPABILITIES,
     VERIFICATION_BUILDER_CAPABILITIES,
     VERIFICATION_EVIDENCE_CAPABILITIES,
     VERIFICATION_TOOL_CAPABILITIES,
@@ -54,6 +45,153 @@ _PROFILE_RUNTIME_METADATA_KEYS = frozenset(
         "timeout_seconds",
     }
 )
+
+
+@dataclass(frozen=True)
+class MinionPlaybookStep:
+    key: str
+    instruction: str
+    done_when: str
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "MinionPlaybookStep":
+        key = str(payload.get("key") or "").strip()
+        instruction = str(payload.get("instruction") or "").strip()
+        done_when = str(payload.get("done_when") or "").strip()
+        if not key or not instruction or not done_when:
+            raise ValueError(
+                "role playbook steps require key, instruction, and done_when"
+            )
+        return cls(key=key, instruction=instruction, done_when=done_when)
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "key": self.key,
+            "instruction": self.instruction,
+            "done_when": self.done_when,
+        }
+
+
+@dataclass(frozen=True)
+class MinionTruthSource:
+    source: str
+    authority: str
+    note: str = ""
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "MinionTruthSource":
+        source = str(payload.get("source") or "").strip()
+        authority = str(payload.get("authority") or "").strip()
+        if not source:
+            raise ValueError("role truth source requires source")
+        if authority not in {
+            "normative",
+            "derived",
+            "evidence",
+            "cursor",
+            "fallback",
+        }:
+            raise ValueError(
+                "role truth source authority must be normative, derived, "
+                "evidence, cursor, or fallback"
+            )
+        return cls(
+            source=source,
+            authority=authority,
+            note=str(payload.get("note") or "").strip(),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "source": self.source,
+            "authority": self.authority,
+            **({"note": self.note} if self.note else {}),
+        }
+
+
+@dataclass(frozen=True)
+class MinionRoleProtocol:
+    protocol_id: str
+    kind: str
+    modes: tuple[str, ...]
+    playbook: tuple[MinionPlaybookStep, ...]
+    truth_sources: tuple[MinionTruthSource, ...]
+    checklist_policy: Mapping[str, Any]
+    submission_policy: Mapping[str, Any]
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "MinionRoleProtocol":
+        protocol_id = str(payload.get("protocol_id") or "").strip()
+        kind = str(payload.get("kind") or "").strip()
+        modes = tuple(_string_list(payload.get("modes")))
+        if not protocol_id:
+            raise ValueError("role protocol requires protocol_id")
+        if kind not in {"architect", "reviewer", "implementation", "verifier"}:
+            raise ValueError(
+                "role protocol kind must be architect, reviewer, "
+                "implementation, or verifier"
+            )
+        if not modes:
+            raise ValueError("role protocol requires at least one mode")
+        raw_playbook = payload.get("playbook")
+        if not isinstance(raw_playbook, Mapping):
+            raise ValueError("role protocol requires [role.playbook]")
+        raw_steps = raw_playbook.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            raise ValueError("role playbook requires at least one step")
+        playbook = tuple(
+            MinionPlaybookStep.from_dict(dict(item or {}))
+            for item in raw_steps
+        )
+        keys = [item.key for item in playbook]
+        if len(set(keys)) != len(keys):
+            raise ValueError("role playbook step keys must be unique")
+        raw_truth = payload.get("truth_sources")
+        if not isinstance(raw_truth, list) or not raw_truth:
+            raise ValueError("role protocol requires ordered truth_sources")
+        truth_sources = tuple(
+            MinionTruthSource.from_dict(dict(item or {}))
+            for item in raw_truth
+        )
+        checklist = _dict(payload.get("checklist"))
+        submission = _dict(payload.get("submission"))
+        if not str(submission.get("kind") or "").strip():
+            raise ValueError("role protocol submission.kind is required")
+        if not str(submission.get("tool") or "").strip():
+            raise ValueError("role protocol submission.tool is required")
+        return cls(
+            protocol_id=protocol_id,
+            kind=kind,
+            modes=modes,
+            playbook=playbook,
+            truth_sources=truth_sources,
+            checklist_policy={
+                "allow_worker_items": bool(
+                    checklist.get("allow_worker_items", True)
+                ),
+                "max_items": max(1, int(checklist.get("max_items") or 64)),
+                "require_complete": bool(
+                    checklist.get("require_complete", True)
+                ),
+            },
+            submission_policy=submission,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "protocol_id": self.protocol_id,
+            "kind": self.kind,
+            "modes": list(self.modes),
+            "playbook": {
+                "steps": [item.to_dict() for item in self.playbook],
+            },
+            "truth_sources": [
+                item.to_dict() for item in self.truth_sources
+            ],
+            "checklist": dict(self.checklist_policy),
+            "submission": dict(self.submission_policy),
+        }
+
 
 @dataclass(frozen=True)
 class MinionProfile:
@@ -75,6 +213,7 @@ class MinionProfile:
     capability_policy: dict[str, Any] = field(default_factory=dict)
     capability_guidance_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
     output_policy: dict[str, Any] = field(default_factory=dict)
+    role_protocol: MinionRoleProtocol | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -106,6 +245,11 @@ class MinionProfile:
                 for canonical, patch in self.capability_guidance_overrides.items()
             },
             "output_policy": dict(self.output_policy),
+            **(
+                {"role": self.role_protocol.to_dict()}
+                if self.role_protocol is not None
+                else {}
+            ),
             "metadata": dict(self.metadata),
         }
 
@@ -153,6 +297,11 @@ class MinionProfile:
                 payload.get("capability_guidance_overrides")
             ),
             output_policy=_dict(payload.get("output_policy")),
+            role_protocol=(
+                MinionRoleProtocol.from_dict(payload["role"])
+                if isinstance(payload.get("role"), Mapping)
+                else None
+            ),
             metadata=metadata,
         )
 
@@ -351,7 +500,35 @@ def resolve_pinned_minion_pack(
     """Resolve a worker pack from its immutable FamilyBindingArtifact."""
 
     profile = MinionProfile.from_dict(dict(profile_payload or {}))
-    family = MinionFamilyManifest.from_dict(dict(family_payload or {}))
+    family_value = dict(family_payload or {})
+    resolved_bindings = validate_family_binding_payload(family_value)
+    family_value["role_bindings"] = {
+        role: (
+            {
+                "executor": "null",
+                "reason": str(dict(binding or {}).get("reason") or ""),
+            }
+            if str(dict(binding or {})["executor"]) == "null"
+            else {
+                "executor": "profile",
+                "profile": str(
+                    dict(binding or {}).get("selector")
+                    or dict(binding or {}).get("profile")
+                    or ""
+                ),
+            }
+        )
+        for role, binding in resolved_bindings.items()
+    }
+    family_value["architecture"] = {
+        "specialization": str(
+            dict(family_value.get("architecture_definition") or {}).get(
+                "specialization_id"
+            )
+            or ""
+        )
+    }
+    family = MinionFamilyManifest.from_dict(family_value)
     requested = str(pack.minion_profile or "").strip()
     if requested and requested != profile.canonical_profile_id:
         raise ValueError(
@@ -386,19 +563,27 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "tool_discovery": ("op_tool_search", "op_tool_read"),
     "capability_call": ("op_tool_call",),
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
-    "v2_contract_sketch_builder": ARCHITECT_BUILDER_CAPABILITIES,
-    "v2_architecture_review_builder": ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
-    "v2_architecture_skeleton_builder": ARCHITECTURE_SKELETON_CAPABILITIES,
-    "v2_skeleton_review_builder": SKELETON_REVIEW_CAPABILITIES,
+    "v2_contract_file_author": (
+        UPDATE_CHECKLIST_CAPABILITY,
+        CONTRACT_SUBMIT_CAPABILITY,
+        ASK_QUESTION_CAPABILITY,
+    ),
+    "v2_contract_reviewer": (
+        UPDATE_CHECKLIST_CAPABILITY,
+        ADD_FINDING_CAPABILITY,
+        REVIEW_SUBMIT_CAPABILITY,
+    ),
     "v2_candidate_builder": CANDIDATE_BUILDER_CAPABILITIES,
     "v2_verification_builder": VERIFICATION_BUILDER_CAPABILITIES,
     "v2_swe_verification": (
         *SWE_VERIFICATION_CAPABILITIES,
         *VERIFICATION_EVIDENCE_CAPABILITIES,
         ADD_FINDING_CAPABILITY,
+        UPDATE_CHECKLIST_CAPABILITY,
+        CONTRACT_SUBMIT_CAPABILITY,
+        REVIEW_SUBMIT_CAPABILITY,
         "op_minion_verification_scratch_write",
     ),
-    "v2_standalone_review_builder": STANDALONE_REVIEW_BUILDER_CAPABILITIES,
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
@@ -492,12 +677,14 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         "op_minion_artifact_write",
         "op_minion_artifact_edit",
         "op_minion_memory_candidate_write",
-        *CONTRACT_BUILDER_CAPABILITIES,
         *CANDIDATE_BUILDER_CAPABILITIES,
-        *SKELETON_BUILDER_CAPABILITIES,
         *VERIFICATION_TOOL_CAPABILITIES,
         *SWE_VERIFICATION_CAPABILITIES,
         ADD_FINDING_CAPABILITY,
+        UPDATE_CHECKLIST_CAPABILITY,
+        CONTRACT_SUBMIT_CAPABILITY,
+        REVIEW_SUBMIT_CAPABILITY,
+        ASK_QUESTION_CAPABILITY,
     }
 )
 
@@ -536,8 +723,6 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
         return True
     if (
         capability in MINION_INTERNAL_ALLOWED_CAPABILITIES
-        or is_contract_builder_capability(capability)
-        or is_skeleton_builder_capability(capability)
         or is_verification_builder_capability(capability)
         or is_swe_verification_capability(capability)
     ):

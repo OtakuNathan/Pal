@@ -1,0 +1,100 @@
+{
+  "specialization_id": "lifestyle.nutrition_checkin.v1",
+  "family_id": "lifestyle",
+  "context_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["goal", "hard_restrictions", "safety_boundary"],
+    "properties": {
+      "goal": {"type": "string", "minLength": 1},
+      "hard_restrictions": {"$ref": "#/$defs/stringList"},
+      "safety_boundary": {"type": "string", "minLength": 1}
+    }
+  },
+  "module_definition_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "meals",
+      "training",
+      "restrictions",
+      "inputs",
+      "outputs",
+      "ownership",
+      "lifecycle",
+      "safety_invariants"
+    ],
+    "properties": {
+      "meals": {"type": "array", "items": {"$ref": "#/$defs/meal"}},
+      "training": {"$ref": "#/$defs/stringList"},
+      "restrictions": {"$ref": "#/$defs/stringList"},
+      "inputs": {"$ref": "#/$defs/stringList"},
+      "outputs": {"$ref": "#/$defs/stringList"},
+      "ownership": {"type": "string", "minLength": 1},
+      "lifecycle": {"type": "string", "minLength": 1},
+      "safety_invariants": {"$ref": "#/$defs/stringList", "minItems": 1}
+    }
+  },
+  "defs": {
+    "meal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "foods", "purpose"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "foods": {"$ref": "#/$defs/stringList", "minItems": 1},
+        "purpose": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "example": {
+    "schema_version": "1",
+    "context": {
+      "goal": "Provide a feasible weekly plan.",
+      "hard_restrictions": ["non-medical guidance"],
+      "safety_boundary": "Escalate medical concerns to a qualified clinician."
+    },
+    "requirements": {
+      "monday_plan": {
+        "claim": "Provide a Monday plan.",
+        "owner": "monday",
+        "contract_path": ["monday.monday_plan"]
+      }
+    },
+    "modules": {
+      "monday": {
+        "responsibility": "Define Monday meals and training.",
+        "execution": "produce",
+        "provides": ["monday_plan"],
+        "dependencies": {},
+        "definition": {
+          "meals": [
+            {
+              "name": "breakfast",
+              "foods": ["oats"],
+              "purpose": "practical breakfast"
+            }
+          ],
+          "training": ["easy walk"],
+          "restrictions": ["respect recorded allergies"],
+          "inputs": ["approved user preferences"],
+          "outputs": ["monday_plan"],
+          "ownership": "The user owns execution and adjustment.",
+          "lifecycle": "Plan, execute externally, observe, revise later.",
+          "safety_invariants": ["do not diagnose or prescribe treatment"]
+        }
+      }
+    },
+    "scenarios": {
+      "use_week_plan": {
+        "modules": ["monday"],
+        "requirement_refs": ["monday_plan"],
+        "entrypoint": {"module": "monday", "surface": "Monday"},
+        "contract_flow": ["preferences -> monday plan -> user"],
+        "observable_behavior": "The user receives a feasible Monday plan.",
+        "failure_behavior": "Unknown or unsafe constraints remain explicit.",
+        "environment": "External human execution."
+      }
+    }
+  }
+}

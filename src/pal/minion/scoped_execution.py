@@ -49,27 +49,36 @@ from pal.minion.tool_admission import (
     effective_minion_capability_name,
     effective_minion_tool_args,
 )
-from pal.minion.v2.contract_builder import (
-    CONTRACT_BUILDER_TOOL_SPECS,
-    contract_builder_tool_result,
-    is_contract_builder_capability,
+from pal.minion.v2.ask_question import (
+    ASK_QUESTION_CAPABILITY,
+    ASK_QUESTION_TOOL_SPEC,
+    ask_question_tool_result,
+)
+from pal.minion.v2.contract_submission import (
+    CONTRACT_SUBMIT_CAPABILITY,
+    CONTRACT_SUBMIT_TOOL_SPEC,
+    contract_submit_tool_result,
 )
 from pal.minion.v2.candidate_builder import (
     CANDIDATE_BUILDER_TOOL_SPECS,
     candidate_builder_tool_result,
     is_candidate_builder_capability,
 )
-from pal.minion.v2.skeleton_builder import (
-    SKELETON_BUILDER_TOOL_SPECS,
-    ask_question_tool_result,
-    is_skeleton_builder_capability,
-    skeleton_builder_tool_result,
-)
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
     ADD_FINDING_TOOL_SPEC,
     add_finding_tool_result,
     is_review_finding_capability,
+)
+from pal.minion.v2.review_submission import (
+    REVIEW_SUBMIT_CAPABILITY,
+    REVIEW_SUBMIT_TOOL_SPEC,
+    review_submit_tool_result,
+)
+from pal.minion.v2.work_items import (
+    UPDATE_CHECKLIST_CAPABILITY,
+    UPDATE_CHECKLIST_TOOL_SPEC,
+    update_checklist_tool_result,
 )
 from pal.minion.v2.swe_verification import (
     SWE_VERIFICATION_TOOL_SPECS,
@@ -131,7 +140,7 @@ class MinionScopedExecutionShellInput(
 _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_artifact_write": {
         "alias": "artifact_write",
-        "description": "Write the profile-declared structured output artifact. Architecture roles must use their bound Contract Builder instead.",
+        "description": "Write the profile-declared structured output artifact. Architect roles edit the Manager-preseeded architect.yaml instead.",
         "InputModel": MinionScopedExecutionOpMinionArtifactWriteInput,
     },
     "op_minion_artifact_edit": {
@@ -152,10 +161,12 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             },
         ),
     },
-    **CONTRACT_BUILDER_TOOL_SPECS,
     **CANDIDATE_BUILDER_TOOL_SPECS,
-    **SKELETON_BUILDER_TOOL_SPECS,
     **VERIFICATION_BUILDER_TOOL_SPECS,
+    ASK_QUESTION_CAPABILITY: ASK_QUESTION_TOOL_SPEC,
+    UPDATE_CHECKLIST_CAPABILITY: UPDATE_CHECKLIST_TOOL_SPEC,
+    CONTRACT_SUBMIT_CAPABILITY: CONTRACT_SUBMIT_TOOL_SPEC,
+    REVIEW_SUBMIT_CAPABILITY: REVIEW_SUBMIT_TOOL_SPEC,
     ADD_FINDING_CAPABILITY: ADD_FINDING_TOOL_SPEC,
 }
 
@@ -173,18 +184,6 @@ def _scoped_workspace_tool_spec(
     workspace: dict[str, Any],
 ) -> dict[str, Any]:
     value = dict(spec)
-    if name == "op_minion_architecture_review_pass":
-        contract = dict(
-            dict(workspace.get("minion_v2") or {}).get(
-                "architecture_review_tool_contract"
-            )
-            or {}
-        )
-        example = dict(contract.get("pass_example") or {})
-        if example:
-            value["examples"] = (example,)
-            value["InputModel"].model_validate(example, strict=True)
-        return value
     if name != ADD_FINDING_CAPABILITY:
         return value
     role = str(dict(workspace.get("minion_v2") or {}).get("role") or "")
@@ -337,7 +336,6 @@ def _workflow_capability(
 _WORKFLOW_READ_CAPABILITIES = frozenset(
     {
         "op_minion_verification_draft_status",
-        "op_minion_review_surface",
     }
 )
 _WORKFLOW_CONTROL_CAPABILITIES = frozenset(
@@ -538,6 +536,18 @@ class MinionScopedExecutionRuntime:
     def _handler(self, name: str) -> Any | None:
         if is_review_finding_capability(name):
             return lambda call, _ctx: add_finding_tool_result(call, self.workspace)
+        if name == UPDATE_CHECKLIST_CAPABILITY:
+            return lambda call, _ctx: update_checklist_tool_result(
+                call, self.workspace
+            )
+        if name == CONTRACT_SUBMIT_CAPABILITY:
+            return lambda call, _ctx: contract_submit_tool_result(
+                call, self.workspace
+            )
+        if name == REVIEW_SUBMIT_CAPABILITY:
+            return lambda call, _ctx: review_submit_tool_result(
+                call, self.workspace
+            )
         if is_swe_verification_capability(name):
             return lambda call, _ctx: swe_verification_tool_result(
                 call,
@@ -550,15 +560,11 @@ class MinionScopedExecutionRuntime:
                 self.workspace,
                 self.produced_artifacts,
             )
-        if is_skeleton_builder_capability(name):
-            if name == "op_minion_ask_question":
-                return lambda call, _ctx: ask_question_tool_result(
-                    call,
-                    self.workspace,
-                    self.produced_artifacts,
-                    request_user=self.request_user_clarification,
-                )
-            return lambda call, _ctx: skeleton_builder_tool_result(call, self.workspace, self.produced_artifacts)
+        if name == ASK_QUESTION_CAPABILITY:
+            return lambda call, _ctx: ask_question_tool_result(
+                call,
+                request_user=self.request_user_clarification,
+            )
         if is_verification_builder_capability(name):
             return lambda call, ctx: verification_builder_tool_result(
                 call,
@@ -567,8 +573,6 @@ class MinionScopedExecutionRuntime:
                 original_adapter=self._original_adapter,
                 turn_id=str(ctx.get("turn_id") or "") or None,
             )
-        if is_contract_builder_capability(name):
-            return lambda call, _ctx: contract_builder_tool_result(call, self.workspace, self.produced_artifacts)
         if name in {"op_minion_artifact_write", "op_minion_artifact_edit"}:
             return lambda call, _ctx: asyncio.to_thread(_workspace_tool_result, call, self.workspace)
         return None

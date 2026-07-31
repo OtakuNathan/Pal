@@ -27,6 +27,10 @@ from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.semantic_evidence import recorded_cases
 from pal.minion.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.minion.v2.verification_builder import semantic_verification_draft_errors
+from pal.minion.v2.work_items import (
+    assert_work_items_complete,
+    findings_from_work_items,
+)
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
@@ -218,8 +222,9 @@ def swe_verification_tool_result(
         store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
         snapshot = store.read(context, seed=empty_review_draft())
         findings, advisories = partition_findings(
-            structured_findings(snapshot.payload)
+            findings_from_work_items(workspace)
         )
+        work_items = assert_work_items_complete(workspace)
         contract = dict(
             dict(workspace.get("minion_v2") or {}).get(
                 "swe_verification_tool_contract"
@@ -284,6 +289,10 @@ def swe_verification_tool_result(
             "outcome": outcome,
             "findings": findings,
             "advisories": advisories,
+            "work_items": [
+                dict(item)
+                for item in list(work_items.get("items") or [])
+            ],
             **({"reason": reason} if reason else {}),
             **({"target_modules": target_modules} if target_modules else {}),
             "changed_test_paths": changed_paths,

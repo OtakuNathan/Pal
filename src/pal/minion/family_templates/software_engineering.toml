@@ -3,23 +3,26 @@ display_name = "Software Engineering"
 domain = "Software design, implementation, code review, repository maintenance, tests, and build verification."
 domain_keywords = ["code", "software", "repo", "test", "build", "review", "bug", "implementation"]
 workflow_template = "contract_dag.v2"
+execution_adapter = "software_git.v2"
 
-[role_bindings]
-architect = "software_engineering.v2_architect"
-reviewer = "software_engineering.v2_reviewer"
-implementation = "software_engineering.v2_coder"
-verifier = "software_engineering.v2_verifier"
+[architecture]
+specialization = "software_engineering.v1"
 
-[builders]
-contract = "skeleton_git.v2"
-verification = "verification.v2"
+[role_bindings.architect]
+executor = "profile"
+profile = "software_engineering.v2_architect"
 
-[adapters]
-workspace = "software_git.v2"
-candidate = "software_git.v2"
-verification = "software_git.v2"
-integration = "software_git.v2"
-publisher = "software_git.v2"
+[role_bindings.reviewer]
+executor = "profile"
+profile = "software_engineering.v2_reviewer"
+
+[role_bindings.implementation]
+executor = "profile"
+profile = "software_engineering.v2_coder"
+
+[role_bindings.verifier]
+executor = "profile"
+profile = "software_engineering.v2_verifier"
 
 [policies]
 research_default = "local_only"

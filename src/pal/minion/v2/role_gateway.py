@@ -8,11 +8,19 @@ from typing import Any, Mapping
 
 from pal.execution.git_tool import GitTool, classify_git_command
 from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
+from pal.minion.v2.architecture_templates import (
+    compiled_architecture_definition_from_mapping,
+)
 from pal.minion.v2.artifacts import ArtifactRef
+from pal.minion.v2.contract_protocol import (
+    ARCHITECT_FILENAME,
+    validate_contract_payload,
+)
 from pal.minion.v2.execution_state import (
     ManagerLogicalExecutionState,
     pager_read_to_dict,
 )
+from pal.minion.v2.role_contracts import validate_family_binding_payload
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
@@ -20,9 +28,9 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftStore,
 )
 from pal.minion.v2.role_protocol import RoleAssignmentState, stable_hash
+from pal.minion.v2.work_items import assert_work_items_complete
 
 ROLE_SUBMISSION_ARTIFACT_TYPES = {
-    "architecture": "ArchitectureRoleSubmissionArtifact",
     "architecture_review": "ArchitectureReviewRoleSubmissionArtifact",
     "candidate": "CandidateRoleSubmissionArtifact",
     "contract": "ContractRoleSubmissionArtifact",
@@ -221,7 +229,11 @@ class RoleAssignmentGateway:
         authenticated: Mapping[str, Any],
         params: Mapping[str, Any],
     ) -> dict[str, Any]:
-        context = self._context(authenticated, params)
+        context = self._context(
+            authenticated,
+            params,
+            allow_work_items=True,
+        )
         snapshot = SubmissionDraftStore(self.service.runtime_root).read(
             context,
             seed=dict(params.get("seed") or {}),
@@ -233,7 +245,11 @@ class RoleAssignmentGateway:
         authenticated: Mapping[str, Any],
         params: Mapping[str, Any],
     ) -> dict[str, Any]:
-        context = self._context(authenticated, params)
+        context = self._context(
+            authenticated,
+            params,
+            allow_work_items=True,
+        )
         result = SubmissionDraftStore(self.service.runtime_root).mutate_precomputed(
             context,
             operation_key=str(params.get("operation_key") or ""),
@@ -256,6 +272,11 @@ class RoleAssignmentGateway:
         if not isinstance(submission, Mapping):
             raise ValueError("role submission must be a JSON object")
         payload = dict(submission)
+        if context.draft_kind == "contract":
+            payload = self._compile_architect_submission(
+                authenticated,
+                payload,
+            )
         artifact_type = role_submission_artifact_type(context.draft_kind)
         if not artifact_type:
             raise ValueError(f"unsupported role submission kind: {context.draft_kind}")
@@ -300,6 +321,102 @@ class RoleAssignmentGateway:
             "submission_artifact_ref": artifact_ref.to_dict(),
             "submission_payload_hash": payload_hash,
         }
+
+    def _compile_architect_submission(
+        self,
+        authenticated: Mapping[str, Any],
+        submission: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Validate one authored projection against its pinned Family binding.
+
+        The sandbox sends only the parsed ``architect.yaml`` instance. Raw JSON
+        Schema and compiler state stay behind this Manager gateway.
+        """
+
+        payload = dict(submission)
+        if set(payload) != {"source", "architecture"}:
+            raise ValueError(
+                "architect submission requires only source and architecture"
+            )
+        if str(payload.get("source") or "") != ARCHITECT_FILENAME:
+            raise ValueError(
+                f"architect submission source must be {ARCHITECT_FILENAME}"
+            )
+        architecture = payload.get("architecture")
+        if not isinstance(architecture, Mapping):
+            raise ValueError("architect submission architecture must be an object")
+
+        assignment = dict(authenticated["assignment"])
+        binding_sha = str(assignment.get("family_binding_sha") or "").strip()
+        binding_record = self.repository.read_artifact_record(binding_sha)
+        if binding_record is None:
+            raise ValueError("pinned FamilyBindingArtifact is unavailable")
+        if str(binding_record.get("artifact_type") or "") != "FamilyBindingArtifact":
+            raise ValueError("pinned family binding has the wrong artifact type")
+        binding = dict(self.service.artifacts.read_json(binding_record))
+        validate_family_binding_payload(binding)
+        architecture_binding = dict(
+            binding.get("architecture_definition") or {}
+        )
+        schema_payload = self.service.artifacts.read_json(
+            dict(architecture_binding.get("schema_ref") or {})
+        )
+        template_payload = self.service.artifacts.read_json(
+            dict(architecture_binding.get("template_ref") or {})
+        )
+        if not isinstance(schema_payload, Mapping):
+            raise ValueError("pinned architecture schema artifact is malformed")
+        if not isinstance(template_payload, Mapping):
+            raise ValueError("pinned architect template artifact is malformed")
+        definition = compiled_architecture_definition_from_mapping(
+            {
+                "specialization_id": architecture_binding["specialization_id"],
+                "family_id": architecture_binding["family_id"],
+                "generation_hash": architecture_binding["generation_hash"],
+                "schema": dict(schema_payload),
+                "template": str(template_payload.get("template") or ""),
+                "example": {},
+            }
+        )
+        document = validate_contract_payload(
+            dict(architecture),
+            definition=definition,
+        )
+
+        prompt_pack = self._authenticated_prompt_pack(authenticated)
+        workspace = {
+            **dict(prompt_pack.get("workspace") or {}),
+            "runtime_root": str(self.service.runtime_root),
+            "minion_v2": dict(
+                dict(prompt_pack.get("metadata") or {}).get("minion_v2") or {}
+            ),
+        }
+        work_items = assert_work_items_complete(workspace)
+        return {
+            "schema_version": "1",
+            "contract_schema": definition.specialization_id,
+            "contract": document.model_dump(mode="python"),
+            "source": ARCHITECT_FILENAME,
+            "work_items": [
+                dict(item)
+                for item in list(work_items.get("items") or [])
+            ],
+        }
+
+    def _authenticated_prompt_pack(
+        self,
+        authenticated: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        attempt = self.repository.read_role_attempt(
+            str(authenticated["attempt_id"])
+        )
+        prompt_ref = dict((attempt or {}).get("prompt_pack_ref") or {})
+        if not prompt_ref.get("sha256"):
+            raise ValueError("role prompt pack is unavailable")
+        prompt_pack = self.service.artifacts.read_json(prompt_ref)
+        if not isinstance(prompt_pack, Mapping):
+            raise ValueError("role prompt pack is malformed")
+        return dict(prompt_pack)
 
     def _artifact_put(
         self,
@@ -380,6 +497,8 @@ class RoleAssignmentGateway:
     def _context(
         authenticated: Mapping[str, Any],
         params: Mapping[str, Any],
+        *,
+        allow_work_items: bool = False,
     ) -> SubmissionDraftContext:
         assignment = dict(authenticated["assignment"])
         context = SubmissionDraftContext.from_mapping(dict(params.get("context") or {}))
@@ -403,7 +522,10 @@ class RoleAssignmentGateway:
         }
         if actual != expected:
             raise ValueError("submission Draft context does not match its assignment")
-        if context.draft_kind != str(assignment["submission_kind"]):
+        allowed_kinds = {str(assignment["submission_kind"])}
+        if allow_work_items:
+            allowed_kinds.add("work_items")
+        if context.draft_kind not in allowed_kinds:
             raise ValueError("submission Draft kind does not match its assignment")
         return context
 

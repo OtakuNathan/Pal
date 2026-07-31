@@ -26,7 +26,11 @@ from pal.minion.profiles import (
     MinionProfileRegistry,
     canonical_profile_id,
 )
-from pal.minion.v2.role_contracts import TASK_PROFILE_BINDING, validate_role_bindings
+from pal.minion.v2.role_contracts import (
+    TASK_PROFILE_BINDING,
+    family_execution_adapter,
+    validate_role_bindings,
+)
 
 
 CATALOG_SCHEMA_VERSION = "1"
@@ -47,6 +51,7 @@ _PROFILE_PATCH_FIELDS = frozenset(
         "capability_policy",
         "capability_guidance_overrides",
         "output_policy",
+        "role",
         "metadata",
     }
 )
@@ -56,9 +61,9 @@ _FAMILY_PATCH_FIELDS = frozenset(
         "domain",
         "domain_keywords",
         "workflow_template",
+        "architecture",
         "role_bindings",
-        "builders",
-        "adapters",
+        "execution_adapter",
         "policies",
         "capability_groups",
         "metadata",
@@ -335,7 +340,10 @@ class MinionCatalogService:
                 "display_name": family.display_name,
                 "source": "override" if family.family_id in family_overrides else "builtin",
                 "workflow_template": family.workflow_template,
-                "role_bindings": dict(family.role_bindings),
+                "role_bindings": {
+                    role: binding.to_dict()
+                    for role, binding in family.role_bindings.items()
+                },
             }
             if include_definitions:
                 item["definition"] = definition
@@ -371,20 +379,23 @@ class MinionCatalogService:
         bindings = validate_role_bindings(family.role_bindings)
         unknown = sorted(
             {
-                profile
-                for profile in bindings.values()
-                if profile != TASK_PROFILE_BINDING and registry.get(profile) is None
+                binding.profile
+                for binding in bindings.values()
+                if binding.executor == "profile"
+                and binding.profile != TASK_PROFILE_BINDING
+                and registry.get(binding.profile) is None
             }
         )
         if unknown:
             raise ValueError(f"family references unknown profiles: {', '.join(unknown)}")
         cross_family = sorted(
             {
-                profile
-                for profile in bindings.values()
-                if profile != TASK_PROFILE_BINDING
-                and registry.get(profile) is not None
-                and registry.get(profile).profile_group.replace("/", ".")
+                binding.profile
+                for binding in bindings.values()
+                if binding.executor == "profile"
+                and binding.profile != TASK_PROFILE_BINDING
+                and registry.get(binding.profile) is not None
+                and registry.get(binding.profile).profile_group.replace("/", ".")
                 != family.family_id
             }
         )
@@ -394,14 +405,16 @@ class MinionCatalogService:
                 + ", ".join(cross_family)
             )
         if family.workflow_template == "contract_dag.v2":
-            from pal.minion.v2.catalog import REGISTERED_ADAPTERS, REGISTERED_BUILDERS
+            from pal.minion.v2.catalog import REGISTERED_ADAPTERS
 
-            unknown_builders = sorted(set(family.builders.values()) - REGISTERED_BUILDERS)
-            if unknown_builders:
-                raise ValueError(f"family references unknown builders: {', '.join(unknown_builders)}")
-            unknown_adapters = sorted(set(family.adapters.values()) - REGISTERED_ADAPTERS)
-            if unknown_adapters:
-                raise ValueError(f"family references unknown adapters: {', '.join(unknown_adapters)}")
+            execution_adapter = family_execution_adapter(
+                family.execution_adapter
+            )
+            if execution_adapter not in REGISTERED_ADAPTERS:
+                raise ValueError(
+                    "family references unknown execution adapter: "
+                    + execution_adapter
+                )
 
     def _validate_effective_catalog(self) -> None:
         for profile in MinionProfileRegistry(runtime_root=self.runtime_root).list_profiles():

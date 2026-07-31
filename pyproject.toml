@@ -18,6 +18,7 @@ dependencies = [
     "pydantic>=2.10,<3",
     "PyYAML>=6.0,<7",
     "jsonschema>=4.23,<5",
+    "jinja2>=3.1,<4",
     "prompt-toolkit>=3.0.52,<4",
     "python-telegram-bot>=20.7,<22",
     "rich>=13,<15",
@@ -52,7 +53,15 @@ where = ["src"]
 "pal.core" = ["tool_surface.toml"]
 "pal.lsp" = ["server_templates/*.toml"]
 "pal.mcp" = ["templates/*.toml"]
-"pal.minion" = ["family_templates/*.toml", "profile_templates/*.toml", "profile_templates/**/*.toml"]
+"pal.minion" = [
+    "architecture_templates/**/*.json",
+    "architecture_templates/**/*.j2",
+    "architecture_specializations/**/*.json",
+    "architecture_specializations/**/*.j2",
+    "family_templates/*.toml",
+    "profile_templates/*.toml",
+    "profile_templates/**/*.toml",
+]
 "pal.plugins_builtin.lsp" = ["plugin.toml"]
 "pal.plugins_builtin.mcp" = ["plugin.toml"]
 "pal.plugins_builtin.minion" = ["plugin.toml"]

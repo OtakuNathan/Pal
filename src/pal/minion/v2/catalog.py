@@ -7,36 +7,37 @@ from typing import Any, Mapping
 from pal.minion.families import MinionFamilyManifest
 from pal.minion.profiles import MinionProfile, MinionProfileRegistry
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.minion.v2.architecture_templates import ArchitectureTemplateCompiler
 from pal.minion.v2.role_contracts import (
     REQUIRED_ORCHESTRATION_ROLES,
     TASK_PROFILE_BINDING,
+    family_execution_adapter,
     validate_role_bindings,
 )
 
 
 CONTRACT_DAG_ROLES = REQUIRED_ORCHESTRATION_ROLES
 
-REGISTERED_BUILDERS = frozenset(
-    {
-        "requirements.v2",
-        "contract_sketch.v2",
-        "skeleton_git.v2",
-        "verification.v2",
-    }
-)
-
 REGISTERED_ADAPTERS = frozenset({"software_git.v2", "artifact_bundle.v2"})
 
 
 @dataclass(frozen=True)
 class ResolvedRoleBinding:
+    executor: str
     selector: str
-    executor_profile: Mapping[str, Any]
+    executor_profile: Mapping[str, Any] | None = None
+    reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "executor": self.executor,
             "selector": self.selector,
-            "executor_profile": dict(self.executor_profile),
+            **(
+                {"executor_profile": dict(self.executor_profile)}
+                if self.executor_profile is not None
+                else {}
+            ),
+            **({"reason": self.reason} if self.reason else {}),
         }
 
 
@@ -48,28 +49,28 @@ class ResolvedFamilyBinding:
     domain_keywords: tuple[str, ...]
     workflow_template: str
     primary_profile: Mapping[str, Any]
+    architecture_definition: Mapping[str, Any]
     role_bindings: Mapping[str, ResolvedRoleBinding]
-    builders: Mapping[str, str]
-    adapters: Mapping[str, str]
+    execution_adapter: str
     policies: Mapping[str, Any]
     capability_groups: Mapping[str, Mapping[str, Any]]
     metadata: Mapping[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "3",
+            "schema_version": "5",
             "family_id": self.family_id,
             "display_name": self.display_name,
             "domain": self.domain,
             "domain_keywords": list(self.domain_keywords),
             "workflow_template": self.workflow_template,
             "primary_profile": dict(self.primary_profile),
+            "architecture_definition": dict(self.architecture_definition),
             "role_bindings": {
                 role: binding.to_dict()
                 for role, binding in sorted(self.role_bindings.items())
             },
-            "builders": dict(self.builders),
-            "adapters": dict(self.adapters),
+            "execution_adapter": self.execution_adapter,
             "policies": dict(self.policies),
             "capability_groups": {
                 group_id: dict(group)
@@ -113,8 +114,20 @@ class MinionV2Catalog:
         family = self.family(primary_profile.profile_group)
         selectors = validate_role_bindings(family.role_bindings)
         resolved_roles: dict[str, ResolvedRoleBinding] = {}
-        for role, selector in selectors.items():
-            executor = primary_profile if selector == TASK_PROFILE_BINDING else profile_registry.get(selector)
+        for role, role_binding in selectors.items():
+            if role_binding.executor == "null":
+                resolved_roles[role] = ResolvedRoleBinding(
+                    executor="null",
+                    selector="",
+                    reason=role_binding.reason,
+                )
+                continue
+            selector = role_binding.profile
+            executor = (
+                primary_profile
+                if selector == TASK_PROFILE_BINDING
+                else profile_registry.get(selector)
+            )
             if executor is None:
                 raise ValueError(
                     f"family {family.family_id} role {role} references unknown profile {selector}"
@@ -124,16 +137,74 @@ class MinionV2Catalog:
                     f"family {family.family_id} role {role} references cross-family profile "
                     f"{executor.canonical_profile_id}"
                 )
+            if executor.role_protocol is None:
+                raise ValueError(
+                    f"family {family.family_id} role {role} profile "
+                    f"{executor.canonical_profile_id} has no role protocol"
+                )
+            if executor.role_protocol.kind != role:
+                raise ValueError(
+                    f"family {family.family_id} role {role} references profile "
+                    f"{executor.canonical_profile_id} for role "
+                    f"{executor.role_protocol.kind}"
+                )
             resolved_roles[role] = ResolvedRoleBinding(
+                executor="profile",
                 selector=selector,
                 executor_profile=executor.to_dict(),
             )
-        unknown_builders = sorted(set(family.builders.values()) - REGISTERED_BUILDERS)
-        if unknown_builders:
-            raise ValueError(f"family {family.family_id} references unknown builders: {', '.join(unknown_builders)}")
-        unknown_adapters = sorted(set(family.adapters.values()) - REGISTERED_ADAPTERS)
-        if unknown_adapters:
-            raise ValueError(f"family {family.family_id} references unknown adapters: {', '.join(unknown_adapters)}")
+        architecture_binding = family.architecture
+        if architecture_binding is None:
+            raise ValueError(
+                f"family {family.family_id} has no architecture specialization"
+            )
+        architecture_definition = ArchitectureTemplateCompiler(
+            providers=tuple(profile_registry.family_providers)
+        ).compile(
+            architecture_binding.specialization
+        )
+        if architecture_definition.family_id != family.family_id:
+            raise ValueError(
+                f"family {family.family_id} cannot use architecture "
+                f"specialization {architecture_definition.specialization_id} "
+                f"owned by {architecture_definition.family_id}"
+            )
+        schema_ref = self.artifacts.put_json(
+            dict(architecture_definition.schema),
+            artifact_type="ArchitectureJsonSchemaArtifact",
+            schema_version="1",
+            provenance={
+                "specialization_id": (
+                    architecture_definition.specialization_id
+                ),
+                "generation_hash": architecture_definition.generation_hash,
+            },
+        )
+        template_ref = self.artifacts.put_json(
+            {
+                "specialization_id": (
+                    architecture_definition.specialization_id
+                ),
+                "generation_hash": architecture_definition.generation_hash,
+                "template": architecture_definition.template,
+            },
+            artifact_type="ArchitectTemplateArtifact",
+            schema_version="1",
+            provenance={
+                "specialization_id": (
+                    architecture_definition.specialization_id
+                ),
+                "generation_hash": architecture_definition.generation_hash,
+            },
+        )
+        execution_adapter = family_execution_adapter(
+            family.execution_adapter
+        )
+        if execution_adapter not in REGISTERED_ADAPTERS:
+            raise ValueError(
+                f"family {family.family_id} references unknown execution "
+                f"adapter: {execution_adapter}"
+            )
         binding = ResolvedFamilyBinding(
             family_id=family.family_id,
             display_name=family.display_name,
@@ -141,9 +212,17 @@ class MinionV2Catalog:
             domain_keywords=family.domain_keywords,
             workflow_template=family.workflow_template,
             primary_profile=primary_profile.to_dict(),
+            architecture_definition={
+                "specialization_id": (
+                    architecture_definition.specialization_id
+                ),
+                "family_id": architecture_definition.family_id,
+                "generation_hash": architecture_definition.generation_hash,
+                "schema_ref": schema_ref.to_dict(),
+                "template_ref": template_ref.to_dict(),
+            },
             role_bindings=resolved_roles,
-            builders=dict(family.builders),
-            adapters=dict(family.adapters),
+            execution_adapter=execution_adapter,
             policies=dict(family.policies),
             capability_groups={
                 group_id: group.to_dict()
@@ -154,9 +233,13 @@ class MinionV2Catalog:
         return self.artifacts.put_json(
             binding.to_dict(),
             artifact_type="FamilyBindingArtifact",
-            schema_version="3",
+            schema_version="5",
             provenance={
                 "family_id": family.family_id,
                 "primary_profile": primary_profile.canonical_profile_id,
             },
+            child_refs=(
+                (schema_ref.sha256, "architecture_schema"),
+                (template_ref.sha256, "architect_template"),
+            ),
         )

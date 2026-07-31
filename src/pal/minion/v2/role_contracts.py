@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Mapping
 
+from pal.minion.families import MinionRoleBinding
+
 
 TASK_PROFILE_BINDING = "$task_profile"
 
@@ -62,13 +64,29 @@ class RoleActivation:
 
 
 REQUIRED_ORCHESTRATION_ROLES = frozenset(role.value for role in OrchestrationRole)
+FAMILY_BINDING_SCHEMA_VERSION = "5"
 
 
-def validate_role_bindings(value: Mapping[str, str]) -> dict[str, str]:
+def family_execution_adapter(value: Any) -> str:
+    """Validate the Family-selected backend for the stable DAG access model."""
+
+    adapter = str(value or "").strip()
+    if not adapter:
+        raise ValueError("family execution_adapter is required")
+    return adapter
+
+
+def validate_role_bindings(
+    value: Mapping[str, Any],
+) -> dict[str, MinionRoleBinding]:
     bindings = {
-        str(role).strip(): str(profile).strip().replace("/", ".")
-        for role, profile in dict(value or {}).items()
-        if str(role).strip() or str(profile).strip()
+        str(role).strip(): (
+            binding
+            if isinstance(binding, MinionRoleBinding)
+            else MinionRoleBinding.from_payload(str(role), binding)
+        )
+        for role, binding in dict(value or {}).items()
+        if str(role).strip()
     }
     missing = sorted(REQUIRED_ORCHESTRATION_ROLES - set(bindings))
     extra = sorted(set(bindings) - REQUIRED_ORCHESTRATION_ROLES)
@@ -79,7 +97,149 @@ def validate_role_bindings(value: Mapping[str, str]) -> dict[str, str]:
         if extra:
             details.append("unknown " + ", ".join(extra))
         raise ValueError("family role_bindings must define exactly four roles: " + "; ".join(details))
-    empty = sorted(role for role, profile in bindings.items() if not profile)
-    if empty:
-        raise ValueError("family role_bindings have empty profile selectors: " + ", ".join(empty))
+    for role in (
+        OrchestrationRole.ARCHITECT.value,
+        OrchestrationRole.REVIEWER.value,
+    ):
+        if bindings[role].executor != "profile":
+            raise ValueError(f"family role {role} requires a profile executor")
+    implementation_executor = bindings[
+        OrchestrationRole.IMPLEMENTATION.value
+    ].executor
+    verifier_executor = bindings[OrchestrationRole.VERIFIER.value].executor
+    if implementation_executor != verifier_executor:
+        raise ValueError(
+            "family implementation and verifier executors must both be profile "
+            "or both be null"
+        )
     return {role: bindings[role] for role in sorted(bindings)}
+
+
+def validate_family_binding_payload(
+    value: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Validate the immutable, fully resolved FamilyBindingArtifact contract."""
+
+    payload = dict(value or {})
+    if str(payload.get("schema_version") or "") != FAMILY_BINDING_SCHEMA_VERSION:
+        raise ValueError(
+            "FamilyBindingArtifact must use schema_version "
+            f"{FAMILY_BINDING_SCHEMA_VERSION}"
+        )
+    if "contract_schema" in payload:
+        raise ValueError(
+            "FamilyBindingArtifact must use architecture_definition, not "
+            "the removed contract_schema binding"
+        )
+    architecture_definition = dict(
+        payload.get("architecture_definition") or {}
+    )
+    for field in (
+        "specialization_id",
+        "family_id",
+        "generation_hash",
+        "schema_ref",
+        "template_ref",
+    ):
+        value = architecture_definition.get(field)
+        if not value:
+            raise ValueError(
+                "FamilyBindingArtifact architecture_definition requires "
+                + field
+            )
+    if str(architecture_definition.get("family_id") or "") != str(
+        payload.get("family_id") or ""
+    ):
+        raise ValueError(
+            "FamilyBindingArtifact architecture definition belongs to a "
+            "different family"
+        )
+    family_execution_adapter(payload.get("execution_adapter"))
+    generation_hash = str(
+        architecture_definition.get("generation_hash") or ""
+    )
+    if len(generation_hash) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in generation_hash
+    ):
+        raise ValueError(
+            "FamilyBindingArtifact architecture generation hash is invalid"
+        )
+    for field in ("schema_ref", "template_ref"):
+        ref = architecture_definition.get(field)
+        if not isinstance(ref, Mapping) or not str(
+            ref.get("sha256") or ""
+        ).strip():
+            raise ValueError(
+                "FamilyBindingArtifact architecture_definition "
+                f"{field} must be a typed artifact ref"
+            )
+    raw_bindings = dict(payload.get("role_bindings") or {})
+    missing = sorted(REQUIRED_ORCHESTRATION_ROLES - set(raw_bindings))
+    extra = sorted(set(raw_bindings) - REQUIRED_ORCHESTRATION_ROLES)
+    if missing or extra:
+        details: list[str] = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if extra:
+            details.append("unknown " + ", ".join(extra))
+        raise ValueError(
+            "FamilyBindingArtifact must resolve exactly four roles: "
+            + "; ".join(details)
+        )
+
+    bindings: dict[str, dict[str, Any]] = {}
+    for role in sorted(raw_bindings):
+        raw = raw_bindings[role]
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                f"FamilyBindingArtifact role {role} must be an object"
+            )
+        binding = dict(raw)
+        executor = str(binding.get("executor") or "")
+        if executor not in {"profile", "null"}:
+            raise ValueError(
+                f"FamilyBindingArtifact role {role} requires an explicit "
+                "profile or null executor"
+            )
+        executor_profile = dict(binding.get("executor_profile") or {})
+        reason = str(binding.get("reason") or "").strip()
+        if executor == "profile":
+            canonical_profile_id = str(
+                executor_profile.get("canonical_profile_id")
+                or executor_profile.get("minion_profile")
+                or ""
+            ).strip()
+            role_protocol = dict(executor_profile.get("role") or {})
+            if not canonical_profile_id:
+                raise ValueError(
+                    f"FamilyBindingArtifact role {role} has no pinned executor profile"
+                )
+            if "contract" in executor_profile:
+                raise ValueError(
+                    f"FamilyBindingArtifact role {role} profile must not "
+                    "select an architecture schema"
+                )
+            if str(role_protocol.get("kind") or "") != role:
+                raise ValueError(
+                    f"FamilyBindingArtifact role {role} has a mismatched role protocol"
+                )
+        elif executor_profile or not reason:
+            raise ValueError(
+                f"FamilyBindingArtifact null role {role} requires a reason and "
+                "must not pin an executor profile"
+            )
+        bindings[role] = binding
+
+    if bindings[OrchestrationRole.ARCHITECT.value]["executor"] != "profile":
+        raise ValueError("FamilyBindingArtifact architect requires a profile executor")
+    if bindings[OrchestrationRole.REVIEWER.value]["executor"] != "profile":
+        raise ValueError("FamilyBindingArtifact reviewer requires a profile executor")
+    if (
+        bindings[OrchestrationRole.IMPLEMENTATION.value]["executor"]
+        != bindings[OrchestrationRole.VERIFIER.value]["executor"]
+    ):
+        raise ValueError(
+            "FamilyBindingArtifact implementation and verifier executors must match"
+        )
+    return bindings

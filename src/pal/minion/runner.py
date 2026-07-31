@@ -524,8 +524,8 @@ class MinionRunner:
         primary = self._required_primary_artifact_name()
         target = f"the required primary artifact {primary!r}" if primary else "required submit evidence"
         submit_tool = {
-            "architecture_submission.json": "architecture_submit",
-            "architecture_review.json": "architecture_review_submit",
+            "architect.yaml": "contract_submit",
+            "contract_review.json": "review_submit",
             "coder_report.json": "candidate_submit",
             "producer_report.json": "candidate_submit",
             "verification_plan.json": "verification_submit",
@@ -1274,26 +1274,11 @@ class MinionRunner:
             "invocation_id": self.pack.invocation_id,
             "minion_v2": binding,
         }
-        role = str(binding.get("role") or "")
-        if role == "architect":
-            if bool(workspace.get("architecture_skeleton_mode")):
-                from pal.minion.v2.skeleton_builder import (
-                    architecture_checklist_context,
-                )
+        if not str(binding.get("role") or ""):
+            return ""
+        from pal.minion.v2.work_items import render_work_item_context
 
-                return architecture_checklist_context(workspace)
-            from pal.minion.v2.contract_builder import (
-                contract_architect_checklist_context,
-            )
-
-            return contract_architect_checklist_context(workspace)
-        if role == "implementation":
-            from pal.minion.v2.candidate_builder import (
-                candidate_checklist_context,
-            )
-
-            return candidate_checklist_context(workspace)
-        return ""
+        return render_work_item_context(workspace)
 
     def _requires_first_tool_call(self) -> bool:
         if bool((self.pack.metadata or {}).get("allow_text_only_completion")):

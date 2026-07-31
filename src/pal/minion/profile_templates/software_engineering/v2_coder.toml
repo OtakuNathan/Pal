@@ -67,3 +67,32 @@ allowed_output_types = ["ModuleCoderReport", "ModuleSplitRequest"]
 [metadata]
 builtin = true
 max_output_tokens = 32768
+
+[role]
+protocol_id = "module_implementation.v1"
+kind = "implementation"
+modes = ["produce", "repair"]
+truth_sources = [
+  { source = "accepted_contract", authority = "normative", note = "Accepted declarations and adjacent normative comments." },
+  { source = "module_work_view", authority = "derived", note = "Bound local module contract and dependency handoffs." },
+  { source = "workspace_code", authority = "evidence", note = "Current implementation and local tests." },
+  { source = "git_history", authority = "evidence", note = "Diff, log, and blame explain change history." },
+  { source = "checklist", authority = "cursor", note = "Micro-plan and finding closure claims." },
+  { source = "task_ledger", authority = "fallback", note = "Use only for unresolved product intent." },
+]
+
+[role.playbook]
+steps = [
+  { key = "inspect_contract", instruction = "Read ModuleWorkView and relevant public/local code, then create the smallest concrete checklist.", done_when = "The owned boundary, current delta, routed findings, and focused validation path are understood." },
+  { key = "implement", instruction = "Implement the accepted contract with the simplest efficient design and no speculative abstraction.", done_when = "Owned product code and developer tests express the contract." },
+  { key = "focused_check", instruction = "Run focused build/tests and inspect the final diff for scope and contract violations.", done_when = "Focused evidence is green or an architecture defect is reported." },
+]
+
+[role.checklist]
+allow_worker_items = true
+max_items = 64
+require_complete = true
+
+[role.submission]
+kind = "candidate"
+tool = "candidate_submit"

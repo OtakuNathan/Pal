@@ -47,6 +47,11 @@ class EchoOutput(StrictToolModel):
     echo: str
 
 
+class NullableInput(StrictToolModel):
+    value: str
+    optional: str | None = None
+
+
 def _guidance() -> ToolGuidance:
     return ToolGuidance(
         purpose="Echo one validated value.",
@@ -199,6 +204,46 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(result, CompleteResult)
             normalized.append(dict(result.output))
         self.assertEqual(normalized, [{"echo": "same"}] * 3)
+
+    async def test_explicit_null_is_forwarded_but_omitted_default_is_not(self) -> None:
+        observed: list[tuple[set[str], str | None]] = []
+
+        def handler(value: NullableInput) -> dict[str, str]:
+            observed.append((set(value.model_fields_set), value.optional))
+            return {"echo": value.value}
+
+        mount_test_capability(
+            self.runtime,
+            alias="nullable_echo",
+            canonical_path="op_test_nullable_echo",
+            InputModel=NullableInput,
+            OutputModel=EchoOutput,
+            guidance=_guidance(),
+            execution=_execution(),
+            search_text="nullable echo merge patch",
+            handler=handler,
+            examples=({"value": "hello", "optional": None},),
+        )
+
+        omitted = self.runtime.invoke_indirect_tool(
+            CanonicalToolCall(name="nullable_echo", args={"value": "omitted"})
+        )
+        explicit = await self.runtime.invoke_indirect_tool_async(
+            CanonicalToolCall(
+                name="nullable_echo",
+                args={"value": "explicit", "optional": None},
+            )
+        )
+
+        self.assertIsInstance(omitted, CompleteResult)
+        self.assertIsInstance(explicit, CompleteResult)
+        self.assertEqual(
+            observed,
+            [
+                ({"value"}, None),
+                ({"value", "optional"}, None),
+            ],
+        )
 
     async def test_effectful_success_requires_receipt(self) -> None:
         mount_test_capability(

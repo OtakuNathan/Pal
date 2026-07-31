@@ -3,23 +3,26 @@ display_name = "General"
 domain = "Generic bounded task execution when no registered domain family fits."
 domain_keywords = ["general", "generic", "task"]
 workflow_template = "contract_dag.v2"
+execution_adapter = "artifact_bundle.v2"
 
-[role_bindings]
-architect = "$task_profile"
-reviewer = "$task_profile"
-implementation = "$task_profile"
-verifier = "$task_profile"
+[architecture]
+specialization = "general.v1"
 
-[builders]
-contract = "contract_sketch.v2"
-verification = "verification.v2"
+[role_bindings.architect]
+executor = "profile"
+profile = "general.architect"
 
-[adapters]
-workspace = "artifact_bundle.v2"
-candidate = "artifact_bundle.v2"
-verification = "artifact_bundle.v2"
-integration = "artifact_bundle.v2"
-publisher = "artifact_bundle.v2"
+[role_bindings.reviewer]
+executor = "profile"
+profile = "general.reviewer"
+
+[role_bindings.implementation]
+executor = "profile"
+profile = "$task_profile"
+
+[role_bindings.verifier]
+executor = "profile"
+profile = "general.verifier"
 
 [policies.llm]
 temperature = 0.05

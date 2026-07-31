@@ -12,6 +12,45 @@ from pal.minion.utils import string_list as _string_list
 
 
 @dataclass(frozen=True)
+class MinionRoleBinding:
+    executor: str
+    profile: str = ""
+    reason: str = ""
+
+    @classmethod
+    def from_payload(
+        cls, role: str, payload: Any
+    ) -> "MinionRoleBinding":
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"family role binding {role} must be a table"
+            )
+        executor = str(payload.get("executor") or "").strip()
+        profile = str(payload.get("profile") or "").strip().replace("/", ".")
+        reason = str(payload.get("reason") or "").strip()
+        if executor not in {"profile", "null"}:
+            raise ValueError(
+                f"family role binding {role}.executor must be profile or null"
+            )
+        if executor == "profile" and not profile:
+            raise ValueError(
+                f"family role binding {role} requires profile"
+            )
+        if executor == "null" and (profile or not reason):
+            raise ValueError(
+                f"family null role binding {role} requires reason and no profile"
+            )
+        return cls(executor=executor, profile=profile, reason=reason)
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "executor": self.executor,
+            **({"profile": self.profile} if self.profile else {}),
+            **({"reason": self.reason} if self.reason else {}),
+        }
+
+
+@dataclass(frozen=True)
 class MinionCapabilityGroup:
     group_id: str
     capabilities: tuple[str, ...] = ()
@@ -41,15 +80,32 @@ class MinionCapabilityGroup:
 
 
 @dataclass(frozen=True)
+class MinionArchitectureBinding:
+    specialization: str
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> "MinionArchitectureBinding":
+        if not isinstance(payload, dict):
+            raise ValueError("family architecture must be a table")
+        specialization = str(payload.get("specialization") or "").strip()
+        if not specialization:
+            raise ValueError("family architecture.specialization is required")
+        return cls(specialization=specialization)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"specialization": self.specialization}
+
+
+@dataclass(frozen=True)
 class MinionFamilyManifest:
     family_id: str
     display_name: str = ""
     domain: str = ""
     domain_keywords: tuple[str, ...] = ()
     workflow_template: str = "contract_dag.v2"
-    role_bindings: dict[str, str] = field(default_factory=dict)
-    builders: dict[str, str] = field(default_factory=dict)
-    adapters: dict[str, str] = field(default_factory=dict)
+    architecture: MinionArchitectureBinding | None = None
+    role_bindings: dict[str, MinionRoleBinding] = field(default_factory=dict)
+    execution_adapter: str = ""
     policies: dict[str, Any] = field(default_factory=dict)
     capability_groups: dict[str, MinionCapabilityGroup] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -73,12 +129,16 @@ class MinionFamilyManifest:
             domain=str(payload.get("domain") or "").strip(),
             domain_keywords=tuple(_string_list(payload.get("domain_keywords") or payload.get("keywords"))),
             workflow_template=str(payload.get("workflow_template") or "contract_dag.v2").strip(),
+            architecture=MinionArchitectureBinding.from_payload(
+                payload.get("architecture")
+            ),
             role_bindings={
-                str(key): str(value).strip().replace("/", ".")
+                str(key): MinionRoleBinding.from_payload(str(key), value)
                 for key, value in _dict(payload.get("role_bindings")).items()
             },
-            builders={str(key): str(value).strip() for key, value in _dict(payload.get("builders")).items()},
-            adapters={str(key): str(value).strip() for key, value in _dict(payload.get("adapters")).items()},
+            execution_adapter=str(
+                payload.get("execution_adapter") or ""
+            ).strip(),
             policies=_dict(payload.get("policies")),
             capability_groups=groups,
             metadata=_dict(payload.get("metadata")),
@@ -91,9 +151,16 @@ class MinionFamilyManifest:
             "domain": self.domain,
             "domain_keywords": list(self.domain_keywords),
             "workflow_template": self.workflow_template,
-            "role_bindings": dict(self.role_bindings),
-            "builders": dict(self.builders),
-            "adapters": dict(self.adapters),
+            "architecture": (
+                self.architecture.to_dict()
+                if self.architecture is not None
+                else {}
+            ),
+            "role_bindings": {
+                key: value.to_dict()
+                for key, value in self.role_bindings.items()
+            },
+            "execution_adapter": self.execution_adapter,
             "policies": dict(self.policies),
             "capability_groups": {key: value.to_dict() for key, value in self.capability_groups.items()},
             "metadata": dict(self.metadata),

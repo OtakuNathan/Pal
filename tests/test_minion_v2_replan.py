@@ -39,7 +39,7 @@ class MinionV2ReplanTests(unittest.TestCase):
         )
         self.manifest_ref = self.artifacts.put_json(
             {"requirements_ref": self.requirements_ref.to_dict()},
-            artifact_type="ArchitectureSkeletonArtifact",
+            artifact_type="TestManifestArtifact",
         )
         self.topology_ref = self.artifacts.put_json({}, artifact_type="SkeletonTopologyArtifact")
         self.contract_ref = self.artifacts.put_json({}, artifact_type="UnitContractArtifact")

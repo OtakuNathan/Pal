@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 from pal.execution.generated_tool_models import (
-    MinionV2VerificationBuilderOpMinionReviewConclusionInput,
-    MinionV2VerificationBuilderOpMinionReviewSurfaceInput,
-    MinionV2VerificationBuilderOpMinionStandaloneReviewSubmitInput,
     MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput,
     MinionV2VerificationBuilderOpMinionVerificationDraftStatusInput,
     MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput,
-    MinionV2VerificationBuilderOpMinionVerificationRemoveFindingInput,
     MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput,
     MinionV2VerificationBuilderOpMinionVerificationScratchWriteInput,
     MinionV2VerificationBuilderOpMinionVerificationSetSummaryInput,
@@ -28,6 +24,10 @@ from pal.minion.v2.review_findings import (
     finding_severity,
     partition_findings,
     structured_findings,
+)
+from pal.minion.v2.work_items import (
+    assert_work_items_complete,
+    findings_from_work_items,
 )
 from pal.minion.v2.semantic_evidence import (
     record_unavailable_evidence,
@@ -161,7 +161,6 @@ _COMMON_VERIFICATION_CAPABILITIES = frozenset(
         "op_minion_verification_set_summary",
         "op_minion_verification_draft_status",
         "op_minion_verification_remove_case",
-        "op_minion_verification_remove_finding",
         "op_minion_verification_submit",
     }
 )
@@ -181,7 +180,6 @@ VERIFICATION_BUILDER_CAPABILITIES = (
     *_FINDING_CAPABILITIES,
     "op_minion_verification_draft_status",
     "op_minion_verification_remove_case",
-    "op_minion_verification_remove_finding",
     "op_minion_verification_submit",
 )
 VERIFICATION_EVIDENCE_CAPABILITIES = (
@@ -193,21 +191,7 @@ VERIFICATION_EVIDENCE_CAPABILITIES = (
     "op_minion_verification_draft_status",
     "op_minion_verification_remove_case",
 )
-STANDALONE_REVIEW_BUILDER_CAPABILITIES = (
-    *(
-        capability
-        for capability in _EXECUTION_CAPABILITIES
-        if capability != "op_minion_verification_run_diff_risk"
-    ),
-    *_FINDING_CAPABILITIES,
-    "op_minion_verification_draft_status",
-    "op_minion_verification_remove_case",
-    "op_minion_verification_remove_finding",
-    "op_minion_review_surface",
-    "op_minion_review_conclusion",
-    "op_minion_standalone_review_submit",
-)
-VERIFICATION_TOOL_CAPABILITIES = tuple(dict.fromkeys((*VERIFICATION_BUILDER_CAPABILITIES, *STANDALONE_REVIEW_BUILDER_CAPABILITIES)))
+VERIFICATION_TOOL_CAPABILITIES = VERIFICATION_BUILDER_CAPABILITIES
 
 _DEFECT_PRECEDENCE = {
     "verification_defect": -1,
@@ -270,30 +254,10 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": "Explicitly withdraw one recorded case by semantic name and give an audit reason. All findings attached to it are withdrawn with it. Do not use this to hide a failing case; rerun the case after a real fix instead.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput,
     },
-    "op_minion_verification_remove_finding": {
-        "alias": "verification_remove_finding",
-        "description": "Explicitly withdraw one finding by finding_key with an audit reason. Do not withdraw a finding merely to make submission pass.",
-        "InputModel": MinionV2VerificationBuilderOpMinionVerificationRemoveFindingInput,
-    },
     "op_minion_verification_submit": {
         "alias": "verification_submit",
         "description": "Submit recorded verification evidence and findings. Takes no arguments; Manager infers verdict and routing from immutable results.",
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationSubmitInput,
-    },
-    "op_minion_review_surface": {
-        "alias": "review_surface",
-        "description": "Record one standalone-review surface. kind is reviewed, test_gap, unreviewed, or residual_risk.",
-        "InputModel": MinionV2VerificationBuilderOpMinionReviewSurfaceInput,
-    },
-    "op_minion_review_conclusion": {
-        "alias": "review_conclusion",
-        "description": "Set the standalone review conclusion. verdict is approved, changes_requested, or blocked.",
-        "InputModel": MinionV2VerificationBuilderOpMinionReviewConclusionInput,
-    },
-    "op_minion_standalone_review_submit": {
-        "alias": "review_submit",
-        "description": "Submit the standalone review. Takes no arguments; Manager compiles recorded cases, findings, surfaces, and conclusion.",
-        "InputModel": MinionV2VerificationBuilderOpMinionStandaloneReviewSubmitInput,
     },
 }
 
@@ -302,22 +266,17 @@ def effective_verification_policy(
     *,
     work_view: Mapping[str, Any],
     verification_policy: Mapping[str, Any],
-    standalone: bool = False,
 ) -> dict[str, Any]:
-    """Compile family defaults into obligations owned by this exact review node."""
+    """Compile family defaults into obligations owned by one verifier node."""
 
     source = dict(verification_policy or {})
     system = str(work_view.get("kind") or "") == "system_and_delivery"
-    mode = "standalone" if standalone else "system" if system else "module"
+    mode = "system" if system else "module"
     entrypoints = [dict(item) for item in list(work_view.get("entrypoints") or []) if isinstance(item, Mapping)]
     entrypoint_kinds = {str(item.get("kind") or "").strip() for item in entrypoints}
     require_consumer_probe = False
     require_dogfood = system
     require_platform_probe = system and "platform_probe" in entrypoint_kinds
-    if standalone:
-        require_dogfood = bool(source.get("require_public_surface_dogfood", False))
-        require_platform_probe = False
-
     historical_regressions = historical_repair_checklist_items(work_view)
 
     allowed_obligations = {
@@ -326,8 +285,7 @@ def effective_verification_policy(
         "lsp",
         "warning_clean",
     }
-    if not standalone:
-        allowed_obligations.add("candidate_delta_review")
+    allowed_obligations.add("candidate_delta_review")
     if historical_regressions:
         allowed_obligations.add("historical_regressions")
     if mode == "module" or require_consumer_probe:
@@ -336,11 +294,6 @@ def effective_verification_policy(
         allowed_obligations.add("public_surface_dogfood")
     if require_platform_probe:
         allowed_obligations.add("platform_probe")
-    if standalone:
-        allowed_obligations.update(
-            {"consumer_probe", "public_surface_dogfood", "platform_probe"}
-        )
-
     action_templates = {
         tag: dict(_VERIFICATION_ACTION_TEMPLATES[tag])
         for tag in sorted(allowed_obligations)
@@ -354,7 +307,7 @@ def effective_verification_policy(
         "require_consumer_probe": require_consumer_probe,
         "require_public_surface_dogfood": require_dogfood,
         "require_platform_probe": require_platform_probe,
-        "require_candidate_delta_review": not standalone,
+        "require_candidate_delta_review": True,
         # Historical regression is node-local. An empty RepairBill ledger has
         # no case to replay and must not become an UNKNOWN obligation.
         "require_historical_regressions": bool(historical_regressions),
@@ -370,14 +323,13 @@ def compile_verification_invocation_tool_contract(
     *,
     work_view: Mapping[str, Any],
     verification_policy: Mapping[str, Any],
-    standalone: bool = False,
 ) -> dict[str, Any]:
     """Compile one stable, invocation-local description contract from bound inputs."""
 
     module_name = str(
         work_view.get("module_name")
         or work_view.get("verification_name")
-        or ("standalone_review" if standalone else "")
+        or ""
     ).strip()
     accepted_modules = sorted(
         {
@@ -429,16 +381,9 @@ def compile_verification_invocation_tool_contract(
     policy = effective_verification_policy(
         work_view=work_view,
         verification_policy=verification_policy,
-        standalone=standalone,
     )
     historical_regressions = historical_repair_checklist_items(work_view)
-    allowed_capabilities = set(
-        STANDALONE_REVIEW_BUILDER_CAPABILITIES
-        if standalone
-        else _COMMON_VERIFICATION_CAPABILITIES
-    )
-    if standalone:
-        allowed_capabilities.discard("op_minion_verification_run_diff_risk")
+    allowed_capabilities = set(_COMMON_VERIFICATION_CAPABILITIES)
     if "consumer_probe" in set(policy["allowed_obligations"]):
         allowed_capabilities.add("op_minion_verification_run_consumer_probe")
     if "public_surface_dogfood" in set(policy["allowed_obligations"]):
@@ -469,7 +414,7 @@ def compile_verification_invocation_tool_contract(
         sort_keys=True,
     )
     overrides: dict[str, dict[str, str]] = {}
-    if policy["mode"] in {"system", "standalone"}:
+    if policy["mode"] == "system":
         overrides["op_minion_verification_scratch_write"] = {
             "use_when": (
                 "Create or replace a complete executable verifier probe in the bound durable review scratch. "
@@ -480,7 +425,7 @@ def compile_verification_invocation_tool_contract(
             ),
             "do_not_use_when": (
                 "Do not use this for product source, module developer/verification corpora, or any path outside "
-                "the bound system-verification or standalone-review scratch."
+                "the bound system-verification scratch."
             ),
         }
     for capability in (*_RUN_TO_KIND_TAG, "op_minion_verification_run_lsp_check", "op_minion_verification_check_unavailable"):
@@ -497,20 +442,19 @@ def compile_verification_invocation_tool_contract(
             "do not invent extra evidence or repeat unchanged passing cases."
         )
     }
-    if not standalone:
-        overrides["op_minion_verification_run_diff_risk"] = {
-            "use_when": (
-                "After replaying every bound historical/current RepairBill regression, inspect the current "
-                "Candidate diff and its semantic neighborhood, then run one targeted check for newly introduced "
-                "defects. Cite the changed path, symbol or contract section and relevant invariants. This evidence "
-                "is Candidate-specific and must be rerun for every assignment; a prior Candidate result cannot "
-                "settle the current one."
-            ),
-            "do_not_use_when": (
-                "Do not use before every required historical RepairBill case has been recorded for this assignment, "
-                "and do not use it as a substitute for focused corpus tests or historical regressions."
-            ),
-        }
+    overrides["op_minion_verification_run_diff_risk"] = {
+        "use_when": (
+            "After replaying every bound historical/current RepairBill regression, inspect the current "
+            "Candidate diff and its semantic neighborhood, then run one targeted check for newly introduced "
+            "defects. Cite the changed path, symbol or contract section and relevant invariants. This evidence "
+            "is Candidate-specific and must be rerun for every assignment; a prior Candidate result cannot "
+            "settle the current one."
+        ),
+        "do_not_use_when": (
+            "Do not use before every required historical RepairBill case has been recorded for this assignment, "
+            "and do not use it as a substitute for focused corpus tests or historical regressions."
+        ),
+    }
     overrides["op_minion_verification_check_unavailable"] = {"use_when": (
         "Record UNKNOWN only for an allowed obligation that is genuinely required but unavailable in this environment. "
         "Do not create an UNKNOWN case for an absent or non-applicable obligation. In particular, an empty historical "
@@ -618,16 +562,8 @@ async def verification_builder_tool_result(
             return _draft_status(call, workspace, draft_kind=draft_kind)
         if name == "op_minion_verification_remove_case":
             return _remove_case(call, workspace, draft_kind=draft_kind)
-        if name == "op_minion_verification_remove_finding":
-            return _remove_finding(call, workspace, draft_kind=draft_kind)
-        if name == "op_minion_review_surface":
-            return _record_review_surface(call, workspace)
-        if name == "op_minion_review_conclusion":
-            return _set_review_conclusion(call, workspace)
         if name == "op_minion_verification_submit":
-            return _submit(call, workspace, produced_artifacts, standalone=False)
-        if name == "op_minion_standalone_review_submit":
-            return _submit(call, workspace, produced_artifacts, standalone=True)
+            return _submit(call, workspace, produced_artifacts)
         raise ValueError(f"unknown verification authoring capability: {name}")
     except Exception as exc:
         return _error(call, exc)
@@ -686,7 +622,9 @@ def _draft_status(
     context, store = _store_context(workspace, draft_kind=draft_kind)
     snapshot = store.read(context, seed=_empty_payload())
     cases = recorded_cases(snapshot.payload)
-    findings, advisories = partition_findings(structured_findings(snapshot.payload))
+    findings, advisories = partition_findings(
+        findings_from_work_items(workspace)
+    )
     tags = {
         str(tag)
         for item in cases
@@ -723,7 +661,7 @@ def _draft_status(
         ],
         "findings": [
             {
-                "finding_key": str(item.get("finding_key") or ""),
+                "finding_id": str(item.get("finding_id") or ""),
                 "finding_kind": str(item.get("finding_kind") or ""),
                 "priority": str(item.get("priority") or ""),
                 "summary": str(item.get("summary") or ""),
@@ -732,7 +670,7 @@ def _draft_status(
         ],
         "advisories": [
             {
-                "finding_key": str(item.get("finding_key") or ""),
+                "finding_id": str(item.get("finding_id") or ""),
                 "finding_kind": str(item.get("finding_kind") or ""),
                 "priority": str(item.get("priority") or ""),
                 "summary": str(item.get("summary") or ""),
@@ -782,48 +720,6 @@ def _remove_case(
     return _ok(call, f"verification case removed: {name}", result)
 
 
-def _remove_finding(
-    call: CanonicalToolCall,
-    workspace: Mapping[str, Any],
-    *,
-    draft_kind: str,
-) -> CanonicalToolResult:
-    args = dict(call.args or {})
-    finding_key = str(args.get("finding_key") or "").strip()
-    reason = str(args.get("reason") or "").strip()
-    if not finding_key:
-        raise ValueError("removing a finding requires finding_key")
-    if not reason:
-        raise ValueError("removing a verification finding requires an audit reason")
-    context, store = _store_context(workspace, draft_kind=draft_kind)
-
-    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-        findings = [dict(item) for item in list(payload.get("findings") or [])]
-        matches = [item for item in findings if str(item.get("finding_key") or "") == finding_key]
-        if not matches:
-            candidates = [str(item.get("finding_key") or "") for item in findings]
-            raise ValueError(
-                "no finding matches finding_key; candidate keys: "
-                + json.dumps(candidates, ensure_ascii=False)
-            )
-        retained = [item for item in findings if item is not matches[0]]
-        payload["findings"] = retained
-        return payload, {
-            "removed": True,
-            "finding_key": finding_key,
-            "reason": reason,
-        }
-
-    result = store.mutate(
-        context,
-        operation_key=str(call.call_id or f"remove-finding:{finding_key}"),
-        request=args,
-        reducer=reducer,
-        seed=_empty_payload(),
-    )
-    return _ok(call, f"verification finding removed: {finding_key}", result)
-
-
 def _set_summary(call: CanonicalToolCall, workspace: Mapping[str, Any], *, draft_kind: str) -> CanonicalToolResult:
     args = dict(call.args or {})
     summary_text = str(args.get("summary") or "").strip()
@@ -841,116 +737,57 @@ def _set_summary(call: CanonicalToolCall, workspace: Mapping[str, Any], *, draft
     return _ok(call, "verification summary recorded", result)
 
 
-def _record_review_surface(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> CanonicalToolResult:
-    args = dict(call.args or {})
-    kind = str(args.get("kind") or "")
-    text = str(args.get("text") or "").strip()
-    context, store = _store_context(workspace, draft_kind="standalone_review")
-
-    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-        summary = dict(payload.get("summary") or {})
-        values = list(summary.get(kind) or [])
-        if text not in values:
-            values.append(text)
-        summary[kind] = values
-        payload["summary"] = summary
-        return payload, {"recorded": True, "kind": kind}
-
-    result = store.mutate(context, operation_key=str(call.call_id or f"surface:{kind}:{text}"), request=args, reducer=reducer, seed=_empty_payload())
-    return _ok(call, "review surface recorded", result)
-
-
-def _set_review_conclusion(call: CanonicalToolCall, workspace: Mapping[str, Any]) -> CanonicalToolResult:
-    args = dict(call.args or {})
-    context, store = _store_context(workspace, draft_kind="standalone_review")
-
-    def reducer(payload: dict[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any]]:
-        summary = dict(payload.get("summary") or {})
-        summary["conclusion"] = {
-            "verdict": str(args.get("verdict") or ""),
-            "summary": str(args.get("summary") or "").strip(),
-            "scope": str(args.get("scope") or "").strip(),
-        }
-        payload["summary"] = summary
-        return payload, {"recorded": True}
-
-    result = store.mutate(context, operation_key=str(call.call_id or "review-conclusion"), request=args, reducer=reducer, seed=_empty_payload())
-    return _ok(call, "review conclusion recorded", result)
-
-
 def _submit(
     call: CanonicalToolCall,
     workspace: Mapping[str, Any],
     produced_artifacts: list[dict[str, Any]],
-    *,
-    standalone: bool,
 ) -> CanonicalToolResult:
     if dict(call.args or {}):
         raise ValueError(f"{call.name} takes no arguments")
-    draft_kind = "standalone_review" if standalone else "verification"
+    draft_kind = "verification"
     context, store = _store_context(workspace, draft_kind=draft_kind)
     snapshot = store.read(context, seed=_empty_payload())
     cases = recorded_cases(snapshot.payload)
     if not cases:
         raise ValueError("submit requires at least one recorded verification case")
     findings, advisories = partition_findings(
-        structured_findings(snapshot.payload)
+        findings_from_work_items(workspace)
     )
+    work_items = assert_work_items_complete(workspace)
     summary = dict(snapshot.payload.get("summary") or {})
-    _validate_case_references(cases, workspace=workspace, standalone=standalone)
-    if standalone:
-        conclusion = dict(summary.get("conclusion") or {})
-        if not conclusion:
-            raise ValueError("standalone review requires review_conclusion before submit")
-        if str(conclusion.get("verdict") or "") == "approved" and findings:
-            raise ValueError("approved standalone review requires an empty finding Draft")
-        output = {
-            "verdict": str(conclusion.get("verdict") or ""),
-            "scope": {"description": str(conclusion.get("scope") or "")},
-            "reviewed_surfaces": list(summary.get("reviewed") or []),
-            "cases": [_case_declaration(item) for item in cases],
-            "findings": [_public_finding(item) for item in findings],
-            "advisories": [_public_finding(item) for item in advisories],
-            "commands_or_lsp_evidence": [str(item.get("name")) for item in cases],
-            "test_gaps": list(summary.get("test_gap") or []),
-            "unreviewed_surfaces": list(summary.get("unreviewed") or []),
-            "residual_risk": list(summary.get("residual_risk") or []),
-            "reviewer_summary": str(conclusion.get("summary") or ""),
-            "recorded_results": cases,
-            "internal_context": _internal_context(context, workspace),
-        }
-        filename = "standalone_review.json"
-        title = "Standalone review submission"
-    else:
-        defect_kind = dominant_verification_defect_kind(findings)
-        output = {
-            "cases": [_case_declaration(item) for item in cases],
-            "findings": [_public_finding(item) for item in findings],
-            "advisories": [_public_finding(item) for item in advisories],
-            "reviewer_summary": _default_summary(cases, findings),
-            **(
-                {"reviewer_notes": str(summary.get("reviewer_summary") or "")}
-                if str(summary.get("reviewer_summary") or "").strip()
-                else {}
-            ),
-            "recorded_results": cases,
-            "internal_context": _internal_context(context, workspace),
-        }
-        if defect_kind:
-            output["defect_kind"] = defect_kind
-            dominant_findings = [
-                item for item in findings if str(item.get("finding_kind") or "") == defect_kind
-            ]
-            first = dominant_findings[0]
-            output["severity"] = finding_severity(first)
-        output["policy_exceptions"] = _policy_exceptions(cases)
-        filename = "verification_plan.json"
-        title = "V2 semantic verification plan"
-    validate_semantic_verification_plan_shape(output, standalone=standalone, require_complete=True)
-    if not standalone:
-        reference_warnings = _preflight_verification_submission(output, workspace)
-        if reference_warnings:
-            output["reference_warnings"] = list(reference_warnings)
+    _validate_case_references(cases, workspace=workspace)
+    defect_kind = dominant_verification_defect_kind(findings)
+    output = {
+        "cases": [_case_declaration(item) for item in cases],
+        "findings": [_public_finding(item) for item in findings],
+        "advisories": [_public_finding(item) for item in advisories],
+        "reviewer_summary": _default_summary(cases, findings),
+        **(
+            {"reviewer_notes": str(summary.get("reviewer_summary") or "")}
+            if str(summary.get("reviewer_summary") or "").strip()
+            else {}
+        ),
+        "recorded_results": cases,
+        "internal_context": _internal_context(context, workspace),
+        "work_items": [
+            dict(item)
+            for item in list(work_items.get("items") or [])
+        ],
+    }
+    if defect_kind:
+        output["defect_kind"] = defect_kind
+        dominant_findings = [
+            item for item in findings if str(item.get("finding_kind") or "") == defect_kind
+        ]
+        first = dominant_findings[0]
+        output["severity"] = finding_severity(first)
+    output["policy_exceptions"] = _policy_exceptions(cases)
+    filename = "verification_plan.json"
+    title = "V2 semantic verification plan"
+    validate_semantic_verification_plan_shape(output, require_complete=True)
+    reference_warnings = _preflight_verification_submission(output, workspace)
+    if reference_warnings:
+        output["reference_warnings"] = list(reference_warnings)
     submission_ref: dict[str, Any] = {}
     if store.uses_role_gateway:
         receipt = store.mark_submitted(
@@ -967,11 +804,7 @@ def _submit(
         )
         local_submission_ref = submission_store.put_json(
             output,
-            artifact_type=(
-                "StandaloneReviewRoleSubmissionArtifact"
-                if standalone
-                else "VerifierRoleSubmissionArtifact"
-            ),
+            artifact_type="VerifierRoleSubmissionArtifact",
             provenance={
                 "workflow_id": context.workflow_id,
                 "invocation_id": context.invocation_id,
@@ -1013,12 +846,18 @@ def _submit(
     )
 
 
-def validate_semantic_verification_plan_shape(value: Mapping[str, Any], *, standalone: bool, require_complete: bool = True) -> None:
-    required = (
-        {"verdict", "scope", "reviewed_surfaces", "cases", "findings", "commands_or_lsp_evidence", "test_gaps", "unreviewed_surfaces", "residual_risk", "reviewer_summary", "recorded_results", "internal_context"}
-        if standalone
-        else {"cases", "findings", "reviewer_summary", "recorded_results", "internal_context"}
-    )
+def validate_semantic_verification_plan_shape(
+    value: Mapping[str, Any],
+    *,
+    require_complete: bool = True,
+) -> None:
+    required = {
+        "cases",
+        "findings",
+        "reviewer_summary",
+        "recorded_results",
+        "internal_context",
+    }
     missing = required - set(value) if require_complete else set()
     if missing:
         raise ValueError("compiled review artifact is missing Manager fields: " + ", ".join(sorted(missing)))
@@ -1035,10 +874,6 @@ def validate_semantic_verification_plan_shape(value: Mapping[str, Any], *, stand
         raise ValueError("compiled review advisories must use disposition=advisory")
     if not isinstance(value.get("recorded_results"), list) or len(value["recorded_results"]) != len(value["cases"]):
         raise ValueError("every case requires one Manager-recorded result")
-    if standalone and str(value.get("verdict") or "") not in {"approved", "changes_requested", "blocked"}:
-        raise ValueError("standalone verdict is invalid")
-
-
 def _verification_submission_errors(
     value: Mapping[str, Any], workspace: Mapping[str, Any]
 ) -> tuple[list[str], tuple[str, ...]]:
@@ -1124,7 +959,9 @@ def semantic_verification_draft_errors(
     """Return policy errors for the current assignment-local verifier Draft."""
 
     cases = recorded_cases(payload)
-    findings, _advisories = partition_findings(structured_findings(payload))
+    findings, _advisories = partition_findings(
+        findings_from_work_items(workspace)
+    )
     errors, _warnings = _verification_submission_errors(
         {
             "recorded_results": cases,
@@ -1191,8 +1028,12 @@ def _preflight_verification_case_execution(
     )
 
 
-def _validate_case_references(cases: list[Mapping[str, Any]], *, workspace: Mapping[str, Any], standalone: bool) -> None:
-    del workspace, standalone
+def _validate_case_references(
+    cases: list[Mapping[str, Any]],
+    *,
+    workspace: Mapping[str, Any],
+) -> None:
+    del workspace
     for item in cases:
         if not str(item.get("description") or "").strip() and not list(item.get("locations") or []) and not list(item.get("invariants") or []):
             raise ValueError(f"case {item.get('name')!r} requires a semantic description, source location, or invariant")
@@ -1254,8 +1095,8 @@ def _default_summary(cases: list[Mapping[str, Any]], findings: list[Mapping[str,
 
 
 def _draft_kind(workspace: Mapping[str, Any]) -> str:
-    role = str(dict(workspace.get("minion_v2") or {}).get("role") or "")
-    return "standalone_review" if role == "reviewer" else "verification"
+    del workspace
+    return "verification"
 
 
 def _store_context(workspace: Mapping[str, Any], *, draft_kind: str) -> tuple[SubmissionDraftContext, SubmissionDraftStore]:

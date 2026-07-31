@@ -65,21 +65,39 @@ required_wheel_paths=(
   "pal/minion/family_templates/software_engineering.toml"
   "pal/minion/profile_templates/generic.toml"
   "pal/minion/profile_templates/general/architect.toml"
+  "pal/minion/profile_templates/general/reviewer.toml"
   "pal/minion/profile_templates/general/verifier.toml"
   "pal/minion/profile_templates/lifestyle/architect.toml"
-  "pal/minion/profile_templates/lifestyle/nutrition_checkin_producer.toml"
-  "pal/minion/profile_templates/lifestyle/verifier.toml"
+  "pal/minion/profile_templates/lifestyle/nutritionist.toml"
+  "pal/minion/profile_templates/lifestyle/reviewer.toml"
+  "pal/minion/architecture_templates/base/schema.json"
+  "pal/minion/architecture_templates/base/architect.yaml.j2"
+  "pal/minion/architecture_specializations/general.v1/specialization.json"
+  "pal/minion/architecture_specializations/general.v1/preamble.j2"
+  "pal/minion/architecture_specializations/general.v1/context.j2"
+  "pal/minion/architecture_specializations/general.v1/module_definition.j2"
+  "pal/minion/architecture_specializations/lifestyle.nutrition_checkin.v1/specialization.json"
+  "pal/minion/architecture_specializations/lifestyle.nutrition_checkin.v1/preamble.j2"
+  "pal/minion/architecture_specializations/lifestyle.nutrition_checkin.v1/context.j2"
+  "pal/minion/architecture_specializations/lifestyle.nutrition_checkin.v1/module_definition.j2"
+  "pal/minion/architecture_specializations/software_engineering.v1/specialization.json"
+  "pal/minion/architecture_specializations/software_engineering.v1/preamble.j2"
+  "pal/minion/architecture_specializations/software_engineering.v1/context.j2"
+  "pal/minion/architecture_specializations/software_engineering.v1/module_definition.j2"
   "pal/minion/profile_templates/software_engineering/v2_architect.toml"
   "pal/minion/profile_templates/software_engineering/v2_coder.toml"
   "pal/minion/profile_templates/software_engineering/v2_reviewer.toml"
   "pal/minion/profile_templates/software_engineering/v2_verifier.toml"
   "pal/minion/v2/adapters.py"
-  "pal/minion/v2/architecture.py"
   "pal/minion/v2/artifacts.py"
+  "pal/minion/v2/architecture_templates.py"
   "pal/minion/v2/candidate_builder.py"
   "pal/minion/v2/capabilities.py"
   "pal/minion/v2/catalog.py"
-  "pal/minion/v2/contract_builder.py"
+  "pal/minion/v2/ask_question.py"
+  "pal/minion/v2/contract_protocol.py"
+  "pal/minion/v2/contract_runtime.py"
+  "pal/minion/v2/contract_submission.py"
   "pal/minion/v2/contracts.py"
   "pal/minion/v2/execution.py"
   "pal/minion/v2/execution_state.py"
@@ -94,17 +112,18 @@ required_wheel_paths=(
   "pal/minion/v2/replan.py"
   "pal/minion/v2/repository.py"
   "pal/minion/v2/review_findings.py"
+  "pal/minion/v2/review_submission.py"
   "pal/minion/v2/role_gateway.py"
   "pal/minion/v2/service.py"
   "pal/minion/v2/sessions.py"
   "pal/minion/v2/skeleton.py"
-  "pal/minion/v2/skeleton_builder.py"
   "pal/minion/v2/submission_drafts.py"
   "pal/minion/v2/submission_preflight.py"
   "pal/minion/v2/swe_verification.py"
   "pal/minion/v2/task_ledger.py"
   "pal/minion/v2/verification.py"
   "pal/minion/v2/verification_builder.py"
+  "pal/minion/v2/work_items.py"
   "pal/minion/v2/worker_main.py"
   "pal/minion/v2/semantic_orchestration/architecture.py"
   "pal/minion/v2/semantic_orchestration/contracts.py"
@@ -131,6 +150,7 @@ fi
 "$python_bin" - "$wheel_path" "$repo_root/providers" <<'PY'
 from __future__ import annotations
 
+import json
 import sys
 import tomllib
 import zipfile
@@ -291,43 +311,80 @@ with zipfile.ZipFile(wheel_path) as wheel:
             fail(f"{path} must use contract_dag.v2")
         if set(dict(payload.get("role_bindings") or {})) != required_roles:
             fail(f"{path} does not bind the complete role set")
-        if set(dict(payload.get("builders") or {}).values()) - {
-            "contract_sketch.v2", "skeleton_git.v2", "verification.v2"
-        }:
-            fail(f"{path} references an unknown builder")
+        architecture = dict(payload.get("architecture") or {})
+        specialization = str(
+            architecture.get("specialization") or ""
+        ).strip()
+        if not specialization:
+            fail(f"{path} must declare architecture.specialization")
+        specialization_path = (
+            "pal/minion/architecture_specializations/"
+            f"{specialization}/specialization.json"
+        )
+        specialization_payload = json.loads(
+            read_text(specialization_path)
+        )
+        if specialization_payload.get("family_id") != family_id:
+            fail(
+                f"{path} architecture specialization belongs to another family"
+            )
+        if payload.get("builders"):
+            fail(f"{path} must not declare legacy builder bindings")
         if any(not str(value).endswith(".v2") for value in dict(payload.get("adapters") or {}).values()):
             fail(f"{path} references a non-V2 adapter")
 
     profile_paths = sorted(name for name in names if name.startswith("pal/minion/profile_templates/") and name.endswith(".toml"))
-    if len(profile_paths) != 10:
-        fail(f"expected 10 builtin role profiles, found {len(profile_paths)}")
+    if len(profile_paths) != 11:
+        fail(f"expected 11 builtin role profiles, found {len(profile_paths)}")
     for path in profile_paths:
         payload = tomllib.loads(read_text(path))
         if not str(payload.get("profile_id") or "").strip() or not str(payload.get("profile_group") or "").strip():
             fail(f"{path} is missing profile identity")
-        if not list(payload.get("capability_groups") or []):
-            fail(f"{path} must declare capability_groups")
+        role = dict(payload.get("role") or {})
+        if role and not list(payload.get("capability_groups") or []):
+            fail(f"{path} role executor must declare capability_groups")
+        if payload.get("contract"):
+            fail(
+                f"{path} must not select an architecture schema; "
+                "the Family owns specialization"
+            )
         output_policy = dict(payload.get("output_policy") or {})
-        if not str(output_policy.get("primary_artifact") or "").strip():
-            fail(f"{path} is missing output_policy.primary_artifact")
+        if role and not str(output_policy.get("primary_artifact") or "").strip():
+            fail(f"{path} role executor is missing output_policy.primary_artifact")
         metadata = dict(payload.get("metadata") or {})
         if metadata.get("builtin") is not True:
             fail(f"{path} must be a managed builtin profile")
 
     scoped_execution = read_text("pal/minion/scoped_execution.py")
     for token in (
-        "CONTRACT_BUILDER_TOOL_SPECS",
         "CANDIDATE_BUILDER_TOOL_SPECS",
-        "SKELETON_BUILDER_TOOL_SPECS",
         "VERIFICATION_BUILDER_TOOL_SPECS",
         "SWE_VERIFICATION_TOOL_SPECS",
+        "UPDATE_CHECKLIST_TOOL_SPEC",
+        "ADD_FINDING_TOOL_SPEC",
+        "CONTRACT_SUBMIT_TOOL_SPEC",
+        "REVIEW_SUBMIT_TOOL_SPEC",
         "op_path_delete",
     ):
         if token not in scoped_execution:
             fail(f"scoped execution is missing {token}")
-    for forbidden in ("PLAN_BUILDER_CAPABILITIES", "op_minion_checkpoint_commit", "op_minion_review_checkpoint"):
+    for forbidden in (
+        "PLAN_BUILDER_CAPABILITIES",
+        "CONTRACT_BUILDER_TOOL_SPECS",
+        "SKELETON_BUILDER_TOOL_SPECS",
+        "op_minion_checkpoint_commit",
+        "op_minion_review_checkpoint",
+    ):
         if forbidden in scoped_execution:
             fail(f"scoped execution contains legacy capability {forbidden}")
+
+    generated_models = read_text("pal/execution/generated_tool_models.py")
+    for forbidden in (
+        "MinionV2ContractBuilder",
+        "MinionV2SkeletonBuilder",
+    ):
+        if forbidden in generated_models:
+            fail(f"generated tool models contain legacy contract protocol {forbidden}")
 
     manager = read_text("pal/minion/manager.py")
     for forbidden in ('"spawn"', '"finalize"', '"tick"', '"recover"'):
@@ -339,7 +396,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if forbidden in shared_messages:
             fail(f"shared worker transport contains legacy symbol {forbidden}")
 
-print("Verified runtime-root-only channel providers, V2 families, role profiles, controlled builders, adapters, worker transport, and legacy cutover")
+print("Verified runtime-root-only channel providers, V2 families, role playbooks, contract protocols, adapters, worker transport, and legacy cutover")
 PY
 
 websocket_overlay_dir="$runtime_overlay_dir/$websocket_provider_relative"

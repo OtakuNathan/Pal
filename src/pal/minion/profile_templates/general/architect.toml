@@ -13,19 +13,47 @@ If the result changes product behavior, architecture, modification scope, or imp
 
 Design a complete DAG with responsibilities, directional contracts/dataflow, ownership, lifecycle/state/invariants, errors, dependencies, and end-to-end integration. Work only on the checklist's current phase. As soon as one phase is settled, externalize it through Contract tools, update the checklist, and move on. Batch independent tool calls in one response and sequence only calls whose inputs depend on an earlier definition; do not serialize every field into a separate LLM round. Correct local gaps instead of rebuilding the complete Contract. Do not specify milestones, private implementation details, algorithms, evidence catalogs, or test matrices. Submit only the contract.
 """
-output_contract_fragment = "Read task.yaml, immediately advance update_checklist into contract encoding, author the durable Contract in bounded phase-sized writes, reconcile topology and integration against the task, complete every checklist item, and finish with contract_submit with no arguments. Never construct architecture_bundle.json yourself."
-capability_groups = ["workspace_read", "v2_contract_sketch_builder"]
+output_contract_fragment = "Read task.yaml, immediately advance update_checklist into contract encoding, author only the Manager-preseeded architect.yaml in bounded phase-sized writes, reconcile topology and integration against the task, complete every checklist item, and finish with contract_submit with no arguments."
+capability_groups = ["workspace_read", "workspace_write", "v2_contract_file_author"]
 [capability_policy]
 mode = "profile_only"
 risk = "read_only"
 [workspace_policy]
-mode = "read_only_repo"
+mode = "writable_workspace"
 [completion_policy]
 evidence = "text_deliverable"
 requires_capability_evidence = true
 [output_policy]
 requires_plan_artifact = false
-primary_artifact = "architecture_bundle.json"
-allowed_output_types = ["ArchitecturePlanningStageOutput"]
+primary_artifact = "architect.yaml"
+allowed_output_types = ["ContractArtifact"]
+
+[role]
+protocol_id = "contract_architect.v1"
+kind = "architect"
+modes = ["author", "revision"]
+truth_sources = [
+  { source = "task.yaml", authority = "normative", note = "Original request plus Manager-appended revisions; later conflicting revisions win." },
+  { source = "workspace_contracts", authority = "normative", note = "Existing owned source and public contract comments." },
+  { source = "architect.yaml", authority = "derived", note = "The current architecture projection being authored." },
+  { source = "checklist", authority = "cursor", note = "Execution cursor only; never design truth." },
+]
+
+[role.playbook]
+steps = [
+  { key = "requirements_design", instruction = "Read the task, inspect only relevant existing boundaries, resolve contradictions, and design the complete module graph.", done_when = "Requirements map to owned modules and no material ambiguity remains." },
+  { key = "contract_projection", instruction = "Encode responsibilities, dependencies, inputs, outputs, errors, invariants, ownership, lifecycle, and scenarios in architect.yaml.", done_when = "The schema-valid contract graph closes every requirement and failure path." },
+  { key = "reconcile", instruction = "Reconcile architect.yaml against the task and existing public boundaries, then submit.", done_when = "All checklist work items are complete and the contract is ready for semantic review." },
+]
+
+[role.checklist]
+allow_worker_items = true
+max_items = 64
+require_complete = true
+
+[role.submission]
+kind = "contract"
+tool = "contract_submit"
+
 [metadata]
 builtin = true

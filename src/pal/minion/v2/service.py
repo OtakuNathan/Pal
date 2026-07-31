@@ -8,16 +8,29 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from pal.minion.v2.architecture import ArchitectureArtifactService, ResearchMode
+from pal.minion.v2.contract_runtime import ContractArtifactAccess, ResearchMode
+from pal.minion.v2.adapters import SOFTWARE_GIT_ADAPTER
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.minion.v2.architecture_templates import (
+    compiled_architecture_definition_from_mapping,
+)
 from pal.minion.v2.catalog import MinionV2Catalog
+from pal.minion.v2.contract_protocol import (
+    CONTRACT_ARTIFACT,
+    compile_contract_markdown,
+    software_contract_projection,
+    validate_contract_payload,
+)
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
 from pal.minion.v2.machines import LIVENESS_REQUIRED_STATES
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.paths import inferred_project_name
 from pal.minion.v2.replan import compile_architecture_finding_markdown
+from pal.minion.v2.role_contracts import (
+    family_execution_adapter,
+    validate_family_binding_payload,
+)
 from pal.minion.v2.skeleton import (
-    ARCHITECTURE_SKELETON_ARTIFACT,
     GitBackedSkeletonService,
     compile_skeleton_markdown,
     review_architecture_skeleton,
@@ -42,7 +55,7 @@ class MinionV2WorkflowService:
     runtime_root: Path
     repository: MinionV2Repository = field(init=False)
     artifacts: ContentAddressedArtifactStore = field(init=False)
-    architecture: ArchitectureArtifactService = field(init=False)
+    contracts: ContractArtifactAccess = field(init=False)
     catalog: MinionV2Catalog = field(init=False)
     skeleton: GitBackedSkeletonService = field(init=False)
     task_ledger: TaskLedgerService = field(init=False)
@@ -50,7 +63,7 @@ class MinionV2WorkflowService:
     def __post_init__(self) -> None:
         self.repository = MinionV2Repository(Path(self.runtime_root))
         self.artifacts = ContentAddressedArtifactStore(Path(self.runtime_root), self.repository)
-        self.architecture = ArchitectureArtifactService(self.artifacts, self.repository)
+        self.contracts = ContractArtifactAccess(self.artifacts, self.repository)
         self.catalog = MinionV2Catalog(Path(self.runtime_root), self.artifacts)
         self.skeleton = GitBackedSkeletonService(Path(self.runtime_root), self.artifacts)
         self.task_ledger = TaskLedgerService(Path(self.runtime_root), self.artifacts)
@@ -338,6 +351,9 @@ class MinionV2WorkflowService:
         family_binding_ref = _artifact_ref_mapping(task.payload.get("family_binding_ref"))
         if not family_binding_ref:
             raise ValueError("Task has no pinned FamilyBindingArtifact")
+        validate_family_binding_payload(
+            dict(self.artifacts.read_json(family_binding_ref))
+        )
         research_mode = ResearchMode(str(data.get("research_mode") or ResearchMode.LOCAL_ONLY))
         task_spec = data.get("task_spec")
         if task_spec is not None and (not isinstance(task_spec, Mapping) or not task_spec):
@@ -359,7 +375,7 @@ class MinionV2WorkflowService:
             self._validate_external_architecture_ref(
                 artifact_ref,
                 trusted_required=operation == "execute_trusted",
-                family_id=str(task.payload.get("family_id") or ""),
+                family_binding_ref=family_binding_ref,
             )
             architecture = dict(self.artifacts.read_json(artifact_ref))
             architecture_requirements_ref = dict(
@@ -380,18 +396,22 @@ class MinionV2WorkflowService:
             self._validate_external_architecture_ref(
                 artifact_ref,
                 trusted_required=False,
-                family_id="software_engineering",
+                family_binding_ref=family_binding_ref,
             )
             repair_artifact = dict(self.artifacts.read_json(artifact_ref))
-            repair_modules = dict(dict(repair_artifact.get("submission") or {}).get("modules") or {})
+            repair_modules = dict(
+                dict(repair_artifact.get("contract") or {}).get("modules")
+                or {}
+            )
             repair_implementation_modules = {
                 name: module
                 for name, module in repair_modules.items()
-                if str(dict(module or {}).get("module_kind") or "") == "implementation"
+                if str(dict(module or {}).get("execution") or "") == "produce"
             }
             if len(repair_implementation_modules) != 1:
                 raise ValueError(
-                    "software review_and_repair requires a bounded single-module ArchitectureSkeletonArtifact"
+                    "software review_and_repair requires a bounded "
+                    "single-module ContractArtifact"
                 )
         skill_refs = _normalize_skill_refs(data.get("skill_refs"))
         request_payload = {
@@ -929,14 +949,34 @@ class MinionV2WorkflowService:
         else:
             manifest = dict(self.artifacts.read_json(manifest_ref))
             record = self.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
-            if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
+            if (
+                record
+                and str(record.get("artifact_type") or "")
+                == CONTRACT_ARTIFACT
+            ):
                 requirements = self.artifacts.read_json(dict(manifest.get("requirements_ref") or {}))
-                markdown = compile_skeleton_markdown(
-                    manifest,
-                    requirements_payload=requirements,
-                )
+                contract = dict(manifest.get("contract") or {})
+                if self._workflow_uses_git_strategy(
+                    revision.workflow_id
+                ):
+                    markdown = compile_skeleton_markdown(
+                        {
+                            **manifest,
+                            "submission": software_contract_projection(
+                                contract
+                            ),
+                        },
+                        requirements_payload=requirements,
+                    )
+                else:
+                    markdown = compile_contract_markdown(
+                        contract,
+                        requirements_payload=requirements,
+                    )
             else:
-                markdown = self.architecture.compile_human_review_markdown(manifest_ref)
+                raise ValueError(
+                    "human architecture review requires a ContractArtifact"
+                )
             actions = ["accept", "edit", "reject"]
         replan_batch_value = revision.payload.get("replan_finding_batch_ref")
         if replan_batch_value and not card:
@@ -1512,7 +1552,7 @@ class MinionV2WorkflowService:
         artifact_ref: Mapping[str, Any],
         *,
         trusted_required: bool,
-        family_id: str,
+        family_binding_ref: Mapping[str, Any],
     ) -> None:
         record = self.repository.read_artifact_record(str(artifact_ref.get("sha256") or ""))
         if record is None or not record.get("durable"):
@@ -1520,43 +1560,111 @@ class MinionV2WorkflowService:
         if trusted_required and not bool(dict(record.get("metadata") or {}).get("trusted_internal_source")):
             raise ValueError("execute_trusted requires an internally trusted artifact source")
         artifact_type = str(record.get("artifact_type") or "")
-        if family_id == "software_engineering":
-            if artifact_type != "ArchitectureSkeletonArtifact":
+        if artifact_type != CONTRACT_ARTIFACT:
+            raise ValueError("external execution requires a ContractArtifact")
+        artifact = dict(
+            self.artifacts.read_json(_artifact_ref_from_record(record))
+        )
+        contract = dict(artifact.get("contract") or {})
+        contract_schema = str(artifact.get("contract_schema") or "")
+        binding = dict(
+            self.artifacts.read_json(dict(family_binding_ref))
+        )
+        validate_family_binding_payload(binding)
+        architecture_binding = dict(
+            binding.get("architecture_definition") or {}
+        )
+        expected_schema = str(
+            architecture_binding.get("specialization_id") or ""
+        )
+        if contract_schema != expected_schema:
+            raise ValueError(
+                f"{binding.get('family_id')} requires architecture "
+                f"specialization {expected_schema}"
+            )
+        schema_payload = self.artifacts.read_json(
+            dict(architecture_binding.get("schema_ref") or {})
+        )
+        template_payload = self.artifacts.read_json(
+            dict(architecture_binding.get("template_ref") or {})
+        )
+        definition = compiled_architecture_definition_from_mapping(
+            {
+                **architecture_binding,
+                "schema": dict(schema_payload),
+                "template": str(
+                    dict(template_payload).get("template") or ""
+                ),
+                "example": {},
+            }
+        )
+        validate_contract_payload(contract, definition=definition)
+        requirements_ref = dict(artifact.get("requirements_ref") or {})
+        requirements_record = self.repository.read_artifact_record(
+            str(requirements_ref.get("sha256") or "")
+        )
+        if requirements_record is None or not requirements_record.get("durable"):
+            raise ValueError(
+                "ContractArtifact has no durable requirements_ref"
+            )
+        if (
+            family_execution_adapter(binding.get("execution_adapter"))
+            == SOFTWARE_GIT_ADAPTER
+        ):
+            bundle_ref = dict(artifact.get("git_bundle_ref") or {})
+            bundle_record = self.repository.read_artifact_record(
+                str(bundle_ref.get("sha256") or "")
+            )
+            if bundle_record is None or not bundle_record.get("durable"):
                 raise ValueError(
-                    "software_engineering workflows accept ArchitectureSkeletonArtifact only; "
-                    "the legacy SWE JSON contract graph is not supported"
+                    "software ContractArtifact has no durable git_bundle_ref"
                 )
-            if str(record.get("schema_version") or "") != "1":
-                raise ValueError("unsupported ArchitectureSkeletonArtifact schema version")
-            artifact = dict(self.artifacts.read_json(_artifact_ref_from_record(record)))
-            for key in ("requirements_ref", "git_bundle_ref"):
-                child = dict(artifact.get(key) or {})
-                child_record = self.repository.read_artifact_record(str(child.get("sha256") or ""))
-                if child_record is None or not child_record.get("durable"):
-                    raise ValueError(f"ArchitectureSkeletonArtifact has no durable {key}")
+            projected = {
+                **artifact,
+                "submission": software_contract_projection(contract),
+            }
             review_workspace = self.skeleton.provision_review_worktree(
-                artifact=artifact,
+                artifact=projected,
                 review_name=f"external-{str(record['sha256'])[:16]}",
             )
             try:
-                requirements = self.artifacts.read_json(dict(artifact["requirements_ref"]))
+                requirements = self.artifacts.read_json(requirements_ref)
                 review = review_architecture_skeleton(
-                    artifact,
+                    projected,
                     worktree=review_workspace.worktree,
                     requirements_payload=requirements,
                 )
             finally:
                 review_workspace.cleanup()
             if review.verdict != "PASS":
-                raise ValueError("external ArchitectureSkeletonArtifact failed mechanical skeleton validation")
-            return
-        if artifact_type != "ArchitectureContractArtifact":
-            raise ValueError("this family requires an ArchitectureContractArtifact")
-        if str(record.get("schema_version") or "") != "1":
-            raise ValueError("unsupported ArchitectureContractArtifact schema version")
-        review = self.architecture.review_manifest(_artifact_ref_from_record(record))
-        if review.verdict != "PASS":
-            raise ValueError("external ArchitectureContractArtifact failed V2 contract validation")
+                raise ValueError(
+                    "external software ContractArtifact failed mechanical "
+                    "declaration validation"
+                )
+
+    def _workflow_uses_git_strategy(self, workflow_id: str) -> bool:
+        workflow = self.repository.read_snapshot(
+            AggregateType.WORKFLOW,
+            workflow_id,
+        )
+        if workflow is None:
+            raise ValueError(
+                f"workflow not found while resolving execution strategy: "
+                f"{workflow_id}"
+            )
+        binding_ref = dict(
+            workflow.payload.get("family_binding_ref") or {}
+        )
+        if not binding_ref.get("sha256"):
+            raise ValueError(
+                "workflow has no pinned FamilyBindingArtifact"
+            )
+        binding = dict(self.artifacts.read_json(binding_ref))
+        validate_family_binding_payload(binding)
+        return (
+            family_execution_adapter(binding.get("execution_adapter"))
+            == SOFTWARE_GIT_ADAPTER
+        )
 
 
 def workflow_request_from_snapshot(

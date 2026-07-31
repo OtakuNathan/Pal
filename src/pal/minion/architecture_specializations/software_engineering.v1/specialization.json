@@ -1,0 +1,230 @@
+{
+  "specialization_id": "software_engineering.v1",
+  "family_id": "software_engineering",
+  "context_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["language", "external_dependencies"],
+    "properties": {
+      "language": {"type": "string", "minLength": 1},
+      "external_dependencies": {
+        "type": "array",
+        "items": {"type": "string"},
+        "uniqueItems": true
+      }
+    }
+  },
+  "module_definition_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "behavior_kind",
+      "contract",
+      "ownership",
+      "lifecycle",
+      "state_machine",
+      "paths"
+    ],
+    "properties": {
+      "behavior_kind": {
+        "enum": ["stateless", "resource_owner", "service", "workflow", "adapter"]
+      },
+      "contract": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["inputs", "outputs", "errors", "invariants"],
+        "properties": {
+          "inputs": {"$ref": "#/$defs/portMap"},
+          "outputs": {"$ref": "#/$defs/portMap", "minProperties": 1},
+          "errors": {"$ref": "#/$defs/stringList"},
+          "invariants": {"$ref": "#/$defs/stringList"}
+        }
+      },
+      "ownership": {"$ref": "#/$defs/stringList", "minItems": 1},
+      "lifecycle": {"$ref": "#/$defs/lifecycle"},
+      "state_machine": {
+        "oneOf": [{"type": "null"}, {"$ref": "#/$defs/stateMachine"}]
+      },
+      "paths": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "contract_mode",
+          "contract_paths",
+          "implementation_scopes",
+          "reference_only"
+        ],
+        "properties": {
+          "contract_mode": {"enum": ["file_frozen", "review_guarded"]},
+          "contract_paths": {"$ref": "#/$defs/stringList", "minItems": 1},
+          "implementation_scopes": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/pathScope"}
+          },
+          "reference_only": {"$ref": "#/$defs/stringList"}
+        }
+      }
+    }
+  },
+  "defs": {
+    "port": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interface", "semantics"],
+      "properties": {
+        "interface": {"type": "string", "minLength": 1},
+        "semantics": {"type": "string", "minLength": 1}
+      }
+    },
+    "portMap": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {"$ref": "#/$defs/port"}
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["creation", "operation", "shutdown", "failure", "cleanup"],
+      "properties": {
+        "creation": {"type": "string", "minLength": 1},
+        "operation": {"type": "string", "minLength": 1},
+        "shutdown": {"type": "string", "minLength": 1},
+        "failure": {"type": "string", "minLength": 1},
+        "cleanup": {"type": "string", "minLength": 1}
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["to", "effect"],
+      "properties": {
+        "to": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "effect": {"type": "string", "minLength": 1}
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["meaning", "transitions"],
+      "properties": {
+        "meaning": {"type": "string", "minLength": 1},
+        "transitions": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+          "additionalProperties": {"$ref": "#/$defs/transition"}
+        }
+      }
+    },
+    "stateMachine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["initial", "states"],
+      "properties": {
+        "initial": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "states": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+          "additionalProperties": {"$ref": "#/$defs/state"}
+        }
+      }
+    },
+    "pathScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path"],
+      "properties": {
+        "kind": {"enum": ["file", "directory"]},
+        "path": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "example": {
+    "schema_version": "1",
+    "context": {"language": "C++20", "external_dependencies": []},
+    "requirements": {
+      "decode_frames": {
+        "claim": "Decode complete frames.",
+        "owner": "decoder",
+        "contract_path": ["decoder.decoded_frames"]
+      }
+    },
+    "modules": {
+      "decoder": {
+        "responsibility": "Own incremental frame decoding.",
+        "execution": "produce",
+        "provides": ["decoded_frames"],
+        "dependencies": {},
+        "definition": {
+          "behavior_kind": "resource_owner",
+          "contract": {
+            "inputs": {
+              "chunks": {
+                "interface": "Decoder::feed",
+                "semantics": "Arbitrary byte chunks in stream order."
+              }
+            },
+            "outputs": {
+              "decoded_frames": {
+                "interface": "Decoder::feed",
+                "semantics": "Complete decoded frames in stream order."
+              }
+            },
+            "errors": ["malformed input enters failed state"],
+            "invariants": ["one decoder owns its buffered bytes"]
+          },
+          "ownership": ["Decoder owns its buffer and state."],
+          "lifecycle": {
+            "creation": "Construction starts ready with an empty buffer.",
+            "operation": "feed accepts chunks and emits complete frames.",
+            "shutdown": "finish classifies remaining buffered input.",
+            "failure": "Malformed input enters failed.",
+            "cleanup": "Destruction releases buffered bytes."
+          },
+          "state_machine": {
+            "initial": "ready",
+            "states": {
+              "ready": {
+                "meaning": "Accepting input.",
+                "transitions": {
+                  "malformed_input": {
+                    "to": "failed",
+                    "effect": "Reject later input until reset."
+                  }
+                }
+              },
+              "failed": {
+                "meaning": "Rejecting input.",
+                "transitions": {
+                  "reset": {
+                    "to": "ready",
+                    "effect": "Clear failure and buffered input."
+                  }
+                }
+              }
+            }
+          },
+          "paths": {
+            "contract_mode": "review_guarded",
+            "contract_paths": ["include/decoder.hpp"],
+            "implementation_scopes": [
+              {"kind": "file", "path": "src/decoder.cpp"}
+            ],
+            "reference_only": []
+          }
+        }
+      }
+    },
+    "scenarios": {
+      "decode_one_frame": {
+        "modules": ["decoder"],
+        "requirement_refs": ["decode_frames"],
+        "entrypoint": {"module": "decoder", "surface": "Decoder::feed"},
+        "contract_flow": ["bytes -> decoder -> decoded_frames"],
+        "observable_behavior": "A complete frame is emitted once.",
+        "failure_behavior": "Malformed input produces the declared error.",
+        "environment": "Focused project test process."
+      }
+    }
+  }
+}

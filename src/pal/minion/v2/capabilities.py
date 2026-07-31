@@ -179,60 +179,6 @@ class MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput(StrictT
     )
 
 
-_STRING_MAP_SCHEMA = {"type": "object", "additionalProperties": {"type": ["string", "null"]}}
-_PROFILE_OVERRIDE_CHANGES_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "display_name": {"type": ["string", "null"]},
-        "identity_fragment": {"type": ["string", "null"]},
-        "behavior_fragment": {"type": ["string", "null"]},
-        "output_contract_fragment": {"type": ["string", "null"]},
-        "preferred_endpoint_id": {"type": ["string", "null"]},
-        "capability_groups": {"type": ["array", "null"], "items": {"type": "string"}},
-        "default_allowed_capabilities": {"type": ["array", "null"], "items": {"type": "string"}},
-        "skill_refs": {"type": ["array", "null"], "items": {"type": "string"}},
-        "default_approval_policy": {"type": ["object", "null"]},
-        "workspace_policy": {"type": ["object", "null"]},
-        "workspace_environment_policy": {"type": ["object", "null"]},
-        "completion_policy": {"type": ["object", "null"]},
-        "capability_policy": {"type": ["object", "null"]},
-        "capability_guidance_overrides": {
-            "type": ["object", "null"],
-            "additionalProperties": {
-                "type": "object",
-                "properties": {
-                    "purpose": {"type": "string"},
-                    "use_when": {"type": "string"},
-                    "do_not_use_when": {"type": "string"},
-                    "failure_next_steps": {"type": "string"},
-                },
-                "additionalProperties": False,
-                "minProperties": 1,
-            },
-        },
-        "output_policy": {"type": ["object", "null"]},
-        "metadata": {"type": ["object", "null"]},
-    },
-    "additionalProperties": False,
-}
-_FAMILY_OVERRIDE_CHANGES_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "display_name": {"type": ["string", "null"]},
-        "domain": {"type": ["string", "null"]},
-        "domain_keywords": {"type": ["array", "null"], "items": {"type": "string"}},
-        "workflow_template": {"type": ["string", "null"]},
-        "role_bindings": {**_STRING_MAP_SCHEMA, "type": ["object", "null"]},
-        "builders": {**_STRING_MAP_SCHEMA, "type": ["object", "null"]},
-        "adapters": {**_STRING_MAP_SCHEMA, "type": ["object", "null"]},
-        "policies": {"type": ["object", "null"]},
-        "capability_groups": {"type": ["object", "null"]},
-        "metadata": {"type": ["object", "null"]},
-    },
-    "additionalProperties": False,
-}
-
-
 @capability_node(
     namespace=INTROSPECTION_NAMESPACE,
     scope="minion_workflow",

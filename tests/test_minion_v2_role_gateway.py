@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 import subprocess
 
+from pal.minion.v2.architecture_templates import ArchitectureTemplateCompiler
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
@@ -248,6 +249,115 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         self.assertTrue(assignment["submission_artifact_ref"]["sha256"])
         self.assertTrue(self.call("submission_status")["recorded"])
 
+    def test_manager_compiles_architect_yaml_against_pinned_family_generation(
+        self,
+    ) -> None:
+        binding_ref = self.service.catalog.publish_family_binding(
+            "general.generic"
+        )
+        assignment, attempt, token, fence, resource = (
+            self._create_architect_assignment(binding_ref.sha256)
+        )
+        definition = ArchitectureTemplateCompiler().compile("general.v1")
+        contract_context = {
+            "workflow_id": "workflow-router",
+            "invocation_id": attempt,
+            "lease_resource_key": resource,
+            "fencing_token": fence,
+            "role": "architect",
+            "mode": "author",
+            "draft_kind": "contract",
+            "input_fingerprint": "architecture-input",
+            "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
+        }
+        work_context = {**contract_context, "draft_kind": "work_items"}
+
+        def architect_call(method: str, **params):
+            return self.gateway.call(
+                method,
+                {"access_token": token, **params},
+            )
+
+        architect_call(
+            "draft_mutate",
+            context=work_context,
+            operation_key="complete-design",
+            request={"step": "design"},
+            expected_version=0,
+            next_payload={
+                "items": [
+                    {
+                        "item_id": "phase:design",
+                        "kind": "phase",
+                        "status": "completed",
+                        "summary": "design",
+                        "ordinal": 0,
+                        "origin": "role_playbook",
+                        "required": True,
+                    }
+                ]
+            },
+            result={"updated": True},
+            seed={
+                "items": [
+                    {
+                        "item_id": "phase:design",
+                        "kind": "phase",
+                        "status": "pending",
+                        "summary": "design",
+                        "ordinal": 0,
+                        "origin": "role_playbook",
+                        "required": True,
+                    }
+                ]
+            },
+        )
+        architect_call(
+            "draft_read",
+            context=contract_context,
+            seed={},
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "Manager-compiled family schema",
+        ):
+            architect_call(
+                "draft_submit",
+                context=contract_context,
+                expected_version=0,
+                submission={
+                    "source": "architect.yaml",
+                    "architecture": {
+                        **definition.example,
+                        "unexpected": True,
+                    },
+                },
+            )
+
+        receipt = architect_call(
+            "draft_submit",
+            context=contract_context,
+            expected_version=0,
+            submission={
+                "source": "architect.yaml",
+                "architecture": definition.example,
+            },
+        )
+        stored = dict(
+            self.service.artifacts.read_json(
+                receipt["submission_artifact_ref"]
+            )
+        )
+        self.assertEqual(stored["contract_schema"], "general.v1")
+        self.assertEqual(stored["source"], "architect.yaml")
+        self.assertNotIn("contract_schema", stored["contract"])
+        self.assertEqual(
+            self.service.repository.read_role_assignment(
+                assignment
+            )["state"],
+            "result_recorded",
+        )
+
     def test_role_artifact_store_round_trips_gateway_artifact_ref(self) -> None:
         owner = self
 
@@ -328,6 +438,94 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         outside.mkdir()
         with self.assertRaisesRegex(ValueError, "outside the assigned repository"):
             self.call("git_read", cmd="status --short", cwd=str(outside))
+
+    def _create_architect_assignment(
+        self,
+        family_binding_sha: str,
+    ) -> tuple[str, str, str, int, str]:
+        session_id = "session-architect"
+        self.service.repository.ensure_role_session(
+            session_id=session_id,
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-router",
+            role="architect",
+            mode="author",
+            executor_profile_id="general.architect",
+            family_binding_sha=family_binding_sha,
+            scope_kind=AggregateType.DAG_NODE_RUN.value,
+            subject_key="node-router",
+        )
+        assignment = self.service.repository.create_role_assignment(
+            RoleAssignmentRequest(
+                assignment_key="architecture-cycle-1",
+                session_id=session_id,
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN.value,
+                aggregate_id="node-router",
+                role="architect",
+                mode="author",
+                executor_profile_id="general.architect",
+                family_binding_sha=family_binding_sha,
+                input_fingerprint="architecture-input",
+                required_inputs=(),
+                input_refs={},
+                execution_spec={"effect_type": "run_architecture_role"},
+                submission_kind="contract",
+            )
+        )
+        assignment_id = str(assignment["assignment_id"])
+        attempt = self.service.repository.claim_role_assignment(
+            assignment_id
+        )
+        attempt_id = str(attempt["attempt_id"])
+        resource = f"assignment:{assignment_id}"
+        fence = self.service.repository.claim_lease(
+            resource,
+            attempt_id,
+            ttl_seconds=120,
+        ).fencing_token
+        prompt_ref = self.service.artifacts.put_json(
+            {
+                "workspace": {"repo_path": str(self.workspace)},
+                "metadata": {
+                    "minion_v2": {
+                        "workflow_id": "workflow-router",
+                        "invocation_id": attempt_id,
+                        "lease_resource_key": resource,
+                        "fencing_token": fence,
+                        "role": "architect",
+                        "mode": "author",
+                        "authoring_input_fingerprint": "architecture-input",
+                        "authoring_contract_version": (
+                            AUTHORING_CONTRACT_VERSION
+                        ),
+                        "work_item_seed": [
+                            {
+                                "kind": "phase",
+                                "summary": "design",
+                                "status": "pending",
+                                "required": True,
+                            }
+                        ],
+                    }
+                },
+            },
+            artifact_type="RolePromptPackArtifact",
+        )
+        self.service.repository.start_role_attempt(
+            assignment_id=assignment_id,
+            attempt_id_value=attempt_id,
+            lease_resource_key=resource,
+            fencing_token=fence,
+            prompt_pack_ref=prompt_ref.to_dict(),
+        )
+        token = self.service.repository.issue_role_attempt_access_token(
+            assignment_id=assignment_id,
+            attempt_id_value=attempt_id,
+            fencing_token=fence,
+        )
+        return assignment_id, attempt_id, token, fence, resource
 
 if __name__ == "__main__":
     unittest.main()

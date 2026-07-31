@@ -3,23 +3,26 @@ display_name = "Lifestyle"
 domain = "Nutrition, diet, meal planning, training, recovery, sleep, and personal health coaching tasks."
 domain_keywords = ["nutrition", "diet", "meal", "training", "fitness", "weight", "sleep", "recovery", "health"]
 workflow_template = "contract_dag.v2"
+execution_adapter = "artifact_bundle.v2"
 
-[role_bindings]
-architect = "$task_profile"
-reviewer = "$task_profile"
-implementation = "$task_profile"
-verifier = "$task_profile"
+[architecture]
+specialization = "lifestyle.nutrition_checkin.v1"
 
-[builders]
-contract = "contract_sketch.v2"
-verification = "verification.v2"
+[role_bindings.architect]
+executor = "profile"
+profile = "lifestyle.architect"
 
-[adapters]
-workspace = "artifact_bundle.v2"
-candidate = "artifact_bundle.v2"
-verification = "artifact_bundle.v2"
-integration = "artifact_bundle.v2"
-publisher = "artifact_bundle.v2"
+[role_bindings.reviewer]
+executor = "profile"
+profile = "lifestyle.reviewer"
+
+[role_bindings.implementation]
+executor = "null"
+reason = "external_human_execution"
+
+[role_bindings.verifier]
+executor = "null"
+reason = "external_human_execution"
 
 [policies]
 research_default = "local_only"
@@ -39,9 +42,3 @@ case_timeout_seconds = 300
 
 [metadata]
 builtin = true
-
-[capability_groups.lifestyle_producer]
-include = ["workspace_read", "workspace_write", "verification_shell", "minion_artifacts"]
-
-[capability_groups.lifestyle_verifier]
-include = ["workspace_read", "verification_shell", "minion_artifacts"]

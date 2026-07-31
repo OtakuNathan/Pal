@@ -29,6 +29,34 @@ requires_capability_evidence = true
 primary_artifact = "producer_report.json"
 allowed_output_types = ["UnitProducerReport", "UnitSplitRequest"]
 
+[role]
+protocol_id = "module_implementation.v1"
+kind = "implementation"
+modes = ["produce", "repair"]
+truth_sources = [
+  { source = "workspace_contracts", authority = "normative", note = "Owned source, public contract, and comments." },
+  { source = "module_work_view", authority = "derived", note = "Manager-compiled local responsibility and dependency contracts." },
+  { source = "work_items", authority = "cursor", note = "Implementation plan plus Manager-routed findings." },
+  { source = "git_diff_log", authority = "evidence", note = "Current candidate delta." },
+  { source = "task.yaml", authority = "fallback", note = "Use only when higher-authority local contracts are insufficient." },
+]
+
+[role.playbook]
+steps = [
+  { key = "inspect_contract", instruction = "Read the owned module contract and relevant dependency interfaces, then create or update the checklist.", done_when = "The bounded change and acceptance surface are clear." },
+  { key = "implement", instruction = "Implement the contract directly without over-abstraction; keep invalid states unrepresentable when the language permits.", done_when = "Owned behavior and routed findings are implemented." },
+  { key = "focused_check", instruction = "Run the minimum focused checks, update the checklist honestly, and submit.", done_when = "Focused checks pass and no checklist item remains." },
+]
+
+[role.checklist]
+allow_worker_items = true
+max_items = 64
+require_complete = true
+
+[role.submission]
+kind = "candidate"
+tool = "candidate_submit"
+
 [metadata]
 builtin = true
 max_output_tokens = 32768

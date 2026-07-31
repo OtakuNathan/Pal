@@ -58,9 +58,12 @@ from pal.minion.v2.verification_builder import (
 )
 from pal.minion.v2.candidate_builder import (
     CANDIDATE_BUILDER_TOOL_SPECS,
-    MinionV2CandidateUpdateChecklistInput,
-    candidate_checklist_context,
     candidate_builder_tool_result,
+)
+from pal.minion.v2.work_items import (
+    MinionUpdateChecklistInput,
+    render_work_item_context,
+    update_checklist_tool_result,
 )
 from pal.minion.v2.swe_verification import (
     _changed_paths,
@@ -84,7 +87,6 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     _seed_durable_verification_scratch,
     _module_verifier_git_diff_refs,
     _validate_skeleton_coder_report,
-    _validate_semantic_verification_plan_shape,
     _verifier_reference_refs,
     _verification_case_specs,
     _verification_corpus_path_owners,
@@ -309,7 +311,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             CanonicalToolCall(
                 name=ADD_FINDING_CAPABILITY,
                 args={
-                    "finding_key": "decoder_developer_corpus_is_broken",
                     "finding_kind": "module_defect",
                     "priority": "p1",
                     "summary": "The decoder developer corpus does not compile.",
@@ -394,7 +395,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             CanonicalToolCall(
                 name=ADD_FINDING_CAPABILITY,
                 args={
-                    "finding_key": "streaming_decoder_double_has_wrong_expectation",
                     "finding_kind": "verification_defect",
                     "priority": "p1",
                     "summary": "The isolation double asserts an output forbidden by the module contract.",
@@ -510,7 +510,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             CanonicalToolCall(
                 name=ADD_FINDING_CAPABILITY,
                 args={
-                    "finding_key": "router_result_could_avoid_copy",
                     "finding_kind": "module_defect",
                     "priority": "p2",
                     "disposition": "advisory",
@@ -548,9 +547,10 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         self.assertEqual(submission["outcome"], "pass")
         self.assertEqual(submission["findings"], [])
-        self.assertEqual(
-            submission["advisories"][0]["finding_key"],
-            "router_result_could_avoid_copy",
+        self.assertTrue(
+            submission["advisories"][0]["finding_id"].startswith(
+                "finding_"
+            )
         )
 
     def test_swe_verifier_requires_a_case_when_corpus_is_empty(self) -> None:
@@ -605,7 +605,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             infer_repair_target_modules(
                 [
                     {
-                        "finding_key": "unowned_failure",
                         "locations": [
                             {
                                 "scope": "workspace",
@@ -706,7 +705,6 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "module_name": "router",
                 "findings": [
                     {
-                        "finding_key": "existing_case_failed",
                         "finding_kind": "module_defect",
                         "priority": "p1",
                         "summary": "The existing durable regression failed.",
@@ -989,7 +987,6 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "module_name": "router",
                 "findings": [
                     {
-                        "finding_key": "pipeline_upstream_defect",
                         "finding_kind": "dependency_defect",
                         "priority": "p1",
                         "summary": "The full pipeline exposes an upstream defect.",
@@ -1187,7 +1184,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         manifest_ref = self.store.put_json(
             {"requirements_ref": requirements_ref.to_dict()},
-            artifact_type="ArchitectureSkeletonArtifact",
+            artifact_type="TestManifestArtifact",
         )
         work_view_ref = self.store.put_json(
             {"module_name": "router"},
@@ -1204,14 +1201,13 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "architecture_manifest_ref": manifest_ref.to_dict(),
                 "producer_report_ref": self.store.put_json(
                     {
-                        "checklist": {
-                            "plan": [
-                                {
-                                    "step": "implement exact routing semantics",
-                                    "status": "completed",
-                                }
-                            ],
-                        }
+                        "work_items": [
+                            {
+                                "kind": "task",
+                                "summary": "implement exact routing semantics",
+                                "status": "completed",
+                            }
+                        ],
                     },
                     artifact_type="ProducerReportArtifact",
                 ).to_dict(),
@@ -1224,10 +1220,11 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(references["candidate_diff"], candidate_view_ref)
         self.assertNotIn("task", references)
         self.assertEqual(
-            self.store.read_json(references["coder_report"])["checklist"]["plan"],
+            self.store.read_json(references["coder_report"])["work_items"],
             [
                 {
-                    "step": "implement exact routing semantics",
+                    "kind": "task",
+                    "summary": "implement exact routing semantics",
                     "status": "completed",
                 }
             ],
@@ -1261,7 +1258,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         ).stdout.strip()
         architecture_ref = self.store.put_json(
             {"skeleton_commit_sha": skeleton_sha},
-            artifact_type="ArchitectureSkeletonArtifact",
+            artifact_type="TestManifestArtifact",
         )
         candidate = {
             "changed_paths": ["src/router.py"],
@@ -1345,6 +1342,23 @@ class MinionV2VerificationTests(unittest.TestCase):
             }
         )
         Path(str(workspace["review_scratch_dir"])).mkdir(parents=True, exist_ok=True)
+        if role in {"reviewer", "verifier"}:
+            initialized = update_checklist_tool_result(
+                CanonicalToolCall(
+                    name="op_minion_update_checklist",
+                    args={
+                        "plan": [
+                            {
+                                "step": "complete the bounded audit",
+                                "status": "completed",
+                            }
+                        ]
+                    },
+                    call_id=f"initialize-audit-{self.lease_index}",
+                ),
+                workspace,
+            )
+            self.assertTrue(initialized.ok, initialized.llm_text)
         return workspace
 
     def _verification_call(
@@ -1355,6 +1369,23 @@ class MinionV2VerificationTests(unittest.TestCase):
         produced: list[dict[str, object]] | None = None,
     ):
         self.call_index += 1
+        if name == "op_minion_verification_submit":
+            initialized = update_checklist_tool_result(
+                CanonicalToolCall(
+                    name="op_minion_update_checklist",
+                    args={
+                        "plan": [
+                            {
+                                "step": "complete the bounded audit",
+                                "status": "completed",
+                            }
+                        ]
+                    },
+                    call_id=f"submit-audit-{self.call_index}",
+                ),
+                workspace,
+            )
+            self.assertTrue(initialized.ok, initialized.llm_text)
         call = CanonicalToolCall(
             name=name,
             args=args or {},
@@ -1397,13 +1428,16 @@ class MinionV2VerificationTests(unittest.TestCase):
         produced: list[dict[str, object]] | None = None,
     ):
         self.call_index += 1
+        call = CanonicalToolCall(
+            name=name,
+            args=args or {},
+            call_id=f"candidate-call-{self.call_index}",
+        )
+        if name == "op_minion_update_checklist":
+            return update_checklist_tool_result(call, workspace)
         return asyncio.run(
             candidate_builder_tool_result(
-                CanonicalToolCall(
-                    name=name,
-                    args=args or {},
-                    call_id=f"candidate-call-{self.call_index}",
-                ),
+                call,
                 workspace,
                 produced if produced is not None else [],
             )
@@ -1879,7 +1913,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             workspace,
             ADD_FINDING_CAPABILITY,
             {
-                "finding_key": "empty_input_is_stable",
                 "finding_kind": "module_defect",
                 "priority": "p1",
                 "summary": "The historical failure remains reproducible.",
@@ -2142,7 +2175,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         }, role="implementation")
         planned = self._candidate_call(
             workspace,
-            "op_minion_candidate_update_checklist",
+            "op_minion_update_checklist",
             {
                 "plan": [
                     {
@@ -2159,11 +2192,11 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(planned.ok, planned.text)
         self.assertIn(
             "in_progress: implement review-guarded render contract",
-            candidate_checklist_context(workspace),
+            render_work_item_context(workspace),
         )
         unfinished = self._candidate_call(workspace, "op_minion_candidate_submit")
         self.assertFalse(unfinished.ok)
-        self.assertIn("unfinished work", unfinished.llm_text)
+        self.assertIn("work items are not complete", unfinished.llm_text)
         self.assertIsInstance(unfinished.invocation_result, RejectedResult)
         self.assertEqual(
             unfinished.invocation_result.effect,
@@ -2187,7 +2220,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         completed = self._candidate_call(
             workspace,
-            "op_minion_candidate_update_checklist",
+            "op_minion_update_checklist",
             {
                 "plan": [
                     {
@@ -2208,16 +2241,13 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(report["files_changed"], ["src/font/backend.cpp"])
         self.assertNotIn("tests_run", report)
         self.assertEqual(
-            report["checklist"]["plan"],
             [
-                {
-                    "step": "implement review-guarded render contract",
-                    "status": "completed",
-                },
-                {
-                    "step": "run focused render check",
-                    "status": "completed",
-                },
+                (item["summary"], item["status"])
+                for item in report["work_items"]
+            ],
+            [
+                ("implement review-guarded render contract", "completed"),
+                ("run focused render check", "completed"),
             ],
         )
 
@@ -2244,13 +2274,11 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "module_name": "font_backend",
                     "findings": [
                         {
-                            "finding_key": "preserve_empty_input",
                             "finding_kind": "module_defect",
                             "priority": "p1",
                             "summary": "Empty input loses the existing state.",
                         },
                         {
-                            "finding_key": "release_native_handle",
                             "finding_kind": "module_defect",
                             "priority": "p1",
                             "summary": "The shutdown path leaks the native handle.",
@@ -2269,44 +2297,57 @@ class MinionV2VerificationTests(unittest.TestCase):
             },
             role="implementation",
         )
+        binding = dict(workspace["minion_v2"])
+        binding["work_item_seed"] = [
+            {
+                "kind": "task",
+                "summary": "resolve finding: preserve_empty_input",
+                "required": True,
+            },
+            {
+                "kind": "task",
+                "summary": "resolve finding: release_native_handle",
+                "required": True,
+            },
+        ]
+        workspace["minion_v2"] = binding
 
         planned = self._candidate_call(
             workspace,
-            "op_minion_candidate_update_checklist",
+            "op_minion_update_checklist",
             {
                 "plan": [
                     {
                         "step": "apply the local repair",
                         "status": "completed",
-                    }
+                    },
+                    {
+                        "step": "resolve finding: preserve_empty_input",
+                        "status": "pending",
+                    },
+                    {
+                        "step": "resolve finding: release_native_handle",
+                        "status": "pending",
+                    },
                 ]
             },
         )
         self.assertTrue(planned.ok, planned.text)
-        self.assertEqual(
-            planned.structured["checklist"]["plan"],
-            [
-                {
-                    "step": "apply the local repair",
-                    "status": "completed",
-                },
-                {
-                    "step": "resolve finding: preserve_empty_input",
-                    "status": "pending",
-                },
-                {
-                    "step": "resolve finding: release_native_handle",
-                    "status": "pending",
-                },
-            ],
+        self.assertIn(
+            "pending: resolve finding: preserve_empty_input",
+            render_work_item_context(workspace),
+        )
+        self.assertIn(
+            "pending: resolve finding: release_native_handle",
+            render_work_item_context(workspace),
         )
 
     def test_candidate_checklist_contract_is_reloadable_and_evidence_free(self) -> None:
         self.assertEqual(
-            MinionV2CandidateUpdateChecklistInput.__module__,
-            "pal.minion.v2.candidate_builder",
+            MinionUpdateChecklistInput.__module__,
+            "pal.minion.v2.work_items",
         )
-        schema = MinionV2CandidateUpdateChecklistInput.model_json_schema(
+        schema = MinionUpdateChecklistInput.model_json_schema(
             mode="validation"
         )
         encoded = json.dumps(schema, sort_keys=True)
@@ -2357,7 +2398,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         planned = self._candidate_call(
             workspace,
-            "op_minion_candidate_update_checklist",
+            "op_minion_update_checklist",
             {
                 "plan": [
                     {
@@ -2433,7 +2474,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         ]
         planned = self._candidate_call(
             workspace,
-            "op_minion_candidate_update_checklist",
+            "op_minion_update_checklist",
             {
                 "plan": [
                     {
@@ -2485,7 +2526,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         planned = self._candidate_call(
             workspace,
-            "op_minion_candidate_update_checklist",
+            "op_minion_update_checklist",
             {
                 "plan": [
                     {
@@ -2523,7 +2564,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         planned = self._candidate_call(
             workspace,
-            "op_minion_candidate_update_checklist",
+            "op_minion_update_checklist",
             {
                 "plan": [
                     {
@@ -2898,7 +2939,6 @@ class MinionV2VerificationTests(unittest.TestCase):
                 workspace,
                 ADD_FINDING_CAPABILITY,
                 {
-                    "finding_key": case.replace(" ", "_"),
                     "finding_kind": finding_kind,
                     "priority": "p1",
                     "summary": f"{case} failed",
@@ -2919,45 +2959,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             {"module_defect", "contract_defect"},
         )
 
-    def test_standalone_review_keeps_case_evidence_free_of_manager_requirement_bindings(self) -> None:
-        artifact_dir = self.runtime_root / "artifacts"
-        stage_dir = self.runtime_root / "artifact-stage"
-        review_view = self.runtime_root / "review-view.json"
-        review_view.write_text(
-            json.dumps(
-                {
-                    "requirements": {
-                        "sections": {"Lifecycle": ["Released resources reject further use."]}
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-        workspace = self._bind_workspace({
-            "repo_path": str(self.runtime_root),
-            "artifact_dir": str(artifact_dir),
-            "artifact_stage_dir": str(stage_dir),
-            "reference_paths": [{"name": "review_request", "path": str(review_view)}],
-        }, role="reviewer")
-        recorded = self._record_lifecycle_case(workspace)
-        self.assertTrue(recorded.ok, recorded.text)
-        self.assertEqual(recorded.structured["case"]["requirements"], [])
-        self.assertTrue(
-            self._verification_call(
-                workspace,
-                "op_minion_review_conclusion",
-                {
-                    "verdict": "changes_requested",
-                    "summary": "A lifecycle defect blocks approval.",
-                    "scope": "resource lifecycle",
-                },
-            ).ok
-        )
-        result = self._verification_call(workspace, "op_minion_standalone_review_submit")
-        self.assertTrue(result.ok, result.text)
-        compiled = json.loads((stage_dir / "standalone_review.json").read_text(encoding="utf-8"))
-        self.assertEqual(compiled["cases"][0]["requirements"], [])
-
     def test_case_execution_does_not_semantically_bind_requirement_text(self) -> None:
         workspace = self._bind_workspace(
             {
@@ -2977,7 +2978,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(result.structured["case"]["requirements"], [])
         self.assertEqual(len(self.adapter.calls), 1)
 
-    def test_draft_case_and_finding_are_upserted_and_removable(self) -> None:
+    def test_case_is_replaceable_and_findings_are_append_only_work_items(self) -> None:
         workspace = self._bind_workspace(
             {"repo_path": str(self.runtime_root)}, role="verifier"
         )
@@ -2995,7 +2996,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             workspace,
             ADD_FINDING_CAPABILITY,
             {
-                "finding_key": "fractional_priority_accepted",
                 "finding_kind": "module_defect",
                 "priority": "p1",
                 "summary": "Fractional priority is accepted.",
@@ -3006,7 +3006,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             workspace,
             ADD_FINDING_CAPABILITY,
             {
-                "finding_key": "priority_shape_underspecified",
                 "finding_kind": "contract_defect",
                 "priority": "p1",
                 "summary": "Priority shape is underspecified.",
@@ -3027,30 +3026,27 @@ class MinionV2VerificationTests(unittest.TestCase):
             workspace,
             ADD_FINDING_CAPABILITY,
             {
-                "finding_key": "fractional_priority_accepted",
+                "finding_kind": "module_defect",
+                "priority": "p1",
+                "summary": "Fractional priority is accepted.",
+            },
+        )
+        self.assertTrue(duplicate.ok, duplicate.text)
+        self.assertTrue(duplicate.structured["deduplicated"])
+        additional = self._verification_call(
+            workspace,
+            ADD_FINDING_CAPABILITY,
+            {
                 "finding_kind": "module_defect",
                 "priority": "p0",
                 "summary": "Fractional priority is accepted and corrupts ordering.",
             },
         )
-        self.assertTrue(duplicate.ok, duplicate.text)
-        self.assertTrue(duplicate.structured["replaced"])
-        removed = self._verification_call(
-            workspace,
-            "op_minion_verification_remove_finding",
-            {
-                "finding_key": "priority_shape_underspecified",
-                "reason": "The finding was classified against the wrong contract layer.",
-            },
-        )
-        self.assertTrue(removed.ok, removed.text)
-        after_removal = self._verification_call(
+        self.assertTrue(additional.ok, additional.text)
+        after_append = self._verification_call(
             workspace, "op_minion_verification_draft_status"
         )
-        self.assertEqual(
-            [item["summary"] for item in after_removal.structured["findings"]],
-            ["Fractional priority is accepted and corrupts ordering."],
-        )
+        self.assertEqual(len(after_append.structured["findings"]), 3)
         removed_case = self._verification_call(
             workspace,
             "op_minion_verification_remove_case",
@@ -3061,9 +3057,12 @@ class MinionV2VerificationTests(unittest.TestCase):
             workspace, "op_minion_verification_draft_status"
         )
         self.assertEqual(final.structured["cases"], [])
-        self.assertEqual(
-            [item["finding_key"] for item in final.structured["findings"]],
-            ["fractional_priority_accepted"],
+        self.assertEqual(len(final.structured["findings"]), 3)
+        self.assertTrue(
+            all(
+                str(item["finding_id"]).startswith("finding_")
+                for item in final.structured["findings"]
+            )
         )
 
     def test_retry_fence_preserves_failed_evidence_and_finding_for_submit(self) -> None:
@@ -3082,7 +3081,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             workspace,
             ADD_FINDING_CAPABILITY,
             {
-                "finding_key": "released_resource_remains_usable",
                 "finding_kind": "module_defect",
                 "priority": "p1",
                 "summary": "Released resource remains usable.",
@@ -3278,7 +3276,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, VerificationStatus.PASS)
 
-    def test_rerun_keeps_finding_until_reviewer_withdraws_it(self) -> None:
+    def test_retry_fence_keeps_append_only_finding_work_items(self) -> None:
         workspace = self._bind_workspace(
             {"repo_path": str(self.runtime_root)},
             role="verifier",
@@ -3289,7 +3287,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             workspace,
             ADD_FINDING_CAPABILITY,
             {
-                "finding_key": "released_resource_remains_usable",
                 "finding_kind": "module_defect",
                 "priority": "p1",
                 "summary": "Released resource remains usable.",
@@ -3317,28 +3314,12 @@ class MinionV2VerificationTests(unittest.TestCase):
             [{"name": "released resource rejects use", "status": "PASS"}],
         )
         self.assertEqual(len(passed_status.structured["findings"]), 1)
-        withdrawn = self._verification_call(
-            retry_workspace,
-            "op_minion_verification_remove_finding",
-            {
-                "finding_key": "released_resource_remains_usable",
-                "reason": "The rerun proves the defect is no longer present.",
-            },
-        )
-        self.assertTrue(withdrawn.ok, withdrawn.text)
 
-    def test_withdrawing_finding_requires_audit_reason(self) -> None:
-        workspace = self._bind_workspace(
-            {"repo_path": str(self.runtime_root)},
-            role="verifier",
-        )
-        result = self._verification_call(
-            workspace,
+    def test_finding_withdrawal_is_not_a_verifier_capability(self) -> None:
+        self.assertNotIn(
             "op_minion_verification_remove_finding",
-            {"finding_key": "missing_finding", "reason": ""},
+            VERIFICATION_BUILDER_TOOL_SPECS,
         )
-        self.assertFalse(result.ok)
-        self.assertIn("audit reason", result.llm_text)
 
     def test_case_order_uses_manager_recording_sequence_not_case_name(self) -> None:
         workspace = self._bind_workspace(
@@ -3380,7 +3361,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             workspace,
             ADD_FINDING_CAPABILITY,
             {
-                "finding_key": "passing_probe_claim",
                 "finding_kind": "module_defect",
                 "priority": "major",
                 "summary": "This must not be accepted.",
@@ -3487,7 +3467,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             workspace,
             ADD_FINDING_CAPABILITY,
             {
-                "finding_key": "reset_semantics_missing",
                 "finding_kind": "contract_defect",
                 "priority": "p1",
                 "summary": "Reset semantics are missing from the product contract.",
@@ -3524,7 +3503,6 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "report_ref": {"sha256": "hidden-report-digest"},
                 "findings": [
                     {
-                        "finding_key": "use_after_release_succeeds",
                         "finding_kind": "contract_defect",
                         "priority": "p0",
                         "summary": "Use after release succeeds.",
@@ -3540,7 +3518,6 @@ class MinionV2VerificationTests(unittest.TestCase):
                 ],
                 "advisories": [
                     {
-                        "finding_key": "resource_id_could_be_strong_type",
                         "finding_kind": "module_defect",
                         "priority": "p2",
                         "disposition": "advisory",
@@ -3559,7 +3536,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             }
         )
         self.assertIn("Use after release succeeds.", markdown)
-        self.assertIn("use_after_release_succeeds", markdown)
         self.assertIn("src/resource.py:42::use", markdown)
         self.assertIn("Optional Advisories", markdown)
         self.assertIn("Use a strong resource identifier type when available.", markdown)
@@ -3570,9 +3546,7 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_coder_defect_report_is_bound_to_module_and_requirement_text(self) -> None:
         report = {
-            "checklist": {
-                "plan": [],
-            },
+            "work_items": [],
             "files_changed": [],
             "status": "architecture_defect",
             "summary": "The frozen contract cannot represent native state.",
@@ -4245,7 +4219,6 @@ class MinionV2VerificationTests(unittest.TestCase):
         targets = infer_repair_target_modules(
             [
                 {
-                    "finding_key": "decoder_developer_corpus_is_broken",
                     "locations": [
                         {
                             "scope": "workspace",
@@ -4263,7 +4236,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             infer_repair_target_modules(
                 [
                     {
-                        "finding_key": "bad_verifier_double",
                         "locations": [
                             {
                                 "scope": "workspace",
@@ -4279,7 +4251,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             infer_repair_target_modules(
                 [
                     {
-                        "finding_key": "bad_verifier_double",
                         "locations": [
                             {
                                 "scope": "workspace",
@@ -4542,7 +4513,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         manifest_ref = self.store.put_json(
             {"requirements_ref": base_requirements_ref.to_dict()},
-            artifact_type="ArchitectureSkeletonArtifact",
+            artifact_type="TestManifestArtifact",
         )
         topology_ref = self.store.put_json({}, artifact_type="SkeletonTopologyArtifact")
         contract_ref = self.store.put_json({}, artifact_type="ArchitectureSkeletonModuleContractArtifact")

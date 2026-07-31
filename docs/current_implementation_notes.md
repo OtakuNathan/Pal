@@ -145,7 +145,13 @@ Current defaults:
 - MCP server request timeout: 300 seconds
 - Pal-to-manager IPC timeout: 300 seconds
 
-## Minion
+## Minion (V1 history)
+
+> The Minion text below is a retained V1 implementation history, not a current
+> contract. The canonical V2 implementation is
+> [minion_v2_contract_orchestration.md](minion_v2_contract_orchestration.md);
+> new code must not infer plan-builder, work-order, or FamilyBinding v2 behavior
+> from this historical section.
 
 Minion is a detachable first-party builtin plugin. The plugin manifest is provisioned under `runtime_root/plugins/_builtin/minion`; plugin-owned runtime configuration lives under `runtime_root/plugins/minion`.
 

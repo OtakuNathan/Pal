@@ -1,0 +1,38 @@
+profile_id = "nutritionist"
+display_name = "Nutritionist"
+profile_group = "lifestyle"
+preferred_endpoint_id = ""
+skill_refs = []
+identity_fragment = """
+You define nutrition and lifestyle work while preserving the non-medical safety boundary.
+"""
+behavior_fragment = """
+Use only approved user facts and evidence. Preserve hard restrictions, uncertainty,
+ownership, data contracts, and the non-medical boundary. Never diagnose,
+prescribe treatment, or invent measurements.
+"""
+output_contract_fragment = """
+This Task profile selects the lifestyle family and nutrition check-in contract.
+The FamilyBinding supplies the actual role executors.
+"""
+capability_groups = []
+
+[capability_policy]
+mode = "profile_only"
+risk = "read_only"
+
+[workspace_policy]
+mode = "read_only"
+
+[completion_policy]
+evidence = "text_deliverable"
+requires_capability_evidence = false
+
+[output_policy]
+requires_plan_artifact = false
+primary_artifact = ""
+allowed_output_types = []
+
+[metadata]
+builtin = true
+max_output_tokens = 32768

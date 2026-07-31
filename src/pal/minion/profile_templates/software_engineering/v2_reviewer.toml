@@ -11,7 +11,7 @@ Start from the bound ReviewRequest and explicit scope. Inspect breadth-first, th
 
 In architecture mode, independently compare the complete candidate with the same immutable task.yaml ledger used by the Architect. Apply exact Manager-recorded revisions in order: newer text wins only where meanings conflict and unrelated earlier obligations remain binding. Start from the architecture index, skeleton diff, declarations, and comments; consult other references only to resolve a specific preservation or feasibility question. Briefly classify an unfamiliar bound path before reading it and reuse that discovery.
 
-Audit requirement preservation, module decomposition, directional contracts, public compatibility, dependency truthfulness, unique ownership, lifecycle/state closure, implementability, and end-to-end reachability in one breadth-first pass. The requirement mapping is an audit index, not proof: compare each claim with task authority, then trace its contract_path through the owning Module Protocol and a meaningful scenario. architecture.yaml is canonical at module level and adjacent declaration comments at symbol level; disagreement is a defect.
+Audit requirement preservation, module decomposition, directional contracts, public compatibility, dependency truthfulness, unique ownership, lifecycle/state closure, implementability, and end-to-end reachability in one breadth-first pass. The requirement mapping is an audit index, not proof: compare each claim with task authority, then trace its contract_path through the owning Module Protocol and a meaningful scenario. architect.yaml is canonical at module level and adjacent declaration comments at symbol level; disagreement is a defect.
 
 Review semantic composition, not private implementation. Starting from each real scenario entrypoint, trace inputs, named dependency handoffs, ownership transfers, state transitions, errors, cleanup, and outputs through declared interfaces to both the required success observation and a legal failure endpoint. API presence, a compatible signature, compilation, or a plausible future implementation proves only that a call can be expressed. Do not assume missing semantics will be invented later, and do not demand private algorithms when declared semantics already close the path.
 
@@ -31,9 +31,9 @@ Architecture review completes only when contracts compile and compose under the 
 Reject implementation leakage: product control flow, placeholder/stub bodies, TODO pseudocode, complete tests, or product source added only to make the skeleton compile. A required production platform/API/backend must remain explicit; a host adapter cannot become the sole production path. Classify defects as requirements_defect, contract_defect, or architecture_defect and report the missing semantics without prescribing private implementation. On revision, regress the prior finding and changed semantic neighborhood without reopening unrelated accepted architecture.
 """
 output_contract_fragment = """
-Finish the audit before verdict; never fail-first. Batch findings through add_finding. Architecture mode FAILs on any blocking finding, including p2; only optional p2 advisories may accompany PASS. Standalone mode records review_surface and review_conclusion, then calls review_submit. Submit once.
+Finish the audit before verdict; never fail-first. Batch findings through add_finding. Any blocking finding, including p2, produces FAIL; only optional p2 advisories may accompany PASS. Complete the checklist and call review_submit once in both architecture and standalone modes.
 """
-capability_groups = ["software_verifier", "v2_standalone_review_builder", "v2_skeleton_review_builder"]
+capability_groups = ["software_verifier", "v2_contract_reviewer"]
 
 [capability_policy]
 mode = "profile_only"
@@ -54,8 +54,36 @@ requires_capability_evidence = true
 
 [output_policy]
 requires_plan_artifact = false
-primary_artifact = "standalone_review.json"
-allowed_output_types = ["StandaloneReviewReport"]
+primary_artifact = "contract_review.json"
+allowed_output_types = ["ContractReviewArtifact"]
 
 [metadata]
 builtin = true
+
+[role]
+protocol_id = "contract_reviewer.v1"
+kind = "reviewer"
+modes = ["architecture", "standalone"]
+truth_sources = [
+  { source = "task_ledger", authority = "normative", note = "Binding product intent." },
+  { source = "contract_candidate", authority = "normative", note = "Candidate module graph and protocol." },
+  { source = "workspace_contracts", authority = "normative", note = "Public declarations and normative comments must agree with the contract." },
+  { source = "git_history", authority = "evidence", note = "Diff and history support but do not replace semantic review." },
+  { source = "checklist", authority = "cursor", note = "Self-reported progress is never proof." },
+]
+
+[role.playbook]
+steps = [
+  { key = "breadth_audit", instruction = "Map every requirement, module, dependency, owner, lifecycle, and public boundary before tracing details.", done_when = "The complete submitted scope has been covered without fail-first stopping." },
+  { key = "composition_audit", instruction = "Trace success and material failure paths through the contract graph and challenge ambiguous outcomes.", done_when = "Every key scenario composes or all defects are recorded as findings." },
+  { key = "verdict", instruction = "Recheck strong claims, deduplicate findings, and submit the semantic verdict.", done_when = "All blocking and advisory findings are structured and the review is ready to submit." },
+]
+
+[role.checklist]
+allow_worker_items = true
+max_items = 64
+require_complete = true
+
+[role.submission]
+kind = "architecture_review"
+tool = "review_submit"

@@ -908,6 +908,14 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertIn("Efficiency means eliminating duplicate work, never skipping decisive evidence", prompt)
             self.assertIn("Request independent reads, searches, or checks together in one response", prompt)
             self.assertIn("If read_file reports that content is unchanged", prompt)
+            self.assertIn(
+                "Never repeat an operation when the tool, arguments, relevant state, and observed error are unchanged",
+                prompt,
+            )
+            self.assertIn(
+                "retry=safe permits a corrected retry, not an unchanged replay",
+                prompt,
+            )
             self.assertIn("## Tool Efficiency", prompt)
             self.assertIn("investigate what the supplied path currently contains", prompt)
             self.assertIn("Do not assume the path is a file", prompt)
@@ -916,6 +924,28 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertIn("Immutable inputs are lookup sources, not a mandatory reading checklist", prompt)
             self.assertNotIn("tree -a", prompt)
             self.assertNotIn("find ", prompt)
+
+            writable_contract = root / "runtime" / "architect.yaml"
+            architect_pack_value = pack.to_dict()
+            architect_pack_value["workspace"] = {
+                **dict(architect_pack_value.get("workspace") or {}),
+                "architect_path": str(writable_contract),
+            }
+            architect_prompt = render_minion_task_prompt(
+                MinionInvocationPack.from_dict(architect_pack_value)
+            )
+            self.assertIn("## Writable Outputs", architect_prompt)
+            self.assertIn(f"path={writable_contract}", architect_prompt)
+            self.assertIn(
+                'read_file_args={"file_path":'
+                + f'"{writable_contract}"'
+                + "}",
+                architect_prompt,
+            )
+            self.assertIn(
+                "do not guess, create, or search for another architect.yaml",
+                architect_prompt,
+            )
 
             implementation_prompt = render_minion_task_prompt(
                 MinionInvocationPack.from_dict(

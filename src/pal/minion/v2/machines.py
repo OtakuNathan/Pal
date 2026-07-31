@@ -1032,7 +1032,6 @@ def _execution_transitions() -> list[TransitionSpec]:
         _spec(kind, S.NOT_STARTED, "START_EXECUTION", S.STARTING),
         _spec(kind, S.STARTING, "NODES_COMPILED", S.RUNNING, guard=_required("node_ids"), effects=_effect("schedule_ready_nodes")),
         _spec(kind, S.RUNNING, "SCHEDULE_TICK", S.RUNNING, effects=_effect("schedule_ready_nodes")),
-        _spec(kind, S.RUNNING, "ALL_UNIT_NODES_ACCEPTED", S.RUNNING, effects=_effect("queue_integration_node")),
         _spec(kind, S.RUNNING, "INTEGRATION_ACCEPTED", S.FINALIZING, guard=_required("integration_candidate_ref"), effects=_effect("publish_final_deliverable")),
         _spec(
             kind,
@@ -1243,7 +1242,7 @@ def _node_transitions() -> list[TransitionSpec]:
         _spec(
             kind,
             S.BLOCKED_BY_DEPS,
-            "LEGACY_INTEGRATION_DEPENDENCIES_ACCEPTED",
+            "INTEGRATION_DEPENDENCIES_ACCEPTED",
             S.QUEUED,
             guard=_all(_node_kind("integration"), _ready_dependencies),
             effects=_effect("admit_implementation_role", role_mode="produce"),
@@ -1255,6 +1254,23 @@ def _node_transitions() -> list[TransitionSpec]:
             S.VERIFY_PREPARING,
             guard=_all(_node_kind("system_verification"), _ready_dependencies),
             effects=_effect("prepare_system_verification"),
+        ),
+        _spec(
+            kind,
+            S.QUEUED,
+            "ACCEPT_NULL_EXECUTION",
+            S.ACCEPTED,
+            guard=_all(
+                _node_kind_in("unit", "integration"),
+                _required(
+                    "candidate_ref",
+                    "candidate_digest",
+                    "verification_artifact_ref",
+                    "module_revision_fingerprint",
+                ),
+            ),
+            effects=_effect("notify_node_accepted"),
+            reducer=_merge_payload,
         ),
         _spec(
             kind,
@@ -1377,7 +1393,7 @@ def _node_transitions() -> list[TransitionSpec]:
         _spec(
             kind,
             S.STALE,
-            "REQUEUE_LEGACY_INTEGRATION_STALE",
+            "REQUEUE_INTEGRATION_STALE",
             S.QUEUED,
             guard=_all(
                 _node_kind("integration"),

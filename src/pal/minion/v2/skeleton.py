@@ -23,7 +23,7 @@ from pal.minion.v2.module_protocol import ModuleDefinition
 from pal.minion.v2.task_ledger import validate_task_ledger
 
 
-ARCHITECTURE_SKELETON_ARTIFACT = "ArchitectureSkeletonArtifact"
+SOFTWARE_CONTRACT_SNAPSHOT_ARTIFACT = "SoftwareContractSnapshotArtifact"
 ARCHITECTURE_SKELETON_BUNDLE_ARTIFACT = "ArchitectureSkeletonGitBundleArtifact"
 ARCHITECTURE_SUBMISSION_ARTIFACT = "ArchitectureSkeletonSubmissionArtifact"
 ARCHITECTURE_VALIDATION_REPORT_ARTIFACT = "ArchitectureValidationReportArtifact"
@@ -1176,7 +1176,7 @@ class GitBackedSkeletonService:
             children.append((evidence_catalog_ref.sha256, "evidence_catalog"))
         return self.artifacts.put_json(
             payload,
-            artifact_type=ARCHITECTURE_SKELETON_ARTIFACT,
+            artifact_type=SOFTWARE_CONTRACT_SNAPSHOT_ARTIFACT,
             provenance={"workflow_name": workflow_name, "revision_name": revision_name},
             child_refs=tuple(children),
         )

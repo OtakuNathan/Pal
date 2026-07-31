@@ -36,4 +36,19 @@ def sanitize_runner_session_pack(pack: MinionInvocationPack) -> MinionInvocation
         for key, value in dict(pack.metadata or {}).items()
         if key in _V2_RUNNER_METADATA_KEYS
     }
+    minion_v2 = metadata.get("minion_v2")
+    if isinstance(minion_v2, dict):
+        # Architecture compilation is a Manager concern. The role receives the
+        # rendered authoring file, never the pinned Draft 2020-12 schema or its
+        # compiler inputs.
+        metadata["minion_v2"] = {
+            key: value
+            for key, value in minion_v2.items()
+            if key not in {
+                "architecture_definition",
+                "architecture_schema",
+                "contract_schema",
+                "architect_template",
+            }
+        }
     return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})

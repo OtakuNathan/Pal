@@ -34,6 +34,35 @@ requires_capability_evidence = true
 primary_artifact = "verification_submission.json"
 allowed_output_types = ["SemanticVerificationSubmissionArtifact"]
 
+[role]
+protocol_id = "module_verification.v1"
+kind = "verifier"
+modes = ["module", "system"]
+truth_sources = [
+  { source = "workspace_contracts", authority = "normative", note = "The verified module's owned code, public contract, and comments." },
+  { source = "module_work_view", authority = "derived", note = "Manager-compiled local scope and dependency contracts." },
+  { source = "git_diff_log", authority = "evidence", note = "The sole source for candidate code changes." },
+  { source = "work_items", authority = "cursor", note = "Historical findings and current verification checklist." },
+  { source = "task.yaml", authority = "fallback", note = "Use only when local contract views cannot resolve required product semantics." },
+]
+
+[role.playbook]
+steps = [
+  { key = "regress", instruction = "Run historical verifier cases and every bound finding regression first.", done_when = "Existing obligations have a reproducible result." },
+  { key = "changed_boundary", instruction = "Inspect the candidate diff and test the changed public boundary, assuming dependencies satisfy their contracts.", done_when = "Changed behavior and failure paths are covered." },
+  { key = "smash_green", instruction = "When checks are green, actively try to falsify ownership, lifecycle, invariants, errors, and performance-sensitive paths.", done_when = "One breadth-first adversarial pass finds no unrecorded defect." },
+  { key = "verdict", instruction = "Record all independent defects, complete the checklist, and submit one verdict.", done_when = "PASS has no blocking finding; otherwise every reproduced defect is recorded." },
+]
+
+[role.checklist]
+allow_worker_items = true
+max_items = 64
+require_complete = true
+
+[role.submission]
+kind = "verification"
+tool = "verification_submit"
+
 [metadata]
 builtin = true
 max_output_tokens = 32768

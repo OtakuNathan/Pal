@@ -77,6 +77,32 @@ if TYPE_CHECKING:
     from pal.core.module_registry import ModuleHandle
 
 
+def _merge_explicit_model_fields(
+    defaults: dict[str, Any],
+    explicit: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(defaults)
+    for key, value in explicit.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_explicit_model_fields(
+                dict(merged[key]),
+                value,
+            )
+        else:
+            merged[key] = value
+    return merged
+
+
+def _invocation_args(
+    validated: BaseModel | dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(validated, BaseModel):
+        return dict(validated)
+    defaults = validated.model_dump(mode="python", exclude_none=True)
+    explicit = validated.model_dump(mode="python", exclude_unset=True)
+    return _merge_explicit_model_fields(defaults, explicit)
+
+
 @dataclass
 class ExecutionRuntime(ExecutionRuntimePort):
     provider_registry: dict[str, Any] = field(default_factory=dict)
@@ -1016,7 +1042,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None,
         allow_tools: bool,
     ) -> Any:
-        args = validated.model_dump(mode="python", exclude_none=True) if isinstance(validated, BaseModel) else dict(validated)
+        args = _invocation_args(validated)
         result = record.binding.callable(
             CapabilityCall(
                 name=record.canonical_path,
@@ -1037,7 +1063,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None,
         allow_tools: bool,
     ) -> Any:
-        args = validated.model_dump(mode="python", exclude_none=True) if isinstance(validated, BaseModel) else dict(validated)
+        args = _invocation_args(validated)
         capability_call = CapabilityCall(
             name=record.canonical_path,
             args=args,

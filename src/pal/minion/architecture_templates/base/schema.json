@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pal://minion/architectures/base",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "context", "requirements", "modules", "scenarios"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "context": {"$ref": "#/$defs/context"},
+    "requirements": {"$ref": "#/$defs/requirements"},
+    "modules": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {"$ref": "#/$defs/module"}
+    },
+    "scenarios": {"$ref": "#/$defs/scenarios"}
+  },
+  "$defs": {
+    "context": {},
+    "moduleDefinition": {},
+    "stringList": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["consumes", "purpose", "handoff"],
+      "properties": {
+        "consumes": {"$ref": "#/$defs/stringList", "minItems": 1},
+        "purpose": {"type": "string", "minLength": 1},
+        "handoff": {"type": "string", "minLength": 1}
+      }
+    },
+    "requirements": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "owner", "contract_path"],
+        "properties": {
+          "claim": {"type": "string", "minLength": 1},
+          "owner": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+          "contract_path": {"$ref": "#/$defs/stringList", "minItems": 1}
+        }
+      }
+    },
+    "module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["responsibility", "execution", "provides", "dependencies", "definition"],
+      "properties": {
+        "responsibility": {"type": "string", "minLength": 1},
+        "execution": {"enum": ["produce", "contract_only"]},
+        "provides": {"$ref": "#/$defs/stringList"},
+        "dependencies": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+          "additionalProperties": {"$ref": "#/$defs/dependency"}
+        },
+        "definition": {"$ref": "#/$defs/moduleDefinition"}
+      }
+    },
+    "scenarios": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "modules",
+          "requirement_refs",
+          "entrypoint",
+          "contract_flow",
+          "observable_behavior",
+          "failure_behavior",
+          "environment"
+        ],
+        "properties": {
+          "modules": {"$ref": "#/$defs/stringList", "minItems": 1},
+          "requirement_refs": {"$ref": "#/$defs/stringList", "minItems": 1},
+          "entrypoint": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["module", "surface"],
+            "properties": {
+              "module": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+              "surface": {"type": "string", "minLength": 1}
+            }
+          },
+          "contract_flow": {"$ref": "#/$defs/stringList", "minItems": 1},
+          "observable_behavior": {"type": "string", "minLength": 1},
+          "failure_behavior": {"type": "string", "minLength": 1},
+          "environment": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

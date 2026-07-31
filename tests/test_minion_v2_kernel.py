@@ -810,6 +810,55 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ControlDisposition.REQUEST,
         )
 
+    def test_null_executor_accepts_a_ready_node_without_worker_states(self) -> None:
+        created = self.engine.transition(
+            None,
+            self.action(
+                "CREATE_NODE_RUN",
+                AggregateType.DAG_NODE_RUN,
+                "node_null",
+                expected_version=0,
+                payload={
+                    "unit_contract_ref": {"sha256": "contract"},
+                    "epoch_id": "epoch_null",
+                    "node_kind": "unit",
+                    "dependency_node_ids": [],
+                    "accepted_dependency_node_ids": [],
+                },
+            ),
+        ).snapshot
+        queued = self.engine.transition(
+            created,
+            self.action(
+                "DEPENDENCIES_ACCEPTED",
+                AggregateType.DAG_NODE_RUN,
+                "node_null",
+                expected_version=1,
+            ),
+        ).snapshot
+        accepted = self.engine.transition(
+            queued,
+            self.action(
+                "ACCEPT_NULL_EXECUTION",
+                AggregateType.DAG_NODE_RUN,
+                "node_null",
+                expected_version=2,
+                payload={
+                    "candidate_ref": {"sha256": "candidate"},
+                    "candidate_digest": "candidate",
+                    "verification_artifact_ref": {"sha256": "verification"},
+                    "module_revision_fingerprint": "fingerprint",
+                    "null_execution": True,
+                },
+            ),
+        )
+        self.assertEqual(accepted.snapshot.state, DagNodeRunState.ACCEPTED)
+        self.assertTrue(accepted.snapshot.payload["null_execution"])
+        self.assertEqual(
+            [effect.effect_type for effect in accepted.effects],
+            ["notify_node_accepted"],
+        )
+
     def test_generated_transition_topology_is_current(self) -> None:
         generated = Path("spec/minion_v2/ImplementationTopology.tla").read_text(
             encoding="utf-8"
@@ -1987,7 +2036,7 @@ class MinionV2PersistenceTests(unittest.TestCase):
                 required_inputs=(),
                 input_refs={},
                 execution_spec={"effect_type": "admit_architect_role"},
-                submission_kind="architecture",
+                submission_kind="contract",
             )
         )
         with sqlite3.connect(str(self.repository.db_path)) as connection:
@@ -2246,14 +2295,14 @@ class MinionV2PersistenceTests(unittest.TestCase):
         )
         manifest = self.artifacts.put_json(
             {"requirements_ref": requirements.to_dict()},
-            artifact_type="ArchitectureContractArtifact",
+            artifact_type="TestManifestArtifact",
             child_refs=((requirements.sha256, "requirements"),),
         )
         self.assertTrue(self.repository.artifact_is_durable(manifest.sha256))
         with self.assertRaises(ValueError):
             self.artifacts.put_json(
                 {"requirements_ref": "sha256:" + "1" * 64},
-                artifact_type="ArchitectureContractArtifact",
+                artifact_type="TestManifestArtifact",
                 child_refs=(("1" * 64, "requirements"),),
             )
 

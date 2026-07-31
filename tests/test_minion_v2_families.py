@@ -21,18 +21,25 @@ from pal.execution.tool_facade import EmptyToolInput, ProviderPayloadOutput, Too
 from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.adapters import prepare_v2_role_workspace, prepare_v2_workspace_environment
-from pal.minion.v2.architecture import ArchitectureArtifactService
+from pal.minion.v2.contract_runtime import ContractArtifactAccess
 from pal.minion.v2.catalog import MinionV2Catalog
 from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.execution import ExecutionCompiler
+from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.repository import MinionV2Repository
-from pal.minion.v2.role_contracts import OrchestrationRole, RoleActivation, RoleMode
+from pal.minion.v2.role_contracts import (
+    OrchestrationRole,
+    RoleActivation,
+    RoleMode,
+    validate_family_binding_payload,
+)
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.semantic_orchestration import (
     apply_v2_research_capability_policy,
     apply_v2_role_capability_policy,
 )
 from pal.minion.v2.semantic_orchestration.orchestrator import (
+    SemanticOrchestrator,
     _role_mode_profile_payload,
 )
 from pal.shared import MinionInvocationPack, RuntimeStatus
@@ -63,25 +70,85 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
     def test_lifestyle_binding_resolves_all_roles_and_artifact_adapters(self) -> None:
         ref = MinionV2Catalog(self.root, self.store).publish_family_binding(
-            "lifestyle.nutrition_checkin_producer"
+            "lifestyle.nutritionist"
         )
         binding = self.store.read_json(ref)
-        self.assertEqual(binding["schema_version"], "3")
+        self.assertEqual(binding["schema_version"], "5")
         self.assertEqual(binding["workflow_template"], "contract_dag.v2")
         self.assertEqual(
             set(binding["role_bindings"]),
             {"architect", "reviewer", "implementation", "verifier"},
         )
-        self.assertEqual(set(binding["adapters"].values()), {"artifact_bundle.v2"})
+        self.assertEqual(binding["execution_adapter"], "artifact_bundle.v2")
         self.assertEqual(
-            {
-                item["executor_profile"]["canonical_profile_id"]
-                for item in binding["role_bindings"].values()
-            },
-            {"lifestyle.nutrition_checkin_producer"},
+            binding["role_bindings"]["architect"]["executor_profile"][
+                "canonical_profile_id"
+            ],
+            "lifestyle.architect",
+        )
+        self.assertEqual(
+            binding["role_bindings"]["reviewer"]["executor_profile"][
+                "canonical_profile_id"
+            ],
+            "lifestyle.reviewer",
+        )
+        self.assertEqual(
+            binding["role_bindings"]["implementation"]["executor"],
+            "null",
+        )
+        self.assertEqual(
+            binding["role_bindings"]["verifier"]["executor"],
+            "null",
         )
         self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
         self.assertEqual(binding["policies"]["llm"]["llm_round_timeout_seconds"], 3000)
+        architecture = dict(binding["architecture_definition"])
+        self.assertEqual(
+            architecture["specialization_id"],
+            "lifestyle.nutrition_checkin.v1",
+        )
+        self.assertEqual(architecture["family_id"], "lifestyle")
+        self.assertEqual(len(architecture["generation_hash"]), 64)
+        schema = self.store.read_json(architecture["schema_ref"])
+        template = dict(
+            self.store.read_json(architecture["template_ref"])
+        )
+        self.assertEqual(
+            schema["x-pal-specialization-id"],
+            architecture["specialization_id"],
+        )
+        self.assertEqual(
+            template["generation_hash"],
+            architecture["generation_hash"],
+        )
+        self.assertNotIn(
+            "contract",
+            binding["role_bindings"]["architect"]["executor_profile"],
+        )
+
+    def test_family_binding_rejects_legacy_implicit_profile_executor(self) -> None:
+        ref = MinionV2Catalog(self.root, self.store).publish_family_binding(
+            "lifestyle.nutritionist"
+        )
+        binding = dict(self.store.read_json(ref))
+        binding["schema_version"] = "3"
+        binding["role_bindings"]["architect"].pop("executor")
+        with self.assertRaisesRegex(
+            ValueError,
+            "schema_version 5",
+        ):
+            validate_family_binding_payload(binding)
+
+    def test_family_binding_requires_an_execution_adapter_strategy(
+        self,
+    ) -> None:
+        ref = MinionV2Catalog(self.root, self.store).publish_family_binding(
+            "generic"
+        )
+        binding = dict(self.store.read_json(ref))
+        binding.pop("execution_adapter")
+        with self.assertRaisesRegex(ValueError, "execution_adapter is required"):
+            validate_family_binding_payload(binding)
 
     def test_general_family_is_a_complete_data_driven_contract_dag(self) -> None:
         ref = MinionV2Catalog(self.root, self.store).publish_family_binding("generic")
@@ -91,7 +158,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             set(binding["role_bindings"]),
             {"architect", "reviewer", "implementation", "verifier"},
         )
-        self.assertEqual(set(binding["adapters"].values()), {"artifact_bundle.v2"})
+        self.assertEqual(binding["execution_adapter"], "artifact_bundle.v2")
         self.assertEqual(binding["primary_profile"]["canonical_profile_id"], "generic")
 
     def test_family_binding_pins_profile_definition_across_catalog_refresh(self) -> None:
@@ -172,31 +239,26 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             "software_engineering.v2_coder",
         )
 
-    def test_architect_cannot_bypass_builder_but_producer_can_write_workspace(self) -> None:
+    def test_architect_authors_contract_and_task_profile_is_not_an_executor(self) -> None:
         planner = apply_v2_role_capability_policy(
             self._pack("lifestyle.architect"),
             activation=RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
         )
         self.assertIn("op_minion_contract_submit", planner.allowed_capabilities)
-        self.assertNotIn("op_file_write", planner.allowed_capabilities)
+        self.assertIn("op_file_write", planner.allowed_capabilities)
+        self.assertIn("op_file_edit", planner.allowed_capabilities)
         self.assertNotIn("op_minion_artifact_write", planner.allowed_capabilities)
 
-        producer = apply_v2_role_capability_policy(
-            self._pack("lifestyle.nutrition_checkin_producer"),
+        task_profile = apply_v2_role_capability_policy(
+            self._pack("lifestyle.nutritionist"),
             activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
         )
-        self.assertIn("op_file_write", producer.allowed_capabilities)
-        self.assertIn("op_minion_artifact_write", producer.allowed_capabilities)
-        self.assertIn("op_minion_candidate_update_checklist", producer.allowed_capabilities)
-        self.assertIn("op_minion_candidate_submit", producer.allowed_capabilities)
-        for capability in (
-            "op_minion_developer_test",
-            "op_minion_developer_compile_check",
-            "op_minion_developer_lsp_check",
-            "op_minion_developer_check_unavailable",
-        ):
-            self.assertNotIn(capability, producer.allowed_capabilities)
-        self.assertNotIn("op_web_search", producer.allowed_capabilities)
+        self.assertNotIn("op_file_write", task_profile.allowed_capabilities)
+        self.assertNotIn("op_file_edit", task_profile.allowed_capabilities)
+        self.assertNotIn(
+            "op_minion_artifact_write",
+            task_profile.allowed_capabilities,
+        )
 
     def test_task_creation_requires_primary_profile_and_ignores_no_family_shortcut(self) -> None:
         service = MinionV2WorkflowService(self.root)
@@ -251,7 +313,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         self.assertTrue(product.ok, product.text)
 
-    def test_verifier_can_only_submit_through_the_schema_bound_builder(self) -> None:
+    def test_verifier_can_only_submit_through_the_schema_bound_protocol(self) -> None:
         software = apply_v2_role_capability_policy(
             self._pack("software_engineering.v2_verifier"),
             activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
@@ -285,7 +347,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             system.allowed_capabilities,
         )
 
-        for profile in ("general.verifier", "lifestyle.verifier"):
+        for profile in ("general.verifier",):
             with self.subTest(profile=profile):
                 verifier = apply_v2_role_capability_policy(
                     self._pack(profile),
@@ -309,14 +371,14 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             self._pack("software_engineering.v2_reviewer"),
             activation=RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE),
         )
-        self.assertIn("op_minion_standalone_review_submit", standalone.allowed_capabilities)
+        self.assertIn("op_minion_review_submit", standalone.allowed_capabilities)
         self.assertIn("op_exec_shell", standalone.allowed_capabilities)
         self.assertNotIn("op_minion_artifact_write", standalone.allowed_capabilities)
         self.assertNotIn("op_minion_verification_submit", standalone.allowed_capabilities)
 
         for profile in (
             "general.generic",
-            "lifestyle.nutrition_checkin_producer",
+            "lifestyle.nutritionist",
         ):
             for activation in (
                 RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
@@ -363,20 +425,20 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             (
                 "general.generic",
                 RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.AUTHOR),
-                "architecture_bundle.json",
-                ["ArchitecturePlanningStageOutput"],
+                "architect.yaml",
+                ["ContractArtifact"],
             ),
             (
-                "lifestyle.nutrition_checkin_producer",
+                "lifestyle.nutritionist",
                 RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
-                "architecture_review.json",
-                ["ArchitectureReviewStageOutput"],
+                "contract_review.json",
+                ["ContractReviewArtifact"],
             ),
             (
                 "general.generic",
                 RoleActivation(OrchestrationRole.REVIEWER, RoleMode.STANDALONE),
-                "standalone_review.json",
-                ["StandaloneReviewReport"],
+                "contract_review.json",
+                ["ContractReviewArtifact"],
             ),
             (
                 "general.generic",
@@ -385,7 +447,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 ["SemanticVerificationSubmissionArtifact"],
             ),
             (
-                "lifestyle.nutrition_checkin_producer",
+                "lifestyle.nutritionist",
                 RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR),
                 "producer_report.json",
                 ["UnitProducerReport", "UnitSplitRequest"],
@@ -393,14 +455,14 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             (
                 "software_engineering.v2_architect",
                 RoleActivation(OrchestrationRole.ARCHITECT, RoleMode.REVISION),
-                "architecture_submission.json",
-                ["ArchitectureSkeletonSubmission"],
+                "architect.yaml",
+                ["ContractArtifact"],
             ),
             (
                 "software_engineering.v2_reviewer",
                 RoleActivation(OrchestrationRole.REVIEWER, RoleMode.ARCHITECTURE),
-                "architecture_review.json",
-                ["ArchitectureReviewStageOutput"],
+                "contract_review.json",
+                ["ContractReviewArtifact"],
             ),
             (
                 "software_engineering.v2_coder",
@@ -522,7 +584,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("op_web_search", external.allowed_capabilities)
         self.assertIn("op_web_read", external.allowed_capabilities)
 
-    def test_architect_roles_receive_only_contract_builder(self) -> None:
+    def test_architect_roles_receive_contract_file_authoring_surface(self) -> None:
         for profile in ("general.architect", "lifestyle.architect"):
             with self.subTest(profile=profile):
                 requirements = self._pack(profile)
@@ -532,12 +594,12 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 self.assertNotIn("op_minion_input_read", requirements.allowed_capabilities)
                 self.assertNotIn("op_minion_evidence_submit", requirements.allowed_capabilities)
                 self.assertIn("op_minion_contract_submit", requirements.allowed_capabilities)
-                self.assertNotIn("op_file_write", requirements.allowed_capabilities)
-                self.assertEqual(requirements.workspace.get("workspace_policy", {}).get("mode"), "read_only_repo")
+                self.assertIn("op_file_write", requirements.allowed_capabilities)
+                self.assertIn("op_file_edit", requirements.allowed_capabilities)
+                self.assertEqual(requirements.workspace.get("workspace_policy", {}).get("mode"), "writable_workspace")
 
         software = self._pack("software_engineering.v2_architect")
-        self.assertIn("op_minion_architecture_submit", software.allowed_capabilities)
-        self.assertNotIn("op_minion_contract_submit", software.allowed_capabilities)
+        self.assertIn("op_minion_contract_submit", software.allowed_capabilities)
         self.assertNotIn("op_minion_artifact_edit", software.allowed_capabilities)
         self.assertNotIn("op_minion_task_revision_submit", software.allowed_capabilities)
         self.assertIn("op_file_write", software.allowed_capabilities)
@@ -921,10 +983,14 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
     def test_worker_authoring_tools_never_expose_manager_identity_fields(self) -> None:
         from pal.minion.v2.candidate_builder import CANDIDATE_BUILDER_TOOL_SPECS
-        from pal.minion.v2.contract_builder import CONTRACT_BUILDER_TOOL_SPECS
-        from pal.minion.v2.skeleton_builder import SKELETON_BUILDER_TOOL_SPECS
+        from pal.minion.v2.contract_submission import CONTRACT_SUBMIT_TOOL_SPEC
+        from pal.minion.v2.review_submission import REVIEW_SUBMIT_TOOL_SPEC
         from pal.minion.v2.swe_verification import SWE_VERIFICATION_TOOL_SPECS
         from pal.minion.v2.verification_builder import VERIFICATION_BUILDER_TOOL_SPECS
+        from pal.minion.v2.work_items import (
+            ADD_FINDING_TOOL_SPEC,
+            UPDATE_CHECKLIST_TOOL_SPEC,
+        )
 
         forbidden_exact = {
             "handle",
@@ -946,8 +1012,12 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         tool_groups = (
             CANDIDATE_BUILDER_TOOL_SPECS,
-            CONTRACT_BUILDER_TOOL_SPECS,
-            SKELETON_BUILDER_TOOL_SPECS,
+            {"op_minion_contract_submit": CONTRACT_SUBMIT_TOOL_SPEC},
+            {"op_minion_review_submit": REVIEW_SUBMIT_TOOL_SPEC},
+            {
+                "op_minion_update_checklist": UPDATE_CHECKLIST_TOOL_SPEC,
+                "op_minion_add_finding": ADD_FINDING_TOOL_SPEC,
+            },
             SWE_VERIFICATION_TOOL_SPECS,
             VERIFICATION_BUILDER_TOOL_SPECS,
         )
@@ -961,19 +1031,18 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                         self.assertFalse(lowered.endswith("_ref"), name)
                         self.assertFalse(lowered.endswith("_sha"), name)
 
-    def test_scoped_architecture_provider_exposes_only_yaml_submit_contract(self) -> None:
+    def test_scoped_contract_provider_exposes_contract_submit(self) -> None:
         scoped = MinionScopedExecutionRuntime(
             ExecutionRuntime(),
-            ["op_minion_architecture_submit"],
+            ["op_minion_contract_submit"],
             workspace={},
         )
 
         provider = scoped.build_llm_tool_contracts()[0]["function"]
 
-        self.assertEqual(provider["name"], "architecture_submit")
+        self.assertEqual(provider["name"], "contract_submit")
         self.assertEqual(provider["input_schema"]["properties"], {})
-        self.assertIn("architecture.yaml", provider["description"])
-        self.assertIn("dynamic snake_case maps", provider["description"])
+        self.assertIn("architect.yaml", provider["description"])
 
     def test_product_requirements_do_not_absorb_family_workflow_policy(self) -> None:
         service = MinionV2WorkflowService(self.root)
@@ -1043,10 +1112,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Mechanically verify examples", architect)
         self.assertIn("call ask_question and wait", architect)
         self.assertIn("Design the smallest complete system at module level", architect)
-        self.assertIn("Do not read architecture.yaml during discovery", architect)
+        self.assertIn("architect.yaml is the final submission projection", architect)
         self.assertIn("Once the design is settled", architect)
-        self.assertIn("immediately begin file-edit tool calls", architect)
-        self.assertIn("do not spend another response restating", architect)
+        self.assertIn("Immediately begin file-edit calls", architect)
+        self.assertIn("instead of restating, rehearsing, simulating", architect)
         self.assertIn("every state, worker, object, and resource has exactly one owner", architect)
         self.assertIn("lifecycle transitions and composition joins close", architect)
         self.assertIn("private implementation is explicitly deferred", architect)
@@ -1267,7 +1336,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 "task_id": "nutrition-task",
                 "title": "Weekly nutrition check-in",
                 "objective": "Produce a non-medical structured check-in",
-                "profile": "lifestyle.nutrition_checkin_producer",
+                "profile": "lifestyle.nutritionist",
                 "workspace": {"kind": "artifact_project", "project_name": "nutrition"},
             }
         )
@@ -1288,51 +1357,80 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 "requirements_ref": prepared["requirements_ref"],
             }
         )
-        architecture = ArchitectureArtifactService(self.store, self.repository)
-        unit = architecture.publish_unit_contract(
-            {
-                "unit_id": "checkin",
-                "unit_behavior_kind": "stateless",
-                "responsibility": "Produce the structured check-in artifact.",
-                "owned_area": ["artifact:checkin"],
-                "reference_only_paths": [],
-                "provided_interfaces": [{"name": "structured_checkin"}],
-                "consumed_interfaces": [],
-                "ownership": {"rule": "checkin exclusively owns the emitted artifact."},
-                "lifecycle": "n/a",
-                "state_model": "stateless",
-                "invariants": ["No undeclared health facts are introduced."],
-                "error_behavior": ["Invalid source observations fail deterministically."],
-                "compatibility": ["The declared check-in schema remains stable."],
-                "dependency_constraints": [],
-                "verification_obligations": ["Validate JSON and source coverage."],
-                "complexity_budget": {
-                    "target_file_count": 1,
-                    "estimated_context_tokens": 1000,
-                    "public_interface_count": 1,
-                    "cross_unit_contract_count": 0,
-                    "stateful_resource_count": 0,
-                    "expected_candidate_cycles": 1,
-                    "platform_dependency_level": 0,
-                },
-                "split_conditions": [],
-            }
+        contracts = ContractArtifactAccess(
+            self.store, self.repository
         )
-        fragment = lambda value, kind: architecture.publish_fragment(value, artifact_type=kind)
-        manifest = architecture.publish_manifest(
+        manifest = self.store.put_json(
             {
                 "requirements_ref": dict(prepared["requirements_ref"]),
-                "global_constraints_ref": fragment([], "GlobalConstraintsArtifact").to_dict(),
-                "gate_checks_ref": fragment([], "ArchitectureGateChecksArtifact").to_dict(),
-                "unit_contract_refs": [unit.to_dict()],
-                "cross_unit_contract_refs": [],
-                "topology_ref": fragment({"depends_on": {"checkin": []}}, "TopologyArtifact").to_dict(),
-                "integration_contract_ref": fragment({"depends_on": ["checkin"]}, "IntegrationContractArtifact").to_dict(),
-                "assumption_ledger_ref": fragment({"assumptions": []}, "AssumptionLedgerArtifact").to_dict(),
-                "risk_ledger_ref": fragment({"risks": []}, "RiskLedgerArtifact").to_dict(),
-            }
+                "contract_schema": "lifestyle.nutrition_checkin.v1",
+                "contract": {
+                    "schema_version": "1",
+                    "context": {
+                        "goal": "Produce a structured nutrition check-in.",
+                        "hard_restrictions": ["non-medical guidance"],
+                        "safety_boundary": (
+                            "Escalate medical concerns to a qualified clinician."
+                        ),
+                    },
+                    "requirements": {
+                        "checkin_output": {
+                            "claim": "Produce the structured check-in.",
+                            "owner": "checkin",
+                            "contract_path": ["checkin.structured_checkin"],
+                        }
+                    },
+                    "modules": {
+                        "checkin": {
+                            "responsibility": (
+                                "Produce the structured check-in artifact."
+                            ),
+                            "execution": "produce",
+                            "provides": ["structured_checkin"],
+                            "dependencies": {},
+                            "definition": {
+                                "meals": [],
+                                "training": ["record declared activity"],
+                                "restrictions": ["do not invent health facts"],
+                                "inputs": ["declared observations"],
+                                "outputs": ["structured_checkin"],
+                                "ownership": (
+                                    "The user owns execution and adjustment."
+                                ),
+                                "lifecycle": (
+                                    "Collect, summarize, review externally."
+                                ),
+                                "safety_invariants": [
+                                    "No diagnosis or treatment advice."
+                                ],
+                            },
+                        }
+                    },
+                    "scenarios": {
+                        "produce_checkin": {
+                            "modules": ["checkin"],
+                            "requirement_refs": ["checkin_output"],
+                            "entrypoint": {
+                                "module": "checkin",
+                                "surface": "structured_checkin",
+                            },
+                            "contract_flow": [
+                                "observations -> checkin -> user"
+                            ],
+                            "observable_behavior": (
+                                "The user receives the structured check-in."
+                            ),
+                            "failure_behavior": (
+                                "Missing observations remain explicit."
+                            ),
+                            "environment": "External human execution.",
+                        }
+                    },
+                },
+            },
+            artifact_type="ContractArtifact",
         )
-        compilation = ExecutionCompiler(self.repository, architecture).compile_epoch(
+        compilation = ExecutionCompiler(self.repository, contracts).compile_epoch(
             workflow_id="nutrition-workflow",
             epoch_id="nutrition-epoch",
             manifest_ref=manifest,
@@ -1341,6 +1439,170 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertEqual(node.payload["execution_adapter"], "artifact_bundle.v2")
         self.assertEqual(node.payload["node_kind"], "unit")
         self.assertTrue(Path(node.payload["workspace_path"]).is_dir())
+
+    def test_nutritionist_null_executors_complete_delivery_end_to_end(self) -> None:
+        service = MinionV2WorkflowService(self.root)
+        created = service.create_task(
+            {
+                "task_id": "nutritionist-e2e-task",
+                "title": "Nutritionist E2E",
+                "objective": "Produce a non-medical nutrition check-in",
+                "profile": "lifestyle.nutritionist",
+                "workspace": {
+                    "kind": "artifact_project",
+                    "project_name": "nutritionist-e2e",
+                },
+            }
+        )
+        prepared = service.prepare_requirements(
+            {
+                "title": "Nutritionist E2E",
+                "task_spec": {
+                    "objective": "Produce a non-medical nutrition check-in."
+                },
+            }
+        )
+        service.start_workflow(
+            {
+                "workflow_id": "nutritionist-e2e-workflow",
+                "task_id": created["task_id"],
+                "operation": "new_requirement",
+                "goal": "Produce the contracted check-in",
+                "requirements_ref": prepared["requirements_ref"],
+            }
+        )
+
+        # This E2E targets execution/delivery. Architect and reviewer have real
+        # profile executors, so replace their already-covered LLM phase with an
+        # accepted ContractArtifact. First execute the Manager-owned START_WORKFLOW
+        # action, then retire only the unexecuted architecture-routing effect.
+        bootstrap = asyncio.run(
+            MinionV2OutboxProcessor(service).process_once(limit=1)
+        )
+        self.assertEqual(bootstrap["failed"], 0)
+        for effect in service.repository.claim_outbox(
+            "nutritionist-e2e-bootstrap",
+            limit=100,
+        ):
+            service.repository.complete_outbox_effect(
+                str(effect["effect_id"]),
+                worker_id="nutritionist-e2e-bootstrap",
+            )
+
+        manifest = service.artifacts.put_json(
+            {
+                "requirements_ref": dict(prepared["requirements_ref"]),
+                "contract_schema": "lifestyle.nutrition_checkin.v1",
+                "contract": {
+                    "schema_version": "1",
+                    "context": {
+                        "goal": "Produce a structured nutrition check-in.",
+                        "hard_restrictions": ["non-medical guidance"],
+                        "safety_boundary": (
+                            "Escalate medical concerns to a qualified clinician."
+                        ),
+                    },
+                    "requirements": {
+                        "checkin_output": {
+                            "claim": "Produce the structured check-in.",
+                            "owner": "checkin",
+                            "contract_path": ["checkin.structured_checkin"],
+                        }
+                    },
+                    "modules": {
+                        "checkin": {
+                            "responsibility": (
+                                "Produce the structured check-in artifact."
+                            ),
+                            "execution": "produce",
+                            "provides": ["structured_checkin"],
+                            "dependencies": {},
+                            "definition": {
+                                "meals": [],
+                                "training": ["record declared activity"],
+                                "restrictions": ["do not invent health facts"],
+                                "inputs": ["declared observations"],
+                                "outputs": ["structured_checkin"],
+                                "ownership": "The user owns execution.",
+                                "lifecycle": "Collect, summarize, review externally.",
+                                "safety_invariants": [
+                                    "No diagnosis or treatment advice."
+                                ],
+                            },
+                        }
+                    },
+                    "scenarios": {
+                        "produce_checkin": {
+                            "modules": ["checkin"],
+                            "requirement_refs": ["checkin_output"],
+                            "entrypoint": {
+                                "module": "checkin",
+                                "surface": "structured_checkin",
+                            },
+                            "contract_flow": [
+                                "observations -> checkin -> user"
+                            ],
+                            "observable_behavior": (
+                                "The user receives the structured check-in."
+                            ),
+                            "failure_behavior": (
+                                "Missing observations remain explicit."
+                            ),
+                            "environment": "External human execution.",
+                        }
+                    },
+                },
+            },
+            artifact_type="ContractArtifact",
+        )
+        compilation = ExecutionCompiler(
+            service.repository,
+            service.contracts,
+        ).compile_epoch(
+            workflow_id="nutritionist-e2e-workflow",
+            epoch_id="nutritionist-e2e-epoch",
+            manifest_ref=manifest,
+        )
+        processor = MinionV2OutboxProcessor(
+            service,
+            semantic_effects=SemanticOrchestrator(service),
+        )
+
+        for _ in range(20):
+            result = asyncio.run(processor.process_once(limit=20))
+            self.assertEqual(result["failed"], 0)
+            workflow = service.repository.read_snapshot(
+                AggregateType.WORKFLOW,
+                "nutritionist-e2e-workflow",
+            )
+            if workflow is not None and workflow.state == "COMPLETED":
+                break
+            self.assertGreater(result["claimed"], 0)
+        else:
+            self.fail("nutritionist workflow did not reach delivery")
+
+        nodes = {
+            item.aggregate_id: item
+            for item in service.repository.list_workflow_snapshots(
+                "nutritionist-e2e-workflow"
+            )
+            if item.aggregate_type == AggregateType.DAG_NODE_RUN
+        }
+        self.assertEqual(set(nodes), set(compilation.node_run_ids))
+        self.assertTrue(all(item.state == "ACCEPTED" for item in nodes.values()))
+        self.assertTrue(
+            all(bool(item.payload.get("null_execution")) for item in nodes.values())
+        )
+        epoch = service.repository.read_snapshot(
+            AggregateType.EXECUTION_EPOCH,
+            compilation.epoch_id,
+        )
+        self.assertEqual(epoch.state, "COMPLETED")
+        deliverable_ref = dict(epoch.payload["published_deliverable_ref"])
+        deliverable = dict(service.artifacts.read_json(deliverable_ref))
+        self.assertEqual(deliverable["workflow_id"], "nutritionist-e2e-workflow")
+        destination = Path(str(deliverable["destination"]))
+        self.assertTrue((destination / "architect.yaml").is_file())
 
 
 if __name__ == "__main__":

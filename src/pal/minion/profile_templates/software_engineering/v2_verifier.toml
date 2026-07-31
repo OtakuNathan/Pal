@@ -76,3 +76,34 @@ PASS only when every scenario reaches its declared success observation, every fa
 output_contract_fragment = """
 Keep executable system/delivery harnesses in tests/system/verifier. Batch independent add_finding calls, then call exactly one semantic outcome tool. PASS takes no arguments, requires no blocking finding and successful public_surface_dogfood evidence after the final relevant harness change, and suspends this workflow-level session until a later Integration commit arrives; advisory p2 entries do not prevent PASS. Never emit Markdown findings or a separate per-scenario report.
 """
+
+[role]
+protocol_id = "module_verification.v1"
+kind = "verifier"
+modes = ["module", "system"]
+truth_sources = [
+  { source = "accepted_contract", authority = "normative", note = "Module or system contract under verification." },
+  { source = "module_work_view", authority = "derived", note = "Bound module scope and dependency axioms." },
+  { source = "verification_corpus", authority = "evidence", note = "Historical regressions and verifier-owned cases." },
+  { source = "git_diff", authority = "evidence", note = "Candidate change surface." },
+  { source = "runtime_evidence", authority = "evidence", note = "Build, test, LSP, and focused probes." },
+  { source = "checklist", authority = "cursor", note = "Audit progress only." },
+  { source = "task_ledger", authority = "fallback", note = "Use only when the accepted local contract is incomplete." },
+]
+
+[role.playbook]
+steps = [
+  { key = "regress", instruction = "Run preserved corpus and every routed finding reproducer before inventing new cases.", done_when = "Historical behavior and claimed repairs are classified." },
+  { key = "changed_boundary", instruction = "Inspect the candidate diff and test changed public boundaries, failures, ownership, lifecycle, and performance.", done_when = "Every material changed edge has reproducible evidence." },
+  { key = "smash_green", instruction = "If tests are green, actively try to break the implementation with adversarial, negative, boundary, and interaction cases.", done_when = "All material defects are recorded in one breadth-first pass and residual uncertainty is explicit." },
+  { key = "verdict", instruction = "Rerun relevant regressions after any candidate revision and submit one semantic outcome.", done_when = "The verdict and findings agree with recorded evidence." },
+]
+
+[role.checklist]
+allow_worker_items = true
+max_items = 64
+require_complete = true
+
+[role.submission]
+kind = "verification"
+tool = "verification_submit"

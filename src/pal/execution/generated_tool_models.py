@@ -874,6 +874,15 @@ MinionV2CapabilitiesMinionV2PublicProviderResetProfileOverrideInput = _strict_mo
     },
 )
 
+MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputRoleBinding = _strict_model(
+    'MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputRoleBinding',
+    {
+        'executor': (Literal['profile', 'null'], Field(...)),
+        'profile': (str | None, Field(None)),
+        'reason': (str | None, Field(None)),
+    },
+)
+
 MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputChanges = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputChanges',
     {
@@ -881,9 +890,16 @@ MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputChanges = _stric
         'domain': (str | None, Field(None)),
         'domain_keywords': (list[str] | None, Field(None)),
         'workflow_template': (str | None, Field(None)),
-        'role_bindings': (dict[str, str | None] | None, Field(None)),
-        'builders': (dict[str, str | None] | None, Field(None)),
-        'adapters': (dict[str, str | None] | None, Field(None)),
+        'role_bindings': (
+            dict[
+                str,
+                MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputRoleBinding
+                | None,
+            ]
+            | None,
+            Field(None),
+        ),
+        'execution_adapter': (str | None, Field(None)),
         'policies': (dict[str, Any] | None, Field(None)),
         'capability_groups': (dict[str, Any] | None, Field(None)),
         'metadata': (dict[str, Any] | None, Field(None)),
@@ -1479,180 +1495,14 @@ MinionV2CandidateBuilderOpMinionCandidateRequestModuleSplitInput = _strict_model
     },
 )
 
-MinionV2ContractBuilderOpMinionContractUnitUpsertInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractUnitUpsertInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'behavior_kind': (Literal['stateless', 'resource_owner', 'service', 'workflow', 'adapter'], Field(...)),
-        'responsibility': (str, Field(..., min_length=1)),
-        'owned_area': (list[str], Field(...)),
-        'reference_only_paths': (list[str], Field(None)),
-        'depends_on': (list[str], Field(...)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractUnitAddInterfaceInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractUnitAddInterfaceInput',
-    {
-        'unit': (str, Field(..., min_length=1)),
-        'direction': (Literal['provided', 'consumed'], Field(...)),
-        'name': (str, Field(..., min_length=1)),
-        'data_shape': (str, Field(None)),
-        'valid_when': (str, Field(None)),
-        'lifetime': (str, Field(None)),
-        'ownership': (str, Field(None)),
-        'error_behavior': (str, Field(None)),
-        'compatibility': (str, Field(None)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractUnitSetOwnershipInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractUnitSetOwnershipInput',
-    {
-        'unit': (str, Field(..., min_length=1)),
-        'statement': (str, Field(..., min_length=1)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractUnitSetLifecycleInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractUnitSetLifecycleInput',
-    {
-        'unit': (str, Field(..., min_length=1)),
-        'description': (str, Field(..., min_length=1)),
-        'states': (list[str], Field(None)),
-        'initial_state': (str, Field(None)),
-        'terminal_states': (list[str], Field(None)),
-        'transitions': (list[str], Field(None)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractUnitSetStateInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractUnitSetStateInput',
-    {
-        'unit': (str, Field(..., min_length=1)),
-        'description': (str, Field(..., min_length=1)),
-        'states': (list[str], Field(None)),
-        'initial_state': (str, Field(None)),
-        'terminal_states': (list[str], Field(None)),
-        'transitions': (list[str], Field(None)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractUnitAddRuleInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractUnitAddRuleInput',
-    {
-        'unit': (str, Field(..., min_length=1)),
-        'kind': (Literal['invariant', 'error_behavior', 'compatibility', 'dependency_constraint', 'verification_obligation', 'split_condition'], Field(...)),
-        'statement': (str, Field(..., min_length=1)),
-        'condition': (str, Field(None)),
-        'expected': (str, Field(None)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractUnitRemoveInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractUnitRemoveInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractAddConstraintInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractAddConstraintInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'constraint': (str, Field(..., min_length=1)),
-        'rationale': (str, Field(None)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractAddGateCheckInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractAddGateCheckInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'check': (str, Field(..., min_length=1)),
-        'scope': (str, Field(None)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractAddCrossUnitContractInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractAddCrossUnitContractInput',
-    {
-        'producer': (str, Field(..., min_length=1)),
-        'consumer': (str, Field(..., min_length=1)),
-        'interface': (str, Field(..., min_length=1)),
-        'data_shape': (str, Field(None)),
-        'valid_when': (str, Field(None)),
-        'ownership_transfer': (str, Field(None)),
-        'lifecycle_handoff': (str, Field(None)),
-        'compatibility': (str, Field(None)),
-        'error_behavior': (str, Field(None)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractSetIntegrationInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractSetIntegrationInput',
-    {
-        'depends_on': (list[str], Field(...)),
-        'entrypoint': (str, Field(..., min_length=1)),
-        'dataflow': (list[str], Field(None)),
-        'completion_condition': (str, Field(..., min_length=1)),
-        'failure_behavior': (str, Field(..., min_length=1)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractAddAssumptionInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractAddAssumptionInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'statement': (str, Field(..., min_length=1)),
-        'owner': (str, Field(None)),
-        'impact': (str, Field(None)),
-        'verification_plan': (str, Field(None)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractAddRiskInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractAddRiskInput',
-    {
-        'name': (str, Field(..., min_length=1)),
-        'risk': (str, Field(..., min_length=1)),
-        'severity': (Literal['low', 'medium', 'high', 'critical'], Field(...)),
-        'mitigation': (str, Field(None)),
-    },
-)
-
-MinionV2ContractBuilderOpMinionContractSubmitInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionContractSubmitInput',
-    {
-    },
-)
-
-MinionV2ContractBuilderOpMinionArchitectureReviewSubmitInput = _strict_model(
-    'MinionV2ContractBuilderOpMinionArchitectureReviewSubmitInput',
-    {
-    },
-)
-
-MinionV2SkeletonBuilderOpMinionAskQuestionInput = _strict_model(
-    'MinionV2SkeletonBuilderOpMinionAskQuestionInput',
+MinionV2AskQuestionInput = _strict_model(
+    'MinionV2AskQuestionInput',
     {
         'title': (str, Field(..., min_length=1)),
         'question': (str, Field(..., min_length=1)),
         'option_1': (str, Field(..., min_length=1)),
         'option_2': (str, Field(..., min_length=1)),
         'option_3': (str, Field(..., min_length=1)),
-    },
-)
-
-MinionV2SkeletonBuilderOpMinionArchitectureSubmitInput = _strict_model(
-    'MinionV2SkeletonBuilderOpMinionArchitectureSubmitInput',
-    {
-    },
-)
-
-MinionV2SkeletonBuilderOpMinionArchitectureReviewFailInput = _strict_model(
-    'MinionV2SkeletonBuilderOpMinionArchitectureReviewFailInput',
-    {
     },
 )
 
@@ -1735,39 +1585,8 @@ MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput = _strict_model(
     },
 )
 
-MinionV2VerificationBuilderOpMinionVerificationRemoveFindingInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionVerificationRemoveFindingInput',
-    {
-        'finding_key': (str, Field(..., min_length=3, max_length=96, pattern='^[a-z][a-z0-9_]*$')),
-        'reason': (str, Field(..., min_length=1)),
-    },
-)
-
 MinionV2VerificationBuilderOpMinionVerificationSubmitInput = _strict_model(
     'MinionV2VerificationBuilderOpMinionVerificationSubmitInput',
-    {
-    },
-)
-
-MinionV2VerificationBuilderOpMinionReviewSurfaceInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionReviewSurfaceInput',
-    {
-        'kind': (Literal['reviewed', 'test_gap', 'unreviewed', 'residual_risk'], Field(...)),
-        'text': (str, Field(..., min_length=1)),
-    },
-)
-
-MinionV2VerificationBuilderOpMinionReviewConclusionInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionReviewConclusionInput',
-    {
-        'verdict': (Literal['approved', 'changes_requested', 'blocked'], Field(...)),
-        'summary': (str, Field(..., min_length=1)),
-        'scope': (str, Field(None)),
-    },
-)
-
-MinionV2VerificationBuilderOpMinionStandaloneReviewSubmitInput = _strict_model(
-    'MinionV2VerificationBuilderOpMinionStandaloneReviewSubmitInput',
     {
     },
 )

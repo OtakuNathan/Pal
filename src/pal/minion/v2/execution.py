@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, IO, Iterator, Mapping
 
-from pal.minion.v2.architecture import ArchitectureArtifactService, validate_architecture_manifest
+from pal.minion.v2.contract_runtime import ContractArtifactAccess
 from pal.minion.v2.adapters import (
     ARTIFACT_BUNDLE_ADAPTER,
     SOFTWARE_GIT_ADAPTER,
@@ -24,6 +24,10 @@ from pal.minion.v2.adapters import (
 )
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
+from pal.minion.v2.contract_protocol import (
+    CONTRACT_ARTIFACT,
+    software_contract_projection,
+)
 from pal.minion.v2.paths import (
     ProjectGitLayout,
     project_git_layout_lock,
@@ -31,13 +35,16 @@ from pal.minion.v2.paths import (
     verification_scratch_root,
 )
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.role_contracts import (
+    family_execution_adapter,
+    validate_family_binding_payload,
+)
 from pal.minion.v2.sessions import (
     coder_session_id,
     module_verifier_session_id,
     node_role_generation,
 )
 from pal.minion.v2.skeleton import (
-    ARCHITECTURE_SKELETON_ARTIFACT,
     SKELETON_MODULE_CONTRACT_ARTIFACT,
     compiled_module_write_scopes,
     module_developer_test_path,
@@ -164,7 +171,7 @@ class WorkspaceLockRegistry:
 @dataclass
 class ExecutionCompiler:
     repository: MinionV2Repository
-    architecture: ArchitectureArtifactService
+    contracts: ContractArtifactAccess
 
     def compile_epoch(
         self,
@@ -177,197 +184,42 @@ class ExecutionCompiler:
         initial_repair_bill_ref: Mapping[str, Any] | None = None,
     ) -> ExecutionCompilation:
         record = self.repository.read_artifact_record(manifest_ref.sha256)
-        if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
-            return self._compile_skeleton_epoch(
-                workflow_id=workflow_id,
-                epoch_id=epoch_id,
-                manifest_ref=manifest_ref,
-                actor=actor,
-                source_epoch_id=source_epoch_id,
-                initial_repair_bill_ref=initial_repair_bill_ref,
+        if record and str(record.get("artifact_type") or "") == CONTRACT_ARTIFACT:
+            artifact = dict(
+                self.contracts.artifacts.read_json(manifest_ref)
             )
-        manifest = validate_architecture_manifest(self.architecture.artifacts.read_json(manifest_ref))
-        fragments = self.architecture.load_manifest_fragments(manifest)
-        topology = dict(fragments.get("topology") or {})
-        depends_on = {
-            str(unit_id): [str(item) for item in list(dependencies or [])]
-            for unit_id, dependencies in dict(topology.get("depends_on") or {}).items()
-        }
-        unit_refs_by_id: dict[str, dict[str, Any]] = {}
-        unit_responsibilities: dict[str, str] = {}
-        for ref, contract in zip(manifest["unit_contract_refs"], fragments.get("unit_contract") or [], strict=True):
-            unit_id = str(dict(contract).get("unit_id") or "")
-            if not unit_id or unit_id in unit_refs_by_id:
-                raise ValueError(f"invalid or duplicate unit id: {unit_id or '<empty>'}")
-            unit_refs_by_id[unit_id] = dict(ref)
-            unit_responsibilities[unit_id] = str(
-                dict(contract).get("responsibility") or ""
-            )
-        if set(depends_on) != set(unit_refs_by_id):
-            raise ValueError("topology nodes do not match unit contracts")
-
-        topology_ref = dict(manifest["topology_ref"])
-        self.repository.dispatch(
-            _action(
-                "CREATE_EXECUTION_EPOCH",
+            contract = dict(artifact.get("contract") or {})
+            execution_adapter = _workflow_execution_adapter(
+                self.repository,
+                self.contracts,
                 workflow_id,
-                AggregateType.EXECUTION_EPOCH,
-                epoch_id,
-                actor,
-                0,
-                {
-                    "architecture_manifest_ref": manifest_ref.to_dict(),
-                    "topology_ref": topology_ref,
-                    "architecture_manifest_sha": manifest_ref.sha256,
-                },
             )
-        )
-        self.repository.dispatch(
-            _action("START_EXECUTION", workflow_id, AggregateType.EXECUTION_EPOCH, epoch_id, actor, 1, {})
-        )
-
-        unit_node_ids = {unit_id: f"{epoch_id}:node:{unit_id}" for unit_id in unit_refs_by_id}
-        module_identity_delta = _module_identity_delta(
-            self.repository,
-            workflow_id=workflow_id,
-            source_epoch_id=source_epoch_id,
-            target_module_responsibilities=unit_responsibilities,
-        )
-        source_role_generations = _module_role_session_generations(
-            self.repository,
-            workflow_id=workflow_id,
-            source_epoch_id=source_epoch_id,
-            target_subjects={*unit_refs_by_id, "integration"},
-            replaced_subjects=set(module_identity_delta["replaced"]),
-        )
-        workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
-        request = (
-            self.architecture.artifacts.read_json(dict(workflow.payload.get("request_ref") or {}))
-            if workflow is not None and workflow.payload.get("request_ref")
-            else {"workspace": {"kind": "new_project", "project_name": workflow_id}}
-        )
-        binding_ref = dict(workflow.payload.get("family_binding_ref") or {}) if workflow is not None else {}
-        binding = self.architecture.artifacts.read_json(binding_ref) if binding_ref else {}
-        adapters = dict(binding.get("adapters") or {})
-        execution_adapter = str(adapters.get("workspace") or SOFTWARE_GIT_ADAPTER)
-        if execution_adapter == SOFTWARE_GIT_ADAPTER:
-            workspaces = provision_module_worktrees(
-                self.repository.runtime_root,
-                workflow_id=workflow_id,
-                workflow_name=str(request.get("workflow_name") or request.get("goal") or workflow_id),
-                unit_ids=sorted(unit_refs_by_id),
-                workspace=dict(request.get("workspace") or {}),
-            )
-            for value in workspaces.values():
-                value["execution_adapter"] = SOFTWARE_GIT_ADAPTER
-        elif execution_adapter == ARTIFACT_BUNDLE_ADAPTER:
-            workspaces = provision_artifact_workspaces(
-                self.repository.runtime_root,
-                epoch_id=epoch_id,
-                unit_ids=sorted(unit_refs_by_id),
-            )
-        else:
-            raise ValueError(f"unsupported execution workspace adapter: {execution_adapter}")
-        environment_fingerprint = _stable_json_hash(
-            {
-                "epoch_base_tree_sha": str(workspaces["integration"]["epoch_base_tree_sha"]),
-                "execution_adapter": execution_adapter,
-                "workspace_environment_policy": dict(
-                    dict(request.get("workspace") or {}).get("workspace_environment_policy") or {}
-                ),
-                "toolchain": dict(request.get("toolchain") or {}),
-            }
-        )
-        for unit_id in sorted(unit_refs_by_id):
-            dependency_node_ids = [unit_node_ids[item] for item in depends_on[unit_id]]
-            self.repository.dispatch(
-                _action(
-                    "CREATE_NODE_RUN",
-                    workflow_id,
-                    AggregateType.DAG_NODE_RUN,
-                    unit_node_ids[unit_id],
-                    actor,
-                    0,
-                    {
-                        "epoch_id": epoch_id,
-                        "unit_id": unit_id,
-                        "module_responsibility": unit_responsibilities[unit_id],
-                        "node_kind": "unit",
-                        "unit_contract_ref": unit_refs_by_id[unit_id],
-                        "architecture_manifest_ref": manifest_ref.to_dict(),
-                        "dependency_node_ids": dependency_node_ids,
-                        "accepted_dependency_node_ids": [],
-                        "epoch_frozen": False,
-                        "role_session_generation": source_role_generations.get(
-                            unit_id,
-                            0,
-                        ),
-                        "environment_fingerprint": environment_fingerprint,
-                        **dict(workspaces[unit_id]),
+            if execution_adapter == SOFTWARE_GIT_ADAPTER:
+                return self._compile_skeleton_epoch(
+                    workflow_id=workflow_id,
+                    epoch_id=epoch_id,
+                    manifest_ref=manifest_ref,
+                    actor=actor,
+                    source_epoch_id=source_epoch_id,
+                    initial_repair_bill_ref=initial_repair_bill_ref,
+                    artifact_override={
+                        **artifact,
+                        "submission": software_contract_projection(contract),
                     },
                 )
+            if execution_adapter == ARTIFACT_BUNDLE_ADAPTER:
+                return self._compile_data_contract_epoch(
+                    workflow_id=workflow_id,
+                    epoch_id=epoch_id,
+                    manifest_ref=manifest_ref,
+                    actor=actor,
+                    source_epoch_id=source_epoch_id,
+                )
+            raise ValueError(
+                "workflow selected an unsupported execution adapter: "
+                + execution_adapter
             )
-
-        integration_node_id = f"{epoch_id}:node:integration"
-        integration_dependencies = [unit_node_ids[unit_id] for unit_id in _topological_module_order(depends_on)]
-        self.repository.dispatch(
-            _action(
-                "CREATE_NODE_RUN",
-                workflow_id,
-                AggregateType.DAG_NODE_RUN,
-                integration_node_id,
-                actor,
-                0,
-                {
-                    "epoch_id": epoch_id,
-                    "unit_id": "integration",
-                    "node_kind": "integration",
-                    "unit_contract_ref": dict(manifest["integration_contract_ref"]),
-                    "architecture_manifest_ref": manifest_ref.to_dict(),
-                    "dependency_node_ids": integration_dependencies,
-                    "accepted_dependency_node_ids": [],
-                    "epoch_frozen": False,
-                    "role_session_generation": source_role_generations.get(
-                        "integration",
-                        0,
-                    ),
-                    "environment_fingerprint": environment_fingerprint,
-                    **dict(workspaces["integration"]),
-                },
-            )
-        )
-        if source_epoch_id:
-            reconcile_module_identities(
-                repository=self.repository,
-                architecture=self.architecture,
-                workflow_id=workflow_id,
-                source_epoch_id=source_epoch_id,
-                target_epoch_id=epoch_id,
-                target_manifest_ref=manifest_ref,
-                actor=actor,
-            )
-        node_ids = tuple([*(unit_node_ids[unit_id] for unit_id in sorted(unit_node_ids)), integration_node_id])
-        self.repository.dispatch(
-            _action(
-                "NODES_COMPILED",
-                workflow_id,
-                AggregateType.EXECUTION_EPOCH,
-                epoch_id,
-                actor,
-                2,
-                {
-                    "node_ids": list(node_ids),
-                    "integration_node_id": integration_node_id,
-                    "module_identity_delta": module_identity_delta,
-                },
-            )
-        )
-        return ExecutionCompilation(
-            epoch_id=epoch_id,
-            node_run_ids=node_ids,
-            unit_node_ids=unit_node_ids,
-            integration_node_id=integration_node_id,
-        )
+        raise ValueError("execution requires a ContractArtifact")
 
     def _compile_skeleton_epoch(
         self,
@@ -378,19 +230,23 @@ class ExecutionCompiler:
         actor: str,
         source_epoch_id: str,
         initial_repair_bill_ref: Mapping[str, Any] | None,
+        artifact_override: Mapping[str, Any] | None = None,
     ) -> ExecutionCompilation:
-        artifact = dict(self.architecture.artifacts.read_json(manifest_ref))
+        artifact = dict(
+            artifact_override
+            or self.contracts.artifacts.read_json(manifest_ref)
+        )
         submission = dict(artifact.get("submission") or {})
         modules = {str(name): dict(value or {}) for name, value in dict(submission.get("modules") or {}).items()}
         if not modules:
-            raise ValueError("ArchitectureSkeletonArtifact has no modules")
+            raise ValueError("software ContractArtifact has no modules")
         implementation_modules = {
             name: module
             for name, module in modules.items()
             if str(module.get("module_kind") or "") == "implementation"
         }
         if not implementation_modules:
-            raise ValueError("ArchitectureSkeletonArtifact has no implementation modules")
+            raise ValueError("software ContractArtifact has no implementation modules")
         if initial_repair_bill_ref and len(implementation_modules) != 1:
             raise ValueError("an initial RepairBill requires a bounded single-module skeleton")
         module_dependencies = {
@@ -403,14 +259,14 @@ class ExecutionCompiler:
             for name, value in dict(submission.get("scenarios") or {}).items()
         }
         if not scenarios:
-            raise ValueError("ArchitectureSkeletonArtifact has no end-to-end verification scenarios")
+            raise ValueError("software ContractArtifact has no end-to-end verification scenarios")
         requirements = {
             str(name): dict(value or {})
             for name, value in dict(submission.get("requirements") or {}).items()
         }
         if not requirements:
-            raise ValueError("ArchitectureSkeletonArtifact has no requirement mappings")
-        topology_ref = self.architecture.artifacts.put_json(
+            raise ValueError("software ContractArtifact has no requirement mappings")
+        topology_ref = self.contracts.artifacts.put_json(
             {
                 "module_dependencies": module_dependencies,
                 "verification_scenarios": {
@@ -445,7 +301,7 @@ class ExecutionCompiler:
                 if str(requirement.get("owner") or "") == name
             )
             semantic_module = {key: value for key, value in module.items() if key != "paths"}
-            module_refs[name] = self.architecture.artifacts.put_json(
+            module_refs[name] = self.contracts.artifacts.put_json(
                 {
                     "module_name": name,
                     "module": semantic_module,
@@ -463,7 +319,7 @@ class ExecutionCompiler:
                 artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
             )
-        scenario_catalog_ref = self.architecture.artifacts.put_json(
+        scenario_catalog_ref = self.contracts.artifacts.put_json(
             {
                 "schema_version": "1",
                 "kind": "system_delivery",
@@ -520,14 +376,14 @@ class ExecutionCompiler:
         )
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
         request = (
-            self.architecture.artifacts.read_json(dict(workflow.payload.get("request_ref") or {}))
+            self.contracts.artifacts.read_json(dict(workflow.payload.get("request_ref") or {}))
             if workflow is not None and workflow.payload.get("request_ref")
             else {}
         )
         system_unit_id = "system_delivery"
         workspaces = provision_skeleton_module_worktrees(
             self.repository.runtime_root,
-            artifacts=self.architecture.artifacts,
+            artifacts=self.contracts.artifacts,
             workflow_id=workflow_id,
             workflow_name=str(request.get("workflow_name") or request.get("goal") or workflow_id),
             unit_ids=sorted([*implementation_modules, system_unit_id]),
@@ -547,7 +403,7 @@ class ExecutionCompiler:
         global_constraint_hash = _stable_json_hash(
             {
                 "constraints": list(request.get("constraints") or []),
-                "requirements": self.architecture.artifacts.read_json(dict(artifact.get("requirements_ref") or {})),
+                "requirements": self.contracts.artifacts.read_json(dict(artifact.get("requirements_ref") or {})),
             }
         )
         unit_node_ids = {name: f"{epoch_id}:node:{name}" for name in implementation_modules}
@@ -669,7 +525,7 @@ class ExecutionCompiler:
         if source_epoch_id:
             reconcile_module_identities(
                 repository=self.repository,
-                architecture=self.architecture,
+                contracts=self.contracts,
                 workflow_id=workflow_id,
                 source_epoch_id=source_epoch_id,
                 target_epoch_id=epoch_id,
@@ -703,37 +559,319 @@ class ExecutionCompiler:
             system_verification_node_id=system_verification_node_id,
         )
 
+    def _compile_data_contract_epoch(
+        self,
+        *,
+        workflow_id: str,
+        epoch_id: str,
+        manifest_ref: ArtifactRef,
+        actor: str,
+        source_epoch_id: str,
+    ) -> ExecutionCompilation:
+        artifact = dict(self.contracts.artifacts.read_json(manifest_ref))
+        contract = dict(artifact.get("contract") or {})
+        modules = {
+            str(name): dict(value or {})
+            for name, value in dict(contract.get("modules") or {}).items()
+            if str(dict(value or {}).get("execution") or "") == "produce"
+        }
+        if not modules:
+            raise ValueError("ContractArtifact has no produced modules")
+        dependencies = {
+            name: [
+                str(provider)
+                for provider in dict(module.get("dependencies") or {})
+                if str(provider) in modules
+            ]
+            for name, module in modules.items()
+        }
+        _topological_module_order(dependencies)
+        requirements = {
+            str(name): dict(value or {})
+            for name, value in dict(contract.get("requirements") or {}).items()
+        }
+        context = dict(contract.get("context") or {})
+        scenarios = {
+            str(name): dict(value or {})
+            for name, value in dict(contract.get("scenarios") or {}).items()
+        }
+        topology_ref = self.contracts.artifacts.put_json(
+            {
+                "module_dependencies": dependencies,
+                "verification_scenarios": {
+                    name: list(scenario.get("modules") or [])
+                    for name, scenario in scenarios.items()
+                },
+            },
+            artifact_type="ContractTopologyArtifact",
+            child_refs=((manifest_ref.sha256, "contract"),),
+        )
+        module_refs: dict[str, ArtifactRef] = {}
+        for name, module in modules.items():
+            module_scenarios = {
+                scenario_name: scenario
+                for scenario_name, scenario in scenarios.items()
+                if name in {
+                    str(item)
+                    for item in list(scenario.get("modules") or [])
+                }
+            }
+            requirement_names = {
+                requirement_name
+                for requirement_name, requirement in requirements.items()
+                if str(requirement.get("owner") or "") == name
+            }
+            requirement_names.update(
+                str(requirement_name)
+                for scenario in module_scenarios.values()
+                for requirement_name in list(
+                    scenario.get("requirement_refs") or []
+                )
+            )
+            module_refs[name] = self.contracts.artifacts.put_json(
+                {
+                    "schema_version": "1",
+                    "module_name": name,
+                    "context": context,
+                    "module": module,
+                    "requirements": {
+                        requirement_name: requirements[requirement_name]
+                        for requirement_name in sorted(requirement_names)
+                    },
+                    "scenarios": module_scenarios,
+                },
+                artifact_type="ContractModuleArtifact",
+                child_refs=((manifest_ref.sha256, "contract"),),
+            )
+        scenario_ref = self.contracts.artifacts.put_json(
+            {
+                "schema_version": "1",
+                "kind": "integration",
+                "scenarios": scenarios,
+                "requirements": requirements,
+            },
+            artifact_type="ScenarioCatalogArtifact",
+            child_refs=((manifest_ref.sha256, "contract"),),
+        )
+        self.repository.dispatch(
+            _action(
+                "CREATE_EXECUTION_EPOCH",
+                workflow_id,
+                AggregateType.EXECUTION_EPOCH,
+                epoch_id,
+                actor,
+                0,
+                {
+                    "architecture_manifest_ref": manifest_ref.to_dict(),
+                    "topology_ref": topology_ref.to_dict(),
+                    "architecture_manifest_sha": manifest_ref.sha256,
+                },
+            )
+        )
+        self.repository.dispatch(
+            _action(
+                "START_EXECUTION",
+                workflow_id,
+                AggregateType.EXECUTION_EPOCH,
+                epoch_id,
+                actor,
+                1,
+                {},
+            )
+        )
+        workspaces = provision_artifact_workspaces(
+            self.repository.runtime_root,
+            # Artifact modules follow the same workflow/module ownership model
+            # as Git-backed modules.  Epochs are audit generations, not
+            # workspace owners.
+            epoch_id=workflow_id,
+            unit_ids=sorted(modules),
+        )
+        unit_node_ids = {
+            name: f"{epoch_id}:node:{name}" for name in modules
+        }
+        responsibilities = {
+            name: str(module.get("responsibility") or "")
+            for name, module in modules.items()
+        }
+        module_identity_delta = _module_identity_delta(
+            self.repository,
+            workflow_id=workflow_id,
+            source_epoch_id=source_epoch_id,
+            target_module_responsibilities=responsibilities,
+        )
+        generations = _module_role_session_generations(
+            self.repository,
+            workflow_id=workflow_id,
+            source_epoch_id=source_epoch_id,
+            target_subjects={*modules, "integration"},
+            replaced_subjects=set(module_identity_delta["replaced"]),
+        )
+        environment_fingerprint = _stable_json_hash(
+            {
+                "execution_adapter": ARTIFACT_BUNDLE_ADAPTER,
+                "contract_schema": str(
+                    artifact.get("contract_schema") or ""
+                ),
+            }
+        )
+        for name in sorted(modules):
+            self.repository.dispatch(
+                _action(
+                    "CREATE_NODE_RUN",
+                    workflow_id,
+                    AggregateType.DAG_NODE_RUN,
+                    unit_node_ids[name],
+                    actor,
+                    0,
+                    {
+                        "epoch_id": epoch_id,
+                        "unit_id": name,
+                        "module_name": name,
+                        "module_responsibility": responsibilities[name],
+                        "node_kind": "unit",
+                        "unit_contract_ref": module_refs[name].to_dict(),
+                        "architecture_manifest_ref": manifest_ref.to_dict(),
+                        "dependency_node_ids": [
+                            unit_node_ids[provider]
+                            for provider in dependencies[name]
+                        ],
+                        "accepted_dependency_node_ids": [],
+                        "epoch_frozen": False,
+                        "role_session_generation": generations.get(name, 0),
+                        "environment_fingerprint": environment_fingerprint,
+                        **dict(workspaces[name]),
+                    },
+                )
+            )
+        integration_node_id = f"{epoch_id}:node:integration"
+        self.repository.dispatch(
+            _action(
+                "CREATE_NODE_RUN",
+                workflow_id,
+                AggregateType.DAG_NODE_RUN,
+                integration_node_id,
+                actor,
+                0,
+                {
+                    "epoch_id": epoch_id,
+                    "unit_id": "integration",
+                    "module_name": "integration",
+                    "node_kind": "integration",
+                    "unit_contract_ref": scenario_ref.to_dict(),
+                    "scenario_catalog_ref": scenario_ref.to_dict(),
+                    "architecture_manifest_ref": manifest_ref.to_dict(),
+                    "dependency_node_ids": [
+                        unit_node_ids[name]
+                        for name in _topological_module_order(dependencies)
+                    ],
+                    "accepted_dependency_node_ids": [],
+                    "epoch_frozen": False,
+                    "role_session_generation": generations.get(
+                        "integration", 0
+                    ),
+                    "environment_fingerprint": environment_fingerprint,
+                    **dict(workspaces["integration"]),
+                },
+            )
+        )
+        if source_epoch_id:
+            reconcile_module_identities(
+                repository=self.repository,
+                contracts=self.contracts,
+                workflow_id=workflow_id,
+                source_epoch_id=source_epoch_id,
+                target_epoch_id=epoch_id,
+                target_manifest_ref=manifest_ref,
+                actor=actor,
+            )
+        node_ids = tuple(
+            [unit_node_ids[name] for name in sorted(unit_node_ids)]
+            + [integration_node_id]
+        )
+        self.repository.dispatch(
+            _action(
+                "NODES_COMPILED",
+                workflow_id,
+                AggregateType.EXECUTION_EPOCH,
+                epoch_id,
+                actor,
+                2,
+                {
+                    "node_ids": list(node_ids),
+                    "integration_node_id": integration_node_id,
+                    "module_identity_delta": module_identity_delta,
+                },
+            )
+        )
+        return ExecutionCompilation(
+            epoch_id=epoch_id,
+            node_run_ids=node_ids,
+            unit_node_ids=unit_node_ids,
+            integration_node_id=integration_node_id,
+        )
+
+
+def _workflow_execution_adapter(
+    repository: MinionV2Repository,
+    contracts: ContractArtifactAccess,
+    workflow_id: str,
+) -> str:
+    workflow = repository.read_snapshot(
+        AggregateType.WORKFLOW,
+        workflow_id,
+    )
+    if workflow is None:
+        raise ValueError(
+            f"workflow is unavailable while resolving execution strategy: "
+            f"{workflow_id}"
+        )
+    binding_ref = dict(workflow.payload.get("family_binding_ref") or {})
+    if not binding_ref.get("sha256"):
+        raise ValueError("workflow has no pinned FamilyBindingArtifact")
+    binding = dict(contracts.artifacts.read_json(binding_ref))
+    validate_family_binding_payload(binding)
+    return family_execution_adapter(binding.get("execution_adapter"))
+
 
 def reconcile_module_identities(
     *,
     repository: MinionV2Repository,
-    architecture: ArchitectureArtifactService,
+    contracts: ContractArtifactAccess,
     workflow_id: str,
     source_epoch_id: str,
     target_epoch_id: str,
     target_manifest_ref: ArtifactRef,
     actor: str,
 ) -> tuple[str, ...]:
-    source_epoch = repository.read_snapshot(AggregateType.EXECUTION_EPOCH, source_epoch_id)
+    source_epoch = repository.read_snapshot(
+        AggregateType.EXECUTION_EPOCH, source_epoch_id
+    )
     if source_epoch is None:
         return ()
     source_manifest_ref = ArtifactRef.from_mapping(
         dict(source_epoch.payload.get("architecture_manifest_ref") or {})
     )
-    source_record = repository.read_artifact_record(source_manifest_ref.sha256)
-    target_record = repository.read_artifact_record(target_manifest_ref.sha256)
-    source_is_skeleton = bool(
-        source_record and str(source_record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT
+    source_record = repository.read_artifact_record(
+        source_manifest_ref.sha256
     )
-    target_is_skeleton = bool(
-        target_record and str(target_record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT
+    target_record = repository.read_artifact_record(
+        target_manifest_ref.sha256
     )
-    if source_is_skeleton or target_is_skeleton:
-        if not (source_is_skeleton and target_is_skeleton):
-            return ()
+    if not (
+        _artifact_is_contract(source_record)
+        and _artifact_is_contract(target_record)
+    ):
+        return ()
+    execution_adapter = _workflow_execution_adapter(
+        repository,
+        contracts,
+        workflow_id,
+    )
+    if execution_adapter == SOFTWARE_GIT_ADAPTER:
         return _reconcile_skeleton_module_identities(
             repository=repository,
-            architecture=architecture,
+            contracts=contracts,
             workflow_id=workflow_id,
             source_epoch_id=source_epoch_id,
             target_epoch_id=target_epoch_id,
@@ -741,134 +879,155 @@ def reconcile_module_identities(
             target_manifest_ref=target_manifest_ref,
             actor=actor,
         )
-    source_manifest = validate_architecture_manifest(architecture.artifacts.read_json(source_manifest_ref))
-    target_manifest = validate_architecture_manifest(architecture.artifacts.read_json(target_manifest_ref))
-    source_fragments = architecture.load_manifest_fragments(source_manifest)
-    target_fragments = architecture.load_manifest_fragments(target_manifest)
+    if execution_adapter == ARTIFACT_BUNDLE_ADAPTER:
+        return _reconcile_data_contract_module_identities(
+            repository=repository,
+            contracts=contracts,
+            workflow_id=workflow_id,
+            source_epoch_id=source_epoch_id,
+            target_epoch_id=target_epoch_id,
+            actor=actor,
+        )
+    raise ValueError(
+        "workflow selected an unsupported execution adapter: "
+        + execution_adapter
+    )
+
+
+def _reconcile_data_contract_module_identities(
+    *,
+    repository: MinionV2Repository,
+    contracts: ContractArtifactAccess,
+    workflow_id: str,
+    source_epoch_id: str,
+    target_epoch_id: str,
+    actor: str,
+) -> tuple[str, ...]:
+    """Carry exact immutable artifact modules across a contract revision."""
+
     snapshots = repository.list_workflow_snapshots(workflow_id)
     source_nodes = {
-        str(item.payload.get("unit_id") or ""): item
+        str(item.payload.get("module_name") or item.payload.get("unit_id") or ""): item
         for item in snapshots
         if item.aggregate_type == AggregateType.DAG_NODE_RUN
         and str(item.payload.get("epoch_id") or "") == source_epoch_id
         and str(item.payload.get("node_kind") or "") == "unit"
     }
     target_nodes = {
-        str(item.payload.get("unit_id") or ""): item
+        str(item.payload.get("module_name") or item.payload.get("unit_id") or ""): item
         for item in snapshots
         if item.aggregate_type == AggregateType.DAG_NODE_RUN
         and str(item.payload.get("epoch_id") or "") == target_epoch_id
         and str(item.payload.get("node_kind") or "") == "unit"
     }
-    source_contracts = _contracts_by_id(source_manifest, source_fragments)
-    target_contracts = _contracts_by_id(target_manifest, target_fragments)
-    source_dependencies = _module_dependencies(source_fragments)
-    target_dependencies = _module_dependencies(target_fragments)
-    carried_forward: list[str] = []
-    for unit_id in _topological_module_order(target_dependencies):
-        source_node = source_nodes.get(unit_id)
-        target_node = repository.read_snapshot(
+    target_dependencies = {
+        name: [
+            str(provider)
+            for provider in dict(
+                dict(
+                    contracts.artifacts.read_json(
+                        dict(node.payload.get("unit_contract_ref") or {})
+                    )
+                ).get("module")
+                or {}
+            ).get("dependencies", {})
+            if str(provider) in target_nodes
+        ]
+        for name, node in target_nodes.items()
+    }
+    carried: list[str] = []
+    for name in _topological_module_order(target_dependencies):
+        source = source_nodes.get(name)
+        target = repository.read_snapshot(
             AggregateType.DAG_NODE_RUN,
-            target_nodes[unit_id].aggregate_id,
+            target_nodes[name].aggregate_id,
         )
+        if source is None or target is None:
+            continue
         if (
-            source_node is None
-            or source_node.state != "ACCEPTED"
-            or target_node is None
-            or target_node.state != "BLOCKED_BY_DEPS"
+            source.state != "ACCEPTED"
+            or target.state != "BLOCKED_BY_DEPS"
+            or not _same_module_identity(source, target)
+            or dict(source.payload.get("unit_contract_ref") or {})
+            != dict(target.payload.get("unit_contract_ref") or {})
         ):
             continue
-        if not _same_module_identity(source_node, target_node):
-            _recreate_replaced_module_worktree(
-                repository=repository,
-                workflow_id=workflow_id,
-                source_node=source_node,
-                target_node=target_node,
-            )
-            continue
-        dependency_ids = [str(item) for item in list(target_node.payload.get("dependency_node_ids") or [])]
         accepted_dependencies = [
-            dependency_id
-            for dependency_id in dependency_ids
-            if (repository.read_snapshot(AggregateType.DAG_NODE_RUN, dependency_id) or target_node).state == "ACCEPTED"
+            str(item)
+            for item in list(target.payload.get("dependency_node_ids") or [])
+            if (
+                repository.read_snapshot(
+                    AggregateType.DAG_NODE_RUN,
+                    str(item),
+                )
+                or target
+            ).state
+            == "ACCEPTED"
         ]
-        if len(accepted_dependencies) != len(dependency_ids):
+        if len(accepted_dependencies) != len(
+            list(target.payload.get("dependency_node_ids") or [])
+        ):
             continue
-        source_fingerprint = _module_revision_signature(
-            manifest=source_manifest,
-            fragments=source_fragments,
-            contract_ref=source_contracts[unit_id][0],
-            contract=source_contracts[unit_id][1],
-            unit_id=unit_id,
-            dependencies=source_dependencies,
-            node=source_node,
-            node_by_module=source_nodes,
+        candidate_ref = dict(source.payload.get("candidate_ref") or {})
+        verification_ref = dict(
+            source.payload.get("verification_artifact_ref") or {}
         )
-        target_fingerprint = _module_revision_signature(
-            manifest=target_manifest,
-            fragments=target_fragments,
-            contract_ref=target_contracts[unit_id][0],
-            contract=target_contracts[unit_id][1],
-            unit_id=unit_id,
-            dependencies=target_dependencies,
-            node=target_node,
-            node_by_module={
-                key: repository.read_snapshot(AggregateType.DAG_NODE_RUN, value.aggregate_id) or value
-                for key, value in target_nodes.items()
-            },
+        candidate_digest = str(source.payload.get("candidate_digest") or "")
+        fingerprint = str(
+            source.payload.get("module_revision_fingerprint") or ""
         )
-        if source_fingerprint != target_fingerprint:
+        if not all((candidate_ref, verification_ref, candidate_digest)):
             continue
-        candidate_ref = dict(source_node.payload.get("candidate_ref") or {})
-        verification_ref = dict(source_node.payload.get("verification_artifact_ref") or {})
-        candidate_digest = str(source_node.payload.get("candidate_digest") or "")
-        if not candidate_ref or not verification_ref or not candidate_digest:
-            continue
-        source_adapter = str(source_node.payload.get("execution_adapter") or SOFTWARE_GIT_ADAPTER)
-        target_adapter = str(target_node.payload.get("execution_adapter") or SOFTWARE_GIT_ADAPTER)
-        if source_adapter != target_adapter:
-            continue
-        if target_adapter == SOFTWARE_GIT_ADAPTER:
-            _carry_forward_candidate(source_node, target_node, candidate_digest)
-        elif target_adapter != ARTIFACT_BUNDLE_ADAPTER:
-            continue
+        if not fingerprint:
+            fingerprint = _stable_json_hash(
+                {
+                    "unit_contract_ref": dict(
+                        source.payload.get("unit_contract_ref") or {}
+                    ),
+                    "candidate_digest": candidate_digest,
+                }
+            )
         result = repository.dispatch(
             _action(
                 "CARRY_FORWARD_MODULE",
                 workflow_id,
                 AggregateType.DAG_NODE_RUN,
-                target_node.aggregate_id,
+                target.aggregate_id,
                 actor,
-                target_node.version,
+                target.version,
                 {
                     "candidate_ref": candidate_ref,
                     "candidate_digest": candidate_digest,
                     "verification_artifact_ref": verification_ref,
-                    "module_revision_fingerprint": target_fingerprint,
+                    "module_revision_fingerprint": fingerprint,
                     "accepted_dependency_node_ids": accepted_dependencies,
                     "epoch_frozen": False,
-                    "output_hashes": dict(source_node.payload.get("output_hashes") or {}),
-                    "dependency_output_hashes": dict(source_node.payload.get("dependency_output_hashes") or {}),
+                    "output_hashes": dict(
+                        source.payload.get("output_hashes") or {}
+                    ),
+                    "dependency_output_hashes": dict(
+                        source.payload.get("dependency_output_hashes") or {}
+                    ),
                     "carried_forward_from_epoch_id": source_epoch_id,
-                    "carried_forward_from_node_run_id": source_node.aggregate_id,
+                    "carried_forward_from_node_run_id": source.aggregate_id,
                 },
             )
         )
-        target_nodes[unit_id] = result.snapshot
-        carried_forward.append(result.snapshot.aggregate_id)
+        target_nodes[name] = result.snapshot
+        carried.append(result.snapshot.aggregate_id)
     _retire_removed_module_resources(
         repository=repository,
         workflow_id=workflow_id,
         source_nodes=source_nodes,
         target_module_names=set(target_nodes),
     )
-    return tuple(carried_forward)
+    return tuple(carried)
 
 
 def _reconcile_skeleton_module_identities(
     *,
     repository: MinionV2Repository,
-    architecture: ArchitectureArtifactService,
+    contracts: ContractArtifactAccess,
     workflow_id: str,
     source_epoch_id: str,
     target_epoch_id: str,
@@ -876,8 +1035,8 @@ def _reconcile_skeleton_module_identities(
     target_manifest_ref: ArtifactRef,
     actor: str,
 ) -> tuple[str, ...]:
-    source_artifact = dict(architecture.artifacts.read_json(source_manifest_ref))
-    target_artifact = dict(architecture.artifacts.read_json(target_manifest_ref))
+    source_artifact = dict(contracts.artifacts.read_json(source_manifest_ref))
+    target_artifact = dict(contracts.artifacts.read_json(target_manifest_ref))
     snapshots = repository.list_workflow_snapshots(workflow_id)
     source_nodes = {
         str(item.payload.get("module_name") or item.payload.get("unit_id") or ""): item
@@ -896,14 +1055,14 @@ def _reconcile_skeleton_module_identities(
     source_contracts = {
         name: (
             dict(node.payload.get("unit_contract_ref") or {}),
-            dict(architecture.artifacts.read_json(dict(node.payload.get("unit_contract_ref") or {}))),
+            dict(contracts.artifacts.read_json(dict(node.payload.get("unit_contract_ref") or {}))),
         )
         for name, node in source_nodes.items()
     }
     target_contracts = {
         name: (
             dict(node.payload.get("unit_contract_ref") or {}),
-            dict(architecture.artifacts.read_json(dict(node.payload.get("unit_contract_ref") or {}))),
+            dict(contracts.artifacts.read_json(dict(node.payload.get("unit_contract_ref") or {}))),
         )
         for name, node in target_nodes.items()
     }
@@ -975,7 +1134,7 @@ def _reconcile_skeleton_module_identities(
                 source_candidate_ref,
                 source_candidate_digest,
             ) = _snapshot_module_workspace_for_replan(
-                architecture=architecture,
+                contracts=contracts,
                 source_node=source_node,
                 target_node=target_node,
             )
@@ -1019,7 +1178,7 @@ def _reconcile_skeleton_module_identities(
             target_nodes[module_name] = result.snapshot
             continue
         candidate_ref = _checkpoint_preserved_module_head(
-            architecture=architecture,
+            contracts=contracts,
             target_node=target_node,
             source_candidate_ref=source_candidate_ref,
             source_candidate_digest=source_candidate_digest,
@@ -1058,9 +1217,18 @@ def _reconcile_skeleton_module_identities(
     return tuple(carried_forward)
 
 
+def _artifact_is_contract(
+    record: Mapping[str, Any] | None,
+) -> bool:
+    return (
+        str(dict(record or {}).get("artifact_type") or "")
+        == CONTRACT_ARTIFACT
+    )
+
+
 def _snapshot_module_workspace_for_replan(
     *,
-    architecture: ArchitectureArtifactService,
+    contracts: ContractArtifactAccess,
     source_node: AggregateSnapshot,
     target_node: AggregateSnapshot,
 ) -> tuple[dict[str, Any], str]:
@@ -1107,7 +1275,7 @@ def _snapshot_module_workspace_for_replan(
         ).split(b"\0")
         if item
     ]
-    ref = architecture.artifacts.put_json(
+    ref = contracts.artifacts.put_json(
         {
             "schema_version": "3",
             "candidate_digest": preserved_digest,
@@ -1173,7 +1341,7 @@ def _merge_architecture_into_preserved_module(
 
 def _checkpoint_preserved_module_head(
     *,
-    architecture: ArchitectureArtifactService,
+    contracts: ContractArtifactAccess,
     target_node: AggregateSnapshot,
     source_candidate_ref: Mapping[str, Any],
     source_candidate_digest: str,
@@ -1198,7 +1366,7 @@ def _checkpoint_preserved_module_head(
             source_candidate_ref.get("sha256") or ""
         ),
     }
-    return architecture.artifacts.put_json(
+    return contracts.artifacts.put_json(
         payload,
         artifact_type="GitCheckpointArtifact",
         child_refs=(
@@ -1441,27 +1609,6 @@ def _module_revision_signature(
     )
 
 
-def _contracts_by_id(
-    manifest: Mapping[str, Any],
-    fragments: Mapping[str, Any],
-) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
-    return {
-        str(dict(contract).get("unit_id") or ""): (dict(ref), dict(contract))
-        for ref, contract in zip(
-            list(manifest.get("unit_contract_refs") or []),
-            list(fragments.get("unit_contract") or []),
-            strict=True,
-        )
-    }
-
-
-def _module_dependencies(fragments: Mapping[str, Any]) -> dict[str, list[str]]:
-    return {
-        str(unit_id): [str(item) for item in list(values or [])]
-        for unit_id, values in dict(dict(fragments.get("topology") or {}).get("depends_on") or {}).items()
-    }
-
-
 def _topological_module_order(dependencies: Mapping[str, list[str]]) -> list[str]:
     pending = {unit_id: set(values) for unit_id, values in dependencies.items()}
     result: list[str] = []
@@ -1695,19 +1842,19 @@ class DagScheduler:
                 **baseline,
             }
             verification = node_kind == "system_verification"
-            legacy_integration = node_kind == "integration"
+            integration = node_kind == "integration"
             if node.state == "BLOCKED_BY_DEPS":
                 if verification:
                     action_type = "VERIFICATION_DEPENDENCIES_ACCEPTED"
-                elif legacy_integration:
-                    action_type = "LEGACY_INTEGRATION_DEPENDENCIES_ACCEPTED"
+                elif integration:
+                    action_type = "INTEGRATION_DEPENDENCIES_ACCEPTED"
                 else:
                     action_type = "DEPENDENCIES_ACCEPTED"
             else:
                 if verification:
                     action_type = "REQUEUE_VERIFICATION_STALE"
-                elif legacy_integration:
-                    action_type = "REQUEUE_LEGACY_INTEGRATION_STALE"
+                elif integration:
+                    action_type = "REQUEUE_INTEGRATION_STALE"
                 else:
                     action_type = "REQUEUE_STALE"
             if node.state == "STALE":
@@ -1732,72 +1879,48 @@ class DagScheduler:
         return tuple(scheduled)
 
 
-def _semantic_contract_value(value: Any) -> Any:
-    """Project Manager-owned contract records onto semantic worker-facing names."""
-
-    if isinstance(value, Mapping):
-        result: dict[str, Any] = {}
-        for key, item in value.items():
-            if key in {
-                "id",
-                "schema_version",
-                "requirement_ids",
-                "evidence_ids",
-                "complexity_policy_violations",
-            }:
-                continue
-            if key == "unit_id":
-                result["name"] = _semantic_contract_value(item)
-                continue
-            result[str(key)] = _semantic_contract_value(item)
-        return result
-    if isinstance(value, list):
-        return [_semantic_contract_value(item) for item in value]
-    return value
-
-
 @dataclass
 class UnitWorkViewBuilder:
-    architecture: ArchitectureArtifactService
+    contracts: ContractArtifactAccess
 
     def build(self, node: AggregateSnapshot) -> ArtifactRef:
         manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
-        record = self.architecture.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
-        if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
-            return self._build_skeleton_view(node)
-        manifest = validate_architecture_manifest(self.architecture.artifacts.read_json(manifest_ref))
-        fragments = self.architecture.load_manifest_fragments(manifest)
-        unit_contract = self.architecture.artifacts.read_json(dict(node.payload["unit_contract_ref"]))
-        unit_id = str(unit_contract.get("unit_id") or "")
-        cross_contracts = [
-            item
-            for item in list(fragments.get("cross_unit_contract") or [])
-            if unit_id in {str(item.get("provider") or ""), str(item.get("consumer") or "")}
-        ]
-        payload = {
-            "schema_version": "2",
-            "unit_contract": _semantic_contract_value(unit_contract),
-            "cross_unit_contracts": _semantic_contract_value(cross_contracts),
-            "global_constraints": _semantic_contract_value(fragments.get("global_constraints")),
-            "assumptions": _semantic_contract_value(fragments.get("assumption_ledger")),
-            "historical_repair_bills": list(node.payload.get("historical_repair_bill_refs") or []),
-        }
-        return self.architecture.artifacts.put_json(
-            payload,
-            artifact_type="UnitWorkViewArtifact",
-            child_refs=(
-                (str(manifest_ref["sha256"]), "architecture_manifest"),
-                (str(dict(node.payload["unit_contract_ref"])["sha256"]), "unit_contract"),
-            ),
+        record = self.contracts.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
+        if record and str(record.get("artifact_type") or "") == CONTRACT_ARTIFACT:
+            adapter = str(node.payload.get("execution_adapter") or "")
+            if adapter == SOFTWARE_GIT_ADAPTER:
+                artifact = dict(
+                    self.contracts.artifacts.read_json(manifest_ref)
+                )
+                contract = dict(artifact.get("contract") or {})
+                return self._build_skeleton_view(
+                    node,
+                    artifact_override={
+                        **artifact,
+                        "submission": software_contract_projection(contract),
+                    },
+                )
+            if adapter == ARTIFACT_BUNDLE_ADAPTER:
+                return self._build_data_contract_view(node)
+            raise ValueError(
+                "unit work view has no supported bound execution adapter"
+            )
+        raise ValueError(
+            "unit work view requires a ContractArtifact"
         )
     def _build_skeleton_view(
         self,
         node: AggregateSnapshot,
+        *,
+        artifact_override: Mapping[str, Any] | None = None,
     ) -> ArtifactRef:
         manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
-        artifact = dict(self.architecture.artifacts.read_json(manifest_ref))
+        artifact = dict(
+            artifact_override
+            or self.contracts.artifacts.read_json(manifest_ref)
+        )
         contract_ref = dict(node.payload.get("unit_contract_ref") or {})
-        contract = dict(self.architecture.artifacts.read_json(contract_ref))
+        contract = dict(self.contracts.artifacts.read_json(contract_ref))
         submission = dict(artifact.get("submission") or {})
         all_modules = {
             str(name): dict(value or {})
@@ -1817,7 +1940,7 @@ class UnitWorkViewBuilder:
         dependency_names = set(dependency_edges)
         dependency_contract_slices: dict[str, Any] = {}
         for dependency_id in list(node.payload.get("contract_dependency_node_ids") or []):
-            dependency = self.architecture.repository.read_snapshot(
+            dependency = self.contracts.repository.read_snapshot(
                 AggregateType.DAG_NODE_RUN, str(dependency_id)
             )
             if dependency is None:
@@ -1828,7 +1951,7 @@ class UnitWorkViewBuilder:
             if dependency_name not in dependency_names:
                 continue
             dependency_contract = dict(
-                self.architecture.artifacts.read_json(
+                self.contracts.artifacts.read_json(
                     dict(dependency.payload.get("unit_contract_ref") or {})
                 )
             )
@@ -1877,16 +2000,82 @@ class UnitWorkViewBuilder:
                 if module_name in dict(value.get("dependencies") or {})
             },
             "historical_repair_bills": [
-                repair_bill_semantic_view(self.architecture.artifacts, item) for item in historical_refs
+                repair_bill_semantic_view(self.contracts.artifacts, item) for item in historical_refs
             ],
         }
-        return self.architecture.artifacts.put_json(
+        return self.contracts.artifacts.put_json(
             payload,
             artifact_type="ModuleWorkViewArtifact",
             child_refs=(
                 (str(manifest_ref["sha256"]), "architecture_skeleton"),
                 (str(contract_ref["sha256"]), "module_contract"),
                 *((str(item["sha256"]), "historical_repair_bill") for item in historical_refs),
+            ),
+        )
+
+    def _build_data_contract_view(
+        self,
+        node: AggregateSnapshot,
+    ) -> ArtifactRef:
+        manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
+        contract_ref = dict(node.payload.get("unit_contract_ref") or {})
+        module_contract = dict(
+            self.contracts.artifacts.read_json(contract_ref)
+        )
+        manifest = dict(
+            self.contracts.artifacts.read_json(manifest_ref)
+        )
+        full_contract = dict(manifest.get("contract") or {})
+        all_modules = {
+            str(name): dict(value or {})
+            for name, value in dict(full_contract.get("modules") or {}).items()
+        }
+        owned_module = dict(module_contract.get("module") or {})
+        dependency_contracts = {
+            provider: {
+                "module": all_modules[provider],
+                "handoff": dict(dependency or {}),
+            }
+            for provider, dependency in dict(
+                owned_module.get("dependencies") or {}
+            ).items()
+            if provider in all_modules
+        }
+        if str(node.payload.get("node_kind") or "") == "integration":
+            dependency_contracts = {
+                name: {"module": module}
+                for name, module in all_modules.items()
+                if str(module.get("execution") or "") == "produce"
+            }
+        payload = {
+            "schema_version": "3",
+            "execution_adapter": ARTIFACT_BUNDLE_ADAPTER,
+            "module_name": str(
+                module_contract.get("module_name")
+                or node.payload.get("module_name")
+                or ""
+            ),
+            "module": owned_module,
+            "context": dict(module_contract.get("context") or {}),
+            "requirements": dict(
+                module_contract.get("requirements") or {}
+            ),
+            "scenarios": dict(module_contract.get("scenarios") or {}),
+            "dependency_contracts": dependency_contracts,
+            "historical_repair_bills": [
+                repair_bill_semantic_view(self.contracts.artifacts, item)
+                for item in list(
+                    node.payload.get("historical_repair_bill_refs") or []
+                )
+                if isinstance(item, Mapping) and item.get("sha256")
+            ],
+        }
+        return self.contracts.artifacts.put_json(
+            payload,
+            artifact_type="ModuleWorkViewArtifact",
+            child_refs=(
+                (str(manifest_ref["sha256"]), "contract"),
+                (str(contract_ref["sha256"]), "module_contract"),
             ),
         )
 
@@ -2117,7 +2306,7 @@ def provision_skeleton_module_worktrees(
     skeleton_tree = str(architecture_artifact.get("skeleton_tree_sha") or "")
     bundle_ref = ArtifactRef.from_mapping(dict(architecture_artifact.get("git_bundle_ref") or {}))
     if not skeleton_sha or not skeleton_tree or not bundle_ref.sha256:
-        raise ValueError("ArchitectureSkeletonArtifact is missing its commit, tree, or Git bundle")
+        raise ValueError("software ContractArtifact is missing its commit, tree, or Git bundle")
     with project_git_layout_lock(layout):
         if not common_git_dir.exists():
             _clone_bundle_repository(
@@ -2205,7 +2394,11 @@ def prepare_node_dependency_baseline(
     workspace = Path(str(node.payload.get("workspace_path") or ""))
     if not workspace.is_dir():
         raise ValueError(f"node workspace does not exist: {workspace}")
-    adapter = str(node.payload.get("execution_adapter") or SOFTWARE_GIT_ADAPTER)
+    adapter = str(node.payload.get("execution_adapter") or "").strip()
+    if adapter not in {SOFTWARE_GIT_ADAPTER, ARTIFACT_BUNDLE_ADAPTER}:
+        raise ValueError(
+            "node dependency baseline has no supported bound execution adapter"
+        )
     if (
         adapter == SOFTWARE_GIT_ADAPTER
         and apply_candidates

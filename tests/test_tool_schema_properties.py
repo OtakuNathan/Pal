@@ -20,7 +20,10 @@ from pal.minion.v2.capabilities import (
     MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,
     MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
 )
-from pal.minion.v2.review_findings import MinionV2ReviewAddFindingInput
+from pal.minion.v2.work_items import (
+    MinionAddFindingInput,
+    MinionUpdateChecklistInput,
+)
 
 
 class PropertyInput(StrictToolModel):
@@ -42,7 +45,8 @@ DECLARED_INPUT_MODELS = tuple(sorted({
             and isinstance(value, type)
             and issubclass(value, StrictToolModel)
         ),
-        ("MinionV2ReviewAddFindingInput", MinionV2ReviewAddFindingInput),
+        ("MinionAddFindingInput", MinionAddFindingInput),
+        ("MinionUpdateChecklistInput", MinionUpdateChecklistInput),
         (
             "MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput",
             MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput,

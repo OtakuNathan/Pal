@@ -1,0 +1,11 @@
+#     meals:  # type: list[Meal]
+#       - name: breakfast
+#         foods: ["Concrete food or portion guidance when known."]  # type: unique list[non-empty string], min 1
+#         purpose: "Why this choice serves the goal."  # type: non-empty string
+#     training: ["Concrete activity or rest guidance."]  # type: unique list[non-empty string]
+#     restrictions: ["Restrictions applied by this unit."]  # type: unique list[non-empty string]
+#     inputs: ["Approved measurements, preferences, and constraints."]  # type: unique list[non-empty string]
+#     outputs: [named_plan]  # type: unique list[non-empty string]; names match provides
+#     ownership: "The user owns execution and adjustment."  # type: non-empty string
+#     lifecycle: "Plan, external execution, observation, and later revision."  # type: non-empty string
+#     safety_invariants: ["No diagnosis or treatment; unsafe uncertainty stays explicit."]  # type: unique list[non-empty string], min 1

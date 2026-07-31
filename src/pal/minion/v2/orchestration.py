@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from pal.minion.v2.artifacts import ArtifactRef
+from pal.minion.v2.contract_protocol import software_contract_projection
 from pal.minion.v2.contracts import (
     ActionEnvelope,
     AggregateSnapshot,
@@ -49,7 +50,6 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "notify_node_accepted",
     "prepare_system_verification",
     "publish_accepted_memory_candidate",
-    "queue_integration_node",
     "propagate_pause",
     "propagate_resume",
     "propagate_cancel",
@@ -262,7 +262,7 @@ class MinionV2OutboxProcessor:
             return self._route_workflow(effect)
         if effect_type == "create_architecture_revision":
             return self._create_revision(effect)
-        if effect_type in {"schedule_ready_nodes", "queue_integration_node"}:
+        if effect_type == "schedule_ready_nodes":
             snapshot = self._effect_snapshot(effect)
             epoch_id = snapshot.aggregate_id if snapshot.aggregate_type == AggregateType.EXECUTION_EPOCH else str(snapshot.payload.get("epoch_id") or "")
             DagScheduler(self.repository).schedule_ready_nodes(
@@ -1192,7 +1192,7 @@ class MinionV2OutboxProcessor:
                 dict(initial_repair_bill_ref or {}).get("sha256") or ""
             ),
         )
-        compilation = ExecutionCompiler(self.repository, self.service.architecture).compile_epoch(
+        compilation = ExecutionCompiler(self.repository, self.service.contracts).compile_epoch(
             workflow_id=workflow_id,
             epoch_id=epoch_id,
             manifest_ref=ref,
@@ -1426,9 +1426,16 @@ class MinionV2OutboxProcessor:
                 }
             )
         manifest = self.service.artifacts.read_json(dict(node.payload.get("architecture_manifest_ref") or {}))
+        submission = dict(manifest.get("submission") or {})
+        if not submission and isinstance(manifest.get("contract"), Mapping):
+            submission = software_contract_projection(
+                dict(manifest.get("contract") or {})
+            )
         architecture_modules = {
             str(name): dict(value or {})
-            for name, value in dict(dict(manifest.get("submission") or {}).get("modules") or {}).items()
+            for name, value in dict(
+                submission.get("modules") or {}
+            ).items()
         }
         requirements_ref = dict(manifest.get("requirements_ref") or {})
         skeleton_sha = str(manifest.get("skeleton_commit_sha") or "")

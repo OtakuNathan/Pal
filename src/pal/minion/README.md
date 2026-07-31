@@ -2,7 +2,9 @@
 
 Owns:
 - durable workflow, aggregate, role-session, and worker-process orchestration
-- role-specific prompt/profile policy
+- Manager-compiled architecture templates, Family specializations, and
+  role-TOML playbooks
+- `ContractArtifact` compilation, module views, and WorkItem ledgers
 - Minion v3 semantic work-checkpoint policy
 - fresh runtime schema cutover and archive policy
 
@@ -19,9 +21,15 @@ Interaction rule:
   `active_errors`, `active_issues`, and `next_actions`; it emits neither
   private chain-of-thought nor durable-memory candidates
 - Architect and Architecture Reviewer keep complete `task.yaml` authority.
-  Coder and Module Verifier keep their bound work view, contracts, and
-  checklist authority. These anchors are mechanically projected and are never
-  rewritten by compaction
+  Manager renders one Family-specialized `architect.yaml`; Architect fills that
+  form and submits it through the Manager's pinned schema validator. Reviewer
+  submits structured findings. Coder and Module Verifier keep only their bound
+  module view, local contract, code, and checklist authority
+- role profile fragments are playbooks, Manager-derived views are inputs, and
+  the WorkItem checklist is the execution driver; none is a second contract
+- every family uses the same Architect/Reviewer/Implementation/Verifier graph.
+  Architect and Reviewer require profile executors; Implementation and Verifier
+  are either both profile-backed or both explicit `null` executors
 - the Minion compaction clock advances only for successful consumable LLM
   rounds. Provider errors, truncation, `compact_required`, tools, and
   compaction calls do not advance it
