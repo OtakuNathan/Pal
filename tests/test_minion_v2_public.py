@@ -3729,6 +3729,16 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             self.assertIn("task_spec", start_schema["properties"])
             self.assertIn("skill_refs", start_schema["properties"])
             self.assertNotIn("source_files", start_schema["properties"])
+            workspace_schema = start_schema["$defs"]["MinionV2StartWorkflowWorkspace"]
+            self.assertIn("kind", workspace_schema["required"])
+            self.assertEqual(
+                workspace_schema["properties"]["kind"]["enum"],
+                ["new_project", "existing_repo"],
+            )
+            self.assertIn(
+                "create a missing repo_path",
+                workspace_schema["properties"]["kind"]["description"],
+            )
             self.assertIn("search active Pal skills", start_descriptor.description)
             self.assertIn("ask the user whether to provide them", start_descriptor.description)
             self.assertIn("pass the exact approved IDs in skill_refs", start_descriptor.description)

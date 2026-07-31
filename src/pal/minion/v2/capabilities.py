@@ -82,7 +82,12 @@ MINION_START_WORKFLOW_GUIDANCE = ToolGuidance(
 
 
 class MinionV2StartWorkflowWorkspace(StrictToolModel):
-    kind: str | None = None
+    kind: Literal["new_project", "existing_repo"] = Field(
+        description=(
+            "Required workspace intent. Use new_project when Pal should create a "
+            "missing repo_path; use existing_repo only when repo_path already exists."
+        ),
+    )
     repo_path: str | None = None
     repo_root: str | None = None
     primary_language: str | None = None
