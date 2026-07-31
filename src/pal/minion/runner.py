@@ -591,7 +591,9 @@ class MinionRunner:
                 {**self.pack.to_dict(), "goal": initial_instruction, "instruction": initial_instruction}
             )
         channel_envelope = _minion_task_envelope(prompt_pack, minion_id=self.minion_id, run_id=self.run_id)
-        tool_protocol_messages: list[dict[str, Any]] = []
+        restored_tool_protocol_messages = _restore_minion_active_tool_protocol(
+            restored
+        )
         response_keys = [str(item) for item in list(restored.get("response_keys") or []) if str(item)]
         previous_response_keys = set(response_keys)
         response_key = str(session_metadata.get("response_key") or "").strip()
@@ -609,15 +611,25 @@ class MinionRunner:
             not restored
             or bool(response_key and response_key not in previous_response_keys)
         )
+        tool_protocol_messages = (
+            []
+            if semantic_input_is_new
+            else restored_tool_protocol_messages
+        )
         if restored:
             event_text = response_text if semantic_input_is_new else ""
+            active_input_id = str(restored.get("active_input_id") or "").strip()
             channel_envelope = ChannelEnvelope(
                 event=EventEnvelope(
                     event_kind=EventKind.USER_MESSAGE,
                     source_kind=SourceKind.MINION,
                     payload={"text": event_text},
                     correlation_id=self.run_id,
-                    event_id=response_key or f"{self.run_id}:resume",
+                    event_id=(
+                        response_key
+                        if semantic_input_is_new
+                        else active_input_id or response_key or f"{self.run_id}:resume"
+                    ),
                 ),
                 endpoint=current_channel_envelope.endpoint,
                 response_handle=current_channel_envelope.response_handle,
@@ -703,6 +715,14 @@ class MinionRunner:
             preferred_llm_endpoint_id=str(restored.get("preferred_llm_endpoint_id") or "") or None,
             preferred_llm_model_id=str(restored.get("preferred_llm_model_id") or "") or None,
             l1_input_committed=not semantic_input_is_new,
+            l1_protocol_committed_count=(
+                min(
+                    len(tool_protocol_messages),
+                    max(0, int(restored.get("l1_protocol_committed_count") or 0)),
+                )
+                if tool_protocol_messages
+                else 0
+            ),
         )
         begin_tool_results = getattr(state.execution_runtime, "begin_tool_result_turn", None)
         logical_context = None
@@ -747,6 +767,8 @@ class MinionRunner:
                     state,
                     outcome.commit_payload.transcript,
                 )
+                executor.close_active_tool_protocol(continuation)
+                self._sync_minion_state_from_continuation(state, continuation)
                 self.memory_candidates = _memory_candidates_from_sink(state.memory_candidate_sink)
                 self._persist_agent_session_checkpoint(
                     workspace,
@@ -881,6 +903,39 @@ class MinionRunner:
             "fencing_token": fencing_token,
             "initial_instruction": str(initial_instruction),
             "response_keys": list(response_keys),
+            "active_input_id": str(
+                getattr(
+                    getattr(
+                        getattr(continuation, "channel_envelope", None),
+                        "event",
+                        None,
+                    ),
+                    "event_id",
+                    "",
+                )
+                or ""
+            ),
+            "active_tool_protocol_messages": [
+                dict(message)
+                for message in list(
+                    getattr(continuation, "tool_protocol_messages", ()) or ()
+                )
+                if isinstance(message, dict)
+            ],
+            "tool_delivery_records": {
+                str(key): dict(value)
+                for key, value in dict(
+                    getattr(continuation, "tool_delivery_records", {}) or {}
+                ).items()
+                if str(key) and isinstance(value, dict)
+            },
+            "l1_protocol_committed_count": max(
+                0,
+                int(
+                    getattr(continuation, "l1_protocol_committed_count", 0)
+                    or 0
+                ),
+            ),
             "l1_items": _serialize_minion_l1(state.memory_service),
             "llm_round_count": int(state.llm_round_count),
             "tool_call_count": int(state.tool_call_count),
@@ -2381,6 +2436,25 @@ def _serialize_minion_l1(
         for transcript in list(memory_service.l1_store.items or ())
         if transcript
     ]
+
+
+def _restore_minion_active_tool_protocol(
+    checkpoint: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    raw = checkpoint.get("active_tool_protocol_messages") if checkpoint else None
+    if raw in (None, []):
+        return []
+    if not isinstance(raw, list) or any(not isinstance(item, Mapping) for item in raw):
+        raise RuntimeError(
+            "manager-selected agent continuation contains invalid active tool protocol"
+        )
+    messages = [dict(item) for item in raw]
+    protocol_error = l1_tool_protocol_validation_error(messages)
+    if protocol_error:
+        raise RuntimeError(
+            "manager-selected agent continuation contains unpaired active tool protocol"
+        )
+    return messages
 
 
 def _restore_minion_memory_state(

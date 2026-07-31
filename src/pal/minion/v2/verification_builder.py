@@ -28,6 +28,7 @@ from pal.minion.v2.review_findings import (
 from pal.minion.v2.work_items import (
     assert_work_items_complete,
     findings_from_work_items,
+    submission_work_items,
 )
 from pal.minion.v2.semantic_evidence import (
     record_unavailable_evidence,
@@ -206,57 +207,120 @@ _DEFECT_PRECEDENCE = {
 VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_scratch_write": {
         "alias": "verification_scratch_write",
-        "description": (
-            "Create or replace one complete verifier-owned test/probe file under the bound scratch directory. "
-            "The result returns the exact scratch_path to execute. Call this same tool again with the complete "
-            "replacement content when revising a probe; do not switch to ordinary file editing tools. "
-            "This cannot modify product source."
-        ),
+        "description": "Create or replace one complete verifier-owned probe file in bound scratch storage.",
+        "guidance": {
+            "use_when": (
+                "Use for a temporary executable test or probe needed by a verification case; "
+                "reuse the returned scratch_path when running it."
+            ),
+            "do_not_use_when": (
+                "Do not use for product source or durable module corpora, and do not revise the "
+                "probe through ordinary file tools."
+            ),
+            "failure_next_steps": (
+                "Correct the relative path or complete content and call this tool again; use the "
+                "returned scratch_path exactly."
+            ),
+        },
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationScratchWriteInput,
     },
     **{
         name: {
             "alias": name.removeprefix("op_minion_"),
-            "description": (
-                "Run and durably register one semantic verification case. Use a readable case name and put any source citation in the description or path; "
-                "the Manager owns stdout/stderr Artifacts and does not ask you to construct a report object."
-            ),
+            "description": f"Run and durably register one {tag.replace('_', ' ')} verification case.",
+            "guidance": {
+                "use_when": " ".join(
+                    [
+                        str(_VERIFICATION_ACTION_TEMPLATES[tag]["when"]),
+                        *[
+                            str(step)
+                            for step in _VERIFICATION_ACTION_TEMPLATES[tag]["steps"]
+                        ],
+                    ]
+                ),
+                "do_not_use_when": (
+                    "Do not use for a different evidence kind, repeat an unchanged case without "
+                    "a new assignment or repair, or construct a separate report object."
+                ),
+                "failure_next_steps": (
+                    "Inspect the complete command result, correct the probe, command, or "
+                    "environment, and rerun the same semantic case name only when justified."
+                ),
+            },
             "InputModel": MinionV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput,
         }
-        for name in _RUN_TO_KIND_TAG
+        for name, (_, tag) in _RUN_TO_KIND_TAG.items()
     },
     "op_minion_verification_run_lsp_check": {
         "alias": "verification_run_lsp_check",
-        "description": (
-            "Run and durably register LSP diagnostics for one source file using the Manager-prepared context. "
-            "Use this instead of invoking a language-server executable or creating compile_commands.json/compile_flags.txt through shell. "
-            "If the prepared operation is unavailable, record the LSP obligation UNKNOWN once with verification_check_unavailable; do not repair the LSP environment yourself."
-        ),
+        "description": "Run and durably register LSP diagnostics for one source file.",
+        "guidance": {
+            "use_when": (
+                "Use the Manager-prepared context when diagnostics are an applicable supporting "
+                "check for a changed source or public symbol."
+            ),
+            "do_not_use_when": (
+                "Do not invoke a language-server executable, create compile_commands.json or "
+                "compile_flags.txt, repair LSP setup, or treat diagnostics as acceptance proof."
+            ),
+            "failure_next_steps": (
+                "If the prepared operation is unavailable, record the required LSP obligation "
+                "UNKNOWN once with verification_check_unavailable."
+            ),
+        },
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput,
     },
     "op_minion_verification_check_unavailable": {
         "alias": "verification_check_unavailable",
-        "description": "Record focused_tests, warning_clean, consumer_probe, public_surface_dogfood, lsp, historical_regressions, platform_probe, or candidate_delta_review as UNKNOWN with a concrete environmental reason. This never manufactures PASS evidence.",
+        "description": "Record one required verification obligation as unavailable in the bound environment.",
+        "guidance": {
+            "use_when": "Use only for an applicable required obligation that genuinely cannot be exercised.",
+            "do_not_use_when": (
+                "Do not use for a failed check, a non-applicable obligation, or to manufacture "
+                "PASS evidence."
+            ),
+            "failure_next_steps": "Correct the obligation kind or concrete environmental reason before retrying.",
+        },
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput,
     },
     "op_minion_verification_set_summary": {
         "alias": "verification_set_summary",
-        "description": "Set the concise verifier summary after running cases.",
+        "description": "Replace the concise verifier summary for the current verification draft.",
+        "guidance": {
+            "use_when": "Use after the material verification cases and findings are known.",
+            "do_not_use_when": "Do not use the summary as evidence or a substitute for structured findings.",
+            "failure_next_steps": "Correct the summary shape from the returned validation error.",
+        },
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationSetSummaryInput,
     },
     "op_minion_verification_draft_status": {
         "alias": "verification_draft_status",
-        "description": "Read a compact status of the current verification Draft, including case names, statuses, active findings, remaining policy obligations, and the next risk-directed action templates.",
+        "description": "Read compact current verification cases, findings, obligations, and next actions.",
+        "guidance": {
+            "use_when": "Use to resume an assignment or select the next unfinished risk-directed action.",
+            "do_not_use_when": "Do not poll it repeatedly when no case, finding, or assignment state has changed.",
+            "failure_next_steps": "Continue from the bound checklist and recorded cases if status cannot be read.",
+        },
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationDraftStatusInput,
     },
     "op_minion_verification_remove_case": {
         "alias": "verification_remove_case",
-        "description": "Explicitly withdraw one recorded case by semantic name and give an audit reason. All findings attached to it are withdrawn with it. Do not use this to hide a failing case; rerun the case after a real fix instead.",
+        "description": "Withdraw one recorded verification case and its attached findings by semantic name.",
+        "guidance": {
+            "use_when": "Use only when a recorded case itself is invalid, duplicate, or no longer applicable.",
+            "do_not_use_when": "Do not hide a legitimate failure; rerun that case after a real fix instead.",
+            "failure_next_steps": "Correct the exact semantic case name and audit reason before retrying.",
+        },
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput,
     },
     "op_minion_verification_submit": {
         "alias": "verification_submit",
-        "description": "Submit recorded verification evidence and findings. Takes no arguments; Manager infers verdict and routing from immutable results.",
+        "description": "Submit the current immutable verification evidence and findings for Manager-derived routing.",
+        "guidance": {
+            "use_when": "Use with no arguments after every required obligation and checklist item is closed.",
+            "do_not_use_when": "Do not use with missing evidence, incomplete findings, or unfinished checklist work.",
+            "failure_next_steps": "Resolve every returned draft consistency error before retrying.",
+        },
         "InputModel": MinionV2VerificationBuilderOpMinionVerificationSubmitInput,
     },
 }
@@ -403,16 +467,6 @@ def compile_verification_invocation_tool_contract(
         "allowed_obligations": list(policy["allowed_obligations"]),
         "required_historical_regressions": historical_regressions,
     }
-    boundary_text = json.dumps(
-        {
-            "contract_paths": contract_paths,
-            "contract_consumption": consumption,
-            "entrypoints": entrypoints,
-            "policy": policy,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
     overrides: dict[str, dict[str, str]] = {}
     if policy["mode"] == "system":
         overrides["op_minion_verification_scratch_write"] = {
@@ -428,13 +482,6 @@ def compile_verification_invocation_tool_contract(
                 "the bound system-verification scratch."
             ),
         }
-    for capability in (*_RUN_TO_KIND_TAG, "op_minion_verification_run_lsp_check", "op_minion_verification_check_unavailable"):
-        overrides[capability] = {"use_when": (
-            "Record one semantic verification case. Consult the immutable task.yaml ledger when accepted contracts are insufficient; do not copy it into structured fields. "
-            "Reusing a case name updates that case. The description may cite a source filename in any language. Set probe_path whenever the command "
-            "consumes a verifier scratch file so exact evidence reuse is invalidated only by that file. "
-            f"Bound verification context: {boundary_text}."
-        )}
     overrides["op_minion_verification_draft_status"] = {
         "use_when": (
             "Use at the start of an assignment and after each verification phase to select the next unfinished "
@@ -460,7 +507,7 @@ def compile_verification_invocation_tool_contract(
         "Do not create an UNKNOWN case for an absent or non-applicable obligation. In particular, an empty historical "
         "RepairBill checklist means there is no historical-regression obligation. Allowed obligations: "
         + json.dumps(policy["allowed_obligations"], ensure_ascii=False, sort_keys=True)
-        + f". Bound verification context: {boundary_text}."
+        + "."
     )}
     if historical_regressions:
         overrides["op_minion_verification_run_historical_regression"] = {"use_when": (
@@ -472,16 +519,15 @@ def compile_verification_invocation_tool_contract(
             + json.dumps(historical_regressions, ensure_ascii=False, sort_keys=True)
         )}
     overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
-        "Record or replace one independently actionable, evidence-backed finding. Use a stable snake_case finding_key, "
-        "p0/p1/p2 priority, a self-contained summary, and exact task_ledger or workspace locations when available. "
-        "Complete the breadth-first audit first and batch independent add_finding calls in one tool round when possible. "
-        "A performance finding is valid when a representative scaling probe or source-level complexity trace shows a "
-        "material asymptotic, latency, memory, resource, copying, scanning, serialization, blocking, or I/O-amplification "
-        "problem; do not record speculative micro-optimizations. Include the triggering workload, measured or derived "
-        "impact, exact hot path, and a bounded contract-preserving optimization direction in the summary. "
-        "Use verification_defect only for an incorrect Verifier-owned probe or corpus, module_defect for the current implementation, dependency_defect for upstream code, contract_defect for a "
-        "frozen boundary, architecture_defect for ownership/topology, requirements_defect for a conflicting task ledger, "
-        "and integration_defect for cross-module product behavior. Bound semantic modules: "
+        "Record one independently actionable, evidence-backed finding with p0/p1/p2 priority, "
+        "a self-contained summary, and exact task_ledger or workspace locations when available. "
+        "Use verification_defect for an incorrect Verifier-owned probe or corpus, module_defect "
+        "for the current implementation, dependency_defect for upstream code, contract_defect "
+        "for a frozen boundary, architecture_defect for ownership/topology, requirements_defect "
+        "for a conflicting task ledger, and integration_defect for cross-module behavior. "
+        "Performance findings require a representative workload, measured or derived impact, "
+        "an exact hot path, and a bounded contract-preserving direction, not speculative "
+        "micro-optimization. Bound semantic modules: "
         f"{json.dumps(all_targets, ensure_ascii=False)}."
     )}
     contract["guidance_overrides"] = overrides
@@ -769,10 +815,7 @@ def _submit(
         ),
         "recorded_results": cases,
         "internal_context": _internal_context(context, workspace),
-        "work_items": [
-            dict(item)
-            for item in list(work_items.get("items") or [])
-        ],
+        "work_items": submission_work_items(work_items.get("items")),
     }
     if defect_kind:
         output["defect_kind"] = defect_kind

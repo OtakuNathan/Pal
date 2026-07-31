@@ -333,6 +333,8 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         self.assertIn("op_file_read", software.allowed_capabilities)
         self.assertNotIn("op_minion_verification_submit", software.allowed_capabilities)
+        self.assertNotIn("op_minion_contract_submit", software.allowed_capabilities)
+        self.assertNotIn("op_minion_review_submit", software.allowed_capabilities)
         self.assertIn("op_file_write", software.allowed_capabilities)
         self.assertNotIn(
             "op_minion_verification_scratch_write",
@@ -373,6 +375,8 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         self.assertIn("op_minion_review_submit", standalone.allowed_capabilities)
         self.assertIn("op_exec_shell", standalone.allowed_capabilities)
+        self.assertNotIn("op_file_edit", standalone.allowed_capabilities)
+        self.assertNotIn("op_file_write", standalone.allowed_capabilities)
         self.assertNotIn("op_minion_artifact_write", standalone.allowed_capabilities)
         self.assertNotIn("op_minion_verification_submit", standalone.allowed_capabilities)
 
@@ -396,6 +400,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
         )
         self.assertIn("op_minion_candidate_submit", coder.allowed_capabilities)
+        self.assertIn("op_minion_update_checklist", coder.allowed_capabilities)
         self.assertNotIn("op_minion_artifact_write", coder.allowed_capabilities)
 
     def test_verifier_profile_compiles_to_one_mode_specific_contract(self) -> None:
@@ -749,6 +754,11 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         assert spec is not None
         properties = dict(spec["input_schema"]["properties"])
         self.assertIn("cwd", properties)
+        self.assertEqual(
+            properties["cmd"]["description"],
+            "Shell command to execute as one string. Pipelines and shell operators are accepted.",
+        )
+        self.assertNotIn("checkpoint", properties["cmd"]["description"])
         self.assertEqual(properties["timeout_ms"]["default"], 180_000)
         self.assertEqual(
             MinionScopedExecutionShellInput.model_validate(
@@ -826,6 +836,106 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             provider["description"],
         )
 
+    def test_workflow_tool_specs_separate_purpose_from_decision_guidance(self) -> None:
+        scoped = MinionScopedExecutionRuntime(
+            ExecutionRuntime(),
+            [
+                "op_minion_update_checklist",
+                "op_minion_ask_question",
+                "op_minion_contract_submit",
+                "op_minion_add_finding",
+                "op_minion_review_submit",
+                "op_minion_candidate_submit",
+                "op_minion_candidate_report_architecture_defect",
+                "op_minion_candidate_request_module_split",
+                "op_minion_verification_pass",
+                "op_minion_verification_request_module_repair",
+                "op_minion_verification_run_diff_risk",
+                "op_minion_verification_run_lsp_check",
+                "op_minion_verification_check_unavailable",
+                "op_minion_verification_draft_status",
+            ],
+            workspace={},
+        )
+        providers = {
+            item["function"]["name"]: item["function"]
+            for item in scoped.build_llm_tool_contracts()
+        }
+
+        checklist = str(providers["update_checklist"]["description"])
+        self.assertIn(
+            "Purpose: Replace the current role's complete compact semantic work cursor.",
+            checklist,
+        )
+        self.assertIn("Use when: Initialize it after understanding", checklist)
+        self.assertIn(
+            "Do not use when: Do not use it as contract truth or evidence",
+            checklist,
+        )
+
+        submit = str(providers["candidate_submit"]["description"])
+        self.assertIn(
+            "Purpose: Submit the current module Candidate for independent verification.",
+            submit,
+        )
+        self.assertIn("Use when: Use after every checklist item is completed", submit)
+        self.assertIn("without a contracted product delta", submit)
+
+        defect = str(
+            providers["candidate_report_architecture_defect"]["description"]
+        )
+        self.assertIn("changing a public boundary", defect)
+        self.assertIn("ordinary implementation difficulty", defect)
+
+        split = str(providers["candidate_request_module_split"]["description"])
+        self.assertIn("genuinely cannot fit one Candidate cycle", split)
+        self.assertIn("preferred refactor", split)
+
+        question = str(providers["ask_question"]["description"])
+        self.assertIn("Purpose: Suspend the current role invocation", question)
+        self.assertIn("material ambiguity", question)
+        self.assertIn("private implementation choice", question)
+
+        contract = str(providers["contract_submit"]["description"])
+        self.assertIn("independent semantic review", contract)
+        self.assertIn("unreconciled declarations", contract)
+
+        review = str(providers["review_submit"]["description"])
+        self.assertIn("Manager derive its verdict", review)
+        self.assertIn("separate Markdown verdict", review)
+
+        finding = str(providers["add_finding"]["description"])
+        self.assertIn("one actionable defect", finding)
+        self.assertIn("Do not invent or maintain finding identities", finding)
+
+        verification_pass = str(providers["verification_pass"]["description"])
+        self.assertIn("successful semantic verification outcome", verification_pass)
+        self.assertIn("missing required evidence", verification_pass)
+
+        module_repair = str(
+            providers["verification_request_module_repair"]["description"]
+        )
+        self.assertIn("reproduced implementation defects", module_repair)
+        self.assertIn("verifier-corpus", module_repair)
+
+        diff_risk = str(providers["verification_run_diff_risk"]["description"])
+        self.assertIn("candidate delta review verification case", diff_risk)
+        self.assertIn("changed Git review range", diff_risk)
+
+        lsp = str(providers["verification_run_lsp_check"]["description"])
+        self.assertIn("Manager-prepared context", lsp)
+        self.assertIn("Do not invoke a language-server executable", lsp)
+
+        unavailable = str(
+            providers["verification_check_unavailable"]["description"]
+        )
+        self.assertIn("required verification obligation", unavailable)
+        self.assertIn("Do not use for a failed check", unavailable)
+
+        draft_status = str(providers["verification_draft_status"]["description"])
+        self.assertIn("select the next unfinished risk-directed action", draft_status)
+        self.assertIn("Do not poll it repeatedly", draft_status)
+
     def test_reference_normalization_preserves_semantic_reference_name(self) -> None:
         bound = self.root / "bound-input.json"
         bound.write_text('{"value":true}\n', encoding="utf-8")
@@ -853,7 +963,6 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("fabricate an API", behavior)
         self.assertIn("test adapter", behavior)
         self.assertIn("production backend", behavior)
-        self.assertIn("independent verification", behavior)
         self.assertIn("test_debugging", coder.allowed_skills)
         architect = self._pack("software_engineering.v2_architect")
         self.assertIn("op_exec_shell", architect.allowed_capabilities)
@@ -886,11 +995,16 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         overrides = dict(coder.resolved_profile["capability_guidance_overrides"])
         self.assertIn(
-            "Manager-prepared and recognition-probed",
-            overrides["op_lsp_status"]["use_when"],
+            "Manager prepares and probes LSP",
+            str(coder.resolved_profile["behavior_fragment"]),
         )
-        self.assertIn("After reading relevant source", overrides["op_lsp_definition"]["use_when"])
-        self.assertIn("do not prove runtime behavior", overrides["op_lsp_diagnostics"]["use_when"])
+        self.assertIn("known symbol at a file position", overrides["op_lsp_definition"]["use_when"])
+        self.assertIn(
+            "behavioral, build, or test proof",
+            overrides["op_lsp_diagnostics"]["do_not_use_when"],
+        )
+        self.assertIn("cross-file text search", overrides["op_file_read"]["do_not_use_when"])
+        self.assertNotIn("tests/<module_name>/developer", overrides["op_file_write"]["use_when"])
         self.assertNotIn("op_git", overrides)
         self.assertNotIn("op_exec_shell", overrides)
 
@@ -1163,8 +1277,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Prefer compile-time rejection", coder)
         self.assertIn("Preserve every accepted declaration's static constraints exactly", coder)
         self.assertIn("Avoid dynamic allocation, unnecessary copying", coder)
-        self.assertIn("update_checklist as a micro-plan, not proof", coder)
-        self.assertIn("submit immediately for independent verification", coder)
+        self.assertIn("checklist is its execution cursor, never authority", coder)
 
         self.assertIn("complete adjudication scope", verifier)
         self.assertIn("dependency public contract as an axiom", verifier)

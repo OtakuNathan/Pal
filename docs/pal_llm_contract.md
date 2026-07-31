@@ -62,6 +62,11 @@ Important transcript rules:
   transcript entries later.
 - L1 stores Pal's IR-level conversation records; provider-specific renderings
   are not L1 truth.
+- Provider-exact continuation fields, including reasoning content required by
+  a tool-call follow-up, live only in the active logical turn and its restart
+  checkpoint. Once the turn closes, L1 renders the closed tool interaction as
+  provider-neutral historical context rather than replaying provider tool
+  envelopes.
 
 ## Endpoint Registry
 
@@ -268,8 +273,11 @@ assembly.
 
 Examples:
 
-- DeepSeek thinking-capable endpoints set both `reasoning_effort` and
-  `extra_body.thinking`.
+- DeepSeek V4 thinking-capable endpoints expose only the effective `off`,
+  `high`, and `max` choices, default to `high`, and set both
+  `reasoning_effort` and `extra_body.thinking`. Compatibility aliases resolve
+  `low`/`medium` to `high` and `xhigh` to `max`; thinking requests omit
+  `tool_choice` as required by the provider.
 - Z.ai/GLM OpenAI-shaped endpoints expose the effective `off`, `high`, and
   `max` choices and set both `reasoning_effort` and `extra_body.thinking`.
   Older Pal aliases are resolved by that provider contract rather than sent

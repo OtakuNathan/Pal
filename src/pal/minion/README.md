@@ -39,8 +39,10 @@ Interaction rule:
 - one logical role session owns file snapshots and pager handles; they expire
   at semantic input `N+5` and become inaccessible when that role session exits
 - checkpoint schema v5 serializes the complete current L1 working set, the L2
-  hot cache, request settings, clocks, and registry generation hash. It does
-  not maintain a second tool-protocol journal or compact-summary truth source
+  hot cache, request settings, clocks, registry generation hash, and the exact
+  active provider tool protocol required to resume an unfinished logical turn.
+  That protocol is transient resume state rather than a second semantic truth
+  source, and it is cleared when the logical turn closes
 - closed tool calls and results enter L1 incrementally. Compaction reads only
   that frozen L1; role contracts, checklists, task fallback, and memory recall
   remain independently projected authority

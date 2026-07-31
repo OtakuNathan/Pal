@@ -29,6 +29,7 @@ from pal.llm import (
     AnthropicMessagesEndpointInvoker,
     CanonicalLLMRequest,
     CanonicalLLMOutcome,
+    CanonicalToolCall,
     EncryptedFileSecretStore,
     EndpointResolver,
     InMemorySecretStore,
@@ -1059,6 +1060,68 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(request_kwargs["reasoning_effort"], "max")
         self.assertNotIn("thinking", request_kwargs)
 
+    def test_openai_chat_invoker_preserves_deepseek_v4_tool_history_contract(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="deepseek-v4-flash",
+            provider="deepseek",
+            model_id="deepseek-v4-flash",
+            api_mode="openai_chat",
+            base_url="https://api.deepseek.com",
+            auth_kind="api_key_ref",
+            credential_ref="deepseek-prod:api-key",
+            priority=0,
+            enabled=True,
+            supports_reasoning=True,
+            capabilities_blob={},
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[
+                    {"role": "user", "content": "inspect"},
+                    {
+                        "role": "assistant",
+                        "provider_specific_fields": {"reasoning_content": "use the probe"},
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "probe", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+                ],
+                max_output_tokens=64,
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "probe",
+                            "description": "Probe.",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                metadata={"think_level": "max"},
+            ),
+        )
+
+        assistant = kwargs["messages"][1]
+        self.assertEqual(assistant["content"], "")
+        self.assertEqual(assistant["reasoning_content"], "use the probe")
+        self.assertNotIn("tool_choice", kwargs)
+        self.assertEqual(kwargs["thinking"], {"type": "enabled"})
+        self.assertEqual(kwargs["reasoning_effort"], "max")
+        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
+        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "enabled"}})
+
     def test_openai_chat_invoker_replays_reasoning_content_for_openai_shape_reasoning_providers(self) -> None:
         cases = [
             ("generic-reasoner", "openai_compatible", "generic-reasoner", "https://example.test/v1", "generic-reasoner"),
@@ -1446,9 +1509,9 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_openai_chat_invoker_maps_deepseek_think_level_to_reasoning_and_thinking_body(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="deepseek-v4-pro",
+            endpoint_id="deepseek-v4-flash",
             provider="deepseek",
-            model_id="deepseek-v4-pro",
+            model_id="deepseek-v4-flash",
             api_mode="openai_chat",
             base_url="https://api.deepseek.com",
             auth_kind="api_key_ref",
@@ -1469,14 +1532,24 @@ class PalV2BootstrapTests(unittest.TestCase):
             CanonicalLLMRequest(
                 messages=[{"role": "user", "content": "hello"}],
                 max_output_tokens=64,
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
                 metadata={"think_level": "xhigh"},
             ),
         )
 
         self.assertEqual(kwargs["api_key"], "deepseek-token")
-        self.assertEqual(kwargs["model"], "deepseek-v4-pro")
-        self.assertEqual(kwargs["reasoning_effort"], "high")
+        self.assertEqual(kwargs["model"], "deepseek-v4-flash")
+        self.assertEqual(kwargs["reasoning_effort"], "max")
         self.assertEqual(kwargs["thinking"], {"type": "enabled"})
+        self.assertNotIn("tool_choice", kwargs)
         self.assertNotIn("extra_body", kwargs)
         _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
         self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "enabled"}})
@@ -3663,6 +3736,152 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(outcome.input_tokens, 17)
         self.assertEqual(outcome.output_tokens, 5)
         self.assertEqual(outcome.cost, 0.0125)
+
+    def test_openai_chat_stream_assembles_fragmented_tool_arguments(self) -> None:
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
+        )
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "finish_reason": None,
+                        "delta": {"reasoning_content": "checking", "content": None},
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": None,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {
+                                        "name": "probe_search",
+                                        "arguments": "{\"query\":\"alpha",
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": None,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {
+                                        "arguments": " beta\",\"limit\":",
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": None,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": "3}"},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {"finish_reason": "tool_calls", "delta": {}}
+                ]
+            },
+        ]
+
+        events = list(invoker._iter_openai_chat_stream(chunks))
+
+        self.assertEqual(
+            [event.event_kind for event in events],
+            [
+                LLMStreamEventKind.REASONING_DELTA,
+                LLMStreamEventKind.TOOL_CALL,
+                LLMStreamEventKind.DONE,
+            ],
+        )
+        self.assertEqual(events[1].tool_call.name, "probe_search")
+        self.assertEqual(events[1].tool_call.call_id, "call_1")
+        self.assertEqual(
+            events[1].tool_call.args,
+            {"query": "alpha beta", "limit": 3},
+        )
+        self.assertEqual(events[-1].finish_reason, LLMFinishReason.TOOL_CALLS)
+
+    def test_openai_chat_response_parser_treats_scalar_tool_arguments_as_invalid(self) -> None:
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
+        )
+
+        outcome = invoker._parse_openai_chat_response(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "function": {
+                                        "name": "probe_search",
+                                        "arguments": "3",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(outcome.tool_calls[0].args, {})
+
+    def test_anthropic_stream_adapter_emits_completed_tool_input_once(self) -> None:
+        invoker = AnthropicMessagesEndpointInvoker()
+        outcome = CanonicalLLMOutcome(
+            reasoning_text="checking",
+            tool_calls=[
+                CanonicalToolCall(
+                    name="probe_search",
+                    args={"query": "alpha beta", "limit": 3},
+                    call_id="toolu_1",
+                )
+            ],
+            finish_reason=LLMFinishReason.TOOL_CALLS,
+        )
+
+        with patch.object(invoker, "invoke", return_value=outcome):
+            events = list(invoker.invoke_stream(object(), object()))
+
+        self.assertEqual(
+            [event.event_kind for event in events],
+            [
+                LLMStreamEventKind.REASONING_DELTA,
+                LLMStreamEventKind.TOOL_CALL,
+                LLMStreamEventKind.DONE,
+            ],
+        )
+        self.assertEqual(events[1].tool_call.args, {"query": "alpha beta", "limit": 3})
+        self.assertEqual(events[1].tool_call.call_id, "toolu_1")
 
     def test_anthropic_parser_and_renderer_preserve_thinking_blocks_for_tool_continuation(self) -> None:
         class FakeResponse:

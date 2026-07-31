@@ -930,11 +930,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("search for repository text search", capability["description"])
         self.assertIn("cmd", capability["input_schema"]["properties"])
         cmd_description = capability["input_schema"]["properties"]["cmd"]["description"]
-        self.assertIn("search for text search", cmd_description)
-        self.assertIn("read_file for file reads", cmd_description)
-        self.assertIn("edit_file for edits", cmd_description)
-        self.assertIn("delete_path for deletion", cmd_description)
-        self.assertIn("runtime/module/minion/capability state", cmd_description)
+        self.assertEqual(
+            cmd_description,
+            "Shell command to execute as one string. Pipelines and shell operators are accepted.",
+        )
+        self.assertNotIn("read_file", cmd_description)
+        self.assertNotIn("checkpoint", cmd_description)
         self.assertNotIn("op_", result.llm_text)
         self.assertEqual(capability["input_schema"]["required"], ["cmd"])
         self.assertIn("output_schema", capability)
@@ -2717,6 +2718,111 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         system_message = next(message for message in followup_messages if message.get("role") == "system")
         self.assertNotIn("Tool Observation", system_message["content"])
 
+    def test_closed_turn_tool_history_is_provider_neutral_on_next_turn(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        channel_runtime = ChannelRuntime()
+        register_channel_with_core(core.context, channel_runtime)
+        memory_service = MemoryService(
+            l3_selector=L3ProviderSelector(
+                resolver=core.context.execution_runtime.l3_plugin_registry.require
+            )
+        )
+        register_memory_with_core(core.context, memory_service)
+        scripted_llm = ScriptedLLMRuntime(
+            [
+                CanonicalLLMOutcome(
+                    text="",
+                    provider_specific_fields={
+                        "reasoning_content": "ephemeral provider reasoning"
+                    },
+                    tool_calls=[
+                        CanonicalToolCall(
+                            name="echo",
+                            args={"value": "first turn"},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                ),
+                CanonicalLLMOutcome(
+                    text="first final",
+                    tool_calls=[],
+                    finish_reason="stop",
+                ),
+                CanonicalLLMOutcome(
+                    text="second final",
+                    tool_calls=[],
+                    finish_reason="stop",
+                ),
+            ]
+        )
+        core.context.port_registry["llm:llm"] = scripted_llm
+        register_test_tool(core.context.execution_runtime, EchoTool())
+
+        def run_turn(text: str) -> None:
+            core.process_channel_turn(
+                ChannelEnvelope(
+                    event=EventEnvelope(
+                        event_kind="user.message",
+                        source_kind="channel",
+                        payload={"text": text},
+                    ),
+                    endpoint=EndpointConfig(
+                        endpoint_id="stdio",
+                        channel_kind="stdio",
+                        binding_key="stdin",
+                    ),
+                    response_handle=ResponseHandle(endpoint_id="stdio"),
+                )
+            )
+
+        run_turn("first request")
+        first_followup = [
+            request
+            for kind, request in scripted_llm.requests
+            if kind in {"generate", "generate_stream"}
+        ][1]
+        active_tool_call = next(
+            message
+            for message in first_followup.messages
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        )
+        self.assertEqual(
+            active_tool_call["provider_specific_fields"]["reasoning_content"],
+            "ephemeral provider reasoning",
+        )
+
+        run_turn("second request")
+        second_request = [
+            request
+            for kind, request in scripted_llm.requests
+            if kind in {"generate", "generate_stream"}
+        ][2]
+        self.assertFalse(
+            any(message.get("role") == "tool" for message in second_request.messages)
+        )
+        self.assertFalse(
+            any(message.get("tool_calls") for message in second_request.messages)
+        )
+        closed_history = next(
+            message
+            for message in second_request.messages
+            if "<closed_tool_interaction>" in str(message.get("content") or "")
+        )
+        self.assertIn("first turn", closed_history["content"])
+        self.assertNotIn("ephemeral provider reasoning", closed_history["content"])
+        self.assertNotIn(
+            "ephemeral provider reasoning",
+            json.dumps(
+                [
+                    message.payload
+                    for transcript in memory_service.l1_store.items
+                    for message in transcript
+                ],
+                ensure_ascii=False,
+            ),
+        )
+
     def test_tool_protocol_prefers_llm_text_over_summary_text(self) -> None:
         core = PalCore()
         register_core_with_core(core)
@@ -3397,6 +3503,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     role="assistant",
                     content="",
                     tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "probe_tool", "arguments": "{}"}}],
+                    payload={"provider_specific_fields": {"reasoning_content": "inspect the probe"}},
                 ),
                 L1TranscriptMessage(role="tool", content="probe result", tool_call_id="call_1"),
             ]
@@ -3407,6 +3514,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual([item.role for item in transcript], ["assistant", "tool"])
         self.assertEqual(transcript[0].content, "")
         self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
+        self.assertEqual(transcript[0].payload, {})
         self.assertEqual(transcript[1].tool_call_id, "call_1")
 
     def test_l1_commit_rejects_orphan_tool_result(self) -> None:
@@ -3486,7 +3594,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             ["fresh valid context"],
         )
 
-    def test_memory_prompt_preserves_complete_tool_protocol_batch(self) -> None:
+    def test_memory_prompt_projects_closed_tool_protocol_as_neutral_history(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
 
         pack = MemoryPack(
@@ -3495,6 +3603,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     role="assistant",
                     content="",
                     tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "probe_tool", "arguments": "{}"}}],
+                    payload={"provider_specific_fields": {"reasoning_content": "inspect the probe"}},
                 ),
                 L1TranscriptMessage(role="tool", content="probe result", tool_call_id="call_1"),
             ]
@@ -3503,13 +3612,15 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
         l1_fragments = [fragment for fragment in fragments if str(fragment.metadata.get("block_id") or "").startswith("l1_recent_context")]
 
-        self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["assistant", "tool"])
-        self.assertEqual(l1_fragments[0].metadata.get("tool_calls")[0]["id"], "call_1")
+        self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["assistant"])
+        self.assertNotIn("tool_calls", l1_fragments[0].metadata)
         self.assertNotIn("provider_specific_fields", l1_fragments[0].metadata)
-        self.assertEqual(l1_fragments[1].metadata.get("tool_call_id"), "call_1")
-        self.assertEqual(l1_fragments[1].content, "probe result")
+        self.assertIn("<closed_tool_interaction>", l1_fragments[0].content)
+        self.assertIn("probe_tool", l1_fragments[0].content)
+        self.assertIn("probe result", l1_fragments[0].content)
+        self.assertNotIn("inspect the probe", l1_fragments[0].content)
 
-    def test_prompt_compiler_preserves_empty_assistant_tool_call_headers(self) -> None:
+    def test_prompt_compiler_neutralizes_closed_l1_tool_protocol(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         service = MemoryService()
@@ -3519,6 +3630,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     role="assistant",
                     content="",
                     tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "probe_tool", "arguments": "{}"}}],
+                    payload={"provider_specific_fields": {"reasoning_content": "inspect the probe"}},
                 ),
                 L1TranscriptMessage(role="tool", content="probe result", tool_call_id="call_1"),
             ]
@@ -3535,14 +3647,19 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 ),
             )
         )
-        protocol_messages = [message for message in prompt.messages if message["role"] in {"assistant", "tool"}]
+        protocol_messages = [
+            message
+            for message in prompt.messages
+            if "<closed_tool_interaction>" in str(message.get("content") or "")
+        ]
 
-        self.assertEqual([message["role"] for message in protocol_messages], ["assistant", "tool"])
-        self.assertEqual(protocol_messages[0]["content"], "")
-        self.assertEqual(protocol_messages[0]["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(len(protocol_messages), 1)
+        self.assertEqual(protocol_messages[0]["role"], "assistant")
+        self.assertNotIn("tool_calls", protocol_messages[0])
         self.assertNotIn("provider_specific_fields", protocol_messages[0])
-        self.assertEqual(protocol_messages[1]["tool_call_id"], "call_1")
-        self.assertEqual(protocol_messages[1]["content"], "probe result")
+        self.assertIn("probe_tool", protocol_messages[0]["content"])
+        self.assertIn("probe result", protocol_messages[0]["content"])
+        self.assertNotIn("inspect the probe", protocol_messages[0]["content"])
 
     def test_memory_prompt_trusts_orphan_tool_result_history_without_revalidating(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
@@ -3556,9 +3673,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
         l1_fragments = [fragment for fragment in fragments if str(fragment.metadata.get("block_id") or "").startswith("l1_recent_context")]
 
-        self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["tool"])
-        self.assertEqual(l1_fragments[0].metadata.get("tool_call_id"), "call_missing")
-        self.assertEqual(l1_fragments[0].content, "orphan result")
+        self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["assistant"])
+        self.assertNotIn("tool_call_id", l1_fragments[0].metadata)
+        self.assertIn("call_missing", l1_fragments[0].content)
+        self.assertIn("orphan result", l1_fragments[0].content)
 
     def test_memory_prompt_trusts_incomplete_tool_call_header_history_without_revalidating(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
@@ -3577,7 +3695,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         l1_fragments = [fragment for fragment in fragments if str(fragment.metadata.get("block_id") or "").startswith("l1_recent_context")]
 
         self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["assistant"])
-        self.assertEqual(l1_fragments[0].metadata.get("tool_calls")[0]["id"], "call_missing")
+        self.assertNotIn("tool_calls", l1_fragments[0].metadata)
+        self.assertIn("call_missing", l1_fragments[0].content)
 
     def test_memory_prompt_trusts_duplicate_tool_call_id_history_without_revalidating(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
@@ -3599,9 +3718,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
         l1_fragments = [fragment for fragment in fragments if str(fragment.metadata.get("block_id") or "").startswith("l1_recent_context")]
 
-        self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["assistant", "tool"])
-        self.assertEqual(len(l1_fragments[0].metadata.get("tool_calls")), 2)
-        self.assertEqual(l1_fragments[1].metadata.get("tool_call_id"), "call_1")
+        self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["assistant"])
+        self.assertNotIn("tool_calls", l1_fragments[0].metadata)
+        self.assertGreaterEqual(l1_fragments[0].content.count("call_1"), 2)
+        self.assertIn("probe result", l1_fragments[0].content)
 
     def test_memory_prompt_trusts_tool_call_header_with_missing_id_history_without_revalidating(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
@@ -3622,9 +3742,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
         l1_fragments = [fragment for fragment in fragments if str(fragment.metadata.get("block_id") or "").startswith("l1_recent_context")]
 
-        self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["assistant", "tool"])
-        self.assertEqual(l1_fragments[0].metadata.get("tool_calls")[0]["function"]["name"], "probe_tool")
-        self.assertEqual(l1_fragments[1].metadata.get("tool_call_id"), "call_1")
+        self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["assistant"])
+        self.assertNotIn("tool_calls", l1_fragments[0].metadata)
+        self.assertIn("probe_tool", l1_fragments[0].content)
+        self.assertIn("probe result", l1_fragments[0].content)
 
     def test_memory_prompt_dedupes_working_memory_entries_by_identity(self) -> None:
         from pal.memory import MemoryPack

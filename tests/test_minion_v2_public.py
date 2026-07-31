@@ -4849,7 +4849,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             workflow_id="wf_triage_resume",
             actor="nathan",
             source_channel="socket:test",
-            subject="architecture",
+            subject="phase:architecture",
             resolution="Removed the stale worker lease and verified the architecture workspace is stable.",
         )
 
@@ -4861,6 +4861,89 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             "Removed the stale worker lease and verified the architecture workspace is stable.",
         )
         self.assertEqual(resumed.payload["triage_resolution_kind"], "manual")
+
+    def test_triage_subjects_disambiguate_module_names_from_phase_names(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        repository = service.repository
+        repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id="wf_subjects",
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id="wf_subjects",
+                actor="test",
+                expected_version=0,
+                idempotency_key="subjects:create-workflow",
+            )
+        )
+        revision = repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_ARCHITECTURE_REVISION",
+                workflow_id="wf_subjects",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="arch_subjects",
+                actor="test",
+                expected_version=0,
+                idempotency_key="subjects:create-architecture",
+            )
+        ).snapshot
+        contract_ref = service.artifacts.put_json(
+            {"module_name": "architecture"},
+            artifact_type="ModuleContractArtifact",
+        )
+        node = repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="wf_subjects",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node_subjects",
+                actor="test",
+                expected_version=0,
+                idempotency_key="subjects:create-node",
+                payload={
+                    "unit_contract_ref": contract_ref.to_dict(),
+                    "epoch_id": "epoch_subjects",
+                    "unit_id": "architecture",
+                    "module_name": "architecture",
+                    "node_kind": "unit",
+                    "dependency_node_ids": [],
+                },
+            )
+        ).snapshot
+        for snapshot, key in ((revision, "architecture"), (node, "module")):
+            repository.dispatch(
+                ActionEnvelope(
+                    action_type="ENTER_TRIAGE",
+                    workflow_id="wf_subjects",
+                    aggregate_type=snapshot.aggregate_type,
+                    aggregate_id=snapshot.aggregate_id,
+                    actor="test",
+                    expected_version=snapshot.version,
+                    idempotency_key=f"subjects:triage:{key}",
+                    payload={"blocker": {"kind": "test"}},
+                )
+            )
+
+        status = service.workflow_status("wf_subjects")
+        subjects = {item["subject"] for item in status["triage"]}
+        self.assertEqual(subjects, {"module:architecture", "phase:architecture"})
+
+        service.resolve_triage(
+            workflow_id="wf_subjects",
+            actor="nathan",
+            source_channel="socket:test",
+            subject="module:architecture",
+            resolution="Recovered only the module worker.",
+        )
+
+        self.assertNotEqual(
+            repository.read_snapshot(AggregateType.DAG_NODE_RUN, "node_subjects").state,
+            "TRIAGE_REQUIRED",
+        )
+        self.assertEqual(
+            repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, "arch_subjects").state,
+            "TRIAGE_REQUIRED",
+        )
 
     def test_triage_resolution_restores_verified_imported_requirements_binding(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
@@ -4920,7 +5003,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             workflow_id="wf_imported_triage",
             actor="nathan",
             source_channel="socket:test",
-            subject="architecture",
+            subject="phase:architecture",
             resolution="Verified the imported manifest and Workflow Request bind identical Requirements.",
         )
 
@@ -5016,6 +5099,13 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 ("wf_orphaned_node",),
             )
 
+        orphaned = service.workflow_status("wf_orphaned_node")
+        self.assertEqual(orphaned["liveness"], "orphaned")
+        self.assertEqual(
+            orphaned["next_legal_action"],
+            ["resume_workflow", "control_workflow:cancel"],
+        )
+
         result = service.resume_workflow(
             workflow_id="wf_orphaned_node",
             actor="nathan",
@@ -5024,14 +5114,42 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         node = service.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
         self.assertEqual(result["status"], "triage_requires_resolution")
-        self.assertEqual(result["triage"][0]["subject"], "drawing")
+        self.assertEqual(result["triage"][0]["subject"], "unit:drawing")
         self.assertEqual(node.state, "TRIAGE_REQUIRED")
+
+        status = service.workflow_status("wf_orphaned_node")
+        self.assertEqual(
+            status["next_legal_action"],
+            ["resolve_triage", "control_workflow:cancel"],
+        )
+        self.assertEqual(
+            status["triage"],
+            [
+                {
+                    "subject": "unit:drawing",
+                    "kind": "dag node run",
+                    "blocker": {
+                        "kind": "orphaned_worker",
+                        "reason": (
+                            "worker-owned state has no live lease, pending outbox "
+                            "effect, or durable role assignment"
+                        ),
+                    },
+                    "resume_state": "PRODUCING",
+                    "recovery": {
+                        "action": "resolve_triage",
+                        "arguments": {"subject": "unit:drawing"},
+                        "requires": ["resolution"],
+                    },
+                }
+            ],
+        )
 
         resolved = service.resolve_triage(
             workflow_id="wf_orphaned_node",
             actor="nathan",
             source_channel="socket:test",
-            subject="drawing",
+            subject="unit:drawing",
             resolution="Confirmed the previous worker is gone and the worktree contains no active writers.",
         )
 

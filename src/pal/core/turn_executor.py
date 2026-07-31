@@ -1172,6 +1172,18 @@ class TurnExecutor:
         continuation.pending_tool_call_batch = []
         continuation.pending_tool_results = []
 
+    @staticmethod
+    def close_active_tool_protocol(continuation: Any) -> None:
+        """Release provider-exact protocol state after a logical turn closes."""
+
+        continuation.tool_protocol_messages.clear()
+        continuation.tool_delivery_records.clear()
+        continuation.pending_assistant_tool_text = ""
+        continuation.pending_assistant_provider_specific_fields = {}
+        continuation.pending_tool_call_batch = []
+        continuation.pending_tool_results = []
+        continuation.l1_protocol_committed_count = 0
+
     def _render_tool_result_content(self, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> str:
         if self._is_memory_recall_tool_call(tool_call.name):
             return self._render_memory_recall_tool_observation(tool_call, result)
@@ -1612,7 +1624,5 @@ class TurnExecutor:
         if not run_result.success or continuation is None:
             return run_result
 
-        continuation.tool_protocol_messages.clear()
-        continuation.tool_delivery_records.clear()
-        continuation.l1_protocol_committed_count = 0
+        self.close_active_tool_protocol(continuation)
         return run_result

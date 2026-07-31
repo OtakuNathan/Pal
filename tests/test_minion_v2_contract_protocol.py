@@ -32,6 +32,7 @@ from pal.minion.v2.work_items import (
     UPDATE_CHECKLIST_CAPABILITY,
     add_finding_tool_result,
     read_work_items,
+    submission_work_items,
     update_checklist_tool_result,
 )
 from pal.shared import MinionInvocationPack
@@ -43,6 +44,31 @@ class ContractProtocolTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_submission_work_items_exposes_semantics_without_manager_identity(self) -> None:
+        self.assertEqual(
+            submission_work_items(
+                [
+                    {
+                        "item_id": "work_internal",
+                        "kind": "phase",
+                        "status": "completed",
+                        "summary": "settle the contract",
+                        "ordinal": 0,
+                        "origin": "role_playbook",
+                        "required": True,
+                        "semantic_hash": "manager-only",
+                    }
+                ]
+            ),
+            [
+                {
+                    "kind": "phase",
+                    "status": "completed",
+                    "summary": "settle the contract",
+                }
+            ],
+        )
 
     def test_every_family_specialization_compiles_a_valid_example_and_template(
         self,

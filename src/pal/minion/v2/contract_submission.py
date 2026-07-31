@@ -22,13 +22,21 @@ _MANAGER_ARCHITECT_DIRECTORY = ".pal-minion-architect"
 
 CONTRACT_SUBMIT_TOOL_SPEC: dict[str, Any] = {
     "alias": "contract_submit",
-    "description": (
-        "Submit the Manager-preseeded architect.yaml after the role "
-        "playbook and checklist are complete. Takes no arguments. The pinned "
-        "Manager-compiled Draft 2020-12 schema, graph invariants, file location, "
-        "fencing token, and checklist closure are checked mechanically. Semantic "
-        "acceptance belongs to the Contract Reviewer."
-    ),
+    "description": "Submit the Manager-preseeded architect.yaml for independent semantic review.",
+    "guidance": {
+        "use_when": (
+            "Use with no arguments after the fixed role playbook and checklist are complete "
+            "and declarations agree with architect.yaml."
+        ),
+        "do_not_use_when": (
+            "Do not use with unfinished checklist work, unreconciled declarations, or a "
+            "known schema or graph defect."
+        ),
+        "failure_next_steps": (
+            "Correct only the reported checklist, schema, graph, or bound-file defect in "
+            "place, then retry once the submitted contract is mechanically valid."
+        ),
+    },
     "InputModel": EmptyToolInput,
     "examples": (),
     "idempotency": "idempotent",

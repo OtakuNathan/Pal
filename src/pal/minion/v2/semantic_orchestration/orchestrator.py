@@ -163,6 +163,7 @@ from pal.minion.v2.submission_drafts import (
     authoring_input_fingerprint,
 )
 from pal.minion.v2.semantic_evidence import recorded_cases
+from pal.minion.v2.work_items import submission_work_items
 from pal.minion.v2.role_contracts import (
     OrchestrationRole,
     RoleActivation,
@@ -1488,6 +1489,7 @@ class SemanticOrchestrator:
                     "status": "superseded",
                 }
             try:
+                failure_generation = max(0, int(snapshot.version))
                 self.repository.dispatch(
                     ActionEnvelope(
                         action_type="ROLE_FAILED",
@@ -1496,7 +1498,14 @@ class SemanticOrchestrator:
                         aggregate_id=snapshot.aggregate_id,
                         actor="minion-v2-worker-supervisor",
                         expected_version=snapshot.version,
-                        idempotency_key=f"worker-failed:{assignment_id}",
+                        # One durable receipt may be replayed after an operator
+                        # resolves triage.  Deduplicate retries inside the
+                        # current aggregate generation without mistaking a
+                        # later recovery cycle for the already-settled failure.
+                        idempotency_key=(
+                            f"worker-failed:{assignment_id}:"
+                            f"generation-{failure_generation}"
+                        ),
                         payload={
                             "failure_artifact_ref": failure_ref.to_dict(),
                             "blocker": {
@@ -2143,6 +2152,16 @@ class SemanticOrchestrator:
         )
         report = _primary_json_output(terminal)
         if skeleton_manifest:
+            # Durable role receipts survive Manager upgrades and are replayed
+            # during triage recovery.  Re-apply the current handoff projection
+            # before defense-in-depth validation so an older receipt cannot
+            # leak Manager-owned WorkItem identity into the business action.
+            report = {
+                **report,
+                "work_items": submission_work_items(
+                    report.get("work_items")
+                ),
+            }
             try:
                 _validate_skeleton_coder_report(
                     report,
@@ -4066,11 +4085,7 @@ class SemanticOrchestrator:
                 "status": status.value,
                 "findings": findings,
                 "advisories": advisories,
-                "work_items": [
-                    dict(item)
-                    for item in list(payload.get("work_items") or [])
-                    if isinstance(item, Mapping)
-                ],
+                "work_items": submission_work_items(payload.get("work_items")),
             },
             artifact_type="StandaloneReviewReportArtifact",
             child_refs=(
@@ -4355,10 +4370,7 @@ class SemanticOrchestrator:
             contract = dict(submission.get("contract") or {})
             checklist = {
                 "kind": "work_items",
-                "items": [
-                    dict(item)
-                    for item in list(submission.get("work_items") or [])
-                ],
+                "items": submission_work_items(submission.get("work_items")),
             }
             current = self.repository.read_snapshot(
                 AggregateType.ARCHITECTURE_REVISION,
@@ -4679,10 +4691,9 @@ class SemanticOrchestrator:
             remove_bound_architect_file(workspace_override)
             checklist = {
                 "kind": "work_items",
-                "items": [
-                    dict(item)
-                    for item in list(role_submission.get("work_items") or [])
-                ],
+                "items": submission_work_items(
+                    role_submission.get("work_items")
+                ),
             }
             current = self.repository.read_snapshot(
                 AggregateType.ARCHITECTURE_REVISION,
@@ -5384,10 +5395,9 @@ class SemanticOrchestrator:
                 {
                     **semantic.to_dict(),
                     "contract_schema": contract_schema,
-                    "work_items": [
-                        dict(item)
-                        for item in list(payload.get("work_items") or [])
-                    ],
+                    "work_items": submission_work_items(
+                        payload.get("work_items")
+                    ),
                 },
                 artifact_type="ContractReviewArtifact",
                 child_refs=((manifest_ref.sha256, "contract"),),
@@ -5880,7 +5890,6 @@ class SemanticOrchestrator:
             effective_policy = effective_verification_policy(
                 work_view=view,
                 verification_policy=dict(family_policies.get("verification") or {}),
-                standalone=activation.mode == RoleMode.STANDALONE,
             )
             verification_policy_ref = self.service.artifacts.put_json(
                 effective_policy,

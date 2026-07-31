@@ -42,6 +42,7 @@ from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
 from pal.minion.tool_guidance import (
     minion_tool_guidance,
+    normalize_tool_guidance_patch,
     normalize_tool_guidance_overrides,
 )
 from pal.minion.tool_admission import (
@@ -115,16 +116,6 @@ class MinionScopedExecutionOpMinionArtifactEditInput(StrictToolModel):
 class MinionScopedExecutionShellInput(
     ExecutionShellExecShellExecCapabilityMixinShellInput
 ):
-    cmd: str = Field(
-        ...,
-        description=(
-            "Task-scoped shell command for bounded discovery, tests, builds, "
-            "scripts, process probes, and ordinary file operations inside the "
-            "assigned worktree. The assigned worktree is the default working "
-            "directory; use $PAL_BUILD_SCRATCH for generated build output when "
-            "the worktree is read-only."
-        ),
-    )
     timeout_ms: int | None = Field(
         180_000,
         ge=1,
@@ -281,11 +272,26 @@ def _workflow_capability(
             effect_receipt=receipt,
         )
 
+    raw_spec_guidance = spec.get("guidance")
+    spec_guidance = (
+        normalize_tool_guidance_patch(
+            raw_spec_guidance,
+            context=f"workflow tool {name!r} guidance",
+        )
+        if raw_spec_guidance is not None
+        else {}
+    )
     base_guidance = ToolGuidance(
-        purpose=purpose,
-        use_when=purpose,
-        do_not_use_when="Do not use outside your current assigned task and role.",
-        failure_next_steps="Correct invalid input; for execution failures inspect the recovery affordance before retrying.",
+        purpose=spec_guidance.get("purpose", purpose),
+        use_when=spec_guidance.get("use_when", purpose),
+        do_not_use_when=spec_guidance.get(
+            "do_not_use_when",
+            "Do not use outside your current assigned task and role.",
+        ),
+        failure_next_steps=spec_guidance.get(
+            "failure_next_steps",
+            "Correct invalid input; for execution failures inspect the recovery affordance before retrying.",
+        ),
     )
     guidance = minion_tool_guidance(
         name,

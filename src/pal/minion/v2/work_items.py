@@ -119,13 +119,21 @@ ADD_FINDING_EXAMPLES = (
 
 UPDATE_CHECKLIST_TOOL_SPEC: dict[str, Any] = {
     "alias": "update_checklist",
-    "description": (
-        "Replace the current role's compact semantic work cursor. Use it immediately "
-        "after understanding the bounded assignment, then update it as work advances. "
-        "The checklist records what is done and what remains; it is not contract truth "
-        "or evidence. Preserve the profile's fixed playbook steps in order and include "
-        "Manager-routed finding repair steps. At most one item may be in_progress."
-    ),
+    "description": "Replace the current role's complete compact semantic work cursor.",
+    "guidance": {
+        "use_when": (
+            "Initialize it after understanding the bounded assignment, then update statuses "
+            "and Manager-routed finding repair steps as work advances."
+        ),
+        "do_not_use_when": (
+            "Do not use it as contract truth or evidence, invent completed work, remove fixed "
+            "playbook steps, or include a terminal submission call as a checklist item."
+        ),
+        "failure_next_steps": (
+            "Correct the complete plan, preserve fixed and Manager-routed items in order, and "
+            "ensure at most one item is in_progress before retrying."
+        ),
+    },
     "InputModel": MinionUpdateChecklistInput,
     "examples": UPDATE_CHECKLIST_EXAMPLES,
     "idempotency": "idempotent",
@@ -134,15 +142,22 @@ UPDATE_CHECKLIST_TOOL_SPEC: dict[str, Any] = {
 
 ADD_FINDING_TOOL_SPEC: dict[str, Any] = {
     "alias": "add_finding",
-    "description": (
-        "Record one actionable defect in the Manager-owned WorkItem ledger. The "
-        "Manager generates its identity; do not invent or maintain keys. priority is "
-        "p0, p1, or p2 and is independent of disposition. Every real correctness, "
-        "contract, requirement, architecture, delivery, or performance defect is "
-        "blocking, including p2. Advisory is reserved for an optional p2 improvement "
-        "whose omission still satisfies every binding requirement and contract. Audit "
-        "the whole scope and batch independent add_finding calls in one tool response."
-    ),
+    "description": "Record one actionable defect in the Manager-owned WorkItem ledger.",
+    "guidance": {
+        "use_when": (
+            "Use after reproducing or otherwise establishing one concrete correctness, "
+            "contract, requirement, architecture, delivery, verification, or performance defect."
+        ),
+        "do_not_use_when": (
+            "Do not invent or maintain finding identities, duplicate an existing semantic "
+            "finding, or mark a real defect advisory. Advisory is only an optional p2 "
+            "improvement whose omission satisfies every binding requirement and contract."
+        ),
+        "failure_next_steps": (
+            "Correct the finding kind, priority, disposition, summary, or bounded locations "
+            "from the returned validation error; reconcile before retrying an applied write."
+        ),
+    },
     "InputModel": MinionAddFindingInput,
     "examples": ADD_FINDING_EXAMPLES,
     "idempotency": "keyed_idempotent",
@@ -216,6 +231,26 @@ def read_work_items(workspace: Mapping[str, Any]) -> dict[str, Any]:
         "version": snapshot.version,
         "items": [dict(item) for item in list(snapshot.payload.get("items") or [])],
     }
+
+
+def submission_work_items(value: Any) -> list[dict[str, str]]:
+    """Project the Manager ledger into role-handoff checklist semantics.
+
+    Ledger identities and ordering metadata stay inside the Manager-owned
+    WorkItem store.  Role submissions only need the meaning and completion
+    state of each item.
+    """
+
+    return [
+        {
+            "kind": str(item.get("kind") or "task"),
+            "status": str(item.get("status") or ""),
+            "summary": str(item.get("summary") or ""),
+        }
+        for raw in list(value or [])
+        if isinstance(raw, Mapping)
+        for item in (dict(raw),)
+    ]
 
 
 def update_checklist_tool_result(

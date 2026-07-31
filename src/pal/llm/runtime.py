@@ -133,7 +133,8 @@ def _is_stale_connection(message: str) -> bool:
 def _classify_retry_error(exc: Exception) -> str:
     """Classify an LLM invocation error into a retry category.
 
-    Returns one of: 'stale_connection', 'timeout', 'connection', 'rate_limit', 'server', 'unknown'.
+    Returns one of: 'stale_connection', 'timeout', 'connection', 'bad_request',
+    'rate_limit', 'server', 'unknown'.
 
     'stale_connection' is a subset of 'connection' — it specifically means a
     keep-alive socket was reused after the server closed it.  These warrant
@@ -169,6 +170,17 @@ def _classify_retry_error(exc: Exception) -> str:
     # HTTP status codes embedded in the error message
     if "429" in message or "rate" in message:
         return "rate_limit"
+    if any(
+        marker in message
+        for marker in (
+            "error code: 400",
+            "status code: 400",
+            "http 400",
+            "badrequesterror",
+            "bad request",
+        )
+    ) or "badrequest" in error_type:
+        return "bad_request"
     if any(code in message for code in ("529", "overload", "502", "503", "504", "500", "internalservererror", "network error")):
         return "server"
 
@@ -598,9 +610,26 @@ class OpenAIChatEndpointInvoker:
         *,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> Iterable[NormalizedLLMStreamEvent]:
+        tool_call_drafts: dict[tuple[str, object], dict[str, Any]] = {}
         for raw_chunk in stream:
-            for event in _parse_openai_chat_stream_chunk(raw_chunk, tool_name_aliases=tool_name_aliases):
+            payload = _openai_chat_stream_payload(raw_chunk)
+            _accumulate_openai_chat_stream_tool_calls(payload, tool_call_drafts)
+            events = _parse_openai_chat_stream_chunk(
+                _without_openai_chat_stream_tool_calls(payload),
+                tool_name_aliases=tool_name_aliases,
+            )
+            for event in events:
+                if event.event_kind == LLMStreamEventKind.DONE:
+                    yield from _finalize_openai_chat_stream_tool_calls(
+                        tool_call_drafts,
+                        tool_name_aliases=tool_name_aliases,
+                    )
+                    tool_call_drafts.clear()
                 yield event
+        yield from _finalize_openai_chat_stream_tool_calls(
+            tool_call_drafts,
+            tool_name_aliases=tool_name_aliases,
+        )
 
     def _parse_openai_chat_response(
         self,
@@ -2322,8 +2351,8 @@ class LLMRuntime(LLMRuntimePort):
                             next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
                         )
                         break
-                    if error_kind == "connection":
-                        if endpoint_domain is not None:
+                    if error_kind in {"connection", "bad_request"}:
+                        if error_kind == "connection" and endpoint_domain is not None:
                             failed_connection_domains.add(endpoint_domain)
                         self._emit_llm_progress(
                             "llm_endpoint_exhausted",
@@ -3183,7 +3212,7 @@ def _parse_tool_calls(
                 loaded = json.loads(raw_args)
             except Exception:
                 loaded = {}
-            args = dict(loaded or {})
+            args = dict(loaded) if isinstance(loaded, dict) else {}
         elif isinstance(raw_args, dict):
             args = dict(raw_args)
         else:
@@ -3197,6 +3226,131 @@ def _parse_tool_calls(
                 )
             )
     return result
+
+
+def _openai_chat_stream_payload(raw_chunk: Any) -> dict[str, Any]:
+    payload = (
+        raw_chunk.model_dump()
+        if hasattr(raw_chunk, "model_dump")
+        else raw_chunk.to_dict()
+        if hasattr(raw_chunk, "to_dict")
+        else raw_chunk
+    )
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _without_openai_chat_stream_tool_calls(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    rendered = dict(payload)
+    choices = []
+    for raw_choice in list(payload.get("choices") or []):
+        if not isinstance(raw_choice, dict):
+            choices.append(raw_choice)
+            continue
+        choice = dict(raw_choice)
+        delta = choice.get("delta")
+        if isinstance(delta, dict) and delta.get("tool_calls") is not None:
+            choice["delta"] = {**delta, "tool_calls": []}
+        choices.append(choice)
+    rendered["choices"] = choices
+    return rendered
+
+
+def _accumulate_openai_chat_stream_tool_calls(
+    payload: dict[str, Any],
+    drafts: dict[tuple[str, object], dict[str, Any]],
+) -> None:
+    choices = list(payload.get("choices") or [])
+    if not choices or not isinstance(choices[0], dict):
+        return
+    delta = choices[0].get("delta")
+    if not isinstance(delta, dict):
+        return
+    for position, raw_item in enumerate(list(delta.get("tool_calls") or [])):
+        if not isinstance(raw_item, dict):
+            continue
+        raw_index = raw_item.get("index")
+        call_id = str(raw_item.get("id") or "").strip()
+        if raw_index is not None:
+            key: tuple[str, object] = ("index", raw_index)
+        elif call_id:
+            key = ("id", call_id)
+        else:
+            key = ("position", position)
+        draft = drafts.setdefault(
+            key,
+            {
+                "position": raw_index if isinstance(raw_index, int) else position,
+                "call_id": "",
+                "name": "",
+                "argument_fragments": [],
+                "argument_object": {},
+            },
+        )
+        if call_id:
+            draft["call_id"] = call_id
+        function = raw_item.get("function")
+        if not isinstance(function, dict):
+            continue
+        name_fragment = str(function.get("name") or "")
+        if name_fragment:
+            current_name = str(draft.get("name") or "")
+            if not current_name:
+                draft["name"] = name_fragment
+            elif name_fragment == current_name:
+                pass
+            elif name_fragment.startswith(current_name):
+                draft["name"] = name_fragment
+            elif not current_name.endswith(name_fragment):
+                draft["name"] = current_name + name_fragment
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            draft["argument_fragments"].append(arguments)
+        elif isinstance(arguments, dict):
+            draft["argument_object"].update(arguments)
+
+
+def _finalize_openai_chat_stream_tool_calls(
+    drafts: dict[tuple[str, object], dict[str, Any]],
+    *,
+    tool_name_aliases: dict[str, str] | None = None,
+) -> Iterable[NormalizedLLMStreamEvent]:
+    ordered = sorted(
+        drafts.values(),
+        key=lambda item: int(item.get("position") or 0),
+    )
+    for draft in ordered:
+        name = str(draft.get("name") or "").strip()
+        if not name:
+            raise LLMEndpointInvocationError(
+                "llm stream contained a tool call without a function name"
+            )
+        args = dict(draft.get("argument_object") or {})
+        fragments = "".join(
+            str(item)
+            for item in list(draft.get("argument_fragments") or ())
+        )
+        if fragments:
+            try:
+                loaded = json.loads(fragments)
+            except Exception as exc:
+                raise LLMEndpointInvocationError(
+                    f"llm stream contained invalid JSON arguments for tool {name}"
+                ) from exc
+            if not isinstance(loaded, dict):
+                raise LLMEndpointInvocationError(
+                    f"llm stream contained non-object arguments for tool {name}"
+                )
+            args.update(loaded)
+        yield NormalizedLLMStreamEvent(
+            event_kind=LLMStreamEventKind.TOOL_CALL,
+            tool_call=CanonicalToolCall(
+                name=_canonical_tool_name(name, tool_name_aliases),
+                args=args,
+                call_id=str(draft.get("call_id") or "").strip() or None,
+            ),
+        )
 
 
 def _parse_openai_chat_stream_chunk(

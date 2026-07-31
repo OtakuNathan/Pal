@@ -1,4 +1,4 @@
-from __future__ import annotations
+/ from __future__ import annotations
 
 from peewee import BooleanField, Check, CharField, IntegerField, TextField
 from playhouse.sqlite_ext import JSONField

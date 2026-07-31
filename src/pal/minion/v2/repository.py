@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 import secrets
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -81,6 +81,7 @@ class MinionV2Repository:
         *,
         role_assignment_id: str = "",
         role_submission_payload_hash: str = "",
+        _connection: sqlite3.Connection | None = None,
     ) -> DispatchResult:
         if bool(str(role_assignment_id or "")) != bool(
             str(role_submission_payload_hash or "")
@@ -88,9 +89,11 @@ class MinionV2Repository:
             raise ValueError(
                 "role submission settlement requires assignment id and payload hash"
             )
-        self.ensure_schema()
+        if _connection is None:
+            self.ensure_schema()
         request_hash = _stable_hash(_action_request_payload(action))
-        with self._transaction() as connection:
+        transaction = self._transaction() if _connection is None else nullcontext(_connection)
+        with transaction as connection:
             duplicate = connection.execute(
                 """
                 SELECT request_hash, result_json
@@ -803,6 +806,7 @@ class MinionV2Repository:
         worker_id: str,
         error: str,
         retry_after_seconds: int = 5,
+        triage_action: ActionEnvelope | None = None,
     ) -> str:
         self.ensure_schema()
         now = _utc_datetime()
@@ -836,6 +840,8 @@ class MinionV2Repository:
                 error_text=str(error),
                 finished_at=now.isoformat(),
             )
+            if exhausted and triage_action is not None:
+                self.dispatch(triage_action, _connection=connection)
             return status
 
     def defer_outbox_effect(
@@ -893,7 +899,8 @@ class MinionV2Repository:
         *,
         worker_id: str,
         error: str,
-    ) -> None:
+        triage_action: ActionEnvelope | None = None,
+    ) -> DispatchResult | None:
         self.ensure_schema()
         now = utc_now()
         with self._transaction() as connection:
@@ -923,6 +930,9 @@ class MinionV2Repository:
                 error_text=str(error),
                 finished_at=now,
             )
+            if triage_action is not None:
+                return self.dispatch(triage_action, _connection=connection)
+            return None
 
     def list_effect_attempts(self, effect_id: str) -> tuple[dict[str, Any], ...]:
         self.ensure_schema()

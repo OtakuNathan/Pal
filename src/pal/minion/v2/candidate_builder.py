@@ -25,7 +25,11 @@ from pal.minion.v2.submission_drafts import (
     assert_authoring_schema_budget,
 )
 from pal.minion.v2.submission_preflight import bound_reference_payload
-from pal.minion.v2.work_items import assert_work_items_complete, read_work_items
+from pal.minion.v2.work_items import (
+    assert_work_items_complete,
+    read_work_items,
+    submission_work_items,
+)
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
@@ -40,22 +44,62 @@ CANDIDATE_BUILDER_CAPABILITIES = (
 CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_candidate_submit": {
         "alias": "candidate_submit",
-        "description": (
-            "Submit the current module Candidate after every update_checklist plan item is completed "
-            "and the implementation is ready for independent verification. The checklist is a "
-            "self-reported work ledger, not proof. candidate_submit itself must never be a "
-            "checklist item. Takes no arguments; Manager derives Git delta and journal fields."
-        ),
+        "description": "Submit the current module Candidate for independent verification.",
+        "guidance": {
+            "use_when": (
+                "Use after every checklist item is completed, focused checks pass, and the "
+                "implementation is ready for independent verification. Takes no arguments; "
+                "the Manager derives Git delta and journal fields."
+            ),
+            "do_not_use_when": (
+                "Do not use with unfinished checklist work, without a contracted product delta, "
+                "or when the correct terminal outcome is an architecture defect or module split. "
+                "Never add candidate_submit itself to the checklist."
+            ),
+            "failure_next_steps": (
+                "Follow the returned recovery affordance, correct the checklist or workspace "
+                "state, and do not repeat the same rejected submission unchanged."
+            ),
+        },
         "InputModel": MinionV2CandidateBuilderOpMinionCandidateSubmitInput,
     },
     "op_minion_candidate_report_architecture_defect": {
         "alias": "candidate_report_architecture_defect",
-        "description": "Terminally report that the frozen architecture contract cannot satisfy the task. Explain the semantic conflict and optionally cite a task source filename or code location.",
+        "description": "Terminally report that the frozen architecture contract cannot satisfy the task.",
+        "guidance": {
+            "use_when": (
+                "Use only when correct implementation requires changing a public boundary, "
+                "contract, ownership, lifecycle/state semantics, ABI, or topology. Explain the "
+                "semantic conflict and optionally cite a task source filename or code location."
+            ),
+            "do_not_use_when": (
+                "Do not use for ordinary implementation difficulty, a local code defect, a test "
+                "failure, or an environment problem that can be handled within the bound module."
+            ),
+            "failure_next_steps": (
+                "Correct the semantic conflict report or location from the returned error; do not "
+                "retry the same rejected report unchanged."
+            ),
+        },
         "InputModel": MinionV2CandidateBuilderOpMinionCandidateReportArchitectureDefectInput,
     },
     "op_minion_candidate_request_module_split": {
         "alias": "candidate_request_module_split",
-        "description": "Terminally request an architecture-owned module split when the bound module cannot fit one Candidate cycle.",
+        "description": "Terminally request an architecture-owned module split.",
+        "guidance": {
+            "use_when": (
+                "Use only when the accepted module's responsibility and scale genuinely cannot "
+                "fit one Candidate cycle without an architecture-owned split."
+            ),
+            "do_not_use_when": (
+                "Do not use for ordinary implementation difficulty, a preferred refactor, or an "
+                "architecture contradiction that should be reported as a contract defect."
+            ),
+            "failure_next_steps": (
+                "Correct the split rationale from the returned error; do not retry the same "
+                "rejected request unchanged."
+            ),
+        },
         "InputModel": MinionV2CandidateBuilderOpMinionCandidateRequestModuleSplitInput,
     },
 }
@@ -161,9 +205,9 @@ def _submit_candidate(
             error_code="candidate_product_required",
         )
     report = {
-        "work_items": [
-            dict(item) for item in list(work_items.get("items") or [])
-        ],
+        "work_items": submission_work_items(
+            work_items.get("items")
+        ),
         "files_changed": files_changed,
         "status": status,
     }

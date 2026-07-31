@@ -22,10 +22,8 @@ MINION_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
                     "Use bounded workspace discovery and repository search. Prefer rg for text search and rg --files "
                     "for file enumeration; fall back to find, grep, or ls only when rg is unavailable or unsuitable. Also use shell "
                     "for tests, builds, scripts, package commands, process inspection, and runtime probes required by "
-                    "your assigned task. The assigned worktree is already the default working directory, so do not guess "
-                    "or reconstruct a role-workspace path. Put generated build output in $PAL_BUILD_SCRATCH when the "
-                    "worktree is read-only. Ordinary file creation and deletion inside a writable assigned worktree are allowed. "
-                    "Run long-lived tests and builds directly so their complete stdout and stderr remain available."
+                    "your assigned task. Run long-lived tests and builds directly so their complete stdout and stderr "
+                    "remain available."
                 ),
                 "do_not_use_when": (
                     "Stay focused on your assigned task; do not inspect or manipulate runtime, orchestration, capability, "
@@ -45,7 +43,19 @@ MINION_SYSTEM_TOOL_GUIDANCE_OVERRIDES = MappingProxyType(
                     "stdout, stderr, and exit status, correct the command or environment, and then rerun only when safe."
                 ),
             }
-        )
+        ),
+        "op_lsp_status": MappingProxyType(
+            {
+                "use_when": (
+                    "Check whether the Manager-prepared bound worktree has a healthy, "
+                    "recognition-probed language server before relying on LSP navigation."
+                ),
+                "failure_next_steps": (
+                    "If unavailable or unhealthy, continue with source inspection, focused "
+                    "builds, and tests; do not repair the Manager-owned LSP environment."
+                ),
+            }
+        ),
     }
 )
 

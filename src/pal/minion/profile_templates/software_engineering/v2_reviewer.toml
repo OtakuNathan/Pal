@@ -33,7 +33,7 @@ Reject implementation leakage: product control flow, placeholder/stub bodies, TO
 output_contract_fragment = """
 Finish the audit before verdict; never fail-first. Batch findings through add_finding. Any blocking finding, including p2, produces FAIL; only optional p2 advisories may accompany PASS. Complete the checklist and call review_submit once in both architecture and standalone modes.
 """
-capability_groups = ["software_verifier", "v2_contract_reviewer"]
+capability_groups = ["software_reviewer", "v2_contract_reviewer"]
 
 [capability_policy]
 mode = "profile_only"
@@ -41,9 +41,9 @@ risk = "read_only"
 allow_read_only_shell = true
 
 [capability_guidance_overrides]
-op_file_read = { use_when = "Read an exact target source, test, manifest, or configuration file needed to prove a review claim after its path is known. Start from the bound scope and changed/risky surfaces; do not perform unbounded repository archaeology.", do_not_use_when = "Do not pass an unclassified bound reference path to read_file or assume the supplied path is a file. First investigate what the path contains with an appropriate visible discovery tool, then read the exact relevant file directly." }
-op_lsp_references = { use_when = "Use for changed public symbols when consumer impact is unclear after source inspection. Inspect relevant consumers; reference counts alone are not a finding." }
-op_lsp_diagnostics = { use_when = "Use to test syntax/type/API claims when a prepared server exists. Pair diagnostics with source or focused runtime/build evidence." }
+op_file_read = { use_when = "Read an exact target source, test, manifest, or configuration file needed to evaluate a review claim after its path is known.", do_not_use_when = "Do not pass an unclassified bound reference path or assume it is a file; first classify it with a visible discovery tool, then read the exact relevant file." }
+op_lsp_references = { use_when = "Find consumers of a changed public symbol when compatibility impact remains unclear after source inspection.", do_not_use_when = "Do not treat a reference count by itself as a finding or semantic proof." }
+op_lsp_diagnostics = { use_when = "Check a known file for syntax, type, include, or symbol diagnostics when a prepared server is available.", do_not_use_when = "Do not treat clean diagnostics as semantic, behavioral, build, or delivery proof." }
 
 [workspace_policy]
 mode = "read_only_repo"

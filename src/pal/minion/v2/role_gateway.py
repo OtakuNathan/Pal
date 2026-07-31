@@ -28,7 +28,10 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftStore,
 )
 from pal.minion.v2.role_protocol import RoleAssignmentState, stable_hash
-from pal.minion.v2.work_items import assert_work_items_complete
+from pal.minion.v2.work_items import (
+    assert_work_items_complete,
+    submission_work_items,
+)
 
 ROLE_SUBMISSION_ARTIFACT_TYPES = {
     "architecture_review": "ArchitectureReviewRoleSubmissionArtifact",
@@ -426,10 +429,7 @@ class RoleAssignmentGateway:
             "contract_schema": definition.specialization_id,
             "contract": document.model_dump(mode="python"),
             "source": ARCHITECT_FILENAME,
-            "work_items": [
-                dict(item)
-                for item in list(work_items.get("items") or [])
-            ],
+            "work_items": submission_work_items(work_items.get("items")),
         }
 
     def _authenticated_prompt_pack(

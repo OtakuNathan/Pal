@@ -1886,6 +1886,7 @@ class PalCore:
                         event=continuation.channel_envelope.event,
                     )
                     await self._deliver_pending_compact_memory_candidates_async(continuation)
+                    self.turn_executor.close_active_tool_protocol(continuation)
                     return outcome
                 current = await self._execute_turn_effect_async(continuation, yielded)
         except asyncio.CancelledError:

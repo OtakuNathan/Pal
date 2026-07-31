@@ -256,14 +256,18 @@ class MemoryService(MemoryServicePort):
         previous_top_of_mind_refs = list(self.l2_store.top_of_mind_refs)
         previous_heat_registry = dict(self.l2_store.heat_registry)
         try:
-            self.l1_store.items = [[
-                L1TranscriptMessage(
-                    role="assistant",
-                    content=summary_entry.rendered or summary_entry.summary,
-                    kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
-                    payload=dict(summary_entry.payload or {}),
+            self.l1_store.items = [
+                normalize_l1_transcript(
+                    [
+                        L1TranscriptMessage(
+                            role="assistant",
+                            content=summary_entry.rendered or summary_entry.summary,
+                            kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
+                            payload=dict(summary_entry.payload or {}),
+                        )
+                    ]
                 )
-            ]]
+            ]
             self.remove_projected_entries([SUMMARY_ENTRY_ID])
         except Exception:
             self.l1_store.items = previous_l1_items

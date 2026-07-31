@@ -746,6 +746,11 @@ class MinionV2WorkflowService:
         active = next((item for item in snapshots if item.aggregate_id == active_id), None)
         workflow_state = str(projection["workflow_state"])
         active_state = active.state if active is not None else ""
+        triage_candidates = self._triage_candidates(workflow_id)
+        triage = [
+            _public_triage_candidate(item)
+            for item in triage_candidates
+        ]
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
         workflow_name = ""
         if workflow is not None:
@@ -796,7 +801,13 @@ class MinionV2WorkflowService:
             "active_worker": active_worker,
             "active_worker_role": str((invocation or {}).get("role") or ""),
             "blocker": projection["blocker"],
-            "next_legal_action": _public_next_actions(workflow_state, active_state),
+            "next_legal_action": _public_next_actions(
+                workflow_state,
+                active_state,
+                has_triage=bool(triage),
+                liveness=str(projection["liveness"] or ""),
+            ),
+            "triage": triage,
             "waiting_for_user": waiting_for_user,
             "human_review_available": active_state == "HUMAN_REVIEW",
             "liveness": projection["liveness"],
@@ -1800,7 +1811,13 @@ def _artifact_ref_from_record(record: Mapping[str, Any]) -> ArtifactRef:
     )
 
 
-def _public_next_actions(workflow_state: str, active_state: str) -> list[str]:
+def _public_next_actions(
+    workflow_state: str,
+    active_state: str,
+    *,
+    has_triage: bool = False,
+    liveness: str = "",
+) -> list[str]:
     if workflow_state in {"COMPLETED", "REJECTED", "CANCELLED"}:
         return ["archive_workflow"]
     if workflow_state == "RESTARTING":
@@ -1809,8 +1826,14 @@ def _public_next_actions(workflow_state: str, active_state: str) -> list[str]:
         return ["resume_workflow", "control_workflow:cancel"]
     if workflow_state in {"PAUSE_REQUESTED", "CANCEL_REQUESTED"}:
         return ["wait_for_safe_point"]
-    if workflow_state == "TRIAGE_REQUIRED" or active_state == "TRIAGE_REQUIRED":
+    if (
+        has_triage
+        or workflow_state == "TRIAGE_REQUIRED"
+        or active_state == "TRIAGE_REQUIRED"
+    ):
         return ["resolve_triage", "control_workflow:cancel"]
+    if str(liveness or "").strip() == "orphaned":
+        return ["resume_workflow", "control_workflow:cancel"]
     if active_state == "HUMAN_REVIEW":
         return ["submit_human_decision", "control_workflow:cancel"]
     return ["control_workflow:pause", "control_workflow:cancel"]
@@ -1819,28 +1842,36 @@ def _public_next_actions(workflow_state: str, active_state: str) -> list[str]:
 def _triage_subject(snapshot: AggregateSnapshot) -> str:
     payload = dict(snapshot.payload or {})
     if snapshot.aggregate_type == AggregateType.DAG_NODE_RUN:
-        return str(
-            payload.get("module_name")
-            or payload.get("verification_name")
-            or payload.get("unit_id")
-            or "DAG node"
-        )
+        module_name = str(payload.get("module_name") or "").strip()
+        if module_name:
+            return f"module:{module_name}"
+        verification_name = str(payload.get("verification_name") or "").strip()
+        if verification_name:
+            return f"verification:{verification_name}"
+        unit_id = str(payload.get("unit_id") or "").strip()
+        return f"unit:{unit_id or 'DAG node'}"
     return {
-        AggregateType.WORKFLOW: "workflow",
-        AggregateType.ARCHITECTURE_REVISION: "architecture",
-        AggregateType.EXECUTION_EPOCH: "execution",
-        AggregateType.STANDALONE_REVIEW: "standalone review",
-        AggregateType.TASK: "task",
-    }.get(snapshot.aggregate_type, snapshot.aggregate_type.value.replace("_", " "))
+        AggregateType.WORKFLOW: "phase:workflow",
+        AggregateType.ARCHITECTURE_REVISION: "phase:architecture",
+        AggregateType.EXECUTION_EPOCH: "phase:execution",
+        AggregateType.STANDALONE_REVIEW: "review:standalone",
+        AggregateType.TASK: "phase:task",
+    }.get(snapshot.aggregate_type, f"aggregate:{snapshot.aggregate_type.value}")
 
 
 def _public_triage_candidate(snapshot: AggregateSnapshot) -> dict[str, Any]:
     blocker = dict(snapshot.payload.get("blocker") or {})
+    subject = _triage_subject(snapshot)
     return {
-        "subject": _triage_subject(snapshot),
+        "subject": subject,
         "kind": snapshot.aggregate_type.value.replace("_", " "),
         "blocker": blocker,
         "resume_state": str(snapshot.payload.get("triage_resume_state") or ""),
+        "recovery": {
+            "action": "resolve_triage",
+            "arguments": {"subject": subject},
+            "requires": ["resolution"],
+        },
     }
 
 

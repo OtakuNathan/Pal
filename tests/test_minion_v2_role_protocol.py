@@ -608,6 +608,61 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             "settled",
         )
 
+        triaged = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            "node-router",
+        )
+        resumed = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="RESOLVE_TRIAGE",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-router",
+                actor="operator",
+                expected_version=triaged.version,
+                payload={"triage_resolution": "manager defect repaired"},
+            )
+        ).snapshot
+        self.assertEqual(resumed.state, "QUEUED")
+        producing = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="START_PRODUCING",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-router",
+                actor="test",
+                expected_version=resumed.version,
+                payload={
+                    "fencing_token": 2,
+                    "active_worker_id": "session-router",
+                    "lease_resource_key": "node:node-router:writer",
+                },
+            )
+        ).snapshot
+        self.assertEqual(producing.state, "PRODUCING")
+
+        replayed = SemanticOrchestrator(
+            MinionV2WorkflowService(self.runtime_root)
+        )._settle_background_role_failure(
+            {
+                "effect_type": "run_implementation_role",
+                "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                "aggregate_id": "node-router",
+            },
+            self.repository.read_role_assignment(assignment["assignment_id"]),
+            RuntimeError("submission still cannot be applied"),
+            exhausted=True,
+        )
+
+        self.assertEqual(replayed["status"], "triage_required")
+        self.assertEqual(
+            self.repository.read_snapshot(
+                AggregateType.DAG_NODE_RUN,
+                "node-router",
+            ).state,
+            "TRIAGE_REQUIRED",
+        )
+
     def test_assignment_key_cannot_be_reused_for_different_inputs(self) -> None:
         self.repository.create_role_assignment(self.request())
         changed = RoleAssignmentRequest(

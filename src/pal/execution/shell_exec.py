@@ -52,12 +52,6 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
     ),
 )
 
-SHELL_EXEC_CMD_DESCRIPTION = (
-    "Shell command to execute as one string. "
-    "Use bounded `tree -a -L 3 --filelimit 200 --noreport` listings (or `find -maxdepth 3 -print | head -n 500` when tree is unavailable). "
-    "Pipelines and shell operators are accepted; use them only when they are part of the command being executed."
-)
-
 DEFAULT_SHELL_TIMEOUT_MS = 120_000
 MAX_SHELL_TIMEOUT_MS = 600_000
 SHELL_TERMINATION_GRACE_SECONDS = 1.0

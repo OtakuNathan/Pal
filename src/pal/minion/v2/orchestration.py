@@ -218,21 +218,24 @@ class MinionV2OutboxProcessor:
                 return "completed"
             error = f"{exc.__class__.__name__}: {exc}"
             if isinstance(exc, PermanentEffectError):
+                triage_action = self._failed_effect_triage_action(effect, exc)
                 self.repository.fail_outbox_effect(
                     effect_id,
                     worker_id=self.worker_id,
                     error=error,
+                    triage_action=triage_action,
                 )
-                self._triage_failed_effect(effect, exc)
             else:
-                retry_status = self.repository.retry_outbox_effect(
+                triage_action = None
+                if int(effect.get("attempt_count") or 0) >= int(effect.get("max_attempts") or 1):
+                    triage_action = self._failed_effect_triage_action(effect, exc)
+                self.repository.retry_outbox_effect(
                     effect_id,
                     worker_id=self.worker_id,
                     error=error,
                     retry_after_seconds=5,
+                    triage_action=triage_action,
                 )
-                if retry_status == "failed":
-                    self._triage_failed_effect(effect, exc)
             self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
             self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
             return "failed"
@@ -1753,7 +1756,11 @@ class MinionV2OutboxProcessor:
             raise ValueError("effect aggregate no longer exists")
         return snapshot
 
-    def _triage_failed_effect(self, effect: Mapping[str, Any], exc: Exception) -> None:
+    def _failed_effect_triage_action(
+        self,
+        effect: Mapping[str, Any],
+        exc: Exception,
+    ) -> ActionEnvelope | None:
         source = self._effect_snapshot(effect)
         target = source
         if "ENTER_TRIAGE" not in self.repository.engine.legal_actions(
@@ -1768,7 +1775,7 @@ class MinionV2OutboxProcessor:
                 AggregateType.WORKFLOW,
                 workflow.state,
             ):
-                return
+                return None
             target = workflow
         failure_ref = self.service.artifacts.put_json(
             {
@@ -1782,30 +1789,27 @@ class MinionV2OutboxProcessor:
             },
             artifact_type="EffectFailureArtifact",
         )
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="ENTER_TRIAGE",
-                workflow_id=target.workflow_id,
-                aggregate_type=target.aggregate_type,
-                aggregate_id=target.aggregate_id,
-                actor="minion-v2-outbox",
-                expected_version=target.version,
-                idempotency_key=(
-                    f"effect-failed:{effect['effect_key']}:"
-                    f"{target.aggregate_type.value}:{target.aggregate_id}"
-                ),
-                payload={
+        return ActionEnvelope(
+            action_type="ENTER_TRIAGE",
+            workflow_id=target.workflow_id,
+            aggregate_type=target.aggregate_type,
+            aggregate_id=target.aggregate_id,
+            actor="minion-v2-outbox",
+            idempotency_key=(
+                f"effect-failed:{effect['effect_key']}:"
+                f"{target.aggregate_type.value}:{target.aggregate_id}"
+            ),
+            payload={
+                "failure_artifact_ref": failure_ref.to_dict(),
+                "blocker": {
+                    "kind": "effect_failed",
+                    "effect_type": effect.get("effect_type"),
                     "failure_artifact_ref": failure_ref.to_dict(),
-                    "blocker": {
-                        "kind": "effect_failed",
-                        "effect_type": effect.get("effect_type"),
-                        "failure_artifact_ref": failure_ref.to_dict(),
-                        "source_aggregate_type": source.aggregate_type.value,
-                        "source_aggregate_id": source.aggregate_id,
-                        "source_aggregate_state": source.state,
-                    },
+                    "source_aggregate_type": source.aggregate_type.value,
+                    "source_aggregate_id": source.aggregate_id,
+                    "source_aggregate_state": source.state,
                 },
-            )
+            },
         )
 
     def _reconcile_control_requests(self, workflow_id: str) -> None:

@@ -451,7 +451,7 @@ ExecutionGitCapabilitiesGitCapabilityMixinGitOutput = _strict_model(
 ExecutionShellExecShellExecCapabilityMixinShellInput = _strict_model(
     'ExecutionShellExecShellExecCapabilityMixinShellInput',
     {
-        'cmd': (str, Field(..., description='Shell command to execute. Use only for command execution, tests, builds, scripts, process probes, and package commands. Use bounded `tree -a -L 3 --filelimit 200 --noreport` listings (or `find -maxdepth 3 -print | head -n 500` when tree is unavailable). If visible, prefer search for text search, read_file for file reads, edit_file for edits, write_file for writes, delete_path for deletion, and git for git status/diff/log/show. Avoid cat/head/tail/grep/rg/sed/awk/tee/echo/printf redirection/rm/unlink/rmdir/git rm/find -delete for repo file operations when the matching capability is visible. For Pal runtime/module/minion/capability state or actions, use built-in Pal tools before shell. In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing; use the dedicated checkpoint commit capability instead.')),
+        'cmd': (str, Field(..., description='Shell command to execute as one string. Pipelines and shell operators are accepted.')),
         'cwd': (str, Field(None, description='Optional working directory.')),
         'timeout_ms': (int, Field(None, description='Optional timeout in milliseconds. Defaults to 120000 and cannot exceed 600000.', ge=1, le=600000)),
     },
@@ -975,7 +975,7 @@ MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput',
     {
         'task': (str, Field(None, description='Human-readable Task title. Omit it to use the Task bound to the current channel.')),
-        'subject': (str, Field(None, description='Module or phase name. Optional only when the workflow has exactly one TRIAGE_REQUIRED item.')),
+        'subject': (str, Field(None, description='Exact semantic subject reported by workflow status, such as module:ohos_font or phase:architecture. Optional only when the workflow has exactly one TRIAGE_REQUIRED item.')),
         'resolution': (str, Field(..., description='Auditable summary of the external or manual action that removed the blocker.', min_length=1)),
     },
 )
@@ -1498,11 +1498,11 @@ MinionV2CandidateBuilderOpMinionCandidateRequestModuleSplitInput = _strict_model
 MinionV2AskQuestionInput = _strict_model(
     'MinionV2AskQuestionInput',
     {
-        'title': (str, Field(..., min_length=1)),
-        'question': (str, Field(..., min_length=1)),
-        'option_1': (str, Field(..., min_length=1)),
-        'option_2': (str, Field(..., min_length=1)),
-        'option_3': (str, Field(..., min_length=1)),
+        'title': (str, Field(..., description='Short label for the decision.', min_length=1)),
+        'question': (str, Field(..., description='One precise user-facing question.', min_length=1)),
+        'option_1': (str, Field(..., description='First mutually exclusive choice, including its impact or tradeoff.', min_length=1)),
+        'option_2': (str, Field(..., description='Second mutually exclusive choice, including its impact or tradeoff.', min_length=1)),
+        'option_3': (str, Field(..., description='Third mutually exclusive choice, including its impact or tradeoff.', min_length=1)),
     },
 )
 
@@ -1540,34 +1540,34 @@ MinionV2SweVerificationOpMinionVerificationUnknownInput = _strict_model(
 MinionV2VerificationBuilderOpMinionVerificationScratchWriteInput = _strict_model(
     'MinionV2VerificationBuilderOpMinionVerificationScratchWriteInput',
     {
-        'path': (str, Field(..., min_length=1)),
-        'content': (str, Field(...)),
+        'path': (str, Field(..., description='Safe relative path inside the bound verifier scratch directory.', min_length=1)),
+        'content': (str, Field(..., description='Complete replacement text for the scratch file.')),
     },
 )
 
 MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput = _strict_model(
     'MinionV2VerificationBuilderOpMinionVerificationRunLspCheckInput',
     {
-        'name': (str, Field(..., min_length=1)),
-        'file': (str, Field(..., min_length=1)),
-        'description': (str, Field(None)),
+        'name': (str, Field(..., description='Readable semantic case name; reusing it replaces the recorded case.', min_length=1)),
+        'file': (str, Field(..., description='Source file to diagnose in the bound workspace.', min_length=1)),
+        'description': (str, Field(None, description='Optional behavior or contract claim checked by this case.')),
     },
 )
 
 MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput = _strict_model(
     'MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput',
     {
-        'name': (str, Field(..., min_length=1)),
-        'obligation': (Literal['focused_tests', 'warning_clean', 'consumer_probe', 'public_surface_dogfood', 'lsp', 'historical_regressions', 'platform_probe', 'candidate_delta_review'], Field(...)),
-        'reason': (str, Field(..., min_length=1)),
-        'path': (str, Field(None)),
+        'name': (str, Field(..., description='Readable semantic name for the unavailable evidence case.', min_length=1)),
+        'obligation': (Literal['focused_tests', 'warning_clean', 'consumer_probe', 'public_surface_dogfood', 'lsp', 'historical_regressions', 'platform_probe', 'candidate_delta_review'], Field(..., description='Required verification obligation that cannot be exercised.')),
+        'reason': (str, Field(..., description='Concrete environmental blocker and missing evidence.', min_length=1)),
+        'path': (str, Field(None, description='Optional exact workspace or task-ledger source location.')),
     },
 )
 
 MinionV2VerificationBuilderOpMinionVerificationSetSummaryInput = _strict_model(
     'MinionV2VerificationBuilderOpMinionVerificationSetSummaryInput',
     {
-        'summary': (str, Field(..., min_length=1)),
+        'summary': (str, Field(..., description='Concise current verification conclusion.', min_length=1)),
     },
 )
 
@@ -1580,8 +1580,8 @@ MinionV2VerificationBuilderOpMinionVerificationDraftStatusInput = _strict_model(
 MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput = _strict_model(
     'MinionV2VerificationBuilderOpMinionVerificationRemoveCaseInput',
     {
-        'name': (str, Field(..., min_length=1)),
-        'reason': (str, Field(..., min_length=1)),
+        'name': (str, Field(..., description='Exact semantic name of the recorded case to withdraw.', min_length=1)),
+        'reason': (str, Field(..., description='Audit reason why the case itself is invalid or no longer applicable.', min_length=1)),
     },
 )
 
@@ -1594,15 +1594,15 @@ MinionV2VerificationBuilderOpMinionVerificationSubmitInput = _strict_model(
 MinionV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput = _strict_model(
     'MinionV2VerificationBuilderVERIFICATIONBUILDERTOOLSPECSInput',
     {
-        'name': (str, Field(..., min_length=1)),
-        'command': (str, Field(..., min_length=1)),
-        'description': (str, Field(None)),
-        'expected_exit_codes': (list[int], Field(None)),
-        'timeout_seconds': (int, Field(None, ge=1)),
-        'path': (str, Field(None)),
-        'symbol': (str, Field(None)),
-        'contract_section': (str, Field(None)),
-        'invariants': (list[str], Field(None)),
-        'probe_path': (str, Field(None)),
+        'name': (str, Field(..., description='Readable semantic case name; reusing it replaces the recorded case.', min_length=1)),
+        'command': (str, Field(..., description='Complete shell command that exercises this verification case.', min_length=1)),
+        'description': (str, Field(None, description='Optional behavior, risk, or contract claim checked by this case.')),
+        'expected_exit_codes': (list[int], Field(None, description='Exit codes that mean the case passed; defaults to [0].')),
+        'timeout_seconds': (int, Field(None, description='Positive execution timeout in seconds.', ge=1)),
+        'path': (str, Field(None, description='Optional exact source location supporting the case.')),
+        'symbol': (str, Field(None, description='Optional source symbol supporting the case.')),
+        'contract_section': (str, Field(None, description='Optional contract section supporting the case.')),
+        'invariants': (list[str], Field(None, description='Contract invariants exercised by the case.')),
+        'probe_path': (str, Field(None, description='Relative verifier scratch path consumed by command, when applicable.')),
     },
 )

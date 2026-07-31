@@ -32,6 +32,11 @@ Interaction rule:
 - L1 accepts only closed tool protocol: every assistant tool-call batch must
   contain exactly its matching results in the same transcript. Orphan,
   incomplete, and late unmatched results are rejected before they enter L1
+- L1 stores provider-neutral semantics only. Exact provider continuation state
+  such as reasoning content lives in the active logical turn/checkpoint and is
+  mechanically stripped by L1 normalization. Closed L1 tool history is
+  rendered as ordinary historical context, never replayed as an active
+  provider tool envelope
 - Core runs compaction and host policies render its checkpoint before storage;
   `MemoryService` performs the L1 replacement, dependent L2 cleanup, and
   execution-context projection inside one rollback boundary

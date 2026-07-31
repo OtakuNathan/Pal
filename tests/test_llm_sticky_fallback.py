@@ -288,6 +288,46 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         self.assertEqual(events[1]["reason"], "timeout")
         self.assertIn("llm_endpoint_fallback_succeeded", [event["phase"] for event in events])
 
+    def test_bad_request_skips_identical_retry_and_falls_back(self) -> None:
+        class _Invoker:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def invoke(self, endpoint, request):
+                _ = request
+                self.calls.append(endpoint.endpoint_id)
+                if endpoint.endpoint_id == "malformed":
+                    raise RuntimeError("Error code: 400 - invalid tool continuation")
+                return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
+
+            def invoke_stream(self, endpoint, request):
+                raise NotImplementedError
+
+        malformed = _fake_endpoint("malformed", "deepseek-v4-flash")
+        working = _fake_endpoint("working", "working-model")
+        invoker = _Invoker()
+        events: list[dict[str, object]] = []
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(malformed, working)),
+            settings_repository=_MemorySettingsRepository(),
+            endpoint_invoker=invoker,
+            endpoint_retry_attempts=3,
+            event_sink=events.append,
+        )
+
+        outcome = runtime.generate(
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                max_output_tokens=64,
+            )
+        )
+
+        self.assertEqual(outcome.text, "ok:working")
+        self.assertEqual(invoker.calls, ["malformed", "working"])
+        self.assertEqual(events[0]["error_kind"], "bad_request")
+        self.assertEqual(events[1]["phase"], "llm_endpoint_exhausted")
+        self.assertEqual(events[1]["reason"], "bad_request")
+
     def test_agenerate_falls_back_when_primary_blocks_past_attempt_timeout(self) -> None:
         class _BlockingInvoker:
             def __init__(self) -> None:

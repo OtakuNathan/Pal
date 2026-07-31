@@ -35,6 +35,7 @@ from pal.minion.runner import (
     MinionAgentLoopState,
     MinionRunner,
     _minion_llm_request_metadata,
+    _restore_minion_active_tool_protocol,
     _restore_minion_memory_state,
 )
 from pal.plugins.l3 import MockL3Plugin
@@ -591,12 +592,20 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
             memory_service=service,
         )
         continuation = SimpleNamespace(
+            channel_envelope=SimpleNamespace(
+                event=SimpleNamespace(event_id="checkpoint-active-input")
+            ),
+            pending_assistant_tool_text="",
+            pending_assistant_provider_specific_fields={},
             pending_tool_call_batch=[],
             pending_tool_results=[],
             tool_protocol_messages=[
                 {
                     "role": "assistant",
                     "content": "",
+                    "provider_specific_fields": {
+                        "reasoning_content": "inspect the file first"
+                    },
                     "tool_calls": [
                         {
                             "id": "read-1",
@@ -634,10 +643,40 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["schema_version"], "5")
         self.assertEqual(payload["llm_round_count"], 6)
+        self.assertEqual(payload["active_input_id"], "checkpoint-active-input")
+        self.assertEqual(
+            payload["active_tool_protocol_messages"][0][
+                "provider_specific_fields"
+            ],
+            {"reasoning_content": "inspect the file first"},
+        )
+        self.assertEqual(
+            _restore_minion_active_tool_protocol(payload),
+            payload["active_tool_protocol_messages"],
+        )
         serialized_text = json.dumps(payload["l1_items"])
         self.assertIn("restorable compact cursor", serialized_text)
         self.assertIn("new work after compact", serialized_text)
+        self.assertNotIn("inspect the file first", serialized_text)
         self.assertFalse(checkpoint_path.with_name("protocol.jsonl").exists())
+
+        TurnExecutor.close_active_tool_protocol(continuation)
+        runner._persist_agent_session_checkpoint(
+            pack.workspace,
+            state,
+            continuation,
+            initial_instruction="continue module work",
+            response_keys=["effect-1"],
+            max_output_tokens=2048,
+        )
+        closed_payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        self.assertEqual(closed_payload["active_tool_protocol_messages"], [])
+        self.assertEqual(closed_payload["tool_delivery_records"], {})
+        self.assertEqual(closed_payload["l1_protocol_committed_count"], 0)
+        self.assertNotIn(
+            "inspect the file first",
+            json.dumps(closed_payload, ensure_ascii=False),
+        )
 
         restored_service, _restored_provider = self._memory_service()
         _restore_minion_memory_state(restored_service, payload)

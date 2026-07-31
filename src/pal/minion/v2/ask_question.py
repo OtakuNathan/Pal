@@ -14,18 +14,21 @@ ASK_QUESTION_CAPABILITY = "op_minion_ask_question"
 
 ASK_QUESTION_TOOL_SPEC: dict[str, Any] = {
     "alias": "ask_question",
-    "description": (
-        "Ask one decisive user question when the task contains a contradiction, "
-        "material ambiguity, infeasible or incorrect requirement, missing "
-        "preference, or a decision that changes product behavior, compatibility, "
-        "architecture, modification scope, or implementation scope. Do not guess "
-        "or silently reinterpret the task. Supply a short title, a precise "
-        "question, and three choice strings that include their impact/tradeoff; "
-        "the channel also permits free text. The logical role invocation suspends "
-        "without a wall-clock deadline. Before the answer returns, Manager appends "
-        "the exact exchange to immutable task.yaml; continue directly and never "
-        "edit or restate the task ledger."
-    ),
+    "description": "Suspend the current role invocation and ask the user one decisive question.",
+    "guidance": {
+        "use_when": (
+            "Use when a contradiction, material ambiguity, infeasible requirement, "
+            "missing preference, or scope-changing decision prevents a correct design."
+        ),
+        "do_not_use_when": (
+            "Do not ask about a settled fact, private implementation choice, or decision "
+            "that can be derived safely from the bound task and public repository context."
+        ),
+        "failure_next_steps": (
+            "If user interaction is unavailable, do not guess or silently reinterpret the "
+            "task; report the blocked requirement through the harness."
+        ),
+    },
     "InputModel": MinionV2AskQuestionInput,
 }
 

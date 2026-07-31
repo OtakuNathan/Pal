@@ -557,8 +557,9 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="resume_workflow",
         description=(
-            "Resume a deliberately paused V2 workflow. TRIAGE_REQUIRED work must be handled explicitly with resolve_triage after its "
-            "reported blocker has actually been addressed."
+            "Resume a deliberately paused V2 workflow, or normalize liveness=orphaned worker-owned work into explicit TRIAGE_REQUIRED "
+            "items after an interrupted worker disappears. Orphan normalization never bypasses recovery: resolve each reported item with "
+            "resolve_triage after its blocker has actually been addressed."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput,
         aliases=("minion_resume_workflow",),
@@ -631,7 +632,8 @@ class MinionV2PublicProvider:
         description=(
             "Mark one TRIAGE_REQUIRED workflow item as manually handled and resume it through the Manager's declared RESOLVE_TRIAGE "
             "transition. Supply what was actually fixed or verified. This does not accept a candidate, waive verification, or skip a gate. "
-            "When several items need triage, select exactly one by its semantic module or phase name, such as ohos_font or architecture."
+            "When several items need triage, copy one exact globally unique semantic subject reported by workflow status, such as "
+            "module:ohos_font or phase:architecture."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput,
         aliases=("minion_resolve_triage",),

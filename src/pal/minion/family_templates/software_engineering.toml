@@ -56,5 +56,8 @@ include = ["workspace_read", "workspace_write", "code_intel", "verification_shel
 [capability_groups.software_verifier]
 include = ["swe_verifier_workspace"]
 
+[capability_groups.software_reviewer]
+include = ["swe_reviewer_workspace"]
+
 [capability_groups.software_research]
 include = ["workspace_read", "code_intel", "memory_recall"]

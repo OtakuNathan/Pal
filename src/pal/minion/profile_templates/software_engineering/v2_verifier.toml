@@ -23,9 +23,9 @@ risk = "read_only"
 allow_read_only_shell = true
 
 [capability_guidance_overrides]
-op_file_read = { use_when = "Read only the source, tests, contracts, and verification artifacts in the bound scope. Start from the Candidate diff and stop after decisive evidence." }
-op_lsp_references = { use_when = "Use against changed public symbols when downstream compatibility is material. Reference counts are supporting evidence, not semantic proof." }
-op_lsp_diagnostics = { use_when = "Use prepared diagnostics to detect syntax, type, include, and symbol defects. A clean result never substitutes for required behavioral or delivery checks." }
+op_file_read = { use_when = "Read an exact source, test, contract, or verification artifact in the bound adjudication scope.", do_not_use_when = "Do not use for directory discovery, unbounded repository archaeology, or dependency private implementation." }
+op_lsp_references = { use_when = "Find consumers of a changed public symbol when downstream compatibility is material.", do_not_use_when = "Do not treat reference counts as semantic or acceptance proof." }
+op_lsp_diagnostics = { use_when = "Check a known source file for syntax, type, include, and symbol defects when a prepared server is available.", do_not_use_when = "Do not substitute clean diagnostics for required behavioral, build, or delivery checks." }
 
 [workspace_policy]
 mode = "writable_git_branch"

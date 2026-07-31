@@ -250,9 +250,10 @@ class MinionV2VerificationTests(unittest.TestCase):
         performance_guidance = contract["guidance_overrides"][
             ADD_FINDING_CAPABILITY
         ]["use_when"]
-        self.assertIn("Material performance defects are valid findings", performance_guidance)
-        self.assertIn("representative scaling probe", performance_guidance)
-        self.assertIn("bounded contract-preserving optimization direction", performance_guidance)
+        self.assertIn("performance finding", performance_guidance)
+        self.assertIn("representative workload", performance_guidance)
+        self.assertIn("concrete impact", performance_guidance)
+        self.assertIn("exact hot path", performance_guidance)
 
     def test_scenario_module_repair_derives_target_from_finding_location(self) -> None:
         workspace = self._bind_workspace(
@@ -1692,13 +1693,16 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertNotIn("lsp_setup", delegated.args)
 
     def test_verification_lsp_tool_requires_manager_prepared_entrypoint(self) -> None:
-        description = VERIFICATION_BUILDER_TOOL_SPECS[
+        spec = VERIFICATION_BUILDER_TOOL_SPECS[
             "op_minion_verification_run_lsp_check"
-        ]["description"]
+        ]
+        description = str(spec["description"])
+        guidance = dict(spec["guidance"])
 
-        self.assertIn("Manager-prepared context", description)
-        self.assertIn("instead of invoking a language-server executable", description)
-        self.assertIn("do not repair the LSP environment yourself", description)
+        self.assertIn("LSP diagnostics for one source file", description)
+        self.assertIn("Manager-prepared context", guidance["use_when"])
+        self.assertIn("language-server executable", guidance["do_not_use_when"])
+        self.assertIn("repair LSP setup", guidance["do_not_use_when"])
 
     def test_verifier_keeps_running_when_historical_order_fails_submit(self) -> None:
         stage_dir = self.runtime_root / "artifact-stage-historical-order"
@@ -2240,6 +2244,13 @@ class MinionV2VerificationTests(unittest.TestCase):
         report = json.loads((stage_dir / "coder_report.json").read_text(encoding="utf-8"))
         self.assertEqual(report["files_changed"], ["src/font/backend.cpp"])
         self.assertNotIn("tests_run", report)
+        _reject_manager_identity_fields(report, owner="test Coder output")
+        self.assertTrue(
+            all(
+                set(item) == {"kind", "status", "summary"}
+                for item in report["work_items"]
+            )
+        )
         self.assertEqual(
             [
                 (item["summary"], item["status"])
@@ -2701,11 +2712,19 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first["fingerprint"], second["fingerprint"])
         self.assertNotIn("requirements", first)
-        run_description = first["guidance_overrides"][
-            "op_minion_verification_run_adversarial_case"
-        ]["use_when"]
-        self.assertIn("src/rule_router/protocol.py", run_description)
-        self.assertIn("tests/test_rule_router.py", run_description)
+        self.assertEqual(
+            first["contract_paths"],
+            ["src/rule_router/protocol.py"],
+        )
+        self.assertEqual(
+            first["entrypoints"],
+            [{"target": "tests/test_rule_router.py"}],
+        )
+        self.assertNotIn(
+            "op_minion_verification_run_adversarial_case",
+            first["guidance_overrides"],
+        )
+        self.assertNotIn("Bound verification context", json.dumps(first))
         self.assertNotIn("workflow_id", json.dumps(first))
         self.assertNotIn("invocation_id", json.dumps(first))
         self.assertIn(
@@ -2747,10 +2766,10 @@ class MinionV2VerificationTests(unittest.TestCase):
         performance_guidance = first["guidance_overrides"][
             ADD_FINDING_CAPABILITY
         ]["use_when"]
-        self.assertIn("A performance finding is valid", performance_guidance)
-        self.assertIn("representative scaling probe", performance_guidance)
-        self.assertIn("do not record speculative micro-optimizations", performance_guidance)
-        self.assertIn("bounded contract-preserving optimization direction", performance_guidance)
+        self.assertIn("Performance findings require", performance_guidance)
+        self.assertIn("representative workload", performance_guidance)
+        self.assertIn("exact hot path", performance_guidance)
+        self.assertIn("bounded contract-preserving direction", performance_guidance)
 
         system = compile_verification_invocation_tool_contract(
             work_view={

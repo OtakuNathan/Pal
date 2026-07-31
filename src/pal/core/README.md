@@ -44,6 +44,10 @@ Interaction rule:
 - the immutable L1 snapshot is compaction's sole semantic input. Current input
   and each closed tool batch are committed to L1 before compaction; provider
   projections, recall caches, and role anchors are not parallel truth sources
+- exact provider tool-continuation fields belong to the active logical turn.
+  They survive an in-flight checkpoint, but turn closure releases them; L1
+  retains only the provider-neutral tool semantics used by compaction and
+  future context
 - one logical turn may create at most three compact generations. Semantic
   generation gets three attempts before a mechanical checkpoint, and the
   prompt plus local validator cap visible checkpoint JSON at an estimated

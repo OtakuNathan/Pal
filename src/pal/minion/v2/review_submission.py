@@ -13,6 +13,7 @@ from pal.minion.v2.submission_drafts import (
 from pal.minion.v2.work_items import (
     assert_work_items_complete,
     findings_from_work_items,
+    submission_work_items,
 )
 from pal.shared import RuntimeStatus
 
@@ -21,13 +22,21 @@ REVIEW_SUBMIT_CAPABILITY = "op_minion_review_submit"
 
 REVIEW_SUBMIT_TOOL_SPEC: dict[str, Any] = {
     "alias": "review_submit",
-    "description": (
-        "Submit the completed semantic review with no arguments. The Manager "
-        "derives FAIL when any blocking finding exists and PASS otherwise; p2 "
-        "defects remain blocking unless explicitly advisory. Checklist closure, "
-        "finding structure, role fencing, and the immutable submission receipt "
-        "are checked mechanically. Do not write a Markdown verdict."
-    ),
+    "description": "Submit the completed semantic review and let the Manager derive its verdict.",
+    "guidance": {
+        "use_when": (
+            "Use with no arguments after the complete audit is finished, every finding is "
+            "recorded with add_finding, and the checklist is complete."
+        ),
+        "do_not_use_when": (
+            "Do not submit before breadth and composition review finish, emit a separate "
+            "Markdown verdict, or treat a blocking p2 finding as PASS."
+        ),
+        "failure_next_steps": (
+            "Complete or correct the checklist and structured findings reported by the "
+            "rejection, then submit again without inventing a separate verdict."
+        ),
+    },
     "InputModel": EmptyToolInput,
     "examples": (),
     "idempotency": "idempotent",
@@ -66,7 +75,7 @@ def review_submit_tool_result(
             "verdict": "FAIL" if blocking else "PASS",
             "findings": blocking,
             "advisories": advisories,
-            "work_items": list(ledger["items"]),
+            "work_items": submission_work_items(ledger["items"]),
         }
         result = store.mark_submitted(
             context,

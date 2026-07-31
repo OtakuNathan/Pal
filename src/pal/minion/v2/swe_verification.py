@@ -30,6 +30,7 @@ from pal.minion.v2.verification_builder import semantic_verification_draft_error
 from pal.minion.v2.work_items import (
     assert_work_items_complete,
     findings_from_work_items,
+    submission_work_items,
 )
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
@@ -50,50 +51,113 @@ SWE_VERIFICATION_CAPABILITIES = (
 SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_verification_pass": {
         "alias": "verification_pass",
-        "description": (
-            "Submit PASS after the durable module corpus covers the candidate and passes. Add or materially strengthen "
-            "adversarial coverage only when the existing corpus leaves a real gap. Takes no arguments. The Manager requires "
-            "a non-empty tests/<module_name>/verifier corpus and a successful ordinary shell or LSP check after any final edit."
-        ),
+        "description": "Submit a successful semantic verification outcome.",
+        "guidance": {
+            "use_when": (
+                "Use with no arguments only after every required regression, diff-risk, "
+                "behavioral, consumer, and delivery obligation for the bound scope passes."
+            ),
+            "do_not_use_when": (
+                "Do not use with a blocking finding, missing required evidence, an untested "
+                "final corpus edit, or a merely green compilation or LSP summary."
+            ),
+            "failure_next_steps": (
+                "Run or record the missing obligation, correct any incomplete checklist or "
+                "finding state, and retry only after the current assignment genuinely passes."
+            ),
+        },
         "InputModel": EmptyToolInput,
     },
     "op_minion_verification_request_module_repair": {
         "alias": "verification_request_module_repair",
-        "description": "Submit module repair after every reproduced defect has been recorded with add_finding. Takes no arguments.",
+        "description": "Submit reproduced implementation defects for module repair.",
+        "guidance": {
+            "use_when": (
+                "Use with no arguments after every current implementation defect is reproduced "
+                "and recorded with add_finding."
+            ),
+            "do_not_use_when": (
+                "Do not use for a verifier-corpus, frozen contract, architecture, requirements, "
+                "or unavailable-environment outcome."
+            ),
+            "failure_next_steps": (
+                "Correct missing or misclassified findings and complete the checklist before retrying."
+            ),
+        },
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestModuleRepairInput,
     },
     "op_minion_verification_request_corpus_repair": {
         "alias": "verification_request_corpus_repair",
-        "description": (
-            "Submit a Verifier-owned corpus defect after recording every incorrect probe with "
-            "finding_kind=verification_defect and an exact tests/<module>/verifier location. "
-            "Manager routes the original module Verifier to correct and rerun its corpus; Coder is never invoked."
-        ),
+        "description": "Submit incorrect Verifier-owned cases for corpus repair.",
+        "guidance": {
+            "use_when": (
+                "Use only after every incorrect probe is recorded as verification_defect with "
+                "an exact verifier-corpus location."
+            ),
+            "do_not_use_when": (
+                "Do not use for product implementation, contract, architecture, integration, "
+                "requirements, or environment defects."
+            ),
+            "failure_next_steps": (
+                "Correct finding classification or locations so the Manager can derive the "
+                "owning Verifier, then retry."
+            ),
+        },
         "InputModel": EmptyToolInput,
     },
     "op_minion_verification_request_contract_revision": {
         "alias": "verification_request_contract_revision",
-        "description": "Submit a frozen public contract or lifecycle/state-model defect already recorded with add_finding.",
+        "description": "Submit a frozen public-contract defect for contract revision.",
+        "guidance": {
+            "use_when": (
+                "Use after recording a contradictory, incomplete, or impossible public contract "
+                "or lifecycle/state-model defect with add_finding."
+            ),
+            "do_not_use_when": "Do not use when the current module can be repaired without changing its accepted contract.",
+            "failure_next_steps": "Correct the finding classification or complete the checklist before retrying.",
+        },
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestContractRevisionInput,
     },
     "op_minion_verification_request_architecture_revision": {
         "alias": "verification_request_architecture_revision",
-        "description": "Submit an add_finding-recorded module-boundary, ownership, hidden-coupling, dependency, or scenario-topology defect requiring architecture revision.",
+        "description": "Submit a topology or ownership defect for architecture revision.",
+        "guidance": {
+            "use_when": (
+                "Use after recording a module-boundary, ownership, hidden-coupling, dependency, "
+                "bootstrap, or scenario-topology defect that cannot be repaired locally."
+            ),
+            "do_not_use_when": "Do not use for an implementation defect or a frozen-contract defect with unchanged topology.",
+            "failure_next_steps": "Correct the finding classification or complete the checklist before retrying.",
+        },
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestArchitectureRevisionInput,
     },
     "op_minion_verification_request_requirements_revision": {
         "alias": "verification_request_requirements_revision",
-        "description": (
-            "Submit a conflict or material omission in the original Requirements after recording it with add_finding. "
-            "Do not author replacement requirement records here."
-        ),
+        "description": "Submit a contradictory or materially incomplete requirement for user revision.",
+        "guidance": {
+            "use_when": "Use after recording the exact requirements conflict or omission with add_finding.",
+            "do_not_use_when": (
+                "Do not use for an implementation, contract, or architecture defect, and do not "
+                "author replacement requirement records."
+            ),
+            "failure_next_steps": "Correct the requirements finding or complete the checklist before retrying.",
+        },
         "InputModel": MinionV2SweVerificationOpMinionVerificationRequestRequirementsRevisionInput,
     },
     "op_minion_verification_unknown": {
         "alias": "verification_unknown",
-        "description": (
-            "Submit UNKNOWN only when a required platform or environment cannot be exercised. Manager policy decides whether it blocks."
-        ),
+        "description": "Submit an UNKNOWN outcome for required evidence unavailable in the bound environment.",
+        "guidance": {
+            "use_when": (
+                "Use only when a required platform or environment genuinely cannot be exercised "
+                "and provide the concrete missing evidence and follow-up plan."
+            ),
+            "do_not_use_when": (
+                "Do not use for a failing check, an absent but non-required obligation, ordinary "
+                "implementation difficulty, or evidence that can still be collected locally."
+            ),
+            "failure_next_steps": "Correct the reason or collect the available evidence before retrying.",
+        },
         "InputModel": MinionV2SweVerificationOpMinionVerificationUnknownInput,
     },
 }
@@ -143,28 +207,23 @@ def compile_swe_verification_tool_contract(
     )
     guidance_overrides: dict[str, dict[str, str]] = {}
     guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
-        "Record or replace one evidence-backed verifier finding. Use verification_defect only for an incorrect "
+        "Record one evidence-backed verifier finding. Use verification_defect only for an incorrect "
         "Verifier-owned probe or corpus, module_defect for the current implementation, "
         "dependency_defect for an upstream module, contract_defect for a frozen public contract, "
         "architecture_defect for ownership/topology, requirements_defect for a contradictory task ledger, and "
-        "integration_defect for cross-module product behavior. Material performance defects are valid findings when "
-        "supported by a representative scaling probe or source-level complexity trace; include the triggering workload, "
-        "impact, exact hot path, and a bounded contract-preserving optimization direction, and do not report speculative "
-        "micro-optimizations. Finish the breadth-first audit first and batch "
-        "independent add_finding calls in one tool round when possible."
+        "integration_defect for cross-module product behavior. A performance finding requires a representative "
+        "workload, concrete impact, and exact hot path; do not report speculative micro-optimization."
     )}
     if system_mode:
         guidance_overrides[ADD_FINDING_CAPABILITY] = {"use_when": (
-            "Record or replace one evidence-backed scenario finding. Use verification_defect when the failure is "
+            "Record one evidence-backed scenario finding. Use verification_defect when the failure is "
             "caused by an incorrect Verifier-owned module corpus or test double; cite its exact "
             "tests/<module>/verifier path and submit corpus repair so Manager returns it to the original Verifier. "
             "For every implementation repair, cite at least "
             "one exact workspace file owned by the affected module so Manager can derive the graph route mechanically. "
             "Use contract_defect, architecture_defect, or requirements_defect when no implementation-owned path can "
-            "legally resolve the issue. Material end-to-end performance defects are valid findings when supported by a "
-            "representative scaling probe or source-level complexity trace; include the triggering workload, impact, exact "
-            "hot path, and bounded contract-preserving optimization direction, not speculative micro-optimization. "
-            "Finish the breadth-first audit first and batch independent findings in one tool round."
+            "legally resolve the issue. A performance finding requires a representative workload, concrete impact, "
+            "and exact hot path; do not report speculative micro-optimization."
         )}
     if system_mode:
         guidance_overrides["op_minion_verification_request_module_repair"] = {"use_when": (
@@ -289,10 +348,7 @@ def swe_verification_tool_result(
             "outcome": outcome,
             "findings": findings,
             "advisories": advisories,
-            "work_items": [
-                dict(item)
-                for item in list(work_items.get("items") or [])
-            ],
+            "work_items": submission_work_items(work_items.get("items")),
             **({"reason": reason} if reason else {}),
             **({"target_modules": target_modules} if target_modules else {}),
             "changed_test_paths": changed_paths,

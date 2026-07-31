@@ -2072,6 +2072,33 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertEqual(attempts[0]["status"], "completed")
         self.assertEqual(attempts[0]["worker_id"], "outbox_worker")
 
+    def test_failed_effect_and_triage_transition_rollback_together(self) -> None:
+        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="atomic-failure"))
+        effect_id = result.outbox_effect_ids[0]
+        self.repository.claim_outbox("outbox_worker", limit=1)
+        invalid_triage = self.action(
+            "NOT_A_REAL_ACTION",
+            version=None,
+            key="atomic-failure:invalid-triage",
+        )
+
+        with self.assertRaises(UnknownTransitionError):
+            self.repository.fail_outbox_effect(
+                effect_id,
+                worker_id="outbox_worker",
+                error="permanent failure",
+                triage_action=invalid_triage,
+            )
+
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            effect = connection.execute(
+                "SELECT status, locked_by, last_error FROM minion_v2_outbox WHERE effect_id = ?",
+                (effect_id,),
+            ).fetchone()
+        self.assertEqual(dict(effect), {"status": "inflight", "locked_by": "outbox_worker", "last_error": ""})
+        self.assertEqual(self.repository.read_snapshot(AggregateType.WORKFLOW, "wf_1").state, "CREATED")
+
     def test_deferred_outbox_effect_returns_to_queue_without_spending_attempt(self) -> None:
         result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer"))
         effect_id = result.outbox_effect_ids[0]
@@ -2145,6 +2172,38 @@ class MinionV2PersistenceTests(unittest.TestCase):
             [(item["worker_id"], item["status"]) for item in attempts],
             [("crashed_worker", "lost"), ("recovery_worker", "failed")],
         )
+
+    def test_exhausted_retry_and_triage_transition_rollback_together(self) -> None:
+        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="atomic-retry"))
+        effect_id = result.outbox_effect_ids[0]
+        self.repository.claim_outbox("retry_worker", limit=1)
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_outbox SET max_attempts = 1 WHERE effect_id = ?",
+                (effect_id,),
+            )
+        invalid_triage = self.action(
+            "NOT_A_REAL_ACTION",
+            version=None,
+            key="atomic-retry:invalid-triage",
+        )
+
+        with self.assertRaises(UnknownTransitionError):
+            self.repository.retry_outbox_effect(
+                effect_id,
+                worker_id="retry_worker",
+                error="terminal retry failure",
+                retry_after_seconds=0,
+                triage_action=invalid_triage,
+            )
+
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            effect = connection.execute(
+                "SELECT status, locked_by, last_error FROM minion_v2_outbox WHERE effect_id = ?",
+                (effect_id,),
+            ).fetchone()
+        self.assertEqual(dict(effect), {"status": "inflight", "locked_by": "retry_worker", "last_error": ""})
 
     def test_deferred_effect_records_claim_history_without_spending_retry_budget(self) -> None:
         result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer-history"))

@@ -8,6 +8,14 @@ from pal.memory.contracts import L1MessageKind, L1TranscriptMessage, L2Entry
 
 SUMMARY_ENTRY_ID = "memory_summary_current"
 SUMMARY_TITLE = "Conversation Summary"
+_TRANSIENT_PROVIDER_PAYLOAD_KEYS = frozenset(
+    {
+        "provider_specific_fields",
+        "reasoning_content",
+        "reasoning_text",
+        "anthropic_thinking_blocks",
+    }
+)
 _PERSISTENT_SYSTEM_REMINDER_RE = re.compile(
     r"\s*<system-reminder\b[^>]*>.*?</system-reminder>\s*",
     re.IGNORECASE | re.DOTALL,
@@ -64,7 +72,7 @@ def normalize_l1_transcript(item: list[L1TranscriptMessage] | list[dict[str, obj
                         ),
                         tool_calls=tool_calls,
                         tool_call_id=tool_call_id,
-                        payload=dict(entry.payload or {}),
+                        payload=_durable_l1_payload(entry.payload),
                     )
                 )
             continue
@@ -86,10 +94,20 @@ def normalize_l1_transcript(item: list[L1TranscriptMessage] | list[dict[str, obj
                         ),
                         tool_calls=tool_calls,
                         tool_call_id=tool_call_id,
-                        payload=dict(entry.get("payload") or {}),
+                        payload=_durable_l1_payload(entry.get("payload")),
                     )
                 )
     return normalized
+
+
+def _durable_l1_payload(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): item
+        for key, item in value.items()
+        if str(key) not in _TRANSIENT_PROVIDER_PAYLOAD_KEYS
+    }
 
 
 def flatten_l1_context(items: list[list[L1TranscriptMessage]]) -> list[L1TranscriptMessage]:

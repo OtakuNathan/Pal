@@ -6,6 +6,7 @@ import unittest
 from pal.control.contracts import ControlRoute
 from pal.control.interactions import build_think_panel_interaction
 from pal.llm.contracts import ThinkingChoice, ThinkingContract
+from pal.llm.llm_adaptor.deepseek import DeepSeekProvider
 from pal.llm.llm_adaptor.openai_chat import CodexBridgeProvider
 from pal.llm.llm_adaptor.zai_glm import ZaiGLMProvider
 
@@ -25,7 +26,33 @@ def _glm_endpoint(*, thinking_contract: object | None = None) -> SimpleNamespace
     )
 
 
+def _deepseek_endpoint() -> SimpleNamespace:
+    return SimpleNamespace(
+        endpoint_id="deepseek-v4-flash",
+        provider="deepseek",
+        model_id="deepseek-v4-flash",
+        api_mode="openai_chat",
+        base_url="https://api.deepseek.com",
+        supports_reasoning=True,
+        capabilities_blob={},
+    )
+
+
 class ThinkingContractTests(unittest.TestCase):
+    def test_deepseek_exposes_current_v4_effort_choices(self) -> None:
+        contract = DeepSeekProvider(_deepseek_endpoint()).thinking_contract()
+
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        self.assertEqual(
+            [choice.choice_id for choice in contract.choices],
+            ["off", "high", "max"],
+        )
+        self.assertEqual(contract.default_choice_id, "high")
+        self.assertEqual(contract.resolve("low"), "high")
+        self.assertEqual(contract.resolve("medium"), "high")
+        self.assertEqual(contract.resolve("xhigh"), "max")
+
     def test_glm_exposes_only_effective_provider_choices(self) -> None:
         contract = ZaiGLMProvider(_glm_endpoint()).thinking_contract()
 

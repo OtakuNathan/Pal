@@ -286,6 +286,34 @@ def _closed_protocol(content: str) -> list[dict[str, object]]:
     ]
 
 
+def test_l1_tool_protocol_discards_provider_specific_fields() -> None:
+    transcript, _ = l1_tool_protocol_transcript(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "provider_specific_fields": {
+                    "reasoning_content": "inspect before calling the tool"
+                },
+                "tool_calls": [
+                    {
+                        "id": "call-provider-fields",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-provider-fields",
+                "content": "ok",
+            },
+        ]
+    )
+
+    assert transcript[0].payload == {}
+
+
 class SharedCompactionEngineTests(unittest.TestCase):
     def test_policy_prompt_owns_schema_and_llm_runtime_has_no_host_api(self) -> None:
         self.assertIn("pal.compaction.pal.v2", COMPACT_PAL_STRUCTURED_SYSTEM)
@@ -875,6 +903,38 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
 
         self.assertEqual(service.l1_store.items, before)
+
+    def test_memory_compact_strips_transient_provider_payload_from_summary(self) -> None:
+        service = _memory_with_turns(1)
+        summary_entry = L2Entry(
+            entry_id="memory_summary_current",
+            kind="summary",
+            scope="system",
+            title="summary",
+            summary="provider-neutral compact summary",
+            rendered="<compact_context>provider-neutral compact summary</compact_context>",
+            payload={
+                "schema": "pal.compaction.test.v1",
+                "provider_specific_fields": {
+                    "reasoning_content": "must not enter durable L1"
+                },
+                "reasoning_content": "must not enter durable L1",
+            },
+        )
+
+        service.compact(
+            MemoryCompactRequest(
+                target_input_budget=512,
+                reserved_output_tokens=128,
+                summary_entry=summary_entry,
+            )
+        )
+
+        compacted = service.l1_store.items[0][0]
+        self.assertEqual(
+            compacted.payload,
+            {"schema": "pal.compaction.test.v1"},
+        )
 
 
 class CompactionPolicyTests(unittest.TestCase):
