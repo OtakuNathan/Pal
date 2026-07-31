@@ -1,0 +1,5 @@
+plugin_id = "codex_architect_harness"
+entrypoint = "codex_architect_harness_runtime"
+version = "0.1.0"
+enabled_by_default = false
+reload_modules = ["codex_architect_harness_runtime"]

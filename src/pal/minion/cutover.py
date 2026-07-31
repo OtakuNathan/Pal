@@ -30,8 +30,8 @@ class MinionRuntimeCutoverResult:
     copied_family_overrides: int = 0
 
 
-def cutover_minion_runtime_v25(runtime_root: Path) -> MinionRuntimeCutoverResult:
-    """Archive a legacy Minion runtime and create one canonical v25 root."""
+def cutover_minion_runtime_v26(runtime_root: Path) -> MinionRuntimeCutoverResult:
+    """Archive a legacy Minion runtime and create one canonical v26 root."""
 
     root = Path(runtime_root)
     source = minion_runtime_dir(root)
@@ -58,7 +58,7 @@ def cutover_minion_runtime_v25(runtime_root: Path) -> MinionRuntimeCutoverResult
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     version_label = str(previous_version) if previous_version >= 0 else "unknown"
     archive = archive_parent / f"{stamp}-v{version_label}"
-    staging_runtime_root = data_root / f".minion-v25-{uuid4().hex}"
+    staging_runtime_root = data_root / f".minion-v26-{uuid4().hex}"
     staging = minion_runtime_dir(staging_runtime_root)
     try:
         _build_staging_runtime(
@@ -163,5 +163,5 @@ def _fsync_directory(path: Path) -> None:
 
 __all__ = [
     "MinionRuntimeCutoverResult",
-    "cutover_minion_runtime_v25",
+    "cutover_minion_runtime_v26",
 ]

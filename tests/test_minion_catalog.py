@@ -132,7 +132,7 @@ class MinionCatalogTests(unittest.TestCase):
                 changes={
                     "role_bindings": {
                         "implementation": {
-                            "executor": "profile",
+                            "participant": "profile",
                             "profile": "software_engineering.missing_coder",
                         }
                     }
@@ -154,7 +154,7 @@ class MinionCatalogTests(unittest.TestCase):
                     "changes": {
                         "role_bindings": {
                             "implementation": {
-                                "executor": "null",
+                                "participant": "null",
                                 "profile": None,
                                 "reason": "external_human_execution",
                             }
@@ -164,7 +164,7 @@ class MinionCatalogTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            parsed.changes.role_bindings["implementation"].executor,
+            parsed.changes.role_bindings["implementation"].participant,
             "null",
         )
         strategy = (
@@ -196,14 +196,14 @@ class MinionCatalogTests(unittest.TestCase):
         service.bootstrap()
         with self.assertRaisesRegex(
             ValueError,
-            "reviewer requires a profile executor",
+            "reviewer requires a profile participant",
         ):
             service.set_family_override(
                 family="lifestyle",
                 changes={
                     "role_bindings": {
                         "reviewer": {
-                            "executor": "null",
+                            "participant": "null",
                             "profile": None,
                             "reason": "missing_reviewer",
                         }
@@ -212,14 +212,14 @@ class MinionCatalogTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(
             ValueError,
-            "implementation and verifier executors must both",
+            "implementation and verifier participants must both",
         ):
             service.set_family_override(
                 family="software_engineering",
                 changes={
                     "role_bindings": {
                         "verifier": {
-                            "executor": "null",
+                            "participant": "null",
                             "profile": None,
                             "reason": "missing_verifier",
                         }
@@ -231,7 +231,7 @@ class MinionCatalogTests(unittest.TestCase):
             changes={
                 "role_bindings": {
                     role: {
-                        "executor": "null",
+                        "participant": "null",
                         "profile": None,
                         "reason": "external_human_execution",
                     }
@@ -242,7 +242,7 @@ class MinionCatalogTests(unittest.TestCase):
         self.assertEqual(
             updated["definition"]["role_bindings"]["implementation"],
             {
-                "executor": "null",
+                "participant": "null",
                 "reason": "external_human_execution",
             },
         )

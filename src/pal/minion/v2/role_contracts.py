@@ -64,7 +64,7 @@ class RoleActivation:
 
 
 REQUIRED_ORCHESTRATION_ROLES = frozenset(role.value for role in OrchestrationRole)
-FAMILY_BINDING_SCHEMA_VERSION = "5"
+FAMILY_BINDING_SCHEMA_VERSION = "6"
 
 
 def family_execution_adapter(value: Any) -> str:
@@ -101,15 +101,15 @@ def validate_role_bindings(
         OrchestrationRole.ARCHITECT.value,
         OrchestrationRole.REVIEWER.value,
     ):
-        if bindings[role].executor != "profile":
-            raise ValueError(f"family role {role} requires a profile executor")
-    implementation_executor = bindings[
+        if bindings[role].participant != "profile":
+            raise ValueError(f"family role {role} requires a profile participant")
+    implementation_participant = bindings[
         OrchestrationRole.IMPLEMENTATION.value
-    ].executor
-    verifier_executor = bindings[OrchestrationRole.VERIFIER.value].executor
-    if implementation_executor != verifier_executor:
+    ].participant
+    verifier_participant = bindings[OrchestrationRole.VERIFIER.value].participant
+    if implementation_participant != verifier_participant:
         raise ValueError(
-            "family implementation and verifier executors must both be profile "
+            "family implementation and verifier participants must both be profile "
             "or both be null"
         )
     return {role: bindings[role] for role in sorted(bindings)}
@@ -196,26 +196,26 @@ def validate_family_binding_payload(
                 f"FamilyBindingArtifact role {role} must be an object"
             )
         binding = dict(raw)
-        executor = str(binding.get("executor") or "")
-        if executor not in {"profile", "null"}:
+        participant = str(binding.get("participant") or "")
+        if participant not in {"profile", "null"}:
             raise ValueError(
                 f"FamilyBindingArtifact role {role} requires an explicit "
-                "profile or null executor"
+                "profile or null participant"
             )
-        executor_profile = dict(binding.get("executor_profile") or {})
+        role_profile = dict(binding.get("role_profile") or {})
         reason = str(binding.get("reason") or "").strip()
-        if executor == "profile":
+        if participant == "profile":
             canonical_profile_id = str(
-                executor_profile.get("canonical_profile_id")
-                or executor_profile.get("minion_profile")
+                role_profile.get("canonical_profile_id")
+                or role_profile.get("minion_profile")
                 or ""
             ).strip()
-            role_protocol = dict(executor_profile.get("role") or {})
+            role_protocol = dict(role_profile.get("role") or {})
             if not canonical_profile_id:
                 raise ValueError(
-                    f"FamilyBindingArtifact role {role} has no pinned executor profile"
+                    f"FamilyBindingArtifact role {role} has no pinned role profile"
                 )
-            if "contract" in executor_profile:
+            if "contract" in role_profile:
                 raise ValueError(
                     f"FamilyBindingArtifact role {role} profile must not "
                     "select an architecture schema"
@@ -224,22 +224,22 @@ def validate_family_binding_payload(
                 raise ValueError(
                     f"FamilyBindingArtifact role {role} has a mismatched role protocol"
                 )
-        elif executor_profile or not reason:
+        elif role_profile or not reason:
             raise ValueError(
                 f"FamilyBindingArtifact null role {role} requires a reason and "
-                "must not pin an executor profile"
+                "must not pin a role profile"
             )
         bindings[role] = binding
 
-    if bindings[OrchestrationRole.ARCHITECT.value]["executor"] != "profile":
-        raise ValueError("FamilyBindingArtifact architect requires a profile executor")
-    if bindings[OrchestrationRole.REVIEWER.value]["executor"] != "profile":
-        raise ValueError("FamilyBindingArtifact reviewer requires a profile executor")
+    if bindings[OrchestrationRole.ARCHITECT.value]["participant"] != "profile":
+        raise ValueError("FamilyBindingArtifact architect requires a profile participant")
+    if bindings[OrchestrationRole.REVIEWER.value]["participant"] != "profile":
+        raise ValueError("FamilyBindingArtifact reviewer requires a profile participant")
     if (
-        bindings[OrchestrationRole.IMPLEMENTATION.value]["executor"]
-        != bindings[OrchestrationRole.VERIFIER.value]["executor"]
+        bindings[OrchestrationRole.IMPLEMENTATION.value]["participant"]
+        != bindings[OrchestrationRole.VERIFIER.value]["participant"]
     ):
         raise ValueError(
-            "FamilyBindingArtifact implementation and verifier executors must match"
+            "FamilyBindingArtifact implementation and verifier participants must match"
         )
     return bindings

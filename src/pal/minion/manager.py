@@ -30,6 +30,7 @@ from pal.minion.llm_broker import (
     preflight_request_from_payload,
     stream_event_to_payload,
 )
+from pal.minion.harnesses import MinionHarnessRegistry
 from pal.minion.web_broker import web_result_to_payload
 from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
@@ -144,6 +145,7 @@ class MinionManager:
     v2_outbox: MinionV2OutboxProcessor = field(init=False)
     v2_semantic_orchestrator: SemanticOrchestrator = field(init=False)
     role_gateway: RoleAssignmentGateway = field(init=False)
+    harness_registry: MinionHarnessRegistry = field(init=False)
     _host_broker_bundle: Any | None = field(default=None, init=False, repr=False)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _drain_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -164,8 +166,10 @@ class MinionManager:
         self.events = MinionEventDelivery()
         self.v2_service = MinionV2WorkflowService(Path(self.runtime_root))
         self.role_gateway = RoleAssignmentGateway(self.v2_service)
+        self.harness_registry = MinionHarnessRegistry(include_pal=True)
         self.v2_semantic_orchestrator = SemanticOrchestrator(
             self.v2_service,
+            harness_registry=self.harness_registry,
             max_parallel_workers=self.max_parallel_modules,
             publish_human_review=self._publish_v2_human_review,
             publish_worker_event=self._publish_v2_worker_event,
@@ -386,6 +390,15 @@ class MinionManager:
             return self.health()
         if method == "reload_runtime_config":
             return self.reload_runtime_config()
+        if method == "replace_harness_registry":
+            generation = self.harness_registry.replace_external(
+                dict(params.get("generation") or {})
+            )
+            self._v2_wake_event.set()
+            return {
+                "ok": True,
+                "generation": generation.to_dict(),
+            }
         if method == "catalog_snapshot":
             return self.catalog.snapshot(
                 kind=str(params.get("kind") or "all"),
@@ -905,6 +918,13 @@ class MinionManager:
             "minion_db_path": str(self.v2_service.repository.db_path),
             "log_sink": current_service_log_sink_description(),
             "catalog_generation": str(self.catalog.snapshot()["generation"]),
+            "harness_generation": (
+                self.harness_registry.snapshot().generation_hash
+            ),
+            "harnesses": [
+                spec.to_dict()
+                for spec in self.harness_registry.snapshot().specs
+            ],
             **dict(self.endpoint_info),
         }
 

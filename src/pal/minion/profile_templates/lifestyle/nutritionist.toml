@@ -13,7 +13,7 @@ prescribe treatment, or invent measurements.
 """
 output_contract_fragment = """
 This Task profile selects the lifestyle family and nutrition check-in contract.
-The FamilyBinding supplies the actual role executors.
+The FamilyBinding supplies the actual role participants.
 """
 capability_groups = []
 

@@ -9,19 +9,19 @@ execution_adapter = "artifact_bundle.v2"
 specialization = "general.v1"
 
 [role_bindings.architect]
-executor = "profile"
+participant = "profile"
 profile = "general.architect"
 
 [role_bindings.reviewer]
-executor = "profile"
+participant = "profile"
 profile = "general.reviewer"
 
 [role_bindings.implementation]
-executor = "profile"
+participant = "profile"
 profile = "$task_profile"
 
 [role_bindings.verifier]
-executor = "profile"
+participant = "profile"
 profile = "general.verifier"
 
 [policies.llm]

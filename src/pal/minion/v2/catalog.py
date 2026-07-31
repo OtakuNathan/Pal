@@ -23,18 +23,18 @@ REGISTERED_ADAPTERS = frozenset({"software_git.v2", "artifact_bundle.v2"})
 
 @dataclass(frozen=True)
 class ResolvedRoleBinding:
-    executor: str
+    participant: str
     selector: str
-    executor_profile: Mapping[str, Any] | None = None
+    role_profile: Mapping[str, Any] | None = None
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "executor": self.executor,
+            "participant": self.participant,
             "selector": self.selector,
             **(
-                {"executor_profile": dict(self.executor_profile)}
-                if self.executor_profile is not None
+                {"role_profile": dict(self.role_profile)}
+                if self.role_profile is not None
                 else {}
             ),
             **({"reason": self.reason} if self.reason else {}),
@@ -58,7 +58,7 @@ class ResolvedFamilyBinding:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "5",
+            "schema_version": "6",
             "family_id": self.family_id,
             "display_name": self.display_name,
             "domain": self.domain,
@@ -115,9 +115,9 @@ class MinionV2Catalog:
         selectors = validate_role_bindings(family.role_bindings)
         resolved_roles: dict[str, ResolvedRoleBinding] = {}
         for role, role_binding in selectors.items():
-            if role_binding.executor == "null":
+            if role_binding.participant == "null":
                 resolved_roles[role] = ResolvedRoleBinding(
-                    executor="null",
+                    participant="null",
                     selector="",
                     reason=role_binding.reason,
                 )
@@ -149,9 +149,9 @@ class MinionV2Catalog:
                     f"{executor.role_protocol.kind}"
                 )
             resolved_roles[role] = ResolvedRoleBinding(
-                executor="profile",
+                participant="profile",
                 selector=selector,
-                executor_profile=executor.to_dict(),
+                role_profile=executor.to_dict(),
             )
         architecture_binding = family.architecture
         if architecture_binding is None:
@@ -233,7 +233,7 @@ class MinionV2Catalog:
         return self.artifacts.put_json(
             binding.to_dict(),
             artifact_type="FamilyBindingArtifact",
-            schema_version="5",
+            schema_version="6",
             provenance={
                 "family_id": family.family_id,
                 "primary_profile": primary_profile.canonical_profile_id,

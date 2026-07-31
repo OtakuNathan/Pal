@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 25
+MINION_V2_SCHEMA_VERSION = 26
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -19,7 +19,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
     if previous_version not in {0, MINION_V2_SCHEMA_VERSION}:
         raise RuntimeError(
             "legacy Minion runtime schema is not migrated in place; "
-            "archive the old runtime and initialize a fresh v25 runtime"
+            "archive the old runtime and initialize a fresh v26 runtime"
         )
     connection.executescript(
         """
@@ -189,7 +189,9 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             fencing_token INTEGER NOT NULL,
             role TEXT NOT NULL,
             mode TEXT NOT NULL DEFAULT '',
-            executor_profile_id TEXT NOT NULL DEFAULT '',
+            role_profile_id TEXT NOT NULL DEFAULT '',
+            harness_id TEXT NOT NULL DEFAULT 'pal',
+            harness_generation TEXT NOT NULL DEFAULT '',
             family_binding_sha TEXT NOT NULL DEFAULT '',
             authoring_contract_version TEXT NOT NULL DEFAULT '',
             prompt_pack_ref_json TEXT NOT NULL,
@@ -213,7 +215,9 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             aggregate_id TEXT NOT NULL,
             role TEXT NOT NULL,
             mode TEXT NOT NULL DEFAULT '',
-            executor_profile_id TEXT NOT NULL DEFAULT '',
+            role_profile_id TEXT NOT NULL DEFAULT '',
+            preferred_harness_id TEXT NOT NULL DEFAULT 'pal',
+            preferred_harness_generation TEXT NOT NULL DEFAULT '',
             family_binding_sha TEXT NOT NULL DEFAULT '',
             scope_kind TEXT NOT NULL DEFAULT '',
             subject_key TEXT NOT NULL DEFAULT '',
@@ -234,7 +238,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             aggregate_id TEXT NOT NULL,
             role TEXT NOT NULL,
             mode TEXT NOT NULL,
-            executor_profile_id TEXT NOT NULL,
+            role_profile_id TEXT NOT NULL,
             family_binding_sha TEXT NOT NULL,
             input_fingerprint TEXT NOT NULL,
             required_inputs_json TEXT NOT NULL DEFAULT '[]',
@@ -268,6 +272,9 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             fencing_token INTEGER NOT NULL,
             process_group_id INTEGER NOT NULL DEFAULT 0,
             access_token_hash TEXT NOT NULL DEFAULT '',
+            harness_id TEXT NOT NULL DEFAULT 'pal',
+            harness_generation TEXT NOT NULL DEFAULT '',
+            harness_state_json TEXT NOT NULL DEFAULT '{}',
             status TEXT NOT NULL DEFAULT 'starting',
             prompt_pack_ref_json TEXT NOT NULL DEFAULT '{}',
             response_artifact_ref_json TEXT NOT NULL DEFAULT '{}',

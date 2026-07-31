@@ -74,7 +74,7 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
             aggregate_id="node-router",
             role="implementation",
             mode="produce",
-            executor_profile_id="software_engineering.v2_coder",
+            role_profile_id="software_engineering.v2_coder",
             family_binding_sha="binding",
             scope_kind="module",
             subject_key="router",
@@ -88,7 +88,7 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
                 aggregate_id="node-router",
                 role="implementation",
                 mode="produce",
-                executor_profile_id="software_engineering.v2_coder",
+                role_profile_id="software_engineering.v2_coder",
                 family_binding_sha="binding",
                 input_fingerprint="router-input",
                 required_inputs=(),
@@ -141,6 +141,29 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         for method in ("bound_input_read", "bound_input_json"):
             with self.subTest(method=method), self.assertRaisesRegex(ValueError, "not allowed"):
                 self.call(method, name="module_work_view")
+
+    def test_gateway_persists_harness_continuation_by_logical_session(self) -> None:
+        written = self.call(
+            "harness_state_write",
+            state={"thread_id": "thread-architect-1"},
+        )
+        self.assertEqual(
+            written["state"],
+            {"thread_id": "thread-architect-1"},
+        )
+        restored = self.call("harness_state_read")
+        self.assertEqual(restored["harness_id"], "pal")
+        self.assertEqual(restored["harness_generation"], "")
+        self.assertEqual(
+            restored["state"],
+            {"thread_id": "thread-architect-1"},
+        )
+
+        with self.assertRaisesRegex(ValueError, "64 KiB"):
+            self.call(
+                "harness_state_write",
+                state={"value": "x" * (65 * 1024)},
+            )
 
     def test_gateway_persists_execution_clock_and_pager_by_role_session(
         self,
@@ -451,7 +474,7 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
             aggregate_id="node-router",
             role="architect",
             mode="author",
-            executor_profile_id="general.architect",
+            role_profile_id="general.architect",
             family_binding_sha=family_binding_sha,
             scope_kind=AggregateType.DAG_NODE_RUN.value,
             subject_key="node-router",
@@ -465,7 +488,7 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
                 aggregate_id="node-router",
                 role="architect",
                 mode="author",
-                executor_profile_id="general.architect",
+                role_profile_id="general.architect",
                 family_binding_sha=family_binding_sha,
                 input_fingerprint="architecture-input",
                 required_inputs=(),

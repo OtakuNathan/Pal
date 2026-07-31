@@ -28,8 +28,11 @@ Interaction rule:
 - role profile fragments are playbooks, Manager-derived views are inputs, and
   the WorkItem checklist is the execution driver; none is a second contract
 - every family uses the same Architect/Reviewer/Implementation/Verifier graph.
-  Architect and Reviewer require profile executors; Implementation and Verifier
-  are either both profile-backed or both explicit `null` executors
+  Architect and Reviewer require profile participants; Implementation and
+  Verifier are either both profile-backed or both explicit `null` participants
+- role profile and execution harness are separate contracts. Each attempt
+  captures one immutable harness generation; attached role-specialized
+  harnesses take priority and Pal remains the universal fallback
 - the Minion compaction clock advances only for successful consumable LLM
   rounds. Provider errors, truncation, `compact_required`, tools, and
   compaction calls do not advance it
@@ -43,7 +46,7 @@ Interaction rule:
   remain independently projected authority
 - compaction retires the active provider prompt projection. It does not advance
   the independent semantic-input pager clock or expire an `N+5` pager handle
-- Minion runtime schema v25 is a fresh cutover. Older or unrecognized runtime
+- Minion runtime schema v26 is a fresh cutover. Older or unrecognized runtime
   databases are archived atomically; only explicit profile and family
   overrides are copied after validation
 - legacy workflow state, aliases, managed seed migrations, and old checkpoint

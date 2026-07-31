@@ -505,12 +505,12 @@ def resolve_pinned_minion_pack(
     family_value["role_bindings"] = {
         role: (
             {
-                "executor": "null",
+                "participant": "null",
                 "reason": str(dict(binding or {}).get("reason") or ""),
             }
-            if str(dict(binding or {})["executor"]) == "null"
+            if str(dict(binding or {})["participant"]) == "null"
             else {
-                "executor": "profile",
+                "participant": "profile",
                 "profile": str(
                     dict(binding or {}).get("selector")
                     or dict(binding or {}).get("profile")

@@ -5,7 +5,7 @@ Status: active clean cutover as of 2026-07-30.
 Minion is a contract graph executor. A Family selects the problem domain and
 pins one Architect, Reviewer, Implementation, and Verifier binding. The graph
 shape is shared across families; the module definition schema and role
-executors are data.
+participants are data.
 
 ## Truth Sources
 
@@ -29,12 +29,12 @@ an execution cursor, never contract truth or evidence.
 
 ## Family And Role Protocol
 
-`FamilyBindingArtifact` schema v5 pins:
+`FamilyBindingArtifact` schema v6 pins:
 
 - the Family architecture specialization, compiled Draft 2020-12 schema,
   rendered Architect form, and one immutable generation hash;
 - role profiles and their versions;
-- each role executor (`profile` or `null`);
+- each role participant (`profile` or `null`);
 - one Family-selected execution adapter strategy;
 - family policies.
 
@@ -42,12 +42,20 @@ Role TOML owns the playbook: identity, behavior, ordered truth sources,
 checklist policy, and terminal submission tool. Profile prose teaches the
 method; the Manager supplies bounded inputs; WorkItems drive execution.
 
-A `null` executor closes a graph node without spawning an LLM. Architect and
+A `null` participant closes a graph node without spawning an LLM. Architect and
 Reviewer remain profile-backed; Implementation and Verifier must either both
-use profiles or both use explicit `null` executors. Lifestyle plans can
+use profiles or both use explicit `null` participants. Lifestyle plans can
 therefore use the same Architect/Reviewer/Implementation/Verifier graph while a
 human performs execution. Other families may map modules to days, slides,
 sheets, chapters, or any schema-defined semantic unit.
+
+Role participation and execution harness are independent contracts. A role
+profile defines domain identity and method. An immutable harness registry
+selects the process that executes that role. Pal is the universal fallback;
+an attached, healthy higher-priority harness may specialize a role without
+changing the Family binding. Each attempt captures one registry generation, so
+detach affects only later attempts. Two failed attempts on a preferred external
+harness fall back to Pal for that assignment.
 
 ## Contract Protocol
 

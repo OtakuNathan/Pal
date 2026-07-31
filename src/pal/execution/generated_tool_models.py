@@ -877,7 +877,7 @@ MinionV2CapabilitiesMinionV2PublicProviderResetProfileOverrideInput = _strict_mo
 MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputRoleBinding = _strict_model(
     'MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInputRoleBinding',
     {
-        'executor': (Literal['profile', 'null'], Field(...)),
+        'participant': (Literal['profile', 'null'], Field(...)),
         'profile': (str | None, Field(None)),
         'reason': (str | None, Field(None)),
     },

@@ -31,6 +31,13 @@ telegram_provider_files=(
   "interaction_store.py"
   "README.md"
 )
+codex_harness_source="$repo_root/plugins/codex_architect_harness"
+codex_harness_relative="plugins/community/codex_architect_harness"
+codex_harness_files=(
+  "plugin.toml"
+  "codex_architect_harness_runtime.py"
+  "codex_architect_worker.py"
+)
 
 mkdir -p "$dist_dir"
 rm -rf "$repo_root/build" "$repo_root/src/pal_v2.egg-info"
@@ -55,6 +62,8 @@ required_wheel_paths=(
   "pal/lsp/server_templates/pyright.toml"
   "pal/mcp/templates/stdio_server.toml"
   "pal/minion/families.py"
+  "pal/minion/harness_request.py"
+  "pal/minion/harnesses.py"
   "pal/minion/profiles.py"
   "pal/minion/manager.py"
   "pal/minion/runner.py"
@@ -342,7 +351,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
             fail(f"{path} is missing profile identity")
         role = dict(payload.get("role") or {})
         if role and not list(payload.get("capability_groups") or []):
-            fail(f"{path} role executor must declare capability_groups")
+            fail(f"{path} role participant must declare capability_groups")
         if payload.get("contract"):
             fail(
                 f"{path} must not select an architecture schema; "
@@ -350,7 +359,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
             )
         output_policy = dict(payload.get("output_policy") or {})
         if role and not str(output_policy.get("primary_artifact") or "").strip():
-            fail(f"{path} role executor is missing output_policy.primary_artifact")
+            fail(f"{path} role participant is missing output_policy.primary_artifact")
         metadata = dict(payload.get("metadata") or {})
         if metadata.get("builtin") is not True:
             fail(f"{path} must be a managed builtin profile")
@@ -382,6 +391,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
     for forbidden in (
         "MinionV2ContractBuilder",
         "MinionV2SkeletonBuilder",
+        "'executor': (Literal['profile', 'null']",
     ):
         if forbidden in generated_models:
             fail(f"generated tool models contain legacy contract protocol {forbidden}")
@@ -425,6 +435,19 @@ for provider_file in "${telegram_provider_files[@]}"; do
     exit 1
   fi
 done
+codex_harness_overlay_dir="$runtime_overlay_dir/$codex_harness_relative"
+mkdir -p "$codex_harness_overlay_dir"
+for harness_file in "${codex_harness_files[@]}"; do
+  install -m 0644 \
+    "$codex_harness_source/$harness_file" \
+    "$codex_harness_overlay_dir/$harness_file"
+  if ! cmp -s \
+    "$codex_harness_source/$harness_file" \
+    "$codex_harness_overlay_dir/$harness_file"; then
+    echo "Runtime overlay differs from Codex harness source file: $harness_file" >&2
+    exit 1
+  fi
+done
 tar -czf "$runtime_overlay_path" -C "$runtime_overlay_dir" .
 
 install -m 0755 "$installer_source" "$installer_path"
@@ -442,4 +465,4 @@ echo "Built $runtime_overlay_path"
 echo "Built $installer_path"
 echo "Built $install_bundle_path"
 echo "Verified ${#required_wheel_paths[@]} required wheel files"
-echo "Verified runtime overlays at $websocket_provider_relative/ and $telegram_provider_relative/"
+echo "Verified runtime overlays at $websocket_provider_relative/, $telegram_provider_relative/, and $codex_harness_relative/"

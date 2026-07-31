@@ -70,6 +70,35 @@ class RoleAssignmentGateway:
         authenticated = self.authorize(str(payload.pop("access_token", "")))
         if method == "submission_status":
             return self._submission_status(authenticated)
+        if method == "harness_state_read":
+            assignment = dict(authenticated["assignment"])
+            attempt = self.repository.read_role_attempt(
+                str(authenticated["attempt_id"])
+            )
+            if attempt is None:
+                raise ValueError("authenticated role attempt is unavailable")
+            harness_id = str(attempt.get("harness_id") or "")
+            harness_generation = str(
+                attempt.get("harness_generation") or ""
+            )
+            return {
+                "harness_id": harness_id,
+                "harness_generation": harness_generation,
+                "state": self.repository.read_role_harness_continuation(
+                    session_id=str(assignment["session_id"]),
+                    harness_id=harness_id,
+                    harness_generation=harness_generation,
+                ),
+            }
+        if method == "harness_state_write":
+            assignment = dict(authenticated["assignment"])
+            state = self.repository.write_role_attempt_harness_state(
+                assignment_id=str(assignment["assignment_id"]),
+                attempt_id_value=str(authenticated["attempt_id"]),
+                fencing_token=int(authenticated["fencing_token"]),
+                harness_state=dict(payload.get("state") or {}),
+            )
+            return {"state": state}
         if method == "draft_read":
             return self._draft_read(authenticated, payload)
         if method == "draft_mutate":

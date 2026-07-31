@@ -149,7 +149,7 @@ class RoleAssignmentRequest:
     aggregate_id: str
     role: str
     mode: str
-    executor_profile_id: str
+    role_profile_id: str
     family_binding_sha: str
     input_fingerprint: str
     required_inputs: tuple[str, ...]
@@ -166,7 +166,7 @@ class RoleAssignmentRequest:
             "aggregate_id": self.aggregate_id,
             "role": self.role,
             "mode": self.mode,
-            "executor_profile_id": self.executor_profile_id,
+            "role_profile_id": self.role_profile_id,
             "family_binding_sha": self.family_binding_sha,
             "input_fingerprint": self.input_fingerprint,
             "submission_kind": self.submission_kind,
@@ -177,8 +177,8 @@ class RoleAssignmentRequest:
                 "role assignment request missing fields: " + ", ".join(missing)
             )
         RoleActivation.from_values(self.role, self.mode)
-        if "." not in self.executor_profile_id:
-            raise ValueError("role assignment executor_profile_id must be canonical")
+        if "." not in self.role_profile_id:
+            raise ValueError("role assignment role_profile_id must be canonical")
         names = tuple(str(item).strip() for item in self.required_inputs)
         if any(not item for item in names) or len(set(names)) != len(names):
             raise ValueError("role assignment required inputs must be unique non-empty names")
@@ -208,7 +208,7 @@ class RoleAssignmentRequest:
             "aggregate_id": self.aggregate_id,
             "role": self.role,
             "mode": self.mode,
-            "executor_profile_id": self.executor_profile_id,
+            "role_profile_id": self.role_profile_id,
             "family_binding_sha": self.family_binding_sha,
             "input_fingerprint": self.input_fingerprint,
             "required_inputs": sorted(str(item) for item in self.required_inputs),

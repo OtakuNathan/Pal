@@ -13,7 +13,7 @@ from pal.minion.utils import string_list as _string_list
 
 @dataclass(frozen=True)
 class MinionRoleBinding:
-    executor: str
+    participant: str
     profile: str = ""
     reason: str = ""
 
@@ -25,26 +25,26 @@ class MinionRoleBinding:
             raise ValueError(
                 f"family role binding {role} must be a table"
             )
-        executor = str(payload.get("executor") or "").strip()
+        participant = str(payload.get("participant") or "").strip()
         profile = str(payload.get("profile") or "").strip().replace("/", ".")
         reason = str(payload.get("reason") or "").strip()
-        if executor not in {"profile", "null"}:
+        if participant not in {"profile", "null"}:
             raise ValueError(
-                f"family role binding {role}.executor must be profile or null"
+                f"family role binding {role}.participant must be profile or null"
             )
-        if executor == "profile" and not profile:
+        if participant == "profile" and not profile:
             raise ValueError(
                 f"family role binding {role} requires profile"
             )
-        if executor == "null" and (profile or not reason):
+        if participant == "null" and (profile or not reason):
             raise ValueError(
                 f"family null role binding {role} requires reason and no profile"
             )
-        return cls(executor=executor, profile=profile, reason=reason)
+        return cls(participant=participant, profile=profile, reason=reason)
 
     def to_dict(self) -> dict[str, str]:
         return {
-            "executor": self.executor,
+            "participant": self.participant,
             **({"profile": self.profile} if self.profile else {}),
             **({"reason": self.reason} if self.reason else {}),
         }

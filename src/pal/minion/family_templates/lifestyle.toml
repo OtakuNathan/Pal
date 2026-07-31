@@ -9,19 +9,19 @@ execution_adapter = "artifact_bundle.v2"
 specialization = "lifestyle.nutrition_checkin.v1"
 
 [role_bindings.architect]
-executor = "profile"
+participant = "profile"
 profile = "lifestyle.architect"
 
 [role_bindings.reviewer]
-executor = "profile"
+participant = "profile"
 profile = "lifestyle.reviewer"
 
 [role_bindings.implementation]
-executor = "null"
+participant = "null"
 reason = "external_human_execution"
 
 [role_bindings.verifier]
-executor = "null"
+participant = "null"
 reason = "external_human_execution"
 
 [policies]

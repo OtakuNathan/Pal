@@ -19,6 +19,13 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from pal.minion.profiles import resolve_pinned_minion_pack
+from pal.minion.harnesses import (
+    HARNESS_LAUNCH_PAL_SANDBOX,
+    PAL_HARNESS_ID,
+    MinionHarnessRegistryGeneration,
+    MinionHarnessRegistry,
+    MinionHarnessSpec,
+)
 from pal.minion.ipc import python_subprocess_env
 from pal.minion.sandbox import build_sandboxed_runner_invocation, with_minion_sandbox_metadata
 from pal.minion.tool_guidance import merge_tool_guidance_overrides
@@ -508,6 +515,31 @@ def _role_submission_kind(activation: RoleActivation, *, contract_authoring: boo
     raise ValueError(f"unsupported role activation: {activation.to_dict()}")
 
 
+def _select_attempt_harness(
+    generation: MinionHarnessRegistryGeneration,
+    *,
+    role: str,
+    prior_attempts: tuple[Mapping[str, Any], ...] = (),
+) -> MinionHarnessSpec:
+    preferred = generation.select(role)
+    if preferred.harness_id == PAL_HARNESS_ID:
+        return preferred
+    failed_preferred = [
+        attempt
+        for attempt in prior_attempts
+        if str(attempt.get("harness_id") or "") == preferred.harness_id
+        and str(attempt.get("status") or "")
+        in {"failed", "interrupted", "cancelled"}
+    ]
+    if len(failed_preferred) < 2:
+        return preferred
+    return next(
+        spec
+        for spec in generation.specs
+        if spec.harness_id == PAL_HARNESS_ID and spec.supports(role)
+    )
+
+
 def _contract_submit_idempotency_key(
     architecture_revision_id: str,
     source_version: int,
@@ -553,6 +585,9 @@ SEMANTIC_EFFECT_TYPES = frozenset(SEMANTIC_EFFECT_ROUTES)
 class SemanticOrchestrator:
     service: MinionV2WorkflowService
     max_parallel_workers: int = 5
+    harness_registry: MinionHarnessRegistry = field(
+        default_factory=lambda: MinionHarnessRegistry(include_pal=True)
+    )
     publish_human_review: HumanReviewPublisher | None = None
     publish_worker_event: WorkerEventPublisher | None = None
     register_broker_run: BrokerRunRegistrar | None = None
@@ -665,7 +700,7 @@ class SemanticOrchestrator:
         mode = RoleMode(self._effect_role_mode(effect))
         if (
             mode == RoleMode.PRODUCE
-            and self._role_executor_kind(
+            and self._role_participant_kind(
                 self._effect_snapshot(effect).workflow_id,
                 OrchestrationRole.IMPLEMENTATION.value,
             )
@@ -702,7 +737,7 @@ class SemanticOrchestrator:
         """Settle an explicitly external/human role without spawning a worker."""
 
         node = self._effect_snapshot(effect)
-        if self._role_executor_kind(
+        if self._role_participant_kind(
             node.workflow_id,
             OrchestrationRole.VERIFIER.value,
         ) != "null":
@@ -770,7 +805,7 @@ class SemanticOrchestrator:
                 "verification_status": "not_applicable",
             },
             artifact_type="NullVerificationReceiptArtifact",
-            provenance={"owner": "manager", "executor": "null"},
+            provenance={"owner": "manager", "participant": "null"},
             child_refs=((candidate_ref.sha256, "candidate"),),
         )
         fingerprint = stable_hash(
@@ -5760,12 +5795,8 @@ class SemanticOrchestrator:
             workspace = {"kind": "new_project", "project_name": f"workflow-{snapshot.workflow_id}"}
         role = activation.role.value
         mode = activation.mode.value
-        continuation_capable = activation.role in {
-            OrchestrationRole.ARCHITECT,
-            OrchestrationRole.REVIEWER,
-            OrchestrationRole.IMPLEMENTATION,
-            OrchestrationRole.VERIFIER,
-        }
+        harness_generation = self.harness_registry.snapshot()
+        preferred_harness = harness_generation.select(role)
         if activation.role == OrchestrationRole.IMPLEMENTATION:
             workspace["manager_owned_submission_paths"] = [
                 "coder_report.json",
@@ -6006,7 +6037,7 @@ class SemanticOrchestrator:
                     "fencing_token": fencing_token,
                     "role": role,
                     "mode": mode,
-                    "executor_profile_id": profile,
+                    "role_profile_id": profile,
                     "submission_receipt_required": True,
                     "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
                     "authoring_input_fingerprint": input_fingerprint,
@@ -6045,10 +6076,10 @@ class SemanticOrchestrator:
             else:
                 revision_scope = {"manager_routed_findings": True}
         role_binding = dict(validate_family_binding_payload(binding)[role])
-        pinned_profile = dict(role_binding.get("executor_profile") or {})
+        pinned_profile = dict(role_binding.get("role_profile") or {})
         if not pinned_profile:
             raise ValueError(
-                f"FamilyBindingArtifact has no pinned executor profile for role {role}"
+                f"FamilyBindingArtifact has no pinned role profile for role {role}"
             )
         pinned_profile = _role_mode_profile_payload(pinned_profile, mode=mode)
         pack = resolve_pinned_minion_pack(
@@ -6339,8 +6370,12 @@ class SemanticOrchestrator:
             aggregate_id=snapshot.aggregate_id,
             role=role,
             mode=mode,
-            executor_profile_id=profile,
+            role_profile_id=profile,
             family_binding_sha=str(binding_ref.get("sha256") or ""),
+            preferred_harness_id=preferred_harness.harness_id,
+            preferred_harness_generation=(
+                harness_generation.generation_hash
+            ),
             scope_kind=session_scope_kind,
             subject_key=session_subject_key,
         )
@@ -6358,7 +6393,7 @@ class SemanticOrchestrator:
                     aggregate_id=snapshot.aggregate_id,
                     role=role,
                     mode=mode,
-                    executor_profile_id=profile,
+                    role_profile_id=profile,
                     family_binding_sha=str(binding_ref.get("sha256") or ""),
                     input_fingerprint=input_fingerprint,
                     required_inputs=(),
@@ -6391,12 +6426,34 @@ class SemanticOrchestrator:
                 raise SubmissionInvariantError(
                     "expired active role assignment could not be made retryable"
                 )
+        harness_spec = _select_attempt_harness(
+            harness_generation,
+            role=role,
+            prior_attempts=(
+                self.repository.list_role_attempts(
+                    str(assignment["assignment_id"])
+                )
+                if assignment is not None
+                else ()
+            ),
+        )
+        pal_checkpoint_capable = (
+            harness_spec.launch_kind == HARNESS_LAUNCH_PAL_SANDBOX
+        )
         if assignment["state"] in {
             RoleAssignmentState.QUEUED.value,
             RoleAssignmentState.RETRY_QUEUED.value,
         }:
             original_prompt_ref = self._durable_assignment_prompt_ref(assignment)
-            if original_prompt_ref is not None:
+            prior_attempt = self.repository.read_role_attempt(
+                str(assignment.get("active_attempt_id") or "")
+            )
+            same_harness = (
+                prior_attempt is None
+                or str(prior_attempt.get("harness_id") or PAL_HARNESS_ID)
+                == harness_spec.harness_id
+            )
+            if original_prompt_ref is not None and same_harness:
                 pack = MinionInvocationPack.from_dict(
                     dict(self.service.artifacts.read_json(original_prompt_ref))
                 )
@@ -6462,7 +6519,11 @@ class SemanticOrchestrator:
                     "metadata": metadata,
                 }
             )
-        attempt = self.repository.claim_role_assignment(str(assignment["assignment_id"]))
+        attempt = self.repository.claim_role_assignment(
+            str(assignment["assignment_id"]),
+            harness_id=harness_spec.harness_id,
+            harness_generation=harness_generation.generation_hash,
+        )
         assignment_lease_resource = f"assignment:{assignment['assignment_id']}"
         assignment_lease = self.repository.claim_lease(
             assignment_lease_resource,
@@ -6491,6 +6552,9 @@ class SemanticOrchestrator:
                 "lease_resource": assignment_lease_resource,
                 "lease_resource_key": assignment_lease_resource,
                 "fencing_token": assignment_lease.fencing_token,
+                "harness_id": harness_spec.harness_id,
+                "harness_generation": harness_generation.generation_hash,
+                "harness_config": dict(harness_spec.config),
             }
         )
         metadata["minion_v2"] = minion_v2
@@ -6507,12 +6571,15 @@ class SemanticOrchestrator:
             "continuation_output_path": str(continuation_output_path),
         }
         pack = MinionInvocationPack.from_dict({**pack_value, "metadata": metadata})
-        pack = _bind_role_attempt_sandbox(
-            self.service.runtime_root,
-            pack,
-            run_id=run_id,
-            durable_prompt_reused=durable_prompt_reused,
-        )
+        if harness_spec.launch_kind == HARNESS_LAUNCH_PAL_SANDBOX:
+            pack = _bind_role_attempt_sandbox(
+                self.service.runtime_root,
+                pack,
+                run_id=run_id,
+                durable_prompt_reused=durable_prompt_reused,
+            )
+        else:
+            pack = sanitize_runner_session_pack(pack)
         prompt_ref = self.service.artifacts.put_json(
             pack.to_dict(),
             artifact_type="RolePromptPackArtifact",
@@ -6543,7 +6610,9 @@ class SemanticOrchestrator:
             fencing_token=fencing_token,
             role=role,
             mode=mode,
-            executor_profile_id=profile,
+            role_profile_id=profile,
+            harness_id=harness_spec.harness_id,
+            harness_generation=harness_generation.generation_hash,
             family_binding_sha=str(binding_ref.get("sha256") or ""),
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt_ref.to_dict(),
@@ -6555,9 +6624,7 @@ class SemanticOrchestrator:
         pack_path = attempt_dir / "pack.json"
         pack_path.write_text(json.dumps(pack.to_dict(), ensure_ascii=False, sort_keys=True), encoding="utf-8")
         argv = [
-            sys.executable,
-            "-m",
-            "pal.minion.v2.worker_main",
+            *harness_spec.worker_argv,
             "--runtime-root",
             str(self.service.runtime_root),
             "--pack-json",
@@ -6569,12 +6636,15 @@ class SemanticOrchestrator:
         ]
         runner_env = python_subprocess_env()
         runner_env[ROLE_GATEWAY_TOKEN_ENV] = assignment_access_token
-        argv, env = build_sandboxed_runner_invocation(
-            runtime_root=self.service.runtime_root,
-            pack=pack,
-            argv=argv,
-            env=runner_env,
-        )
+        if harness_spec.launch_kind == HARNESS_LAUNCH_PAL_SANDBOX:
+            argv, env = build_sandboxed_runner_invocation(
+                runtime_root=self.service.runtime_root,
+                pack=pack,
+                argv=argv,
+                env=runner_env,
+            )
+        else:
+            env = runner_env
 
         def process_started(owner: WorkerProcessOwner) -> None:
             process = owner.process
@@ -6714,7 +6784,7 @@ class SemanticOrchestrator:
                 assignment_lease.fencing_token,
                 continuation_output_path,
             )
-            if continuation_ref is not None and continuation_capable:
+            if continuation_ref is not None and pal_checkpoint_capable:
                 self.repository.suspend_role_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
@@ -6754,7 +6824,7 @@ class SemanticOrchestrator:
                 assignment_lease.fencing_token,
                 continuation_output_path,
             )
-            if continuation_ref is not None and continuation_capable:
+            if continuation_ref is not None and pal_checkpoint_capable:
                 self.repository.suspend_role_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
@@ -6830,7 +6900,7 @@ class SemanticOrchestrator:
                 assignment_lease.fencing_token,
                 continuation_output_path,
             )
-            if continuation_ref is not None and continuation_capable:
+            if continuation_ref is not None and pal_checkpoint_capable:
                 self.repository.suspend_role_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
@@ -6864,7 +6934,7 @@ class SemanticOrchestrator:
                 assignment_lease.fencing_token,
                 continuation_output_path,
             )
-            if continuation_ref is not None and continuation_capable:
+            if continuation_ref is not None and pal_checkpoint_capable:
                 self.repository.suspend_role_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
@@ -6878,7 +6948,7 @@ class SemanticOrchestrator:
                     status="failed",
                 )
             raise SubmissionInvariantError(
-                "role executor reported completion before its durable submission receipt"
+                "role participant reported completion before its durable submission receipt"
             )
         with contextlib.suppress(Exception):
             self.repository.release_lease(
@@ -6919,7 +6989,7 @@ class SemanticOrchestrator:
                 ),
             ),
         )
-        if continuation_capable:
+        if pal_checkpoint_capable:
             if continuation_ref is None:
                 raise RuntimeError("resumable role completed without a durable agent-session checkpoint")
             self.repository.suspend_role_invocation(
@@ -7160,8 +7230,8 @@ class SemanticOrchestrator:
         binding = dict(self.service.artifacts.read_json(binding_ref))
         role_binding = dict(validate_family_binding_payload(binding)[role])
         profile = str(
-            dict(role_binding.get("executor_profile") or {}).get("canonical_profile_id")
-            or dict(role_binding.get("executor_profile") or {}).get("minion_profile")
+            dict(role_binding.get("role_profile") or {}).get("canonical_profile_id")
+            or dict(role_binding.get("role_profile") or {}).get("minion_profile")
             or ""
         ).strip()
         if not profile:
@@ -7193,8 +7263,8 @@ class SemanticOrchestrator:
         binding = dict(self.service.artifacts.read_json(binding_ref))
         return dict(validate_family_binding_payload(binding)[role])
 
-    def _role_executor_kind(self, workflow_id: str, role: str) -> str:
-        return str(self._role_binding(workflow_id, role)["executor"])
+    def _role_participant_kind(self, workflow_id: str, role: str) -> str:
+        return str(self._role_binding(workflow_id, role)["participant"])
 
     def _uses_git_skeleton(self, workflow_id: str) -> bool:
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)

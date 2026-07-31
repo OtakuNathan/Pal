@@ -381,7 +381,7 @@ class MinionCatalogService:
             {
                 binding.profile
                 for binding in bindings.values()
-                if binding.executor == "profile"
+                if binding.participant == "profile"
                 and binding.profile != TASK_PROFILE_BINDING
                 and registry.get(binding.profile) is None
             }
@@ -392,7 +392,7 @@ class MinionCatalogService:
             {
                 binding.profile
                 for binding in bindings.values()
-                if binding.executor == "profile"
+                if binding.participant == "profile"
                 and binding.profile != TASK_PROFILE_BINDING
                 and registry.get(binding.profile) is not None
                 and registry.get(binding.profile).profile_group.replace("/", ".")

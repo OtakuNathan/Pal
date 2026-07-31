@@ -22,6 +22,10 @@ from pal.minion.ipc import (
     open_manager_connection,
     python_subprocess_env,
 )
+from pal.minion.harnesses import (
+    MinionHarnessRegistry,
+    MinionHarnessRegistryGeneration,
+)
 from pal.minion.source import MinionControlEventHandler, MinionEventSource
 from pal.minion.v2.capabilities import MinionV2PublicProvider
 from pal.minion.v2.service import MinionV2WorkflowService
@@ -48,6 +52,7 @@ class MinionSnapshot:
 class MinionManagerProvider:
     runtime_root: Path
     context: MainContext | None = None
+    harness_registry: MinionHarnessRegistry | None = None
     process: subprocess.Popen[bytes] | None = None
     last_health: dict[str, Any] = field(default_factory=dict)
     last_error: str = ""
@@ -59,11 +64,22 @@ class MinionManagerProvider:
     _event_stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _lifecycle_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _attached: bool = field(default=False, init=False, repr=False)
+    _unsubscribe_harness_registry: Callable[[], None] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         self.runtime_root = Path(self.runtime_root)
         self.client = MinionManagerClient(self.runtime_root)
         self._lifecycle_client = MinionManagerClient(self.runtime_root, request_timeout_seconds=5.0)
+        if self.harness_registry is not None:
+            self._unsubscribe_harness_registry = (
+                self.harness_registry.subscribe(
+                    self._on_harness_registry_generation
+                )
+            )
 
     def attach_manager(self) -> dict[str, Any]:
         with self._lifecycle_lock:
@@ -74,6 +90,7 @@ class MinionManagerProvider:
                 self._attached = True
                 self.last_health = health
                 self.last_error = ""
+                self._sync_harness_registry()
                 self._start_event_subscription()
                 self.client.request_sync("v2_wake")
                 return health
@@ -97,6 +114,28 @@ class MinionManagerProvider:
     def wake_v2(self) -> None:
         self._require_manager()
         self.client.request_sync("v2_wake")
+
+    def _on_harness_registry_generation(
+        self,
+        generation: MinionHarnessRegistryGeneration,
+    ) -> None:
+        if not self._attached:
+            return
+        try:
+            self.client.replace_harness_registry_sync(generation.to_dict())
+        except Exception as exc:
+            self.last_error = (
+                "harness registry sync failed: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
+            raise
+
+    def _sync_harness_registry(self) -> None:
+        if self.harness_registry is None:
+            return
+        self.client.replace_harness_registry_sync(
+            self.harness_registry.snapshot().to_dict()
+        )
 
     def has_pending_events(self) -> bool:
         with self._buffer_lock:
@@ -458,10 +497,15 @@ def register_with_core(
     service: object | None = None,
     *,
     runtime_root: Path | None = None,
+    harness_registry: MinionHarnessRegistry | None = None,
 ) -> ModuleHandle:
     _ = service
     resolved_root = Path(runtime_root or context.execution_runtime.runtime_root or Path.cwd() / ".pal-minion")
-    manager = MinionManagerProvider(runtime_root=resolved_root, context=context)
+    manager = MinionManagerProvider(
+        runtime_root=resolved_root,
+        context=context,
+        harness_registry=harness_registry,
+    )
     public = MinionV2PublicProvider(
         runtime_root=resolved_root,
         context=context,
@@ -496,6 +540,10 @@ def register_with_core(
         ports={"minion": manager, "minion_v2": public},
         shutdown_sync=manager._stop_manager,
     )
+    if manager._unsubscribe_harness_registry is not None:
+        handle.cleanup_callbacks.append(
+            manager._unsubscribe_harness_registry
+        )
     context.register_module(handle)
     context.event_source_registry.attach("minion", source)
     for kind in event_kinds:

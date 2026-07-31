@@ -90,6 +90,15 @@ class MinionManagerClient:
     def reload_runtime_config_sync(self) -> dict[str, Any]:
         return self.request_sync("reload_runtime_config")
 
+    def replace_harness_registry_sync(
+        self,
+        generation: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self.request_sync(
+            "replace_harness_registry",
+            {"generation": dict(generation)},
+        )
+
     def catalog_snapshot_sync(
         self,
         *,

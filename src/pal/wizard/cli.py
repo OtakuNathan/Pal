@@ -449,14 +449,14 @@ def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
     service.create_database(registration)
     service.provision_builtin_plugins(registration)
     service.seed_from_wizard(registration, collected)
-    from pal.minion.cutover import cutover_minion_runtime_v25
+    from pal.minion.cutover import cutover_minion_runtime_v26
 
-    minion_cutover = cutover_minion_runtime_v25(runtime_root)
+    minion_cutover = cutover_minion_runtime_v26(runtime_root)
 
     print(f"\n  Database configured at {db_path}")
     if minion_cutover.status == "archived_and_initialized":
         print(
-            "  Minion runtime archived and initialized at schema v25 "
+            "  Minion runtime archived and initialized at schema v26 "
             f"(archive: {minion_cutover.archive_root})"
         )
 

@@ -9,19 +9,19 @@ execution_adapter = "software_git.v2"
 specialization = "software_engineering.v1"
 
 [role_bindings.architect]
-executor = "profile"
+participant = "profile"
 profile = "software_engineering.v2_architect"
 
 [role_bindings.reviewer]
-executor = "profile"
+participant = "profile"
 profile = "software_engineering.v2_reviewer"
 
 [role_bindings.implementation]
-executor = "profile"
+participant = "profile"
 profile = "software_engineering.v2_coder"
 
 [role_bindings.verifier]
-executor = "profile"
+participant = "profile"
 profile = "software_engineering.v2_verifier"
 
 [policies]

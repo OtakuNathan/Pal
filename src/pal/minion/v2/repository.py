@@ -1516,8 +1516,10 @@ class MinionV2Repository:
         aggregate_id: str,
         role: str,
         mode: str,
-        executor_profile_id: str,
+        role_profile_id: str,
         family_binding_sha: str,
+        preferred_harness_id: str = "pal",
+        preferred_harness_generation: str = "",
         scope_kind: str = "",
         subject_key: str = "",
     ) -> dict[str, Any]:
@@ -1527,8 +1529,14 @@ class MinionV2Repository:
             "aggregate_id": str(aggregate_id or "").strip(),
             "role": str(role or "").strip(),
             "mode": str(mode or "").strip(),
-            "executor_profile_id": str(executor_profile_id or "").strip(),
+            "role_profile_id": str(role_profile_id or "").strip(),
             "family_binding_sha": str(family_binding_sha or "").strip(),
+            "preferred_harness_id": str(
+                preferred_harness_id or "pal"
+            ).strip(),
+            "preferred_harness_generation": str(
+                preferred_harness_generation or ""
+            ).strip(),
             "scope_kind": str(scope_kind or "").strip(),
             "subject_key": str(subject_key or "").strip(),
         }
@@ -1540,7 +1548,7 @@ class MinionV2Repository:
                 "aggregate_id",
                 "role",
                 "mode",
-                "executor_profile_id",
+                "role_profile_id",
                 "family_binding_sha",
                 "scope_kind",
                 "subject_key",
@@ -1550,8 +1558,8 @@ class MinionV2Repository:
         if missing:
             raise ValueError("role session missing fields: " + ", ".join(missing))
         RoleActivation.from_values(values["role"], values["mode"])
-        if "." not in values["executor_profile_id"]:
-            raise ValueError("role session executor_profile_id must be canonical")
+        if "." not in values["role_profile_id"]:
+            raise ValueError("role session role_profile_id must be canonical")
         self.ensure_schema()
         now = utc_now()
         with self._transaction() as connection:
@@ -1562,7 +1570,7 @@ class MinionV2Repository:
             identity = (
                 values["workflow_id"],
                 values["role"],
-                values["executor_profile_id"],
+                values["role_profile_id"],
                 values["family_binding_sha"],
                 values["scope_kind"],
                 values["subject_key"],
@@ -1571,7 +1579,7 @@ class MinionV2Repository:
                 actual = (
                     str(existing["workflow_id"]),
                     str(existing["role"]),
-                    str(existing["executor_profile_id"]),
+                    str(existing["role_profile_id"]),
                     str(existing["family_binding_sha"]),
                     str(existing["scope_kind"] or ""),
                     str(existing["subject_key"] or ""),
@@ -1596,9 +1604,10 @@ class MinionV2Repository:
                 """
                 INSERT INTO minion_v2_role_sessions(
                     session_id, workflow_id, aggregate_type, aggregate_id, role, mode,
-                    executor_profile_id, family_binding_sha,
+                    role_profile_id, preferred_harness_id,
+                    preferred_harness_generation, family_binding_sha,
                     scope_kind, subject_key, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     values["session_id"],
@@ -1607,7 +1616,9 @@ class MinionV2Repository:
                     values["aggregate_id"],
                     values["role"],
                     values["mode"],
-                    values["executor_profile_id"],
+                    values["role_profile_id"],
+                    values["preferred_harness_id"],
+                    values["preferred_harness_generation"],
                     values["family_binding_sha"],
                     values["scope_kind"],
                     values["subject_key"],
@@ -1802,13 +1813,13 @@ class MinionV2Repository:
             session_identity = (
                 str(session["workflow_id"]),
                 str(session["role"]),
-                str(session["executor_profile_id"]),
+                str(session["role_profile_id"]),
                 str(session["family_binding_sha"]),
             )
             request_identity = (
                 request.workflow_id,
                 request.role,
-                request.executor_profile_id,
+                request.role_profile_id,
                 request.family_binding_sha,
             )
             if session_identity != request_identity:
@@ -1850,7 +1861,7 @@ class MinionV2Repository:
                 INSERT INTO minion_v2_role_assignments(
                     assignment_id, assignment_key, request_hash, session_id,
                     workflow_id, aggregate_type, aggregate_id, role, mode,
-                    executor_profile_id, family_binding_sha,
+                    role_profile_id, family_binding_sha,
                     input_fingerprint, required_inputs_json, input_refs_json,
                     execution_spec_json, submission_kind, state, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1865,7 +1876,7 @@ class MinionV2Repository:
                     request.aggregate_id,
                     request.role,
                     request.mode,
-                    request.executor_profile_id,
+                    request.role_profile_id,
                     request.family_binding_sha,
                     request.input_fingerprint,
                     _json(sorted(request.required_inputs)),
@@ -1926,7 +1937,13 @@ class MinionV2Repository:
         if scope_kind != request.aggregate_type or subject_key != request.aggregate_id:
             raise ValueError("role assignment is outside its aggregate-bound session")
 
-    def claim_role_assignment(self, assignment_id: str) -> dict[str, Any]:
+    def claim_role_assignment(
+        self,
+        assignment_id: str,
+        *,
+        harness_id: str = "pal",
+        harness_generation: str = "",
+    ) -> dict[str, Any]:
         self.ensure_schema()
         with self._transaction() as connection:
             assignment = connection.execute(
@@ -1959,13 +1976,16 @@ class MinionV2Repository:
                 """
                 INSERT INTO minion_v2_role_attempts(
                     attempt_id, assignment_id, attempt_index, lease_resource_key,
-                    fencing_token, status, started_at, updated_at
-                ) VALUES (?, ?, ?, '', 0, ?, ?, ?)
+                    fencing_token, harness_id, harness_generation,
+                    status, started_at, updated_at
+                ) VALUES (?, ?, ?, '', 0, ?, ?, ?, ?, ?)
                 """,
                 (
                     identifier,
                     str(assignment_id),
                     attempt_index,
+                    str(harness_id or "pal"),
+                    str(harness_generation or ""),
                     RoleAttemptState.STARTING.value,
                     now,
                     now,
@@ -2711,6 +2731,75 @@ class MinionV2Repository:
             ).fetchone()
             return _decode_role_attempt(row) if row is not None else None
 
+    def read_role_harness_continuation(
+        self,
+        *,
+        session_id: str,
+        harness_id: str,
+        harness_generation: str,
+    ) -> dict[str, Any]:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT attempt.harness_state_json
+                FROM minion_v2_role_attempts AS attempt
+                JOIN minion_v2_role_assignments AS assignment
+                  ON assignment.assignment_id = attempt.assignment_id
+                WHERE assignment.session_id = ? AND attempt.harness_id = ?
+                  AND attempt.harness_generation = ?
+                  AND attempt.harness_state_json != '{}'
+                ORDER BY attempt.started_at DESC, attempt.attempt_index DESC
+                LIMIT 1
+                """,
+                (
+                    str(session_id),
+                    str(harness_id),
+                    str(harness_generation),
+                ),
+            ).fetchone()
+        if row is None:
+            return {}
+        value = json.loads(str(row["harness_state_json"] or "{}"))
+        return dict(value) if isinstance(value, Mapping) else {}
+
+    def write_role_attempt_harness_state(
+        self,
+        *,
+        assignment_id: str,
+        attempt_id_value: str,
+        fencing_token: int,
+        harness_state: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        self.ensure_schema()
+        with self._transaction() as connection:
+            _assignment, attempt = self._role_assignment_attempt_locked(
+                connection,
+                assignment_id=str(assignment_id),
+                attempt_id_value=str(attempt_id_value),
+            )
+            self._assert_lease_locked(
+                connection,
+                str(attempt["lease_resource_key"]),
+                str(attempt_id_value),
+                int(fencing_token),
+            )
+            if str(attempt["status"]) != RoleAttemptState.RUNNING.value:
+                raise ValueError("role attempt is not running")
+            state = dict(harness_state or {})
+            encoded = _json(state)
+            if len(encoded.encode("utf-8")) > 64 * 1024:
+                raise ValueError("harness continuation exceeds 64 KiB")
+            connection.execute(
+                """
+                UPDATE minion_v2_role_attempts
+                SET harness_state_json = ?, updated_at = ?
+                WHERE attempt_id = ?
+                """,
+                (encoded, utc_now(), str(attempt_id_value)),
+            )
+            return state
+
     def list_role_assignments(
         self,
         *,
@@ -2786,7 +2875,9 @@ class MinionV2Repository:
         fencing_token: int,
         role: str,
         mode: str,
-        executor_profile_id: str,
+        role_profile_id: str,
+        harness_id: str = "pal",
+        harness_generation: str = "",
         family_binding_sha: str,
         authoring_contract_version: str,
         prompt_pack_ref: Mapping[str, Any],
@@ -2800,10 +2891,11 @@ class MinionV2Repository:
                 """
                 INSERT INTO minion_v2_role_invocations(
                     invocation_id, workflow_id, aggregate_type, aggregate_id, lease_resource_key,
-                    fencing_token, role, mode, executor_profile_id, family_binding_sha,
+                    fencing_token, role, mode, role_profile_id, harness_id,
+                    harness_generation, family_binding_sha,
                     authoring_contract_version, prompt_pack_ref_json,
                     status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
                 ON CONFLICT(invocation_id) DO UPDATE SET
                     workflow_id = excluded.workflow_id,
                     aggregate_type = excluded.aggregate_type,
@@ -2812,7 +2904,9 @@ class MinionV2Repository:
                     fencing_token = excluded.fencing_token,
                     role = excluded.role,
                     mode = excluded.mode,
-                    executor_profile_id = excluded.executor_profile_id,
+                    role_profile_id = excluded.role_profile_id,
+                    harness_id = excluded.harness_id,
+                    harness_generation = excluded.harness_generation,
                     family_binding_sha = excluded.family_binding_sha,
                     authoring_contract_version = excluded.authoring_contract_version,
                     prompt_pack_ref_json = excluded.prompt_pack_ref_json,
@@ -2828,7 +2922,9 @@ class MinionV2Repository:
                     fencing_token,
                     role,
                     mode,
-                    executor_profile_id,
+                    role_profile_id,
+                    str(harness_id or "pal"),
+                    str(harness_generation or ""),
                     family_binding_sha,
                     str(authoring_contract_version),
                     _json(dict(prompt_pack_ref)),
@@ -3910,6 +4006,7 @@ def _decode_role_attempt(row: sqlite3.Row) -> dict[str, Any]:
     for key, output in (
         ("prompt_pack_ref_json", "prompt_pack_ref"),
         ("response_artifact_ref_json", "response_artifact_ref"),
+        ("harness_state_json", "harness_state"),
     ):
         value[output] = json.loads(str(value.pop(key, "{}") or "{}"))
     return value

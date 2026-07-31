@@ -73,7 +73,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             "lifestyle.nutritionist"
         )
         binding = self.store.read_json(ref)
-        self.assertEqual(binding["schema_version"], "5")
+        self.assertEqual(binding["schema_version"], "6")
         self.assertEqual(binding["workflow_template"], "contract_dag.v2")
         self.assertEqual(
             set(binding["role_bindings"]),
@@ -81,23 +81,23 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         self.assertEqual(binding["execution_adapter"], "artifact_bundle.v2")
         self.assertEqual(
-            binding["role_bindings"]["architect"]["executor_profile"][
+            binding["role_bindings"]["architect"]["role_profile"][
                 "canonical_profile_id"
             ],
             "lifestyle.architect",
         )
         self.assertEqual(
-            binding["role_bindings"]["reviewer"]["executor_profile"][
+            binding["role_bindings"]["reviewer"]["role_profile"][
                 "canonical_profile_id"
             ],
             "lifestyle.reviewer",
         )
         self.assertEqual(
-            binding["role_bindings"]["implementation"]["executor"],
+            binding["role_bindings"]["implementation"]["participant"],
             "null",
         )
         self.assertEqual(
-            binding["role_bindings"]["verifier"]["executor"],
+            binding["role_bindings"]["verifier"]["participant"],
             "null",
         )
         self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
@@ -123,7 +123,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         self.assertNotIn(
             "contract",
-            binding["role_bindings"]["architect"]["executor_profile"],
+            binding["role_bindings"]["architect"]["role_profile"],
         )
 
     def test_family_binding_rejects_legacy_implicit_profile_executor(self) -> None:
@@ -132,10 +132,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         binding = dict(self.store.read_json(ref))
         binding["schema_version"] = "3"
-        binding["role_bindings"]["architect"].pop("executor")
+        binding["role_bindings"]["architect"].pop("participant")
         with self.assertRaisesRegex(
             ValueError,
-            "schema_version 5",
+            "schema_version 6",
         ):
             validate_family_binding_payload(binding)
 
@@ -166,7 +166,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             "software_engineering.v2_coder"
         )
         binding = self.store.read_json(ref)
-        pinned = dict(binding["role_bindings"]["implementation"]["executor_profile"])
+        pinned = dict(binding["role_bindings"]["implementation"]["role_profile"])
         original_name = str(pinned["display_name"])
 
         MinionCatalogService(self.root).set_profile_override(
@@ -201,7 +201,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         self.assertEqual(
             {
-                role: value["executor_profile"]["canonical_profile_id"]
+                role: value["role_profile"]["canonical_profile_id"]
                 for role, value in binding["role_bindings"].items()
             },
             {
@@ -233,7 +233,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         binding = self.store.read_json(created["family_binding_ref"])
         self.assertEqual(
-            binding["role_bindings"]["implementation"]["executor_profile"][
+            binding["role_bindings"]["implementation"]["role_profile"][
                 "canonical_profile_id"
             ],
             "software_engineering.v2_coder",
@@ -954,7 +954,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         binding = self.store.read_json(binding_ref)
         self.assertEqual(
-            binding["role_bindings"]["reviewer"]["executor_profile"]["canonical_profile_id"],
+            binding["role_bindings"]["reviewer"]["role_profile"]["canonical_profile_id"],
             "software_engineering.v2_reviewer",
         )
         self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
@@ -1110,7 +1110,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("one bounded consistency pass", architect)
         self.assertIn("newer text wins only where meanings conflict", architect)
         self.assertIn("Mechanically verify examples", architect)
-        self.assertIn("call ask_question and wait", architect)
+        self.assertIn("request one user clarification through the harness and wait", architect)
         self.assertIn("Design the smallest complete system at module level", architect)
         self.assertIn("architect.yaml is the final submission projection", architect)
         self.assertIn("Once the design is settled", architect)
@@ -1211,7 +1211,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 behavior = str(self._pack(profile).resolved_profile["behavior_fragment"])
                 self.assertIn("bounded consistency pass", behavior)
                 self.assertIn("mechanically verify", behavior.lower())
-                self.assertIn("call ask_question and wait", behavior)
+                self.assertIn("request one user clarification through the harness and wait", behavior)
 
     def test_profile_tool_guidance_override_is_applied_to_scoped_surface(self) -> None:
         researcher = self._pack("software_engineering.v2_architect")
@@ -1473,7 +1473,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
 
         # This E2E targets execution/delivery. Architect and reviewer have real
-        # profile executors, so replace their already-covered LLM phase with an
+        # profile participants, so replace their already-covered LLM phase with an
         # accepted ContractArtifact. First execute the Manager-owned START_WORKFLOW
         # action, then retire only the unexecuted architecture-routing effect.
         bootstrap = asyncio.run(

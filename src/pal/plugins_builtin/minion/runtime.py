@@ -9,12 +9,20 @@ from pal.plugins.contracts import PluginBuildContext
 @dataclass
 class MinionBuiltinBundle:
     runtime_root: object
+    harness_registry: object | None = None
     plugin_id: str = "minion"
     version: str = "0.1.0"
 
     def register_with_core(self, context):
-        return register_with_core(context, runtime_root=self.runtime_root)
+        return register_with_core(
+            context,
+            runtime_root=self.runtime_root,
+            harness_registry=self.harness_registry,
+        )
 
 
 def build_plugin(context: PluginBuildContext) -> MinionBuiltinBundle:
-    return MinionBuiltinBundle(runtime_root=context.runtime_root)
+    return MinionBuiltinBundle(
+        runtime_root=context.runtime_root,
+        harness_registry=context.services.get("minion_harness_registry"),
+    )

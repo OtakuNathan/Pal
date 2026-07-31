@@ -28,6 +28,7 @@ from pal.llm import (
 from pal.llm.request_hooks import MAIN_LLM_REQUEST_HOOKS
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
+from pal.minion.harnesses import MinionHarnessRegistry
 from pal.plugins import PluginHost, register_with_core as register_plugins_with_core
 from pal.proactive import ProactiveManager, ProactiveRepository, ProactiveRunner, register_with_core as register_proactive_with_core
 from pal.shared.text_search import warmup_jieba
@@ -111,11 +112,15 @@ def compose_runtime(
     memory_service = MemoryService(
         l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require)
     )
+    minion_harness_registry = MinionHarnessRegistry()
     runtime_settings_repository.ensure_defaults()
     plugin_host = PluginHost(
         context=core.context,
         runtime_root=registration.runtime.runtime_root,
-        services={"memory_service": memory_service},
+        services={
+            "memory_service": memory_service,
+            "minion_harness_registry": minion_harness_registry,
+        },
     )
     proactive_repository = ProactiveRepository()
     proactive_manager = ProactiveManager(repository=proactive_repository)

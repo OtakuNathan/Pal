@@ -26,6 +26,7 @@ models=(
     CanonicalWorktreeLifecycle
     FileMutationAuthorization
     ContractWorkItemLifecycle
+    HarnessGenerationLifecycle
 )
 
 cd "${repo_root}"
