@@ -18,6 +18,11 @@ def _build_parser() -> argparse.ArgumentParser:
     setup_parser = subparsers.add_parser("setup", aliases=("wizard", "wizzard"), help="Interactive setup wizard")
     setup_parser.add_argument("--check", action="store_true", help="Check local runtime dependencies without provisioning")
     setup_parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="Upgrade an existing runtime without interactive reconfiguration",
+    )
+    setup_parser.add_argument(
         "--runtime-root",
         type=Path,
         default=None,
@@ -112,9 +117,17 @@ def main() -> int:
     # -- setup is synchronous, no asyncio ------------------------------------
     if args.command == "setup":
         from pal.wizard.cli import run_setup_wizard
+        if getattr(args, "check", False) and getattr(args, "upgrade", False):
+            parser.error("setup --check and --upgrade are mutually exclusive")
         if getattr(args, "check", False):
             from pal.wizard.cli import run_dependency_doctor
             return run_dependency_doctor()
+        if getattr(args, "upgrade", False):
+            from pal.wizard.cli import run_setup_upgrade
+            runtime_root = getattr(args, "runtime_root", None)
+            if runtime_root is None:
+                parser.error("setup --upgrade requires --runtime-root")
+            return run_setup_upgrade(runtime_root=runtime_root)
         return run_setup_wizard(runtime_root=getattr(args, "runtime_root", None))
 
     if args.command == "browser-service":

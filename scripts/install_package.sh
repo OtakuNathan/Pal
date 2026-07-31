@@ -124,6 +124,10 @@ if [[ -z "$overlay_path" ]]; then
 fi
 [[ -f "$wheel_path" ]] || fail "wheel does not exist: $wheel_path"
 [[ -f "$overlay_path" ]] || fail "runtime-root overlay does not exist: $overlay_path"
+existing_runtime=0
+if [[ -f "$runtime_root/pal.sqlite3" ]]; then
+  existing_runtime=1
+fi
 
 platform="$(uname -s)"
 case "$platform" in
@@ -235,8 +239,13 @@ case ":$PATH:" in
 esac
 
 echo
-echo "Starting interactive Pal setup..."
-"$pal_bin" setup --runtime-root "$runtime_root"
+if [[ "$existing_runtime" -eq 1 ]]; then
+  echo "Upgrading existing Pal runtime without changing configuration..."
+  "$pal_bin" setup --upgrade --runtime-root "$runtime_root"
+else
+  echo "Starting interactive Pal setup..."
+  "$pal_bin" setup --runtime-root "$runtime_root"
+fi
 
 echo
 echo "Running Pal dependency doctor..."

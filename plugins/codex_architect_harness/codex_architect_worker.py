@@ -59,6 +59,7 @@ class CodexAppServer:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=False,
+            limit=16 * 1024 * 1024,
         )
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         response = await self.request(
@@ -259,14 +260,27 @@ class CodexArchitectWorker:
                 effort=effort,
                 timeout_seconds=timeout,
             ) as server:
-                thread_id = await self._open_thread(server)
-                correction = self.request.user_input
+                thread_id, resumed = await self._open_thread(server)
+                correction = (
+                    "Resume the existing Architect assignment from the current "
+                    "bound files and native plan. Do not repeat investigation "
+                    "that is already represented there. Complete the remaining "
+                    "plan items, reconcile the bound files, and finish."
+                    if resumed
+                    else self.request.user_input
+                )
                 for correction_index in range(4):
                     turn_id = await self._start_turn(
                         server,
                         thread_id=thread_id,
                         text=correction,
                         effort=effort,
+                    )
+                    await self._write_harness_state(
+                        {
+                            "thread_id": thread_id,
+                            "assignment_started": True,
+                        }
                     )
                     plan_error = await self._drive_turn(
                         server,
@@ -327,7 +341,10 @@ class CodexArchitectWorker:
             with contextlib.suppress(asyncio.CancelledError):
                 await stdin_task
 
-    async def _open_thread(self, server: CodexAppServer) -> str:
+    async def _open_thread(
+        self,
+        server: CodexAppServer,
+    ) -> tuple[str, bool]:
         continuation = await asyncio.to_thread(
             self.gateway.request_sync,
             "harness_state_read",
@@ -335,6 +352,7 @@ class CodexArchitectWorker:
         )
         state = dict(continuation.get("state") or {})
         thread_id = str(state.get("thread_id") or "").strip()
+        assignment_started = bool(state.get("assignment_started"))
         common: dict[str, Any] = {
             "cwd": str(self.request.cwd),
             "developerInstructions": self.request.developer_instructions,
@@ -364,12 +382,23 @@ class CodexArchitectWorker:
         ).strip()
         if not resolved:
             raise CodexHarnessError("Codex thread response contained no id")
+        await self._write_harness_state(
+            {
+                "thread_id": resolved,
+                "assignment_started": assignment_started,
+            }
+        )
+        return resolved, bool(thread_id and assignment_started)
+
+    async def _write_harness_state(
+        self,
+        state: Mapping[str, Any],
+    ) -> None:
         await asyncio.to_thread(
             self.gateway.request_sync,
             "harness_state_write",
-            {"state": {"thread_id": resolved}},
+            {"state": dict(state)},
         )
-        return resolved
 
     async def _start_turn(
         self,

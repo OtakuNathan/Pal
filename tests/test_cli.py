@@ -16,6 +16,16 @@ class PalV2CliParserTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["wizard"]).command, "setup")
         self.assertEqual(parser.parse_args(["wizzard"]).command, "setup")
         self.assertTrue(parser.parse_args(["setup", "--check"]).check)
+        self.assertTrue(
+            parser.parse_args(
+                [
+                    "setup",
+                    "--upgrade",
+                    "--runtime-root",
+                    "/tmp/pal-runtime",
+                ]
+            ).upgrade
+        )
         setup_args = parser.parse_args(
             ["setup", "--runtime-root", "/tmp/pal-runtime"]
         )
@@ -44,6 +54,31 @@ class PalV2CliParserTests(unittest.TestCase):
             self.assertEqual(main(), 0)
 
         run_setup_wizard.assert_called_once_with(runtime_root=runtime_root)
+
+    def test_setup_upgrade_is_non_interactive_and_requires_runtime_root(
+        self,
+    ) -> None:
+        runtime_root = Path("/tmp/pal-runtime")
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "pal",
+                    "setup",
+                    "--upgrade",
+                    "--runtime-root",
+                    str(runtime_root),
+                ],
+            ),
+            patch(
+                "pal.wizard.cli.run_setup_upgrade",
+                return_value=0,
+            ) as run_setup_upgrade,
+        ):
+            self.assertEqual(main(), 0)
+
+        run_setup_upgrade.assert_called_once_with(runtime_root=runtime_root)
 
     def test_tty_subcommand_parses_with_runtime_root(self) -> None:
         args = _build_parser().parse_args(

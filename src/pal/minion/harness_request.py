@@ -83,20 +83,25 @@ def compile_architect_harness_request(
     lines = [
         "# Architect Assignment",
         "",
-        str(pack.instruction or pack.goal or "").strip(),
+        "Read the immutable task ledger, perform one bounded consistency "
+        "pass, and author the smallest complete module-level architecture in "
+        "the bound workspace. Define responsibilities, directional public "
+        "contracts and dependency handoffs, ownership, lifecycle, invariants, "
+        "observable errors, state machines only where needed, and meaningful "
+        "end-to-end contract flows. Write declaration skeletons without "
+        "product behavior, then encode and reconcile the same design in the "
+        "bound architect.yaml. Do not compile, build, test, link, commit, or "
+        "implement private algorithms.",
+        "",
+        "## Acceptance",
+        "- Boundaries and responsibilities are declared.",
+        "- Every state, worker, object, and resource has exactly one owner.",
+        "- Public contracts, errors, lifecycle transitions, and composition "
+        "joins are closed.",
+        "- Private implementation is explicitly deferred.",
+        "- Every fixed native-plan item is completed and the bound files agree "
+        "before the final response.",
     ]
-    if pack.acceptance_criteria:
-        lines.extend(
-            [
-                "",
-                "## Acceptance",
-                *[
-                    f"- {str(item)}"
-                    for item in pack.acceptance_criteria
-                    if str(item).strip()
-                ],
-            ]
-        )
     if steps:
         lines.extend(["", "## Fixed Plan Phases"])
         for item in steps:
@@ -159,13 +164,26 @@ def compile_architect_harness_request(
     ]
     if reminders:
         lines.extend(["", "## Approved Operating Manuals", *reminders])
-    return ArchitectHarnessRequest(
+    request = ArchitectHarnessRequest(
         developer_instructions=developer_instructions,
         user_input="\n".join(lines).strip(),
         cwd=cwd,
         architect_path=architect_path,
         work_item_seed=seed,
     )
+    leaked = [
+        token
+        for token in _PAL_TOOL_TOKENS
+        if token in (
+            request.developer_instructions + "\n" + request.user_input
+        )
+    ]
+    if leaked:
+        raise ValueError(
+            "Architect harness request leaked Pal tool names: "
+            + ", ".join(leaked)
+        )
+    return request
 
 
 def _workspace_root(workspace: Mapping[str, Any]) -> Path:

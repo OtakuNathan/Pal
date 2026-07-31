@@ -529,7 +529,7 @@ def _select_attempt_harness(
         for attempt in prior_attempts
         if str(attempt.get("harness_id") or "") == preferred.harness_id
         and str(attempt.get("status") or "")
-        in {"failed", "interrupted", "cancelled"}
+        in {"failed", "interrupted", "cancelled", "lost"}
     ]
     if len(failed_preferred) < 2:
         return preferred
@@ -4517,14 +4517,17 @@ class SemanticOrchestrator:
                 scope_base_submission,
                 self.service.artifacts.read_json(_ref_from_mapping(finding_value)),
             )
-        architecture_workspace = self.service.skeleton.provision_architecture_workspace(
-            workflow_id=revision.workflow_id,
-            workflow_name=str(request.get("workflow_name") or request.get("goal") or revision.workflow_id),
-            revision_name=revision.aggregate_id,
-            workspace=dict(request.get("workspace") or {}),
-            requirements_ref=requirements_ref,
-            base_artifact=base_artifact,
-        )
+        try:
+            architecture_workspace = self.service.skeleton.provision_architecture_workspace(
+                workflow_id=revision.workflow_id,
+                workflow_name=str(request.get("workflow_name") or request.get("goal") or revision.workflow_id),
+                revision_name=revision.aggregate_id,
+                workspace=dict(request.get("workspace") or {}),
+                requirements_ref=requirements_ref,
+                base_artifact=base_artifact,
+            )
+        except ValueError as exc:
+            raise PermanentEffectError(str(exc)) from exc
         lease = self.repository.claim_lease(
             lease_resource,
             invocation_id,

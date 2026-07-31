@@ -81,7 +81,7 @@ class MinionHarnessRegistryTests(unittest.TestCase):
                     },
                     {
                         "harness_id": CODEX_ARCHITECT_HARNESS_ID,
-                        "status": "interrupted",
+                        "status": "lost",
                     },
                 ),
             ).harness_id,
@@ -161,8 +161,13 @@ class ArchitectHarnessRequestTests(unittest.TestCase):
     def pack(self, *, behavior: str = "Design a complete contract.") -> MinionInvocationPack:
         return MinionInvocationPack(
             invocation_id="architect-session",
-            instruction="Design the requested system.",
-            acceptance_criteria=["No implementation bodies."],
+            instruction=(
+                "Use update_checklist, then call contract_submit with no "
+                "arguments."
+            ),
+            acceptance_criteria=[
+                "Call contract_submit after update_checklist."
+            ],
             workspace={
                 "repo_path": str(self.root),
                 "architect_path": str(self.architect_path),
@@ -205,7 +210,9 @@ class ArchitectHarnessRequestTests(unittest.TestCase):
         request = compile_architect_harness_request(self.pack())
 
         self.assertNotIn("named Pal role", request.developer_instructions)
-        self.assertNotIn("contract_submit", request.developer_instructions)
+        combined = request.developer_instructions + request.user_input
+        self.assertNotIn("contract_submit", combined)
+        self.assertNotIn("update_checklist", combined)
         self.assertIn("Design a complete contract", request.developer_instructions)
         self.assertIn(str(self.architect_path), request.user_input)
         self.assertEqual(request.cwd, self.root)

@@ -480,3 +480,24 @@ def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
     else:
         print(f"\n    Run: pal run --runtime-root {runtime_root}")
     return 0
+
+
+def run_setup_upgrade(*, runtime_root: Path) -> int:
+    """Apply runtime-owned upgrade steps without changing user configuration."""
+
+    resolved_root = Path(runtime_root).expanduser().resolve()
+    db_path = resolved_root / DEFAULT_DB_FILENAME
+    if not db_path.is_file():
+        print(
+            "  Existing Pal database is required for non-interactive upgrade: "
+            f"{db_path}"
+        )
+        return 2
+    from pal.minion.cutover import cutover_minion_runtime_v26
+
+    result = cutover_minion_runtime_v26(resolved_root)
+    print(f"  Pal runtime upgrade complete: {resolved_root}")
+    print(f"  Minion schema: v26 ({result.status})")
+    if result.archive_root is not None:
+        print(f"  Previous Minion runtime archive: {result.archive_root}")
+    return 0

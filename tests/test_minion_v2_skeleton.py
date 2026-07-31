@@ -14,6 +14,7 @@ from pal.minion.v2.contract_protocol import (
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.skeleton import (
     ArchitectureValidationError,
+    GitBackedSkeletonService,
     compiled_module_write_scopes,
     module_developer_test_path,
     module_verification_corpus_path,
@@ -65,6 +66,7 @@ class SoftwareContractAdapterTests(unittest.TestCase):
             self.runtime_root,
             repository,
         )
+        self.skeleton = GitBackedSkeletonService(self.runtime_root, artifacts)
         self.requirements_ref = TaskLedgerService(
             self.runtime_root,
             artifacts,
@@ -146,6 +148,42 @@ class SoftwareContractAdapterTests(unittest.TestCase):
             {"kind": "directory", "path": "tests/decoder/verifier"},
             scopes,
         )
+
+    def test_new_project_explicit_repo_path_is_created_before_snapshot(self) -> None:
+        requested_repo = self.runtime_root / "projects" / "fixed_queue"
+
+        workspace = self.skeleton.provision_architecture_workspace(
+            workflow_id="wf-new-project",
+            workflow_name="fixed_queue",
+            revision_name="revision-1",
+            workspace={
+                "kind": "new_project",
+                "project_name": "fixed_queue",
+                "repo_path": str(requested_repo),
+            },
+            requirements_ref=self.requirements_ref,
+        )
+
+        self.assertTrue(requested_repo.is_dir())
+        self.assertTrue(workspace.worktree.is_dir())
+
+    def test_existing_repo_path_is_not_created_implicitly(self) -> None:
+        missing_repo = self.runtime_root / "missing-existing-repo"
+
+        with self.assertRaisesRegex(ValueError, "workspace source is not a directory"):
+            self.skeleton.provision_architecture_workspace(
+                workflow_id="wf-existing-repo",
+                workflow_name="missing_repo",
+                revision_name="revision-1",
+                workspace={
+                    "kind": "existing_repo",
+                    "project_name": "missing_repo",
+                    "repo_path": str(missing_repo),
+                },
+                requirements_ref=self.requirements_ref,
+            )
+
+        self.assertFalse(missing_repo.exists())
 
 
 if __name__ == "__main__":

@@ -983,6 +983,10 @@ class GitBackedSkeletonService:
         common_git_dir = layout.common_git_dir
         snapshot_marker = layout.workspace_snapshot_marker
         source = str(workspace.get("repo_path") or workspace.get("cwd") or "").strip()
+        if source and str(workspace.get("kind") or "").strip() == "new_project":
+            source_path = Path(source).expanduser()
+            if not source_path.exists():
+                source_path.mkdir(parents=True, exist_ok=True)
         with project_git_layout_lock(layout):
             if not snapshot_marker.is_file():
                 snapshot = self._create_synthetic_snapshot(
