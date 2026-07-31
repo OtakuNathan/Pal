@@ -13,7 +13,10 @@ from uuid import uuid4
 
 from pal.foundation import utc_now
 from pal.llm.contracts import CanonicalToolCall
-from pal.minion.harness_request import compile_architect_harness_request
+from pal.minion.harness_request import (
+    architect_harness_assignment_fingerprint,
+    compile_architect_harness_request,
+)
 from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
 from pal.minion.v2.contract_submission import contract_submit_tool_result
 from pal.minion.v2.work_items import (
@@ -25,6 +28,17 @@ from pal.shared import MinionInvocationPack
 
 class CodexHarnessError(RuntimeError):
     pass
+
+
+def _is_same_started_assignment(
+    state: Mapping[str, Any],
+    assignment_fingerprint: str,
+) -> bool:
+    return bool(
+        state.get("assignment_started")
+        and str(state.get("assignment_fingerprint") or "").strip()
+        == str(assignment_fingerprint).strip()
+    )
 
 
 class CodexAppServer:
@@ -223,6 +237,9 @@ class CodexArchitectWorker:
         self.minion_id = str(minion_id)
         self.run_id = str(run_id)
         self.request = compile_architect_harness_request(pack)
+        self.assignment_fingerprint = (
+            architect_harness_assignment_fingerprint(pack)
+        )
         token = str(os.environ.get(ROLE_GATEWAY_TOKEN_ENV) or "").strip()
         self.gateway = MinionRoleGatewayClient(self.runtime_root, token)
         binding = dict(dict(pack.metadata or {}).get("minion_v2") or {})
@@ -280,6 +297,9 @@ class CodexArchitectWorker:
                         {
                             "thread_id": thread_id,
                             "assignment_started": True,
+                            "assignment_fingerprint": (
+                                self.assignment_fingerprint
+                            ),
                         }
                     )
                     plan_error = await self._drive_turn(
@@ -352,7 +372,10 @@ class CodexArchitectWorker:
         )
         state = dict(continuation.get("state") or {})
         thread_id = str(state.get("thread_id") or "").strip()
-        assignment_started = bool(state.get("assignment_started"))
+        same_assignment = _is_same_started_assignment(
+            state,
+            self.assignment_fingerprint,
+        )
         common: dict[str, Any] = {
             "cwd": str(self.request.cwd),
             "developerInstructions": self.request.developer_instructions,
@@ -385,10 +408,15 @@ class CodexArchitectWorker:
         await self._write_harness_state(
             {
                 "thread_id": resolved,
-                "assignment_started": assignment_started,
+                "assignment_started": bool(
+                    state.get("assignment_started")
+                ),
+                "assignment_fingerprint": str(
+                    state.get("assignment_fingerprint") or ""
+                ),
             }
         )
-        return resolved, bool(thread_id and assignment_started)
+        return resolved, bool(thread_id and same_assignment)
 
     async def _write_harness_state(
         self,

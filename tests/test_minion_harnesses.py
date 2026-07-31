@@ -6,7 +6,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from pal.minion.harness_request import compile_architect_harness_request
+from pal.minion.harness_request import (
+    architect_harness_assignment_fingerprint,
+    compile_architect_harness_request,
+)
 from pal.minion.harnesses import (
     CODEX_ARCHITECT_HARNESS_ID,
     HARNESS_LAUNCH_HOST,
@@ -23,6 +26,7 @@ from pal.shared import MinionInvocationPack
 from plugins.codex_architect_harness.codex_architect_worker import (
     CodexAppServer,
     CodexArchitectWorker,
+    _is_same_started_assignment,
 )
 
 
@@ -183,6 +187,7 @@ class ArchitectHarnessRequestTests(unittest.TestCase):
             metadata={
                 "minion_v2": {
                     "role": "architect",
+                    "authoring_input_fingerprint": "assignment-v1",
                     "role_protocol": {
                         "playbook": {
                             "steps": [
@@ -217,12 +222,30 @@ class ArchitectHarnessRequestTests(unittest.TestCase):
         self.assertIn(str(self.architect_path), request.user_input)
         self.assertEqual(request.cwd, self.root)
         self.assertEqual(request.work_item_seed[0]["kind"], "phase")
+        self.assertEqual(
+            architect_harness_assignment_fingerprint(self.pack()),
+            "assignment-v1",
+        )
 
     def test_compiler_rejects_a_pal_specific_profile_contract(self) -> None:
         with self.assertRaisesRegex(ValueError, "Pal tool names"):
             compile_architect_harness_request(
                 self.pack(behavior="call ask_question and wait")
             )
+
+    def test_resume_only_suppresses_input_for_the_same_assignment(self) -> None:
+        state = {
+            "thread_id": "thread-1",
+            "assignment_started": True,
+            "assignment_fingerprint": "assignment-v1",
+        }
+
+        self.assertTrue(
+            _is_same_started_assignment(state, "assignment-v1")
+        )
+        self.assertFalse(
+            _is_same_started_assignment(state, "assignment-v2")
+        )
 
 
 class CodexAppServerProtocolTests(unittest.IsolatedAsyncioTestCase):

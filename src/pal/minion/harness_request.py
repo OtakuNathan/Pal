@@ -25,6 +25,20 @@ class ArchitectHarnessRequest:
     work_item_seed: tuple[dict[str, Any], ...]
 
 
+def architect_harness_assignment_fingerprint(
+    pack: MinionInvocationPack,
+) -> str:
+    binding = dict(dict(pack.metadata or {}).get("minion_v2") or {})
+    fingerprint = str(
+        binding.get("authoring_input_fingerprint") or ""
+    ).strip()
+    if not fingerprint:
+        raise ValueError(
+            "Architect harness requires an authoring input fingerprint"
+        )
+    return fingerprint
+
+
 def compile_architect_harness_request(
     pack: MinionInvocationPack,
 ) -> ArchitectHarnessRequest:
@@ -122,6 +136,8 @@ def compile_architect_harness_request(
             [
                 "",
                 "## Manager-Routed Work Items",
+                "Read the corresponding Manager-bound immutable finding "
+                "inputs before changing files.",
                 "Include each exact item below in the native plan and complete "
                 "it before finishing:",
                 *[
