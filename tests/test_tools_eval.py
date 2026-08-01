@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +17,7 @@ from pal.eval_tools import (
     _redact,
     load_tools_benchmark,
 )
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall
+from pal.llm.contracts import generation_result_from_values
 from pal.execution.tool_facade import EffectOutcome, RetryDirective
 
 
@@ -150,16 +152,16 @@ def test_enum_repair_case_seeds_rejection_then_scores_schema_read_and_valid_retr
 
         async def agenerate(self, _request):
             outcomes = [
-                CanonicalLLMOutcome(tool_calls=[CanonicalToolCall(name="read_tool", args={"name": "search_tools"})]),
-                CanonicalLLMOutcome(
+                generation_result_from_values(tool_calls=[new_tool_call(name="read_tool", args={"name": "search_tools"})]),
+                generation_result_from_values(
                     tool_calls=[
-                        CanonicalToolCall(
+                        new_tool_call(
                             name="search_tools",
                             args={"namespace": "inspect", "query": "execution runtime state"},
                         )
                     ]
                 ),
-                CanonicalLLMOutcome(text="done"),
+                generation_result_from_values(text="done"),
             ]
             outcome = outcomes[self.index]
             self.index += 1

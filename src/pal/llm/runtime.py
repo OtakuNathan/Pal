@@ -1,94 +1,65 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 import asyncio
+import json
+import random
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-import json
-import logging
-import queue
-import random
-import threading
-import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Protocol
-
-from pal.llm.adapters import (
-    LLMProviderRegistry,
-    build_runtime_provider_registry,
-    resolve_endpoint_adapter,
-    _think_level_to_completion_reasoning_effort,
-)
-from pal.llm.llm_adaptor.base import OPENAI_RESPONSES_SHAPE
-from pal.llm.llm_adaptor.anthropic_api import (
-    chat_messages_to_anthropic_messages,
-    chat_tools_to_anthropic_tools,
-    think_level_to_anthropic_thinking,
-)
-from pal.llm.llm_adaptor.openai_responses import OpenAIResponsesDraft, chat_tools_to_responses_tools
-from pal.llm.codex_openai_bridge import (
-    DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY,
-    CodexCliBridge,
-    CodexCompletion,
-    CodexBridgeError,
-    _messages_to_codex_input,
-    _openai_tools_to_dynamic_tools,
-    _strip_openai_prefix,
-)
-from pal.llm.credentials import LLMCredentialResolver
-from pal.llm.request_hooks import apply_llm_message_hooks, is_zai_glm_endpoint
+from typing import Any, Protocol
 
 from pal.llm.contracts import (
-    CanonicalLLMOutcome,
-    CanonicalLLMRequest,
-    CanonicalToolCall,
+    LLMGenerationResult,
     LLMPreflightAdvice,
     LLMPreflightRequest,
     LLMRuntimePort,
+    ThinkingChoice,
     ThinkingContract,
 )
-from pal.llm.models import LLMEndpointModel
-from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
-from pal.llm.usage import LLMUsage, LLMUsageLedger
-from pal.shared import LLMFinishReason, LLMPreflightStatus, LLMStreamEventKind
-from pal.stream_events import NormalizedLLMStreamEvent
-
-
-_LOGGER = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Retry helpers — inspired by Claude Code's withRetry.ts
-# ---------------------------------------------------------------------------
-
-_DEFAULT_BASE_RETRY_DELAY_MS = 500
-_DEFAULT_MAX_RETRY_DELAY_MS = 32_000
-_DEFAULT_STALE_CONNECTION_SETTLE_MS = 300
-_DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS = 180.0
-_DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS = 180.0
-_DEFAULT_MAX_OUTPUT_RECOVERY_ATTEMPTS = 3
-_OUTPUT_LIMIT_FINISH_REASONS = {
-    "length",
-    "max_tokens",
-    "max_output_tokens",
-    "model_context_window_exceeded",
-}
-_OUTPUT_LIMIT_CONTINUATION_PROMPT = (
-    "Output token limit hit. Resume directly—no apology and no recap. "
-    "Pick up mid-thought if needed and break the remaining work into smaller pieces. "
-    "No tool call from the truncated response was executed; if one is still needed, "
-    "emit it again exactly once as a complete valid tool call."
+from pal.llm.credentials import LLMCredentialResolver, LLMCredentialUnavailableError
+from pal.llm.endpoint import ShapeEndpointInvoker
+from pal.llm.endpoint_spec import LLMEndpointSpec
+from pal.llm.ir import (
+    GenerationPolicyIR,
+    LLMFinishReason,
+    LLMMessageIR,
+    LLMRequestIR,
+    LLMResponseIR,
+    LLMResponseDeltaKind,
+    LLMResponseUpdate,
+    MessageRole,
+    MessageState,
+    TextPartIR,
+    ThinkingLevel,
 )
-_ENDPOINT_FALLBACK_DISABLED_POLICIES = {
-    "disabled",
-    "none",
-    "off",
-    "strict",
-    "strict_preferred",
-    "no_fallback",
-}
-_STRICT_ENDPOINT_PREFERRED_SOURCES = {"profile"}
-_SCOPED_LLM_EVENT_SINK: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
+from pal.llm.model_hooks import ModelHookRegistry
+from pal.llm.models import LLMEndpointModel
+from pal.llm.output_recovery import (
+    continuation_request,
+    endpoint_output_upper_limit,
+    merge_responses,
+    recovery_settings,
+    safe_truncated_response,
+    stream_recovery_updates,
+    with_recovery_stage,
+)
+from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
+from pal.llm.usage import LLMUsageLedger
+from pal.shared import LLMPreflightStatus
+from pal.shared.json_values import thaw_json
+
+
+_DEFAULT_TIMEOUT_SECONDS = 180.0
+_STRICT_ENDPOINT_PREFERRED_SOURCES = frozenset({"profile"})
+_FALLBACK_DISABLED_POLICIES = frozenset(
+    {"disabled", "none", "off", "strict", "strict_preferred", "no_fallback"}
+)
+_SCOPED_EVENT_SINK: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
     "pal_llm_event_sink",
     default=None,
 )
@@ -96,169 +67,38 @@ _SCOPED_LLM_EVENT_SINK: ContextVar[Callable[[dict[str, Any]], None] | None] = Co
 
 @contextmanager
 def scoped_llm_event_sink(sink: Callable[[dict[str, Any]], None] | None):
-    token = _SCOPED_LLM_EVENT_SINK.set(sink if callable(sink) else None)
+    token = _SCOPED_EVENT_SINK.set(sink if callable(sink) else None)
     try:
         yield
     finally:
-        _SCOPED_LLM_EVENT_SINK.reset(token)
+        _SCOPED_EVENT_SINK.reset(token)
 
 
-def _endpoint_fallback_disabled(policy: Any) -> bool:
-    return str(policy or "").strip().lower() in _ENDPOINT_FALLBACK_DISABLED_POLICIES
+class LLMEndpointInvocationError(RuntimeError):
+    pass
 
 
-def _is_stale_connection(message: str) -> bool:
-    """Detect keep-alive socket deaths: ECONNRESET, EPIPE, server disconnected.
-
-    These happen when the server closed the TCP connection but the local
-    connection pool still holds the dead socket.  The next request picks
-    up the stale socket and fails instantly — even to a *different* endpoint
-    if they share the same connection pool.
-
-    Claude Code handles this by disabling keep-alive and forcing a new
-    client.  We mark the error so the caller can take evasive action.
-    """
-    return any(
-        marker in message
-        for marker in (
-            "econnreset",
-            "epipe",
-            "broken pipe",
-            "server disconnected",
-            "remoteprotocolerror",
-        )
-    )
+class LLMEndpointResponseError(LLMEndpointInvocationError):
+    pass
 
 
-def _classify_retry_error(exc: Exception) -> str:
-    """Classify an LLM invocation error into a retry category.
-
-    Returns one of: 'stale_connection', 'timeout', 'connection', 'bad_request',
-    'rate_limit', 'server', 'unknown'.
-
-    'stale_connection' is a subset of 'connection' — it specifically means a
-    keep-alive socket was reused after the server closed it.  These warrant
-    immediate endpoint skip AND a brief settle delay.
-    """
-    message = str(exc).lower()
-    error_type = type(exc).__name__.lower()
-
-    if _is_stale_connection(message):
-        return "stale_connection"
-
-    if (
-        any(marker in message for marker in ("timed out", "timeout"))
-        or "timeout" in error_type
-    ):
-        return "timeout"
-
-    # Network / connection level: connection refused, protocol reset, etc.
-    if any(
-        marker in message
-        for marker in (
-            "connectionerror",
-            "connection refused",
-            "connection aborted",
-            "connectionreset",
-        )
-    ) or any(
-        marker in error_type
-        for marker in ("connection", "protocol")
-    ):
-        return "connection"
-
-    # HTTP status codes embedded in the error message
-    if "429" in message or "rate" in message:
-        return "rate_limit"
-    if any(
-        marker in message
-        for marker in (
-            "error code: 400",
-            "status code: 400",
-            "http 400",
-            "badrequesterror",
-            "bad request",
-        )
-    ) or "badrequest" in error_type:
-        return "bad_request"
-    if any(code in message for code in ("529", "overload", "502", "503", "504", "500", "internalservererror", "network error")):
-        return "server"
-
-    return "unknown"
-
-
-def _endpoint_connection_failure_domain(endpoint: LLMEndpointModel) -> tuple[str, str] | None:
-    provider = str(getattr(endpoint, "provider", "") or "").strip().lower()
-    base_url = str(getattr(endpoint, "base_url", "") or "").strip().lower()
-    capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
-    if (
-        provider in {"codex", "codex_cli"}
-        or base_url.startswith("codex://")
-        or capabilities.get("codex_cli")
-        or capabilities.get("official_codex_cli")
-        or capabilities.get("codex_native")
-    ):
-        return ("codex_cli", base_url or "codex://cli")
-    return None
-
-
-def _next_endpoint_id(endpoints: list[LLMEndpointModel], index: int) -> str:
-    next_index = int(index) + 1
-    if next_index < len(endpoints):
-        return str(endpoints[next_index].endpoint_id or "")
-    return ""
-
-
-def _compute_retry_delay(
-    attempt: int,
-    *,
-    error_kind: str,
-    base_delay_ms: int = _DEFAULT_BASE_RETRY_DELAY_MS,
-    max_delay_ms: int = _DEFAULT_MAX_RETRY_DELAY_MS,
-    stale_settle_ms: int = _DEFAULT_STALE_CONNECTION_SETTLE_MS,
-) -> float:
-    """Return delay in seconds before the next retry attempt.
-
-    Exponential backoff with jitter, capped at max_delay_ms.
-    - stale_connection: brief settle pause only (TCP cleanup)
-    - connection: fast skip — just jitter to avoid thundering herd
-    - rate_limit / server: full exponential backoff
-    """
-    if error_kind == "stale_connection":
-        return stale_settle_ms / 1000.0
-
-    base = min(base_delay_ms * (2 ** (attempt - 1)), max_delay_ms)
-    jitter = random.random() * 0.25 * base  # noqa: S311
-    return (base + jitter) / 1000.0
-
-
-def _coerce_timeout_seconds(value: Any, *, default: float) -> float:
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError):
-        seconds = default
-    if seconds <= 0:
-        seconds = default
-    return max(1.0, seconds)
-
-
-@dataclass
-class _EndpointInvocationResult:
-    """Carries the outcome of endpoint iteration with retry."""
-    kind: str  # "success" | "compact_required" | "error" | "no_endpoints"
-    value: Any = None
-    endpoint: LLMEndpointModel | None = None
-    effective_request: CanonicalLLMRequest | None = None
-    target_input_budget: int | None = None
-    reserved_output_tokens: int | None = None
-    error_kind: str = ""
-    error_type: str = ""
+class LLMRequestPreparationError(LLMEndpointInvocationError):
+    pass
 
 
 @dataclass(frozen=True)
-class _OutputRecoveryResult:
-    value: Any
-    request: CanonicalLLMRequest
+class PreparedLLMRequest:
+    endpoint: LLMEndpointModel
+    request: LLMRequestIR
+    estimated_input_tokens: int
+    target_input_budget: int
+
+    @property
+    def compact_required(self) -> bool:
+        return (
+            self.target_input_budget > 0
+            and self.estimated_input_tokens > self.target_input_budget
+        )
 
 
 @dataclass
@@ -269,24 +109,19 @@ class EndpointResolver:
     def __post_init__(self) -> None:
         if self.endpoints:
             self.endpoints = tuple(self.endpoints)
-            return
-        self.refresh()
+            self._validate()
+        else:
+            self.refresh()
 
     def refresh(self) -> tuple[LLMEndpointModel, ...]:
-        if self.repository is None:
-            self.endpoints = tuple(self.endpoints)
-        else:
+        if self.repository is not None:
             self.endpoints = tuple(self.repository.list_enabled())
+        self._validate()
         return self.endpoints
 
-    def primary(
-        self,
-        *,
-        preferred_endpoint_id: str | None = None,
-        fallback_endpoint_id: str | None = None,
-    ) -> LLMEndpointModel | None:
-        enabled = self.enabled(preferred_endpoint_id=preferred_endpoint_id, fallback_endpoint_id=fallback_endpoint_id)
-        return enabled[0] if enabled else None
+    def _validate(self) -> None:
+        for endpoint in self.endpoints:
+            LLMEndpointSpec.from_value(endpoint)
 
     def enabled(
         self,
@@ -296,1546 +131,64 @@ class EndpointResolver:
         include_remaining: bool = True,
     ) -> list[LLMEndpointModel]:
         items = list(self.endpoints)
-        preferred = str(preferred_endpoint_id or "").strip()
-        fallback = str(fallback_endpoint_id or "").strip()
-        if not preferred and not fallback:
-            return items if include_remaining else items[:1]
         ordered: list[LLMEndpointModel] = []
         seen: set[str] = set()
-        for endpoint_id in (preferred, fallback):
-            if not endpoint_id or endpoint_id in seen:
+        for endpoint_id in (preferred_endpoint_id, fallback_endpoint_id):
+            normalized = str(endpoint_id or "").strip()
+            if not normalized or normalized in seen:
                 continue
-            match = next((item for item in items if item.endpoint_id == endpoint_id), None)
-            if match is None:
-                continue
-            ordered.append(match)
-            seen.add(endpoint_id)
+            match = next((item for item in items if item.endpoint_id == normalized), None)
+            if match is not None:
+                ordered.append(match)
+                seen.add(normalized)
         if include_remaining:
             ordered.extend(item for item in items if item.endpoint_id not in seen)
-        return ordered
+        return ordered if ordered else (items if include_remaining else items[:1])
+
+    def primary(
+        self,
+        *,
+        preferred_endpoint_id: str | None = None,
+        fallback_endpoint_id: str | None = None,
+    ) -> LLMEndpointModel | None:
+        enabled = self.enabled(
+            preferred_endpoint_id=preferred_endpoint_id,
+            fallback_endpoint_id=fallback_endpoint_id,
+        )
+        return enabled[0] if enabled else None
 
 
 class LLMEndpointInvokerPort(Protocol):
     def invoke(
         self,
         endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> CanonicalLLMOutcome:
+        request: LLMRequestIR,
+        *,
+        stream: bool = False,
+        timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    ) -> tuple[LLMResponseIR, tuple[LLMResponseUpdate, ...]]:
         ...
 
-    def invoke_stream(
+    def invoke_updates(
         self,
         endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> Iterable[NormalizedLLMStreamEvent]:
+        request: LLMRequestIR,
+        *,
+        timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    ) -> Iterator[LLMResponseUpdate]:
         ...
-
-
-class LLMEndpointInvocationError(RuntimeError):
-    pass
-
-
-def _timeout_from_openai_kwargs(kwargs: dict[str, Any]) -> float:
-    for key in ("force_timeout", "request_timeout", "timeout"):
-        value = kwargs.get(key)
-        if value is None:
-            continue
-        return _coerce_timeout_seconds(value, default=120.0)
-    return 120.0
-
-
-def _run_with_wall_timeout(
-    operation: Callable[[], Any],
-    *,
-    timeout_seconds: float,
-    description: str,
-) -> Any:
-    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
-
-    def target() -> None:
-        try:
-            result_queue.put(("ok", operation()))
-        except BaseException as exc:  # noqa: BLE001
-            result_queue.put(("error", exc))
-
-    thread = threading.Thread(target=target, name="pal-llm-call", daemon=True)
-    thread.start()
-    thread.join(timeout=max(0.001, float(timeout_seconds)))
-    if thread.is_alive():
-        raise LLMEndpointInvocationError(f"{description} timed out after {timeout_seconds:g}s")
-    try:
-        kind, payload = result_queue.get_nowait()
-    except queue.Empty as exc:
-        raise LLMEndpointInvocationError(f"{description} ended without returning a result") from exc
-    if kind == "error":
-        raise payload
-    return payload
-
-
-def _run_llm_with_wall_timeout(
-    operation: Callable[[], Any],
-    *,
-    timeout_seconds: float,
-    description: str,
-) -> Any:
-    return _run_with_wall_timeout(operation, timeout_seconds=timeout_seconds, description=description)
-
-
-@dataclass
-class OpenAIChatEndpointInvoker:
-    """OpenAI-compatible chat invoker, with stub:// endpoints kept local."""
-
-    credentials: LLMCredentialResolver = field(default_factory=LLMCredentialResolver)
-    artifact_manager: Any = None
-    runtime_root: str | Path | None = None
-    provider_registry: LLMProviderRegistry = field(default_factory=build_runtime_provider_registry)
-    message_hooks: tuple[str, ...] = ()
-    last_payload_summary: dict[str, Any] = field(default_factory=dict, init=False)
-
-    def __post_init__(self) -> None:
-        if self.runtime_root is not None:
-            self.provider_registry.load_runtime_adapters(self.runtime_root)
-
-    def refresh_credentials(self) -> bool:
-        refresh = getattr(self.credentials, "refresh", None)
-        if callable(refresh):
-            refresh()
-            return True
-        clear_cache = getattr(self.credentials, "clear_cache", None)
-        if callable(clear_cache):
-            clear_cache()
-            return True
-        return False
-
-    def refresh_provider_registry(self) -> bool:
-        self.provider_registry.refresh_external_sources(runtime_root=self.runtime_root)
-        return True
-
-    def invoke(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> CanonicalLLMOutcome:
-        if endpoint.provider == "stub" or str(endpoint.base_url).startswith("stub://"):
-            self.last_payload_summary = _summarize_provider_payload(endpoint, request.messages, image_url_format="stub")
-            return self._invoke_stub(endpoint, request)
-        return self._invoke_openai_chat(endpoint, request)
-
-    def invoke_stream(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> Iterable[NormalizedLLMStreamEvent]:
-        if endpoint.provider == "stub" or str(endpoint.base_url).startswith("stub://"):
-            self.last_payload_summary = _summarize_provider_payload(endpoint, request.messages, image_url_format="stub")
-            return self._invoke_stub_stream(endpoint, request)
-        return self._invoke_openai_chat_stream(endpoint, request)
-
-    def _invoke_stub(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> CanonicalLLMOutcome:
-        content = _last_message_text(request.messages)
-        text = content.strip() or "stub response"
-        response_mode = _coerce_response_mode(request.metadata.get("response_mode_hint"))
-        return CanonicalLLMOutcome(
-            text=text,
-            reasoning_text="",
-            tool_calls=[],
-            finish_reason=LLMFinishReason.STOP,
-            response_mode=response_mode,
-        )
-
-    def _invoke_stub_stream(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> Iterable[NormalizedLLMStreamEvent]:
-        _ = endpoint
-        content = _last_message_text(request.messages)
-        text = content.strip() or "stub response"
-        response_mode = _coerce_response_mode(request.metadata.get("response_mode_hint"))
-        midpoint = max(1, len(text) // 2)
-        return [
-            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=text[:midpoint]),
-            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=text[midpoint:]),
-            NormalizedLLMStreamEvent(
-                event_kind=LLMStreamEventKind.DONE,
-                finish_reason=LLMFinishReason.STOP,
-                response_mode=response_mode,
-            ),
-        ]
-
-    def _invoke_openai_chat(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> CanonicalLLMOutcome:
-        try:
-            import openai  # type: ignore
-        except Exception as exc:
-            raise LLMEndpointInvocationError("openai SDK is not installed in the current runtime") from exc
-
-        request_shape, kwargs, tool_name_aliases = self._build_openai_request_kwargs(endpoint, request)
-        try:
-            if request_shape == OPENAI_RESPONSES_SHAPE:
-                client_kwargs, request_kwargs = _split_openai_responses_sdk_kwargs(kwargs)
-                client = openai.OpenAI(**client_kwargs)
-                response = _run_llm_with_wall_timeout(
-                    lambda: client.responses.create(**request_kwargs),
-                    timeout_seconds=_timeout_from_openai_kwargs(kwargs),
-                    description=f"openai responses invocation for {endpoint.endpoint_id}",
-                )
-                return self._parse_openai_responses_response(response, tool_name_aliases=tool_name_aliases)
-            client_kwargs, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
-            client = openai.OpenAI(**client_kwargs)
-            response = _run_llm_with_wall_timeout(
-                lambda: client.chat.completions.create(**request_kwargs),
-                timeout_seconds=_timeout_from_openai_kwargs(kwargs),
-                description=f"openai chat invocation for {endpoint.endpoint_id}",
-            )
-        except Exception as exc:
-            raise LLMEndpointInvocationError(f"openai chat invocation failed for {endpoint.endpoint_id}: {exc}") from exc
-        return self._parse_openai_chat_response(response, tool_name_aliases=tool_name_aliases)
-
-    def _invoke_openai_chat_stream(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> Iterable[NormalizedLLMStreamEvent]:
-        try:
-            import openai  # type: ignore
-        except Exception as exc:
-            raise LLMEndpointInvocationError("openai SDK is not installed in the current runtime") from exc
-
-        request_shape, kwargs, tool_name_aliases = self._build_openai_request_kwargs(endpoint, request)
-        if request_shape == OPENAI_RESPONSES_SHAPE:
-            outcome = self._invoke_openai_chat(endpoint, request)
-            return list(_stream_events_from_outcome(outcome))
-        try:
-            client_kwargs, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
-            request_kwargs["stream"] = True
-            if _include_openai_stream_usage(endpoint):
-                request_kwargs["stream_options"] = {"include_usage": True}
-            client = openai.OpenAI(**client_kwargs)
-            return _run_llm_with_wall_timeout(
-                lambda: list(
-                    self._iter_openai_chat_stream(
-                        client.chat.completions.create(**request_kwargs),
-                        tool_name_aliases=tool_name_aliases,
-                    )
-                ),
-                timeout_seconds=_timeout_from_openai_kwargs(kwargs),
-                description=f"openai chat streaming invocation for {endpoint.endpoint_id}",
-            )
-        except Exception as exc:
-            raise LLMEndpointInvocationError(f"openai chat invocation failed for {endpoint.endpoint_id}: {exc}") from exc
-
-    def _build_completion_kwargs(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> tuple[dict[str, Any], dict[str, str]]:
-        _, kwargs, tool_name_aliases = self._build_openai_request_kwargs(endpoint, request)
-        return kwargs, tool_name_aliases
-
-    def _build_openai_request_kwargs(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> tuple[str, dict[str, Any], dict[str, str]]:
-        tool_name_aliases = _build_tool_name_aliases(request.tools)
-        image_url_format = _image_url_format(endpoint)
-        messages = _coerce_messages_for_openai_chat(
-            list(request.messages),
-            tool_name_aliases=tool_name_aliases,
-            artifact_manager=self.artifact_manager,
-            supports_vision=bool(endpoint.supports_vision),
-            image_url_format=image_url_format,
-        )
-        adapter = self.provider_registry.resolve(endpoint)
-        request_shape = str(getattr(adapter, "request_shape", "") or "").strip() or "chat_completions"
-        draft = adapter.new_draft(messages)
-        timeout_seconds = request.metadata.get("timeout_seconds")
-        if timeout_seconds is not None:
-            try:
-                timeout_value = max(1, int(float(timeout_seconds)))
-                draft.timeout = timeout_value
-                if hasattr(draft, "request_timeout"):
-                    draft.request_timeout = float(timeout_value)
-                if hasattr(draft, "force_timeout"):
-                    draft.force_timeout = float(timeout_value)
-            except (TypeError, ValueError):
-                pass
-        if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
-            draft.api_base = _openai_api_base(str(endpoint.base_url))
-        api_key = self.credentials.resolve_api_key(endpoint)
-        if api_key:
-            draft.api_key = api_key
-        elif endpoint.auth_kind == "local_provider_auth" and endpoint.api_mode == "openai_chat":
-            # The OpenAI SDK requires a non-empty key even for local
-            # OpenAI-compatible endpoints that ignore Authorization.
-            draft.api_key = "local-provider-auth"
-        if request.temperature is not None:
-            draft.temperature = request.temperature
-        if request.max_output_tokens is not None:
-            if isinstance(draft, OpenAIResponsesDraft):
-                draft.max_output_tokens = request.max_output_tokens
-            else:
-                draft.max_tokens = request.max_output_tokens
-        if isinstance(draft, OpenAIResponsesDraft):
-            tools = chat_tools_to_responses_tools(request.tools)
-        else:
-            tools = _coerce_tools_for_openai_chat(request.tools, tool_name_aliases=tool_name_aliases)
-        if tools:
-            draft.tools = tools
-            draft.tool_choice = "auto"
-        adapter.apply_request(request, draft)
-        if is_zai_glm_endpoint(endpoint) and self.message_hooks and hasattr(draft, "messages"):
-            draft.messages = apply_llm_message_hooks(
-                endpoint,
-                request,
-                list(draft.messages or []),
-                hooks=self.message_hooks,
-            )
-        if hasattr(draft, "messages"):
-            messages = list(draft.messages or [])
-        self.last_payload_summary = _summarize_provider_payload(endpoint, messages, image_url_format=image_url_format)
-        return request_shape, draft.to_kwargs(), tool_name_aliases
-
-    def _iter_openai_chat_stream(
-        self,
-        stream: Iterable[Any],
-        *,
-        tool_name_aliases: dict[str, str] | None = None,
-    ) -> Iterable[NormalizedLLMStreamEvent]:
-        tool_call_drafts: dict[tuple[str, object], dict[str, Any]] = {}
-        for raw_chunk in stream:
-            payload = _openai_chat_stream_payload(raw_chunk)
-            _accumulate_openai_chat_stream_tool_calls(payload, tool_call_drafts)
-            events = _parse_openai_chat_stream_chunk(
-                _without_openai_chat_stream_tool_calls(payload),
-                tool_name_aliases=tool_name_aliases,
-            )
-            for event in events:
-                if event.event_kind == LLMStreamEventKind.DONE:
-                    yield from _finalize_openai_chat_stream_tool_calls(
-                        tool_call_drafts,
-                        tool_name_aliases=tool_name_aliases,
-                    )
-                    tool_call_drafts.clear()
-                yield event
-        yield from _finalize_openai_chat_stream_tool_calls(
-            tool_call_drafts,
-            tool_name_aliases=tool_name_aliases,
-        )
-
-    def _parse_openai_chat_response(
-        self,
-        response: Any,
-        *,
-        tool_name_aliases: dict[str, str] | None = None,
-    ) -> CanonicalLLMOutcome:
-        payload = response.model_dump() if hasattr(response, "model_dump") else response.to_dict() if hasattr(response, "to_dict") else response
-        choices = list((payload or {}).get("choices") or [])
-        if not choices:
-            raise LLMEndpointInvocationError("llm response contained no choices")
-        first = choices[0] or {}
-        message = first.get("message") or {}
-        text = _message_text(message)
-        reasoning_text = _message_reasoning_text(message)
-        usage = _response_usage(payload)
-        outcome = CanonicalLLMOutcome(
-            text=text,
-            reasoning_text=reasoning_text,
-            provider_specific_fields=_message_provider_specific_fields(message),
-            tool_calls=_parse_tool_calls(message, tool_name_aliases=tool_name_aliases),
-            finish_reason=str(first.get("finish_reason") or LLMFinishReason.STOP),
-            **_usage_fields(usage),
-            response_mode=_coerce_response_mode(((payload or {}).get("metadata") or {}).get("response_mode")),
-        )
-        _ensure_llm_invocation_result_has_payload(outcome)
-        return outcome
-
-    def _parse_openai_responses_response(
-        self,
-        response: Any,
-        *,
-        tool_name_aliases: dict[str, str] | None = None,
-    ) -> CanonicalLLMOutcome:
-        payload = response.model_dump() if hasattr(response, "model_dump") else response.to_dict() if hasattr(response, "to_dict") else response
-        if isinstance(payload, dict) and payload.get("choices"):
-            return self._parse_openai_chat_response(payload, tool_name_aliases=tool_name_aliases)
-        output_items = list((payload or {}).get("output") or []) if isinstance(payload, dict) else []
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_calls: list[CanonicalToolCall] = []
-        for item in output_items:
-            if not isinstance(item, dict):
-                continue
-            item_type = str(item.get("type") or "").strip()
-            if item_type == "message":
-                for content in list(item.get("content") or []):
-                    if not isinstance(content, dict):
-                        continue
-                    if content.get("type") == "output_text":
-                        text = str(content.get("text") or "")
-                        if text:
-                            text_parts.append(text)
-                continue
-            if item_type == "function_call":
-                name = _canonical_tool_name(str(item.get("name") or ""), tool_name_aliases)
-                args = _coerce_tool_args(item.get("arguments"))
-                if name:
-                    tool_calls.append(
-                        CanonicalToolCall(
-                            name=name,
-                            args=args,
-                            call_id=str(item.get("call_id") or item.get("id") or "") or None,
-                        )
-                    )
-                continue
-            if item_type == "reasoning":
-                for summary in list(item.get("summary") or []):
-                    if isinstance(summary, dict):
-                        text = str(summary.get("text") or "")
-                        if text:
-                            reasoning_parts.append(text)
-        usage = _response_usage(payload)
-        outcome = CanonicalLLMOutcome(
-            text="".join(text_parts),
-            reasoning_text="\n".join(reasoning_parts),
-            tool_calls=tool_calls,
-            finish_reason=LLMFinishReason.TOOL_CALLS if tool_calls else LLMFinishReason.STOP,
-            **_usage_fields(usage),
-            response_mode=_coerce_response_mode(((payload or {}).get("metadata") or {}).get("response_mode")) if isinstance(payload, dict) else None,
-        )
-        _ensure_llm_invocation_result_has_payload(outcome)
-        return outcome
-
-
-def _ensure_llm_invocation_result_has_payload(result: Any) -> None:
-    if isinstance(result, CanonicalLLMOutcome):
-        if _is_empty_successful_llm_outcome(result):
-            raise LLMEndpointInvocationError("llm response contained no assistant content or tool calls")
-        return
-    if isinstance(result, list) and all(isinstance(item, NormalizedLLMStreamEvent) for item in result):
-        if _is_empty_successful_stream_result(result):
-            raise LLMEndpointInvocationError("llm stream ended without assistant content or tool calls")
-
-
-def _response_usage(payload: Any) -> LLMUsage:
-    """Normalize OpenAI-compatible and Anthropic usage into one contract."""
-
-    if not isinstance(payload, dict):
-        return LLMUsage()
-    raw_usage = payload.get("usage")
-    usage = dict(raw_usage) if isinstance(raw_usage, dict) else {}
-    reported = isinstance(raw_usage, dict)
-    provider_input = _nonnegative_int(
-        usage.get("input_tokens", usage.get("prompt_tokens", 0))
-    )
-    output_tokens = _nonnegative_int(
-        usage.get("output_tokens", usage.get("completion_tokens", 0))
-    )
-    input_details = _first_mapping(
-        usage,
-        "prompt_tokens_details",
-        "input_tokens_details",
-        "input_token_details",
-    )
-    output_details = _first_mapping(
-        usage,
-        "completion_tokens_details",
-        "output_tokens_details",
-        "output_token_details",
-    )
-    anthropic_cached = _optional_nonnegative_int(usage.get("cache_read_input_tokens"))
-    detail_cached = _first_optional_nonnegative_int(
-        input_details,
-        "cached_tokens",
-        "cache_read_tokens",
-        "cache_read_input_tokens",
-    )
-    cached_input_tokens = anthropic_cached if anthropic_cached is not None else detail_cached or 0
-
-    anthropic_write = _optional_nonnegative_int(usage.get("cache_creation_input_tokens"))
-    if anthropic_write is None:
-        cache_creation = usage.get("cache_creation")
-        if isinstance(cache_creation, dict):
-            anthropic_write = sum(_nonnegative_int(value) for value in cache_creation.values())
-    detail_write = _first_optional_nonnegative_int(
-        input_details,
-        "cache_write_tokens",
-        "cache_creation_tokens",
-        "cache_creation_input_tokens",
-    )
-    cache_write_input_tokens = anthropic_write if anthropic_write is not None else detail_write or 0
-
-    # Anthropic reports uncached, cache-read, and cache-write input as separate
-    # top-level categories. OpenAI-compatible APIs report one total with cache
-    # categories nested inside token details.
-    split_input_categories = anthropic_cached is not None or anthropic_write is not None
-    if split_input_categories:
-        uncached_input_tokens = provider_input
-        input_tokens = provider_input + cached_input_tokens + cache_write_input_tokens
-    else:
-        input_tokens = max(provider_input, cached_input_tokens + cache_write_input_tokens)
-        uncached_input_tokens = max(
-            0,
-            input_tokens - cached_input_tokens - cache_write_input_tokens,
-        )
-
-    reasoning_tokens = _first_optional_nonnegative_int(
-        output_details,
-        "reasoning_tokens",
-        "reasoning_output_tokens",
-    ) or 0
-    raw_cost = usage.get("cost")
-    if raw_cost is None:
-        raw_cost = usage.get("total_cost")
-    if raw_cost is None:
-        raw_cost = payload.get("cost")
-    if raw_cost is None:
-        raw_cost = payload.get("total_cost")
-    return LLMUsage(
-        input_tokens=input_tokens,
-        uncached_input_tokens=uncached_input_tokens,
-        cached_input_tokens=cached_input_tokens,
-        cache_write_input_tokens=cache_write_input_tokens,
-        output_tokens=output_tokens,
-        reasoning_tokens=reasoning_tokens,
-        cost=_nonnegative_float(raw_cost),
-        reported=reported,
-    )
-
-
-def _usage_fields(usage: LLMUsage) -> dict[str, Any]:
-    return {
-        "input_tokens": usage.input_tokens,
-        "uncached_input_tokens": usage.uncached_input_tokens,
-        "cached_input_tokens": usage.cached_input_tokens,
-        "cache_write_input_tokens": usage.cache_write_input_tokens,
-        "output_tokens": usage.output_tokens,
-        "reasoning_tokens": usage.reasoning_tokens,
-        "cost": usage.cost,
-        "usage_reported": usage.reported,
-    }
-
-
-def _first_mapping(source: dict[str, Any], *keys: str) -> dict[str, Any]:
-    for key in keys:
-        value = source.get(key)
-        if isinstance(value, dict):
-            return dict(value)
-    return {}
-
-
-def _optional_nonnegative_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    return _nonnegative_int(value)
-
-
-def _first_optional_nonnegative_int(source: dict[str, Any], *keys: str) -> int | None:
-    for key in keys:
-        if key in source and source.get(key) is not None:
-            return _nonnegative_int(source.get(key))
-    return None
-
-
-def _include_openai_stream_usage(endpoint: Any) -> bool:
-    """Request the terminal usage chunk unless an adapter explicitly opts out."""
-
-    capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
-    for key in ("stream_usage", "include_stream_usage", "supports_stream_usage"):
-        if key in capabilities:
-            return bool(capabilities.get(key))
-    return True
-
-
-def _nonnegative_int(value: Any) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _nonnegative_float(value: Any) -> float:
-    try:
-        return max(0.0, float(value or 0.0))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _endpoint_max_output_tokens_upper_limit(endpoint: LLMEndpointModel) -> int | None:
-    capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
-    recovery = capabilities.get("max_output_recovery")
-    nested = dict(recovery) if isinstance(recovery, dict) else {}
-    raw = nested.get("upper_limit", capabilities.get("max_output_tokens_upper_limit"))
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
-
-
-def _max_output_recovery_settings(
-    endpoint: LLMEndpointModel,
-    request: CanonicalLLMRequest,
-    *,
-    default_attempts: int,
-) -> dict[str, int | bool]:
-    capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
-    recovery = capabilities.get("max_output_recovery")
-    nested = dict(recovery) if isinstance(recovery, dict) else {}
-    enabled = bool(nested.get("enabled", recovery if isinstance(recovery, bool) else False))
-    explicit_enabled = request.metadata.get("max_output_recovery_enabled")
-    if explicit_enabled is not None:
-        enabled = bool(explicit_enabled)
-    endpoint_default = _positive_int_or_none(getattr(endpoint, "max_output_tokens", None))
-    explicitly_requested = explicit_enabled is True
-    if endpoint_default is not None and request.max_output_tokens < endpoint_default and not explicitly_requested:
-        enabled = False
-    upper_limit = _endpoint_max_output_tokens_upper_limit(endpoint) or request.max_output_tokens
-    upper_limit = max(int(request.max_output_tokens), int(upper_limit))
-    raw_attempts = nested.get(
-        "max_continuations",
-        capabilities.get("max_output_recovery_attempts", default_attempts),
-    )
-    try:
-        max_continuations = max(0, int(raw_attempts))
-    except (TypeError, ValueError):
-        max_continuations = max(0, int(default_attempts))
-    return {
-        "enabled": enabled and (upper_limit > request.max_output_tokens or max_continuations > 0),
-        "upper_limit": upper_limit,
-        "max_continuations": max_continuations,
-    }
-
-
-def _positive_int_or_none(value: Any) -> int | None:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _invocation_finish_reason(result: Any) -> str:
-    if isinstance(result, CanonicalLLMOutcome):
-        return str(result.finish_reason or "").strip().lower()
-    if isinstance(result, list):
-        for event in reversed(result):
-            reason = str(getattr(event, "finish_reason", "") or "").strip().lower()
-            if reason:
-                return reason
-    return ""
-
-
-def _is_output_limited_result(result: Any) -> bool:
-    return _invocation_finish_reason(result) in _OUTPUT_LIMIT_FINISH_REASONS
-
-
-def _invocation_text(result: Any) -> str:
-    if isinstance(result, CanonicalLLMOutcome):
-        return str(result.text or "")
-    if isinstance(result, list):
-        return "".join(
-            str(event.text or "")
-            for event in result
-            if event.event_kind == LLMStreamEventKind.TEXT_DELTA
-        )
-    return ""
-
-
-def _invocation_reasoning_text(result: Any) -> str:
-    if isinstance(result, CanonicalLLMOutcome):
-        return str(result.reasoning_text or "")
-    if isinstance(result, list):
-        return "".join(
-            str(event.reasoning_text or "")
-            for event in result
-            if event.event_kind == LLMStreamEventKind.REASONING_DELTA
-        )
-    return ""
-
-
-def _with_output_recovery_metadata(
-    request: CanonicalLLMRequest,
-    *,
-    stage: str,
-    attempt: int,
-) -> CanonicalLLMRequest:
-    return replace(
-        request,
-        metadata={
-            **dict(request.metadata),
-            "max_output_recovery_stage": stage,
-            "max_output_recovery_attempt": int(attempt),
-        },
-    )
-
-
-def _build_output_continuation_request(
-    request: CanonicalLLMRequest,
-    truncated_result: Any,
-    *,
-    max_output_tokens: int,
-    attempt: int,
-) -> CanonicalLLMRequest:
-    messages = [dict(message) for message in request.messages]
-    metadata = dict(request.metadata)
-    metadata.pop("prompt_budget_snapshot", None)
-    partial_text = _invocation_text(truncated_result)
-    if partial_text:
-        messages.append({"role": "assistant", "content": partial_text})
-    messages.append({"role": "user", "content": _OUTPUT_LIMIT_CONTINUATION_PROMPT})
-    return _with_output_recovery_metadata(
-        replace(
-            request,
-            messages=messages,
-            max_output_tokens=int(max_output_tokens),
-            metadata=metadata,
-        ),
-        stage="continue",
-        attempt=attempt,
-    )
-
-
-def _strip_truncated_tool_calls(result: Any) -> Any:
-    if isinstance(result, CanonicalLLMOutcome):
-        return replace(result, tool_calls=[])
-    if isinstance(result, list):
-        return [event for event in result if event.event_kind != LLMStreamEventKind.TOOL_CALL]
-    return result
-
-
-def _merge_output_recovery_results(partials: list[Any], final_result: Any) -> Any:
-    partial_usage = sum(
-        (_invocation_usage(item) for item in partials),
-        start=LLMUsage(),
-    )
-    if isinstance(final_result, CanonicalLLMOutcome):
-        merged_usage = partial_usage + _invocation_usage(final_result)
-        return replace(
-            final_result,
-            text="".join(_invocation_text(item) for item in partials) + str(final_result.text or ""),
-            reasoning_text="\n".join(
-                part
-                for part in [*(_invocation_reasoning_text(item) for item in partials), str(final_result.reasoning_text or "")]
-                if part
-            ),
-            **_usage_fields(merged_usage),
-        )
-    if isinstance(final_result, list):
-        prefix: list[NormalizedLLMStreamEvent] = []
-        for partial in partials:
-            if not isinstance(partial, list):
-                text = _invocation_text(partial)
-                reasoning = _invocation_reasoning_text(partial)
-                if reasoning:
-                    prefix.append(
-                        NormalizedLLMStreamEvent(
-                            event_kind=LLMStreamEventKind.REASONING_DELTA,
-                            reasoning_text=reasoning,
-                        )
-                    )
-                if text:
-                    prefix.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=text))
-                continue
-            prefix.extend(
-                event
-                for event in partial
-                if event.event_kind in {LLMStreamEventKind.TEXT_DELTA, LLMStreamEventKind.REASONING_DELTA}
-            )
-        return [
-            *prefix,
-            *_add_usage_to_invocation_result(
-                final_result,
-                partial_usage,
-            ),
-        ]
-    return final_result
-
-
-def _merge_exhausted_output_recovery_results(partials: list[Any]) -> Any:
-    if not partials:
-        return CanonicalLLMOutcome(text="", finish_reason="length")
-    final_result = _strip_truncated_tool_calls(partials[-1])
-    return _merge_output_recovery_results(partials[:-1], final_result)
-
-
-def _invocation_usage(result: Any) -> LLMUsage:
-    if isinstance(result, CanonicalLLMOutcome):
-        input_tokens = max(0, int(result.input_tokens or 0))
-        uncached_input_tokens = max(0, int(result.uncached_input_tokens or 0))
-        cached_input_tokens = max(0, int(result.cached_input_tokens or 0))
-        cache_write_input_tokens = max(0, int(result.cache_write_input_tokens or 0))
-        if input_tokens and not (
-            uncached_input_tokens or cached_input_tokens or cache_write_input_tokens
-        ):
-            uncached_input_tokens = input_tokens
-        return LLMUsage(
-            input_tokens=input_tokens,
-            uncached_input_tokens=uncached_input_tokens,
-            cached_input_tokens=cached_input_tokens,
-            cache_write_input_tokens=cache_write_input_tokens,
-            output_tokens=max(0, int(result.output_tokens or 0)),
-            reasoning_tokens=max(0, int(result.reasoning_tokens or 0)),
-            cost=max(0.0, float(result.cost or 0.0)),
-            reported=bool(result.usage_reported),
-        )
-    if isinstance(result, list):
-        return sum(
-            (
-                _stream_event_usage(event)
-                for event in result
-            ),
-            start=LLMUsage(),
-        )
-    return LLMUsage()
-
-
-def _stream_event_usage(event: Any) -> LLMUsage:
-    input_tokens = max(0, int(getattr(event, "input_tokens", 0) or 0))
-    uncached_input_tokens = max(
-        0,
-        int(getattr(event, "uncached_input_tokens", 0) or 0),
-    )
-    cached_input_tokens = max(
-        0,
-        int(getattr(event, "cached_input_tokens", 0) or 0),
-    )
-    cache_write_input_tokens = max(
-        0,
-        int(getattr(event, "cache_write_input_tokens", 0) or 0),
-    )
-    if input_tokens and not (
-        uncached_input_tokens or cached_input_tokens or cache_write_input_tokens
-    ):
-        uncached_input_tokens = input_tokens
-    return LLMUsage(
-        input_tokens=input_tokens,
-        uncached_input_tokens=uncached_input_tokens,
-        cached_input_tokens=cached_input_tokens,
-        cache_write_input_tokens=cache_write_input_tokens,
-        output_tokens=max(0, int(getattr(event, "output_tokens", 0) or 0)),
-        reasoning_tokens=max(
-            0,
-            int(getattr(event, "reasoning_tokens", 0) or 0),
-        ),
-        cost=max(0.0, float(getattr(event, "cost", 0.0) or 0.0)),
-        reported=bool(getattr(event, "usage_reported", False)),
-    )
-
-
-def _invocation_provider_response_count(result: Any) -> int:
-    if isinstance(result, CanonicalLLMOutcome):
-        return max(0, int(result.provider_response_count or 0))
-    if isinstance(result, list):
-        return sum(
-            max(0, int(getattr(event, "provider_response_count", 0) or 0))
-            for event in result
-        )
-    return 0
-
-
-def _add_usage_to_invocation_result(
-    result: Any,
-    extra: LLMUsage,
-) -> Any:
-    if extra == LLMUsage():
-        return result
-    if isinstance(result, CanonicalLLMOutcome):
-        merged = _invocation_usage(result) + extra
-        return replace(
-            result,
-            **_usage_fields(merged),
-        )
-    if isinstance(result, list):
-        events = list(result)
-        for index in range(len(events) - 1, -1, -1):
-            event = events[index]
-            if event.event_kind != LLMStreamEventKind.DONE:
-                continue
-            merged = _invocation_usage([event]) + extra
-            events[index] = replace(
-                event,
-                **_usage_fields(merged),
-            )
-            return events
-        events.append(
-            NormalizedLLMStreamEvent(
-                event_kind=LLMStreamEventKind.DONE,
-                **_usage_fields(extra),
-            )
-        )
-        return events
-    return result
-
-
-def _with_provider_response_count(result: Any, count: int) -> Any:
-    normalized_count = max(0, int(count or 0))
-    if isinstance(result, CanonicalLLMOutcome):
-        return replace(result, provider_response_count=normalized_count)
-    if isinstance(result, list):
-        events = list(result)
-        for index in range(len(events) - 1, -1, -1):
-            event = events[index]
-            if event.event_kind != LLMStreamEventKind.DONE:
-                continue
-            events[index] = replace(event, provider_response_count=normalized_count)
-            return events
-    return result
-
-
-def _is_empty_successful_llm_outcome(outcome: CanonicalLLMOutcome) -> bool:
-    finish_reason = str(outcome.finish_reason or "").strip()
-    if finish_reason in {LLMFinishReason.ERROR, LLMFinishReason.COMPACT_REQUIRED} or finish_reason.lower() in _OUTPUT_LIMIT_FINISH_REASONS:
-        return False
-    return not str(outcome.text or "").strip() and not list(outcome.tool_calls or [])
-
-
-def _is_empty_successful_stream_result(events: list[NormalizedLLMStreamEvent]) -> bool:
-    saw_terminal_error = False
-    saw_payload = False
-    for event in events:
-        if str(event.finish_reason or "").strip().lower() in _OUTPUT_LIMIT_FINISH_REASONS:
-            saw_terminal_error = True
-        if event.event_kind in {LLMStreamEventKind.ERROR, LLMStreamEventKind.COMPACT_REQUIRED}:
-            saw_terminal_error = True
-        elif event.event_kind == LLMStreamEventKind.TEXT_DELTA and str(event.text or "").strip():
-            saw_payload = True
-        elif event.event_kind == LLMStreamEventKind.TOOL_CALL and event.tool_call is not None:
-            saw_payload = True
-    return not saw_terminal_error and not saw_payload
-
-
-@dataclass
-class OpenAIResponsesEndpointInvoker:
-    credentials: LLMCredentialResolver = field(default_factory=LLMCredentialResolver)
-    artifact_manager: Any = None
-    runtime_root: str | Path | None = None
-    provider_registry: LLMProviderRegistry = field(default_factory=build_runtime_provider_registry)
-    message_hooks: tuple[str, ...] = ()
-    _renderer: OpenAIChatEndpointInvoker = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self._renderer = OpenAIChatEndpointInvoker(
-            credentials=self.credentials,
-            artifact_manager=self.artifact_manager,
-            runtime_root=self.runtime_root,
-            provider_registry=self.provider_registry,
-            message_hooks=self.message_hooks,
-        )
-
-    @staticmethod
-    def supports_endpoint(endpoint: LLMEndpointModel) -> bool:
-        capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
-        provider = str(getattr(endpoint, "provider", "") or "").strip().lower()
-        adapter = str(capabilities.get("adapter") or capabilities.get("llm_adapter") or "").strip().lower()
-        return bool(
-            provider in {"openai", "codex_bridge"}
-            or adapter in {"openai_responses", "responses", "codex_bridge"}
-            or capabilities.get("openai_responses")
-            or capabilities.get("responses_api")
-            or capabilities.get("codex_bridge")
-        )
-
-    def refresh_credentials(self) -> bool:
-        return self._renderer.refresh_credentials()
-
-    def refresh_provider_registry(self) -> bool:
-        return self._renderer.refresh_provider_registry()
-
-    def invoke(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        try:
-            import openai  # type: ignore
-        except Exception as exc:
-            raise LLMEndpointInvocationError("openai SDK is not installed in the current runtime") from exc
-
-        request_shape, kwargs, tool_name_aliases = self._renderer._build_openai_request_kwargs(endpoint, request)
-        if request_shape != OPENAI_RESPONSES_SHAPE:
-            raise LLMEndpointInvocationError(f"endpoint {endpoint.endpoint_id} did not render a Responses request")
-        client_kwargs, request_kwargs = _split_openai_responses_sdk_kwargs(kwargs)
-        try:
-            client = openai.OpenAI(**client_kwargs)
-            response = _run_with_wall_timeout(
-                lambda: client.responses.create(**request_kwargs),
-                timeout_seconds=_timeout_from_openai_kwargs(kwargs),
-                description=f"openai responses invocation for {endpoint.endpoint_id}",
-            )
-        except Exception as exc:
-            raise LLMEndpointInvocationError(f"openai responses invocation failed for {endpoint.endpoint_id}: {exc}") from exc
-        return self._renderer._parse_openai_responses_response(response, tool_name_aliases=tool_name_aliases)
-
-    def invoke_stream(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> Iterable[NormalizedLLMStreamEvent]:
-        yield from _stream_events_from_outcome(self.invoke(endpoint, request))
-
-
-@dataclass
-class AnthropicMessagesEndpointInvoker:
-    credentials: LLMCredentialResolver = field(default_factory=LLMCredentialResolver)
-    artifact_manager: Any = None
-    last_payload_summary: dict[str, Any] = field(default_factory=dict, init=False)
-
-    @staticmethod
-    def supports_endpoint(endpoint: LLMEndpointModel) -> bool:
-        provider = str(getattr(endpoint, "provider", "") or "").strip().lower()
-        api_mode = str(getattr(endpoint, "api_mode", "") or "").strip().lower()
-        return bool(provider == "anthropic" or api_mode == "anthropic_messages")
-
-    def refresh_credentials(self) -> bool:
-        refresh = getattr(self.credentials, "refresh", None)
-        if callable(refresh):
-            refresh()
-            return True
-        clear_cache = getattr(self.credentials, "clear_cache", None)
-        if callable(clear_cache):
-            clear_cache()
-            return True
-        return False
-
-    def invoke(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        try:
-            import anthropic  # type: ignore
-        except Exception as exc:
-            raise LLMEndpointInvocationError("anthropic SDK is not installed in the current runtime") from exc
-
-        client_kwargs, request_kwargs, tool_name_aliases = self._build_messages_kwargs(endpoint, request)
-        try:
-            client = anthropic.Anthropic(**client_kwargs)
-            response = _run_with_wall_timeout(
-                lambda: client.messages.create(**request_kwargs),
-                timeout_seconds=_coerce_timeout_seconds(client_kwargs.get("timeout"), default=120.0),
-                description=f"anthropic messages invocation for {endpoint.endpoint_id}",
-            )
-        except Exception as exc:
-            raise LLMEndpointInvocationError(f"anthropic messages invocation failed for {endpoint.endpoint_id}: {exc}") from exc
-        return _parse_anthropic_messages_response(response, tool_name_aliases=tool_name_aliases)
-
-    def invoke_stream(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> Iterable[NormalizedLLMStreamEvent]:
-        yield from _stream_events_from_outcome(self.invoke(endpoint, request))
-
-    def _build_messages_kwargs(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
-        tool_name_aliases = _build_tool_name_aliases(request.tools)
-        image_url_format = _image_url_format(endpoint)
-        messages = _coerce_messages_for_openai_chat(
-            list(request.messages),
-            tool_name_aliases=tool_name_aliases,
-            artifact_manager=self.artifact_manager,
-            supports_vision=bool(endpoint.supports_vision),
-            image_url_format=image_url_format,
-        )
-        messages = self._transform_messages(endpoint, request, messages)
-        self.last_payload_summary = _summarize_provider_payload(endpoint, messages, image_url_format=image_url_format)
-        system, anthropic_messages = chat_messages_to_anthropic_messages(messages)
-        timeout = _coerce_timeout_seconds(request.metadata.get("timeout_seconds"), default=120.0)
-        client_kwargs: dict[str, Any] = {
-            "timeout": timeout,
-            "max_retries": 0,
-        }
-        api_key = self.credentials.resolve_api_key(endpoint)
-        if api_key:
-            client_kwargs["api_key"] = api_key
-        if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
-            client_kwargs["base_url"] = _openai_api_base(str(endpoint.base_url))
-        request_kwargs: dict[str, Any] = {
-            "model": _strip_model_provider_prefix(str(request.model_hint or endpoint.model_id or ""), {"anthropic"}),
-            "messages": anthropic_messages,
-            "max_tokens": request.max_output_tokens,
-        }
-        if system:
-            request_kwargs["system"] = system
-        if request.temperature is not None:
-            request_kwargs["temperature"] = request.temperature
-        tools = chat_tools_to_anthropic_tools(request.tools)
-        if tools:
-            request_kwargs["tools"] = tools
-        thinking = think_level_to_anthropic_thinking(
-            request.metadata.get("think_level"),
-            request.max_output_tokens,
-            thinking_budget_tokens=request.thinking_budget_tokens,
-        )
-        if thinking is not None:
-            request_kwargs["thinking"] = thinking
-        return client_kwargs, request_kwargs, tool_name_aliases
-
-    def _transform_messages(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-        messages: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        return messages
-
-
-@dataclass
-class ZaiAnthropicMessagesEndpointInvoker(AnthropicMessagesEndpointInvoker):
-    message_hooks: tuple[str, ...] = ()
-
-    @staticmethod
-    def supports_endpoint(endpoint: LLMEndpointModel) -> bool:
-        api_mode = str(getattr(endpoint, "api_mode", "") or "").strip().lower()
-        return bool(api_mode == "anthropic_messages" and is_zai_glm_endpoint(endpoint))
-
-    def _transform_messages(
-        self,
-        endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-        messages: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        return apply_llm_message_hooks(endpoint, request, messages, hooks=self.message_hooks)
-
-
-def _stream_events_from_outcome(outcome: CanonicalLLMOutcome) -> Iterable[NormalizedLLMStreamEvent]:
-    provider_specific_fields = dict(getattr(outcome, "provider_specific_fields", {}) or {})
-    if outcome.reasoning_text or provider_specific_fields:
-        yield NormalizedLLMStreamEvent(
-            event_kind=LLMStreamEventKind.REASONING_DELTA,
-            reasoning_text=outcome.reasoning_text,
-            provider_specific_fields=provider_specific_fields,
-        )
-    if outcome.text:
-        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=outcome.text)
-    for tool_call in outcome.tool_calls:
-        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call)
-    if outcome.tool_calls:
-        yield NormalizedLLMStreamEvent(
-            event_kind=LLMStreamEventKind.DONE,
-            finish_reason=LLMFinishReason.TOOL_CALLS,
-            **_usage_fields(_invocation_usage(outcome)),
-            provider_response_count=outcome.provider_response_count,
-        )
-        return
-    yield NormalizedLLMStreamEvent(
-        event_kind=LLMStreamEventKind.DONE,
-        finish_reason=outcome.finish_reason,
-        **_usage_fields(_invocation_usage(outcome)),
-        provider_response_count=outcome.provider_response_count,
-    )
-
-
-def _split_openai_responses_sdk_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    request_kwargs = dict(kwargs)
-    api_key = request_kwargs.pop("api_key", None)
-    api_base = request_kwargs.pop("api_base", None)
-    timeout = request_kwargs.pop("timeout", None)
-    max_retries = request_kwargs.pop("max_retries", 0)
-    request_kwargs.pop("request_timeout", None)
-    request_kwargs.pop("force_timeout", None)
-    request_kwargs["model"] = _strip_model_provider_prefix(
-        str(request_kwargs.get("model") or ""),
-        {"openai", "hosted_vllm", "lm_studio", "llamafile"},
-    )
-    client_kwargs: dict[str, Any] = {"max_retries": int(max_retries or 0)}
-    if api_key:
-        client_kwargs["api_key"] = api_key
-    if api_base:
-        client_kwargs["base_url"] = api_base
-    if timeout is not None:
-        client_kwargs["timeout"] = timeout
-    return client_kwargs, request_kwargs
-
-
-def _split_openai_chat_sdk_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    request_kwargs = dict(kwargs)
-    api_key = request_kwargs.pop("api_key", None)
-    api_base = request_kwargs.pop("api_base", None)
-    timeout = request_kwargs.pop("timeout", None)
-    max_retries = request_kwargs.pop("max_retries", 0)
-    request_kwargs.pop("request_timeout", None)
-    request_kwargs.pop("force_timeout", None)
-    thinking = request_kwargs.pop("thinking", None)
-    extra_body = dict(request_kwargs.pop("extra_body", {}) or {})
-    if thinking is not None:
-        extra_body["thinking"] = thinking
-    if extra_body:
-        request_kwargs["extra_body"] = extra_body
-    client_kwargs: dict[str, Any] = {"max_retries": int(max_retries or 0)}
-    if api_key:
-        client_kwargs["api_key"] = api_key
-    if api_base:
-        client_kwargs["base_url"] = api_base
-    if timeout is not None:
-        client_kwargs["timeout"] = timeout
-    return client_kwargs, request_kwargs
-
-
-def _strip_model_provider_prefix(model: str, providers: set[str]) -> str:
-    text = str(model or "").strip()
-    if "/" not in text:
-        return text
-    provider, name = text.split("/", 1)
-    if provider.strip().lower() in providers:
-        return name
-    return text
-
-
-def _parse_anthropic_messages_response(
-    response: Any,
-    *,
-    tool_name_aliases: dict[str, str] | None = None,
-) -> CanonicalLLMOutcome:
-    payload = response.model_dump() if hasattr(response, "model_dump") else response.to_dict() if hasattr(response, "to_dict") else response
-    content_blocks = list((payload or {}).get("content") or []) if isinstance(payload, dict) else []
-    text_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    thinking_blocks: list[dict[str, Any]] = []
-    tool_calls: list[CanonicalToolCall] = []
-    for block in content_blocks:
-        if not isinstance(block, dict):
-            continue
-        block_type = str(block.get("type") or "").strip()
-        if block_type == "text":
-            text = str(block.get("text") or "")
-            if text:
-                text_parts.append(text)
-            continue
-        if block_type == "thinking":
-            thinking_blocks.append(dict(block))
-            text = str(block.get("thinking") or block.get("text") or "")
-            if text:
-                reasoning_parts.append(text)
-            continue
-        if block_type == "redacted_thinking":
-            thinking_blocks.append(dict(block))
-            continue
-        if block_type == "tool_use":
-            name = _canonical_tool_name(str(block.get("name") or ""), tool_name_aliases)
-            if name:
-                tool_calls.append(
-                    CanonicalToolCall(
-                        name=name,
-                        args=_coerce_tool_args(block.get("input")),
-                        call_id=str(block.get("id") or "").strip() or None,
-                    )
-                )
-    stop_reason = str((payload or {}).get("stop_reason") or "") if isinstance(payload, dict) else ""
-    finish_reason = LLMFinishReason.TOOL_CALLS if tool_calls else _anthropic_finish_reason(stop_reason)
-    usage = _response_usage(payload)
-    outcome = CanonicalLLMOutcome(
-        text="".join(text_parts),
-        reasoning_text="\n".join(reasoning_parts),
-        provider_specific_fields=_anthropic_provider_specific_fields(thinking_blocks, reasoning_parts),
-        tool_calls=tool_calls,
-        finish_reason=finish_reason,
-        **_usage_fields(usage),
-    )
-    _ensure_llm_invocation_result_has_payload(outcome)
-    return outcome
-
-
-def _anthropic_finish_reason(stop_reason: str) -> str:
-    if stop_reason in {"end_turn", "stop_sequence"}:
-        return LLMFinishReason.STOP
-    if stop_reason == "tool_use":
-        return LLMFinishReason.TOOL_CALLS
-    return stop_reason or LLMFinishReason.STOP
-
-
-def _anthropic_provider_specific_fields(
-    thinking_blocks: list[dict[str, Any]],
-    reasoning_parts: list[str],
-) -> dict[str, Any]:
-    fields: dict[str, Any] = {}
-    if thinking_blocks:
-        fields["anthropic_thinking_blocks"] = [dict(block) for block in thinking_blocks]
-    reasoning_content = "\n".join(reasoning_parts)
-    if reasoning_content:
-        fields["reasoning_content"] = reasoning_content
-    return fields
-
-
-@dataclass
-class CodexCliEndpointInvoker:
-    """Native Codex CLI invoker that returns Pal canonical outcomes."""
-
-    bridge: CodexCliBridge | None = None
-    artifact_manager: Any = None
-    max_concurrency: int = DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY
-    _semaphore: threading.BoundedSemaphore = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        if self.bridge is None:
-            self.bridge = CodexCliBridge()
-        self._semaphore = threading.BoundedSemaphore(max(1, int(self.max_concurrency)))
-
-    @staticmethod
-    def supports_endpoint(endpoint: LLMEndpointModel) -> bool:
-        capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
-        provider = str(getattr(endpoint, "provider", "") or "").strip().lower()
-        adapter = str(capabilities.get("adapter") or capabilities.get("llm_adapter") or "").strip().lower()
-        base_url = str(getattr(endpoint, "base_url", "") or "").strip().lower()
-        return bool(
-            provider in {"codex", "codex_cli"}
-            or adapter in {"codex", "codex_cli", "codex_native"}
-            or capabilities.get("codex_cli")
-            or capabilities.get("official_codex_cli")
-            or capabilities.get("codex_native")
-            or base_url.startswith("codex://")
-        )
-
-    def invoke(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        model, developer_instructions, input_items, dynamic_tools, effort = _codex_cli_request_parts(
-            endpoint,
-            request,
-            artifact_manager=self.artifact_manager,
-        )
-        timeout_seconds = _coerce_timeout_seconds(request.metadata.get("timeout_seconds"), default=120.0)
-        bridge = self._require_bridge()
-        with self._semaphore:
-            try:
-                completion = bridge.invoke_turn(
-                    model=model,
-                    developer_instructions=developer_instructions,
-                    input_items=input_items,
-                    dynamic_tools=dynamic_tools,
-                    effort=effort,
-                    timeout_seconds=timeout_seconds,
-                    messages=list(request.messages or []),
-                )
-            except CodexBridgeError as exc:
-                if not _should_retry_codex_final_answer_without_tools(exc, request, dynamic_tools):
-                    raise
-                completion = bridge.invoke_turn(
-                    model=model,
-                    developer_instructions=_codex_final_answer_instructions(developer_instructions),
-                    input_items=input_items,
-                    dynamic_tools=[],
-                    effort=effort,
-                    timeout_seconds=timeout_seconds,
-                    messages=list(request.messages or []),
-                )
-            if _codex_completion_repeats_prior_tool_call(completion, request):
-                completion = bridge.invoke_turn(
-                    model=model,
-                    developer_instructions=_codex_final_answer_instructions(developer_instructions),
-                    input_items=input_items,
-                    dynamic_tools=[],
-                    effort=effort,
-                    timeout_seconds=timeout_seconds,
-                    messages=list(request.messages or []),
-                )
-        return _codex_completion_to_outcome(completion, endpoint=endpoint)
-
-    def invoke_stream(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> Iterable[NormalizedLLMStreamEvent]:
-        outcome = self.invoke(endpoint, request)
-        for tool_call in outcome.tool_calls:
-            yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call)
-        if outcome.tool_calls:
-            yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.TOOL_CALLS)
-            return
-        if outcome.text:
-            yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=outcome.text)
-        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=outcome.finish_reason)
-
-    def _require_bridge(self) -> CodexCliBridge:
-        if self.bridge is None:
-            self.bridge = CodexCliBridge()
-        return self.bridge
-
-
-@dataclass
-class RoutingLLMEndpointInvoker:
-    """Route native endpoint protocols to their concrete SDK invokers."""
-
-    openai_chat_invoker: OpenAIChatEndpointInvoker = field(default_factory=OpenAIChatEndpointInvoker)
-    codex_invoker: CodexCliEndpointInvoker = field(default_factory=CodexCliEndpointInvoker)
-    openai_invoker: OpenAIResponsesEndpointInvoker = field(default_factory=OpenAIResponsesEndpointInvoker)
-    zai_anthropic_invoker: ZaiAnthropicMessagesEndpointInvoker = field(default_factory=ZaiAnthropicMessagesEndpointInvoker)
-    anthropic_invoker: AnthropicMessagesEndpointInvoker = field(default_factory=AnthropicMessagesEndpointInvoker)
-    last_payload_summary: dict[str, Any] = field(default_factory=dict, init=False)
-
-    @property
-    def provider_registry(self) -> LLMProviderRegistry:
-        return self.openai_chat_invoker.provider_registry
-
-    def refresh_credentials(self) -> bool:
-        refreshed = bool(self.openai_chat_invoker.refresh_credentials())
-        refreshed = bool(self.openai_invoker.refresh_credentials()) or refreshed
-        refreshed = bool(self.zai_anthropic_invoker.refresh_credentials()) or refreshed
-        refreshed = bool(self.anthropic_invoker.refresh_credentials()) or refreshed
-        return refreshed
-
-    def refresh_provider_registry(self) -> bool:
-        refreshed = bool(self.openai_chat_invoker.refresh_provider_registry())
-        refreshed = bool(self.openai_invoker.refresh_provider_registry()) or refreshed
-        return refreshed
-
-    def invoke(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        selected = self._select(endpoint)
-        self.last_payload_summary = {}
-        try:
-            return selected.invoke(endpoint, request)
-        finally:
-            summary = getattr(selected, "last_payload_summary", None)
-            self.last_payload_summary = dict(summary or {})
-
-    def invoke_stream(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> Iterable[NormalizedLLMStreamEvent]:
-        selected = self._select(endpoint)
-        self.last_payload_summary = {}
-        try:
-            yield from selected.invoke_stream(endpoint, request)
-        finally:
-            summary = getattr(selected, "last_payload_summary", None)
-            self.last_payload_summary = dict(summary or {})
-
-    def _select(self, endpoint: LLMEndpointModel) -> LLMEndpointInvokerPort:
-        if self.codex_invoker.supports_endpoint(endpoint):
-            return self.codex_invoker
-        if self.openai_invoker.supports_endpoint(endpoint):
-            return self.openai_invoker
-        if self.zai_anthropic_invoker.supports_endpoint(endpoint):
-            return self.zai_anthropic_invoker
-        if self.anthropic_invoker.supports_endpoint(endpoint):
-            return self.anthropic_invoker
-        return self.openai_chat_invoker
 
 
 def build_default_endpoint_invoker(
     *,
     credentials: LLMCredentialResolver | None = None,
-    artifact_manager: Any = None,
     runtime_root: str | Path | None = None,
-    message_hooks: tuple[str, ...] = (),
-) -> RoutingLLMEndpointInvoker:
+) -> ShapeEndpointInvoker:
+    _ = runtime_root
     resolver = credentials or LLMCredentialResolver()
-    provider_registry = build_runtime_provider_registry()
-    return RoutingLLMEndpointInvoker(
-        openai_chat_invoker=OpenAIChatEndpointInvoker(
-            credentials=resolver,
-            artifact_manager=artifact_manager,
-            runtime_root=runtime_root,
-            provider_registry=provider_registry,
-            message_hooks=message_hooks,
-        ),
-        openai_invoker=OpenAIResponsesEndpointInvoker(
-            credentials=resolver,
-            artifact_manager=artifact_manager,
-            runtime_root=runtime_root,
-            provider_registry=provider_registry,
-            message_hooks=message_hooks,
-        ),
-        zai_anthropic_invoker=ZaiAnthropicMessagesEndpointInvoker(
-            credentials=resolver,
-            artifact_manager=artifact_manager,
-            message_hooks=message_hooks,
-        ),
-        anthropic_invoker=AnthropicMessagesEndpointInvoker(
-            credentials=resolver,
-            artifact_manager=artifact_manager,
-        ),
-        codex_invoker=CodexCliEndpointInvoker(artifact_manager=artifact_manager),
+    return ShapeEndpointInvoker(
+        credential_resolver=resolver.resolve_api_key,
     )
-
-
-def _codex_cli_request_parts(
-    endpoint: LLMEndpointModel,
-    request: CanonicalLLMRequest,
-    *,
-    artifact_manager: Any = None,
-) -> tuple[str, str, list[dict[str, Any]], list[dict[str, Any]], str | None]:
-    model = _strip_openai_prefix(str(request.model_hint or endpoint.model_id or ""))
-    developer_instructions, input_items = _messages_to_codex_input(list(request.messages or []), artifact_manager=artifact_manager)
-    dynamic_tools = _openai_tools_to_dynamic_tools(request.tools)
-    effort = _think_level_to_completion_reasoning_effort(request.metadata.get("think_level"))
-    return model, developer_instructions, input_items, dynamic_tools, effort
-
-
-def _should_retry_codex_final_answer_without_tools(
-    exc: CodexBridgeError,
-    request: CanonicalLLMRequest,
-    dynamic_tools: list[dict[str, Any]],
-) -> bool:
-    if not dynamic_tools:
-        return False
-    if "timed out" not in str(exc).lower():
-        return False
-    return any(str(message.get("role") or "").strip() == "tool" for message in list(request.messages or []))
-
-
-def _codex_final_answer_instructions(developer_instructions: str) -> str:
-    return "\n\n".join(
-        part
-        for part in (
-            str(developer_instructions or "").strip(),
-            (
-                "Pal has already executed the available tools and included their results in the conversation. "
-                "Produce the final user-facing answer now. Do not request another tool."
-            ),
-        )
-        if part
-    )
-
-
-def _codex_completion_repeats_prior_tool_call(
-    completion: CodexCompletion,
-    request: CanonicalLLMRequest,
-) -> bool:
-    if completion.tool_call is None:
-        return False
-    if not any(str(message.get("role") or "").strip() == "tool" for message in list(request.messages or [])):
-        return False
-    current_name = str(completion.tool_call.name or "").strip()
-    current_args = _coerce_tool_args(completion.tool_call.arguments)
-    if not current_name:
-        return False
-    for message in list(request.messages or []):
-        if str(message.get("role") or "").strip() != "assistant":
-            continue
-        for prior_call in list(message.get("tool_calls") or []):
-            function = (prior_call or {}).get("function") or {}
-            prior_name = str(function.get("name") or "").strip()
-            if prior_name != current_name:
-                continue
-            if _coerce_tool_args(function.get("arguments")) == current_args:
-                return True
-    return False
-
-
-def _codex_completion_to_outcome(completion: CodexCompletion, *, endpoint: LLMEndpointModel) -> CanonicalLLMOutcome:
-    if completion.tool_call is not None:
-        return CanonicalLLMOutcome(
-            text="",
-            reasoning_text="",
-            tool_calls=[
-                CanonicalToolCall(
-                    name=str(completion.tool_call.name or "").strip(),
-                    args=_coerce_tool_args(completion.tool_call.arguments),
-                    call_id=str(completion.tool_call.call_id or "").strip() or None,
-                )
-            ],
-            finish_reason=LLMFinishReason.TOOL_CALLS,
-            preferred_endpoint_id=endpoint.endpoint_id,
-            preferred_model_id=endpoint.model_id,
-        )
-    return CanonicalLLMOutcome(
-        text=str(completion.text or "").strip(),
-        reasoning_text="",
-        tool_calls=[],
-        finish_reason=LLMFinishReason.STOP,
-        preferred_endpoint_id=endpoint.endpoint_id,
-        preferred_model_id=endpoint.model_id,
-    )
-
-
-def _coerce_tool_args(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return dict(raw)
-    if isinstance(raw, str):
-        try:
-            loaded = json.loads(raw)
-        except Exception:
-            loaded = {}
-        return dict(loaded or {}) if isinstance(loaded, dict) else {}
-    return {}
 
 
 @dataclass
@@ -1844,190 +197,462 @@ class LLMRuntime(LLMRuntimePort):
     settings_repository: RuntimeSettingRepository
     endpoint_invoker: LLMEndpointInvokerPort | None = None
     config: Any = None
-    safety_margin_tokens: int = 16384
+    safety_margin_tokens: int = 16_384
     endpoint_retry_attempts: int = 3
-    last_request: CanonicalLLMRequest | None = None
+    last_request: LLMRequestIR | None = None
     last_endpoint_id: str | None = None
     last_model_id: str | None = None
     think_level: str = ""
     active_endpoint_id: str | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
     usage_ledger: LLMUsageLedger = field(default_factory=LLMUsageLedger, repr=False)
+    model_hooks: ModelHookRegistry = field(init=False)
 
     def __post_init__(self) -> None:
+        runtime_root = Path(getattr(self.config, "runtime_root", None) or ".")
+        self.model_hooks = ModelHookRegistry.load(runtime_root)
         if self.endpoint_invoker is None:
-            self.endpoint_invoker = build_default_endpoint_invoker()
-        _purge_legacy_llm_failure_audits(self.config)
+            self.endpoint_invoker = build_default_endpoint_invoker(runtime_root=runtime_root)
+        self.endpoint_retry_attempts = max(
+            1,
+            int(getattr(self.config, "llm_endpoint_retry_attempts", self.endpoint_retry_attempts) or 1),
+        )
         self.refresh_runtime_settings()
-        if self.config is not None:
-            self.endpoint_retry_attempts = self.config.llm_endpoint_retry_attempts
-
-    @property
-    def _retry_base_delay_ms(self) -> int:
-        return getattr(self.config, "llm_base_retry_delay_ms", _DEFAULT_BASE_RETRY_DELAY_MS) if self.config else _DEFAULT_BASE_RETRY_DELAY_MS
-
-    @property
-    def _retry_max_delay_ms(self) -> int:
-        return getattr(self.config, "llm_max_retry_delay_ms", _DEFAULT_MAX_RETRY_DELAY_MS) if self.config else _DEFAULT_MAX_RETRY_DELAY_MS
-
-    @property
-    def _retry_stale_settle_ms(self) -> int:
-        return getattr(self.config, "llm_stale_connection_settle_ms", _DEFAULT_STALE_CONNECTION_SETTLE_MS) if self.config else _DEFAULT_STALE_CONNECTION_SETTLE_MS
-
-    @property
-    def _default_request_timeout_seconds(self) -> float:
-        value = (
-            getattr(self.config, "llm_request_timeout_seconds", _DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS)
-            if self.config
-            else _DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS
-        )
-        return _coerce_timeout_seconds(value, default=_DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS)
-
-    @property
-    def _default_compaction_timeout_seconds(self) -> float:
-        value = (
-            getattr(self.config, "llm_compaction_timeout_seconds", _DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS)
-            if self.config
-            else _DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS
-        )
-        return _coerce_timeout_seconds(value, default=_DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS)
-
-    @property
-    def _max_output_recovery_attempts(self) -> int:
-        value = (
-            getattr(self.config, "llm_max_output_recovery_attempts", _DEFAULT_MAX_OUTPUT_RECOVERY_ATTEMPTS)
-            if self.config
-            else _DEFAULT_MAX_OUTPUT_RECOVERY_ATTEMPTS
-        )
-        try:
-            return max(0, int(value))
-        except (TypeError, ValueError):
-            return _DEFAULT_MAX_OUTPUT_RECOVERY_ATTEMPTS
-
-    def _timeout_seconds_for_metadata(self, metadata: dict[str, Any]) -> float:
-        explicit = metadata.get("timeout_seconds")
-        if explicit is not None:
-            return _coerce_timeout_seconds(explicit, default=self._default_request_timeout_seconds)
-        purpose = str(metadata.get("purpose") or "").strip().lower()
-        if "compaction" in purpose:
-            return self._default_compaction_timeout_seconds
-        return self._default_request_timeout_seconds
-
-    def _timeout_seconds_for_request(self, request: CanonicalLLMRequest) -> float:
-        return self._timeout_seconds_for_metadata(dict(request.metadata))
-
-    def refresh_runtime_settings(self) -> None:
-        configured_active = self.settings_repository.get_active_llm_endpoint_id()
-        endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
-        self.active_endpoint_id = configured_active if configured_active in endpoint_ids else None
-        endpoint = self.active_endpoint()
-        self.think_level = self._effective_think_level_for_endpoint(endpoint) or ""
 
     def active_endpoint(self) -> LLMEndpointModel | None:
         return self.endpoint_resolver.primary(preferred_endpoint_id=self.active_endpoint_id)
+
+    def refresh_runtime_settings(self) -> None:
+        previous = self.active_endpoint()
+        configured = self.settings_repository.get_active_llm_endpoint_id()
+        endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
+        self.active_endpoint_id = configured if configured in endpoint_ids else None
+        endpoint = self.active_endpoint()
+        self.think_level = self._effective_thinking_level(endpoint) or ""
+        if endpoint is not None and (
+            previous is None or previous.endpoint_id != endpoint.endpoint_id
+        ):
+            activate = getattr(self.endpoint_invoker, "activate_endpoint", None)
+            if callable(activate):
+                activate(endpoint.endpoint_id)
+
+    def refresh_llm_endpoints(self) -> dict[str, Any]:
+        before = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
+        self.endpoint_resolver.refresh()
+        runtime_root = Path(getattr(self.config, "runtime_root", None) or ".")
+        self.model_hooks = ModelHookRegistry.load(runtime_root)
+        refresh_credentials = getattr(
+            self.endpoint_invoker,
+            "refresh_credentials",
+            None,
+        )
+        credentials_refreshed = bool(
+            refresh_credentials()
+            if callable(refresh_credentials)
+            else False
+        )
+        self.refresh_runtime_settings()
+        after = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
+        primary = self.active_endpoint()
+        return {
+            "before_count": len(before),
+            "enabled_count": len(after),
+            "added_endpoint_ids": sorted(after - before),
+            "removed_endpoint_ids": sorted(before - after),
+            "configured_active_endpoint_id": self.settings_repository.get_active_llm_endpoint_id(),
+            "active_endpoint_id": self.active_endpoint_id,
+            "primary_endpoint_id": primary.endpoint_id if primary else None,
+            "primary_model_id": primary.model_id if primary else None,
+            "model_hook_count": len(self.model_hooks.hooks),
+            "credentials_refreshed": credentials_refreshed,
+        }
+
+    def set_active_endpoint(self, endpoint_id: str) -> str:
+        normalized = str(endpoint_id or "").strip()
+        if not any(endpoint.endpoint_id == normalized for endpoint in self.endpoint_resolver.endpoints):
+            raise ValueError(f"unknown enabled LLM endpoint: {normalized}")
+        self.settings_repository.set_active_llm_endpoint_id(normalized)
+        self.active_endpoint_id = normalized
+        self.think_level = self._effective_thinking_level(self.active_endpoint()) or ""
+        activate = getattr(self.endpoint_invoker, "activate_endpoint", None)
+        if callable(activate):
+            activate(normalized)
+        return normalized
+
+    def close(self) -> None:
+        close = getattr(self.endpoint_invoker, "close", None)
+        if callable(close):
+            close()
 
     def thinking_contract(self, endpoint_id: str | None = None) -> ThinkingContract | None:
         endpoint = self._endpoint_by_id(endpoint_id) if endpoint_id else self.active_endpoint()
         if endpoint is None:
             return None
-        return self._adapter_for_endpoint(endpoint).thinking_contract()
+        levels = self._thinking_levels(endpoint)
+        if not levels:
+            return None
+        return ThinkingContract(
+            choices=tuple(ThinkingChoice(level, level.replace("xhigh", "extra high").title()) for level in levels),
+            default_choice_id=str(endpoint.default_thinking_level),
+        )
 
     def thinking_status(self, endpoint_id: str | None = None) -> dict[str, Any]:
         endpoint = self._endpoint_by_id(endpoint_id) if endpoint_id else self.active_endpoint()
         if endpoint is None:
-            return {
-                "available": False,
-                "endpoint_id": None,
-                "model_id": None,
-                "current": None,
-                "choices": [],
-            }
-        contract = self._adapter_for_endpoint(endpoint).thinking_contract()
-        current = self._effective_think_level_for_endpoint(endpoint, contract=contract)
+            return {"available": False, "endpoint_id": None, "model_id": None, "current": None, "choices": []}
+        levels = self._thinking_levels(endpoint)
         return {
-            "available": contract is not None,
+            "available": bool(levels),
             "endpoint_id": endpoint.endpoint_id,
             "model_id": endpoint.model_id,
-            "current": current,
-            "choices": [
-                {"id": choice.choice_id, "label": choice.label}
-                for choice in (contract.choices if contract is not None else ())
-            ],
+            "current": self._effective_thinking_level(endpoint),
+            "choices": [{"id": level, "label": level.replace("xhigh", "extra high").title()} for level in levels],
         }
 
     def thinking_levels_snapshot(self) -> dict[str, str]:
-        snapshot: dict[str, str] = {}
-        for endpoint in self.endpoint_resolver.enabled():
-            level = self._effective_think_level_for_endpoint(endpoint)
-            if level:
-                snapshot[endpoint.endpoint_id] = level
-        return snapshot
+        return {
+            endpoint.endpoint_id: level
+            for endpoint in self.endpoint_resolver.enabled()
+            if (level := self._effective_thinking_level(endpoint)) is not None
+        }
 
     def set_think_level(self, value: str, *, endpoint_id: str | None = None) -> str:
         endpoint = self._endpoint_by_id(endpoint_id) if endpoint_id else self.active_endpoint()
         if endpoint is None:
             raise ValueError("no enabled LLM endpoint is available")
-        contract = self._adapter_for_endpoint(endpoint).thinking_contract()
-        if contract is None:
-            raise ValueError(f"endpoint {endpoint.endpoint_id} does not support configurable thinking")
-        resolved = contract.resolve(value)
-        if resolved is None:
-            valid = ", ".join(choice.choice_id for choice in contract.choices)
-            raise ValueError(f"invalid think level for {endpoint.endpoint_id}; available: {valid}")
-        self.settings_repository.set_think_level(endpoint.endpoint_id, resolved)
-        active_endpoint = self.active_endpoint()
-        if active_endpoint is not None and endpoint.endpoint_id == active_endpoint.endpoint_id:
-            self.think_level = resolved
-        return resolved
+        normalized = str(value or "").strip().lower()
+        levels = self._thinking_levels(endpoint)
+        if normalized not in levels:
+            raise ValueError(f"invalid think level for {endpoint.endpoint_id}; available: {', '.join(levels)}")
+        self.settings_repository.set_think_level(endpoint.endpoint_id, normalized)
+        if endpoint.endpoint_id == self.active_endpoint_id:
+            self.think_level = normalized
+        return normalized
 
-    def _endpoint_by_id(self, endpoint_id: str | None) -> LLMEndpointModel | None:
-        normalized = str(endpoint_id or "").strip()
-        if not normalized:
-            return None
-        return next(
-            (endpoint for endpoint in self.endpoint_resolver.endpoints if endpoint.endpoint_id == normalized),
-            None,
+    def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+        self.refresh_runtime_settings()
+        endpoints = self._enabled_endpoints(request.request)
+        endpoint = endpoints[0] if endpoints else None
+        if endpoint is None:
+            raise LLMEndpointInvocationError("no enabled endpoints are available")
+        prepared = self._compile_request(endpoint, request.request)
+        return LLMPreflightAdvice(
+            status=(
+                LLMPreflightStatus.COMPACT_REQUIRED
+                if prepared.compact_required
+                else LLMPreflightStatus.READY
+            ),
+            active_model=endpoint.model_id,
+            fallback_chain=[item.model_id for item in endpoints[1:]],
+            target_input_budget=prepared.target_input_budget,
+            reserved_output_tokens=prepared.request.policy.max_output_tokens,
+            breakdown={
+                "estimated_input_tokens": prepared.estimated_input_tokens,
+                "target_input_budget": prepared.target_input_budget,
+            },
         )
 
-    def _adapter_for_endpoint(self, endpoint: LLMEndpointModel):
-        provider_registry = getattr(self.endpoint_invoker, "provider_registry", None)
-        if provider_registry is not None:
-            return provider_registry.resolve(endpoint)
-        return resolve_endpoint_adapter(endpoint)
+    async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+        return self.preflight(request)
 
-    def _effective_think_level_for_endpoint(
+    def resolve_endpoint_facts(
         self,
-        endpoint: LLMEndpointModel | None,
         *,
-        contract: ThinkingContract | None = None,
-    ) -> str | None:
+        preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None,
+    ) -> dict[str, Any]:
+        endpoints = self._enabled_endpoints_for_preference(
+            preferred_endpoint_id=preferred_endpoint_id,
+            preferred_endpoint_source=preferred_endpoint_source,
+        )
+        endpoint = endpoints[0] if endpoints else None
+        if endpoint is None:
+            return {
+                "endpoint_id": str(preferred_endpoint_id or self.active_endpoint_id or "") or None,
+                "model_id": None,
+                "wire_shape": None,
+                "context_window": None,
+                "max_output_tokens": None,
+                "supports_streaming": False,
+                "thinking_levels": [],
+                "default_thinking_level": None,
+            }
+        return {
+            "endpoint_id": endpoint.endpoint_id,
+            "model_id": endpoint.model_id,
+            "wire_shape": endpoint.wire_shape,
+            "context_window": endpoint.context_window,
+            "max_output_tokens": endpoint.max_output_tokens,
+            "max_output_tokens_upper_limit": endpoint_output_upper_limit(endpoint),
+            "supports_streaming": bool(endpoint.supports_streaming),
+            "thinking_levels": list(endpoint.thinking_levels_blob or ()),
+            "default_thinking_level": endpoint.default_thinking_level,
+        }
+
+    def resolve_max_output_tokens(
+        self,
+        *,
+        preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None,
+    ) -> int | None:
+        endpoints = self._enabled_endpoints_for_preference(
+            preferred_endpoint_id=preferred_endpoint_id,
+            preferred_endpoint_source=preferred_endpoint_source,
+        )
+        endpoint = endpoints[0] if endpoints else None
         if endpoint is None:
             return None
-        effective_contract = contract or self._adapter_for_endpoint(endpoint).thinking_contract()
-        if effective_contract is None:
-            return None
-        persisted = self.settings_repository.get_think_level(endpoint.endpoint_id)
-        active_endpoint = self.active_endpoint()
-        migrated_legacy = False
-        if persisted is None and active_endpoint is not None and endpoint.endpoint_id == active_endpoint.endpoint_id:
-            legacy = self.settings_repository.get_legacy_think_level()
-            if legacy is not None:
-                persisted = legacy
-                migrated_legacy = True
-        resolved = effective_contract.resolve(persisted)
-        if resolved is None:
-            resolved = effective_contract.default_choice_id
-        if persisted != resolved:
-            self.settings_repository.set_think_level(endpoint.endpoint_id, resolved)
-        elif migrated_legacy:
-            self.settings_repository.set_think_level(endpoint.endpoint_id, resolved)
-        if migrated_legacy:
-            self.settings_repository.delete_legacy_think_level()
-        return resolved
+        if endpoint.max_output_tokens is not None:
+            return int(endpoint.max_output_tokens)
+        return int(endpoint.context_window) if endpoint.context_window is not None else None
+
+    def supports_streaming(self, request: LLMRequestIR | None = None) -> bool:
+        endpoints = self._enabled_endpoints(request) if request is not None else [self.active_endpoint()]
+        endpoint = endpoints[0] if endpoints else None
+        return bool(endpoint and endpoint.supports_streaming)
+
+    def generate(self, request: LLMRequestIR) -> LLMGenerationResult:
+        self.last_request = request
+        endpoints = self._enabled_endpoints(request)
+        if not endpoints:
+            return _failure_result("no enabled endpoints are available")
+        last_error: Exception | None = None
+        requested_preferred = str(request.metadata.get("preferred_endpoint_id") or "").strip() or None
+        for endpoint_index, endpoint in enumerate(endpoints):
+            try:
+                prepared = self._compile_request(endpoint, request)
+            except Exception as exc:
+                last_error = exc
+                error_kind = self._record_failure(endpoint, exc, 0)
+                self._emit(
+                    "llm_endpoint_exhausted",
+                    endpoint=endpoint,
+                    reason=error_kind,
+                )
+                continue
+            effective = prepared.request
+            if prepared.compact_required:
+                return self._compact_required_result(endpoint, effective)
+            if _is_stub_endpoint(endpoint):
+                response = _text_response("stub response", LLMFinishReason.STUB)
+                return self._success(endpoint, response)
+            for attempt in range(self.endpoint_retry_attempts):
+                try:
+                    response, _ = self._invoker().invoke(
+                        endpoint,
+                        effective,
+                        stream=False,
+                        timeout_seconds=self._timeout_seconds(effective),
+                    )
+                    response = self._recover_length(endpoint, effective, response)
+                    if response.finish_reason == LLMFinishReason.ERROR:
+                        raise LLMEndpointResponseError(
+                            f"endpoint {endpoint.endpoint_id} returned finish_reason=error"
+                        )
+                    if requested_preferred is None and endpoint.endpoint_id != self.active_endpoint_id:
+                        self.set_active_endpoint(endpoint.endpoint_id)
+                    if endpoint_index > 0:
+                        self._emit("llm_endpoint_fallback_succeeded", endpoint=endpoint)
+                    return self._success(endpoint, response)
+                except Exception as exc:
+                    last_error = exc
+                    error_kind = self._record_failure(endpoint, exc, attempt)
+                    retryable = _retryable_error_kind(error_kind)
+                    if retryable and attempt + 1 < self.endpoint_retry_attempts:
+                        time.sleep(_retry_delay(attempt + 1))
+                        continue
+                    self._emit(
+                        "llm_endpoint_exhausted",
+                        endpoint=endpoint,
+                        reason=error_kind,
+                    )
+                    break
+        self.usage_ledger.record_failed_request(
+            endpoint_id=endpoints[-1].endpoint_id if endpoints else ""
+        )
+        return _failure_result(_public_failure_text(last_error))
+
+    async def agenerate(self, request: LLMRequestIR) -> LLMGenerationResult:
+        return await asyncio.to_thread(self.generate, request)
+
+    def _iter_stream_updates(self, request: LLMRequestIR) -> Iterator[LLMResponseUpdate]:
+        self.last_request = request
+        endpoints = self._enabled_endpoints(request)
+        if not endpoints:
+            response = _failure_result("no enabled endpoints are available").response
+            yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
+            return
+        last_error: Exception | None = None
+        for endpoint in endpoints:
+            try:
+                prepared = self._compile_request(endpoint, request)
+            except Exception as exc:
+                last_error = exc
+                error_kind = self._record_failure(endpoint, exc, 0)
+                self._emit(
+                    "llm_endpoint_exhausted",
+                    endpoint=endpoint,
+                    reason=error_kind,
+                )
+                continue
+            effective = prepared.request
+            if prepared.compact_required:
+                response = self._compact_required_result(endpoint, effective).response
+                yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
+                return
+            semantic_seen = False
+            for attempt in range(self.endpoint_retry_attempts):
+                last_update: LLMResponseUpdate | None = None
+                try:
+                    for update in self._invoker().invoke_updates(
+                        endpoint,
+                        effective,
+                        timeout_seconds=self._timeout_seconds(effective),
+                    ):
+                        last_update = update
+                        semantic_seen = semantic_seen or (
+                            update.delta_kind != LLMResponseDeltaKind.STATE
+                            and bool(update.response.message.parts)
+                        )
+                        if (
+                            update.delta_kind == LLMResponseDeltaKind.STATE
+                            and update.response.finish_reason
+                            in {LLMFinishReason.LENGTH, LLMFinishReason.ERROR}
+                        ):
+                            continue
+                        yield update
+                    completed = last_update.response if last_update is not None else _text_response("", LLMFinishReason.ERROR)
+                    if completed.finish_reason == LLMFinishReason.LENGTH:
+                        recovered = self._recover_length(
+                            endpoint,
+                            effective,
+                            completed,
+                            allow_discarded_retry=False,
+                        )
+                        if recovered.finish_reason == LLMFinishReason.ERROR:
+                            raise LLMEndpointResponseError(
+                                f"endpoint {endpoint.endpoint_id} output recovery returned finish_reason=error"
+                            )
+                        recovery_updates = tuple(stream_recovery_updates(completed, recovered))
+                        yield from recovery_updates
+                        completed = recovered
+                    if completed.finish_reason == LLMFinishReason.ERROR:
+                        raise LLMEndpointResponseError(
+                            f"endpoint {endpoint.endpoint_id} returned finish_reason=error"
+                        )
+                    self._record_success(endpoint, completed)
+                    self.last_endpoint_id = endpoint.endpoint_id
+                    self.last_model_id = endpoint.model_id
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    error_kind = self._record_failure(endpoint, exc, attempt)
+                    if semantic_seen:
+                        partial = last_update.response if last_update is not None else _text_response(str(exc), LLMFinishReason.ERROR)
+                        error_response = replace(partial, finish_reason=LLMFinishReason.ERROR)
+                        self.usage_ledger.record_failed_request(
+                            endpoint_id=endpoint.endpoint_id
+                        )
+                        yield LLMResponseUpdate(error_response, delta_kind=LLMResponseDeltaKind.STATE)
+                        return
+                    if (
+                        _retryable_error_kind(error_kind)
+                        and attempt + 1 < self.endpoint_retry_attempts
+                    ):
+                        time.sleep(_retry_delay(attempt + 1))
+                        continue
+                    self._emit(
+                        "llm_endpoint_exhausted",
+                        endpoint=endpoint,
+                        reason=error_kind,
+                    )
+                    break
+        self.usage_ledger.record_failed_request(
+            endpoint_id=endpoints[-1].endpoint_id if endpoints else ""
+        )
+        response = _failure_result(str(last_error or "LLM stream failed")).response
+        yield LLMResponseUpdate(response, delta_kind=LLMResponseDeltaKind.STATE)
+
+    async def astream(self, request: LLMRequestIR) -> AsyncIterator[LLMResponseUpdate]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[object] = asyncio.Queue()
+        done = object()
+
+        def worker() -> None:
+            try:
+                for update in self._iter_stream_updates(request):
+                    loop.call_soon_threadsafe(queue.put_nowait, update)
+            except BaseException as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, done)
+
+        task = asyncio.create_task(asyncio.to_thread(worker))
+        try:
+            while True:
+                item = await queue.get()
+                if item is done:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                yield item  # type: ignore[misc]
+        finally:
+            await task
 
     def usage_snapshot(self) -> dict[str, Any]:
-        """Return process-lifetime provider usage without exposing prompts."""
         return self.usage_ledger.snapshot()
+
+    def _compile_request(
+        self,
+        endpoint: LLMEndpointModel,
+        request: LLMRequestIR,
+    ) -> PreparedLLMRequest:
+        LLMEndpointSpec.from_value(endpoint)
+        hooked = self.model_hooks.apply(
+            endpoint.model_id,
+            replace(request, model_hint=endpoint.model_id),
+        )
+        level = hooked.policy.thinking_level
+        levels = self._thinking_levels(endpoint)
+        if level is None:
+            effective = self._effective_thinking_level(endpoint)
+            level = ThinkingLevel(effective) if effective else None
+        elif level.value not in levels:
+            raise LLMRequestPreparationError(
+                f"thinking_level={level.value!r} is not declared by endpoint "
+                f"{endpoint.endpoint_id}; available={list(levels)}"
+            )
+        max_output = hooked.policy.max_output_tokens
+        if endpoint.max_output_tokens is not None:
+            max_output = min(max_output, int(endpoint.max_output_tokens))
+        policy = replace(
+            hooked.policy,
+            max_output_tokens=max_output,
+            thinking_level=level,
+        )
+        prepared = replace(hooked, policy=policy, model_hint=endpoint.model_id)
+        target = self._target_input_budget(endpoint, prepared.policy.max_output_tokens)
+        return PreparedLLMRequest(
+            endpoint=endpoint,
+            request=prepared,
+            estimated_input_tokens=_estimate_request_tokens(prepared),
+            target_input_budget=target,
+        )
+
+    def _prepare_request(
+        self,
+        endpoint: LLMEndpointModel,
+        request: LLMRequestIR,
+    ) -> LLMRequestIR:
+        return self._compile_request(endpoint, request).request
+
+    def _enabled_endpoints(self, request: LLMRequestIR | None) -> list[LLMEndpointModel]:
+        metadata = dict(request.metadata) if request is not None else {}
+        return self._enabled_endpoints_for_preference(
+            preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
+            preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
+            endpoint_fallback_policy=str(metadata.get("endpoint_fallback_policy") or "").strip() or None,
+        )
 
     def _enabled_endpoints_for_preference(
         self,
@@ -2037,1369 +662,347 @@ class LLMRuntime(LLMRuntimePort):
         endpoint_fallback_policy: str | None = None,
     ) -> list[LLMEndpointModel]:
         preferred = str(preferred_endpoint_id or "").strip() or None
-        preferred_source = str(preferred_endpoint_source or "").strip().lower()
-        fallback_disabled = _endpoint_fallback_disabled(endpoint_fallback_policy) or (
-            bool(preferred) and preferred_source in _STRICT_ENDPOINT_PREFERRED_SOURCES
+        source = str(preferred_endpoint_source or "").strip().lower()
+        strict = (
+            str(endpoint_fallback_policy or "").strip().lower() in _FALLBACK_DISABLED_POLICIES
+            or bool(preferred and source in _STRICT_ENDPOINT_PREFERRED_SOURCES)
         )
-        if fallback_disabled:
-            if preferred:
-                return self.endpoint_resolver.enabled(preferred_endpoint_id=preferred, include_remaining=False)
-            if self.active_endpoint_id:
-                return self.endpoint_resolver.enabled(preferred_endpoint_id=self.active_endpoint_id, include_remaining=False)
-            return self.endpoint_resolver.enabled(include_remaining=False)
-        if preferred:
-            return self.endpoint_resolver.enabled(
-                preferred_endpoint_id=preferred,
-                fallback_endpoint_id=self.active_endpoint_id,
-            )
-        return self.endpoint_resolver.enabled(preferred_endpoint_id=self.active_endpoint_id)
-
-    def _enabled_endpoints_for_metadata(self, metadata: dict[str, Any]) -> list[LLMEndpointModel]:
-        return self._enabled_endpoints_for_preference(
-            preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
-            preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
-            endpoint_fallback_policy=str(metadata.get("endpoint_fallback_policy") or "").strip() or None,
+        if strict:
+            selected = preferred or self.active_endpoint_id
+            if selected:
+                return [
+                    endpoint
+                    for endpoint in self.endpoint_resolver.endpoints
+                    if endpoint.endpoint_id == selected
+                ]
+            return list(self.endpoint_resolver.endpoints[:1])
+        return self.endpoint_resolver.enabled(
+            preferred_endpoint_id=preferred,
+            fallback_endpoint_id=self.active_endpoint_id,
+            include_remaining=True,
         )
 
-    def refresh_llm_endpoints(self) -> dict[str, Any]:
-        before = [endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints]
-        configured_active = self.settings_repository.get_active_llm_endpoint_id()
-        credentials_refreshed = self._refresh_endpoint_credentials()
-        provider_adapters_refreshed = self._refresh_provider_adapters()
-        self.endpoint_resolver.refresh()
-        self.refresh_runtime_settings()
-        after = [endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints]
-        primary = self.endpoint_resolver.primary(preferred_endpoint_id=self.active_endpoint_id)
-        provider_registry = getattr(self.endpoint_invoker, "provider_registry", None)
-        provider_adapter_load_errors = list(getattr(provider_registry, "load_errors", []) or [])
-        return {
-            "before_count": len(before),
-            "enabled_count": len(after),
-            "added_endpoint_ids": sorted(set(after) - set(before)),
-            "removed_endpoint_ids": sorted(set(before) - set(after)),
-            "configured_active_endpoint_id": configured_active,
-            "active_endpoint_id": self.active_endpoint_id,
-            "active_endpoint_available": bool(configured_active and configured_active == self.active_endpoint_id),
-            "primary_endpoint_id": primary.endpoint_id if primary is not None else None,
-            "primary_model_id": primary.model_id if primary is not None else None,
-            "enabled_endpoint_ids": after,
-            "credentials_refreshed": credentials_refreshed,
-            "provider_adapters_refreshed": provider_adapters_refreshed,
-            "provider_adapter_load_errors": provider_adapter_load_errors,
-        }
-
-    def _refresh_endpoint_credentials(self) -> bool:
-        refresh = getattr(self.endpoint_invoker, "refresh_credentials", None)
-        if callable(refresh):
-            return bool(refresh())
-        credentials = getattr(self.endpoint_invoker, "credentials", None)
-        if credentials is None:
-            return False
-        credential_refresh = getattr(credentials, "refresh", None)
-        if callable(credential_refresh):
-            credential_refresh()
-            return True
-        clear_cache = getattr(credentials, "clear_cache", None)
-        if callable(clear_cache):
-            clear_cache()
-            return True
-        return False
-
-    def _refresh_provider_adapters(self) -> bool:
-        refresh = getattr(self.endpoint_invoker, "refresh_provider_registry", None)
-        if callable(refresh):
-            return bool(refresh())
-        provider_registry = getattr(self.endpoint_invoker, "provider_registry", None)
-        if provider_registry is None:
-            return False
-        load_entry_points = getattr(provider_registry, "load_entry_points", None)
-        if callable(load_entry_points):
-            load_entry_points()
-            return True
-        return False
-
-    def set_active_endpoint(self, endpoint_id: str) -> str:
-        normalized = str(endpoint_id or "").strip()
-        self.settings_repository.set_active_llm_endpoint_id(normalized)
-        self.active_endpoint_id = normalized or None
-        self.think_level = self._effective_think_level_for_endpoint(self.active_endpoint()) or ""
-        return normalized
-
-    def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
-        self.refresh_runtime_settings()
-        enabled = self._enabled_endpoints_for_metadata(dict(request.metadata))
-        primary = enabled[0] if enabled else None
-        return self._build_preflight_advice(
-            endpoint=primary,
-            request=request,
-            fallback_chain=[endpoint.model_id for endpoint in enabled[1:]],
-        )
-
-    async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
-        return await asyncio.to_thread(self.preflight, request)
-
-    def resolve_endpoint_facts(
-        self,
-        *,
-        preferred_endpoint_id: str | None = None,
-        preferred_endpoint_source: str | None = None,
-    ) -> dict[str, Any]:
-        self.refresh_runtime_settings()
-        normalized_preferred = str(preferred_endpoint_id or "").strip() or None
-        enabled = self._enabled_endpoints_for_preference(
-            preferred_endpoint_id=normalized_preferred,
-            preferred_endpoint_source=preferred_endpoint_source,
-        )
-        endpoint = enabled[0] if enabled else None
+    def _effective_thinking_level(self, endpoint: LLMEndpointModel | None) -> str | None:
         if endpoint is None:
-            return {
-                "endpoint_id": normalized_preferred or self.active_endpoint_id,
-                "model_id": None,
-                "context_window": None,
-                "max_output_tokens": None,
-                "max_output_tokens_upper_limit": None,
-                "supports_vision": False,
-                "supports_streaming": False,
-                "input_modalities": [],
-                "capabilities": {},
-            }
-        return {
-            "endpoint_id": endpoint.endpoint_id,
-            "model_id": endpoint.model_id,
-            "context_window": endpoint.context_window,
-            "max_output_tokens": endpoint.max_output_tokens,
-            "max_output_tokens_upper_limit": _endpoint_max_output_tokens_upper_limit(endpoint),
-            "supports_vision": bool(endpoint.supports_vision),
-            "supports_streaming": bool(endpoint.supports_streaming),
-            "input_modalities": list(endpoint.input_modalities_blob or []),
-            "capabilities": dict(endpoint.capabilities_blob or {}),
-        }
-
-    def resolve_max_output_tokens(
-        self,
-        *,
-        preferred_endpoint_id: str | None = None,
-        preferred_endpoint_source: str | None = None,
-    ) -> int | None:
-        self.refresh_runtime_settings()
-        enabled = self._enabled_endpoints_for_preference(
-            preferred_endpoint_id=preferred_endpoint_id,
-            preferred_endpoint_source=preferred_endpoint_source,
+            return None
+        levels = self._thinking_levels(endpoint)
+        if not levels:
+            return None
+        persisted = str(self.settings_repository.get_think_level(endpoint.endpoint_id) or "").strip().lower()
+        effective = (
+            persisted
+            if persisted in levels
+            else str(getattr(endpoint, "default_thinking_level", None) or levels[0])
         )
-        endpoint = enabled[0] if enabled else None
-        if endpoint is not None and endpoint.max_output_tokens is not None:
-            return endpoint.max_output_tokens
-        if endpoint is not None and endpoint.context_window is not None:
-            return self._max_output_tokens_from_context_window(endpoint.context_window)
-        return None
+        if effective not in levels:
+            effective = levels[0]
+        if persisted != effective:
+            self.settings_repository.set_think_level(endpoint.endpoint_id, effective)
+        return effective
 
-    def _invoke_endpoints_with_retry(
-        self,
-        request: CanonicalLLMRequest,
-        invoke_fn,
-    ) -> _EndpointInvocationResult:
-        """Shared endpoint iteration with retry, backoff, and stale-connection handling."""
-        requested_preferred_endpoint_id = str(request.metadata.get("preferred_endpoint_id") or "").strip() or None
-        enabled = list(self._enabled_endpoints_for_metadata(dict(request.metadata)))
-        if not enabled:
-            effective_request = self._build_effective_request(request, endpoint=None)
-            self.last_request = effective_request
-            self.last_endpoint_id = None
-            self.last_model_id = None
-            self.usage_ledger.record_failed_request()
-            return _EndpointInvocationResult(kind="no_endpoints")
+    @staticmethod
+    def _thinking_levels(endpoint: LLMEndpointModel) -> tuple[str, ...]:
+        return LLMEndpointSpec.from_value(endpoint).thinking_levels_blob
 
-        last_error: Exception | None = None
-        last_error_kind = "unknown"
-        last_error_type = ""
-        had_stale_connection = False
-        failed_connection_domains: set[tuple[str, str]] = set()
-        last_attempted_endpoint_id = ""
-        for endpoint_index, endpoint in enumerate(enabled):
-            endpoint_domain = _endpoint_connection_failure_domain(endpoint)
-            if endpoint_domain is not None and endpoint_domain in failed_connection_domains:
-                self._emit_llm_progress(
-                    "llm_endpoint_skipped",
-                    endpoint=endpoint,
-                    endpoint_index=endpoint_index,
-                    endpoint_count=len(enabled),
-                    reason="shared_connection_failure_domain",
-                )
-                continue
-            if had_stale_connection:
-                time.sleep(self._retry_stale_settle_ms / 1000.0)
-                had_stale_connection = False
-            if endpoint_index > 0:
-                self._emit_llm_progress(
-                    "llm_endpoint_fallback_started",
-                    endpoint=endpoint,
-                    endpoint_index=endpoint_index,
-                    endpoint_count=len(enabled),
-                )
+    def _endpoint_by_id(self, endpoint_id: str | None) -> LLMEndpointModel | None:
+        normalized = str(endpoint_id or "").strip()
+        return next((endpoint for endpoint in self.endpoint_resolver.endpoints if endpoint.endpoint_id == normalized), None)
 
-            effective_request = self._build_effective_request(request, endpoint=endpoint)
-            self.last_request = effective_request
-            advice = self._build_preflight_advice(
-                endpoint=endpoint,
-                request=LLMPreflightRequest(
-                    messages=effective_request.messages,
-                    max_output_tokens=effective_request.max_output_tokens,
-                    model_hint=effective_request.model_hint,
-                    tools=list(effective_request.tools),
-                    metadata=dict(effective_request.metadata),
-                ),
-                fallback_chain=[],
-            )
-            if advice.status == LLMPreflightStatus.COMPACT_REQUIRED:
-                self.last_endpoint_id = endpoint.endpoint_id
-                self.last_model_id = endpoint.model_id
-                return _EndpointInvocationResult(
-                    kind="compact_required",
-                    endpoint=endpoint,
-                    effective_request=effective_request,
-                    target_input_budget=advice.target_input_budget,
-                    reserved_output_tokens=advice.reserved_output_tokens,
-                )
+    def _needs_compaction(self, endpoint: LLMEndpointModel, request: LLMRequestIR) -> bool:
+        target = self._target_input_budget(endpoint, request.policy.max_output_tokens)
+        return target > 0 and _estimate_request_tokens(request) > target
 
-            attempt_count = max(1, self.endpoint_retry_attempts)
-            for attempt in range(attempt_count):
-                last_attempted_endpoint_id = endpoint.endpoint_id
-                try:
-                    timeout_seconds = self._timeout_seconds_for_metadata(dict(effective_request.metadata))
-                    recovered = self._invoke_with_output_recovery(
-                        endpoint,
-                        effective_request,
-                        lambda recovery_request: _run_with_wall_timeout(
-                            lambda: invoke_fn(endpoint, recovery_request),
-                            timeout_seconds=timeout_seconds,
-                            description=f"llm endpoint invocation for {endpoint.endpoint_id}",
-                        ),
-                    )
-                    result = recovered.value
-                    effective_request = recovered.request
-                    _ensure_llm_invocation_result_has_payload(result)
-                    self.last_request = effective_request
-                    self.last_endpoint_id = endpoint.endpoint_id
-                    self.last_model_id = endpoint.model_id
-                    if requested_preferred_endpoint_id is None and endpoint.endpoint_id != self.active_endpoint_id:
-                        self.set_active_endpoint(endpoint.endpoint_id)
-                    if endpoint_index > 0:
-                        self._emit_llm_progress(
-                            "llm_endpoint_fallback_succeeded",
-                            endpoint=endpoint,
-                            endpoint_index=endpoint_index,
-                            endpoint_count=len(enabled),
-                        )
-                    self.usage_ledger.record_success(
-                        endpoint_id=endpoint.endpoint_id,
-                        model_id=endpoint.model_id,
-                        provider=endpoint.provider,
-                        usage=_invocation_usage(result),
-                        provider_response_count=_invocation_provider_response_count(result),
-                    )
-                    return _EndpointInvocationResult(
-                        kind="success",
-                        value=result,
-                        endpoint=endpoint,
-                        effective_request=effective_request,
-                    )
-                except Exception as exc:
-                    self.usage_ledger.record_failed_attempt(
-                        endpoint_id=endpoint.endpoint_id,
-                        model_id=endpoint.model_id,
-                        provider=endpoint.provider,
-                    )
-                    last_error = exc
-                    error_kind = _classify_retry_error(exc)
-                    last_error_kind = error_kind
-                    last_error_type = type(exc).__name__
-                    _LOGGER.warning(
-                        "LLM endpoint attempt failed endpoint_id=%s model_id=%s provider=%s "
-                        "attempt=%d/%d endpoint_index=%d/%d error_kind=%s error_type=%s",
-                        endpoint.endpoint_id,
-                        endpoint.model_id,
-                        endpoint.provider,
-                        attempt + 1,
-                        attempt_count,
-                        endpoint_index + 1,
-                        len(enabled),
-                        error_kind,
-                        type(exc).__name__,
-                    )
-                    attempt_failed_payload = {
-                        "endpoint_index": endpoint_index,
-                        "endpoint_count": len(enabled),
-                        "attempt": attempt + 1,
-                        "max_attempts": attempt_count,
-                        "error_kind": error_kind,
-                        "error_type": type(exc).__name__,
-                        "next_endpoint_id": _next_endpoint_id(enabled, endpoint_index),
-                    }
-                    self._emit_llm_progress("llm_endpoint_attempt_failed", endpoint=endpoint, **attempt_failed_payload)
-                    if error_kind == "stale_connection":
-                        if endpoint_domain is not None:
-                            failed_connection_domains.add(endpoint_domain)
-                        had_stale_connection = True
-                        self._emit_llm_progress(
-                            "llm_endpoint_exhausted",
-                            endpoint=endpoint,
-                            endpoint_index=endpoint_index,
-                            endpoint_count=len(enabled),
-                            attempt=attempt + 1,
-                            max_attempts=attempt_count,
-                            reason=error_kind,
-                            next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
-                        )
-                        break
-                    if error_kind in {"connection", "bad_request"}:
-                        if error_kind == "connection" and endpoint_domain is not None:
-                            failed_connection_domains.add(endpoint_domain)
-                        self._emit_llm_progress(
-                            "llm_endpoint_exhausted",
-                            endpoint=endpoint,
-                            endpoint_index=endpoint_index,
-                            endpoint_count=len(enabled),
-                            attempt=attempt + 1,
-                            max_attempts=attempt_count,
-                            reason=error_kind,
-                            next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
-                        )
-                        break
-                    if error_kind == "timeout":
-                        if endpoint_domain is not None:
-                            failed_connection_domains.add(endpoint_domain)
-                        self._emit_llm_progress(
-                            "llm_endpoint_exhausted",
-                            endpoint=endpoint,
-                            endpoint_index=endpoint_index,
-                            endpoint_count=len(enabled),
-                            attempt=attempt + 1,
-                            max_attempts=attempt_count,
-                            reason=error_kind,
-                            next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
-                        )
-                        break
-                    if attempt < attempt_count - 1:
-                        delay = _compute_retry_delay(
-                            attempt + 1,
-                            error_kind=error_kind,
-                            base_delay_ms=self._retry_base_delay_ms,
-                            max_delay_ms=self._retry_max_delay_ms,
-                            stale_settle_ms=self._retry_stale_settle_ms,
-                        )
-                        self._emit_llm_progress(
-                            "llm_endpoint_retry_scheduled",
-                            endpoint=endpoint,
-                            endpoint_index=endpoint_index,
-                            endpoint_count=len(enabled),
-                            attempt=attempt + 1,
-                            next_attempt=attempt + 2,
-                            max_attempts=attempt_count,
-                            error_kind=error_kind,
-                            delay_seconds=round(delay, 3),
-                            next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
-                        )
-                        time.sleep(delay)
-                    else:
-                        self._emit_llm_progress(
-                            "llm_endpoint_exhausted",
-                            endpoint=endpoint,
-                            endpoint_index=endpoint_index,
-                            endpoint_count=len(enabled),
-                            attempt=attempt + 1,
-                            max_attempts=attempt_count,
-                            reason=error_kind,
-                            next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
-                        )
+    def _target_input_budget(self, endpoint: LLMEndpointModel, output_tokens: int) -> int:
+        context_window = int(endpoint.context_window or 0)
+        if context_window <= 0:
+            return 0
+        margin = min(self.safety_margin_tokens, max(1024, int(context_window * 0.05)))
+        return max(1, context_window - int(output_tokens) - margin)
 
-        self.last_endpoint_id = None
-        self.last_model_id = None
-        if last_error is not None and not last_error_type:
-            last_error_type = type(last_error).__name__
-        self.usage_ledger.record_failed_request(
-            endpoint_id=last_attempted_endpoint_id,
-        )
-        return _EndpointInvocationResult(
-            kind="error",
-            error_kind=last_error_kind,
-            error_type=last_error_type or "UnknownEndpointError",
+    def _compact_required_result(self, endpoint: LLMEndpointModel, request: LLMRequestIR) -> LLMGenerationResult:
+        response = _text_response("Context compaction is required before LLM invocation.", LLMFinishReason.COMPACT_REQUIRED)
+        return LLMGenerationResult(
+            response=response,
+            target_input_budget=self._target_input_budget(endpoint, request.policy.max_output_tokens),
+            reserved_output_tokens=request.policy.max_output_tokens,
+            preferred_endpoint_id=endpoint.endpoint_id,
+            preferred_model_id=endpoint.model_id,
         )
 
-    def _invoke_with_output_recovery(
+    def _recover_length(
         self,
         endpoint: LLMEndpointModel,
-        request: CanonicalLLMRequest,
-        invoke_once: Callable[[CanonicalLLMRequest], Any],
-    ) -> _OutputRecoveryResult:
-        current_request = request
-        provider_response_count = 0
-
-        def invoke_and_count(candidate: CanonicalLLMRequest) -> Any:
-            nonlocal provider_response_count
-            value = invoke_once(candidate)
-            provider_response_count += 1
-            return value
-
-        result = invoke_and_count(current_request)
-        if not _is_output_limited_result(result):
-            return _OutputRecoveryResult(
-                value=_with_provider_response_count(result, provider_response_count),
-                request=current_request,
-            )
-
-        settings = _max_output_recovery_settings(
+        request: LLMRequestIR,
+        first: LLMResponseIR,
+        *,
+        allow_discarded_retry: bool = True,
+    ) -> LLMResponseIR:
+        if first.finish_reason != LLMFinishReason.LENGTH:
+            return first
+        default_attempts = max(
+            0,
+            int(
+                getattr(
+                    self.config,
+                    "llm_max_output_recovery_attempts",
+                    3,
+                )
+                or 0
+            ),
+        )
+        settings = recovery_settings(
             endpoint,
             request,
-            default_attempts=self._max_output_recovery_attempts,
+            default_attempts=default_attempts,
         )
-        if not settings["enabled"]:
-            return _OutputRecoveryResult(
-                value=_with_provider_response_count(
-                    _strip_truncated_tool_calls(result),
-                    provider_response_count,
-                ),
-                request=current_request,
-            )
+        if not settings.enabled:
+            return safe_truncated_response(first)
 
-        upper_limit = int(settings["upper_limit"])
-        discarded_usage = LLMUsage()
-        if current_request.max_output_tokens < upper_limit:
-            escalated_request = _with_output_recovery_metadata(
-                replace(current_request, max_output_tokens=upper_limit),
+        discarded: tuple[LLMResponseIR, ...] = ()
+        responses: list[LLMResponseIR] = []
+        current_request = request
+        current = first
+        if (
+            allow_discarded_retry
+            and request.policy.max_output_tokens < settings.upper_limit
+        ):
+            escalated = with_recovery_stage(
+                request,
                 stage="escalate",
                 attempt=0,
+                max_output_tokens=settings.upper_limit,
             )
-            if self._recovery_request_fits(endpoint, escalated_request):
-                self._emit_llm_progress(
+            if not self._needs_compaction(endpoint, escalated):
+                self._emit(
                     "llm_output_limit_recovery_started",
                     endpoint=endpoint,
                     stage="escalate",
                     attempt=0,
-                    max_attempts=int(settings["max_continuations"]),
-                    previous_max_output_tokens=current_request.max_output_tokens,
-                    max_output_tokens=upper_limit,
+                    max_output_tokens=settings.upper_limit,
                 )
-                discarded_usage = _invocation_usage(result)
-                current_request = escalated_request
-                result = invoke_and_count(current_request)
-                if not _is_output_limited_result(result):
-                    self._emit_llm_progress(
+                discarded = (first,)
+                current_request = escalated
+                current, _ = self._invoker().invoke(
+                    endpoint,
+                    current_request,
+                    stream=False,
+                    timeout_seconds=self._timeout_seconds(current_request),
+                )
+                if current.finish_reason != LLMFinishReason.LENGTH:
+                    recovered = merge_responses([current], discarded=discarded)
+                    self._emit(
                         "llm_output_limit_recovery_succeeded",
                         endpoint=endpoint,
                         stage="escalate",
                         attempt=0,
-                        max_output_tokens=upper_limit,
+                        max_output_tokens=settings.upper_limit,
                     )
-                    return _OutputRecoveryResult(
-                        value=_with_provider_response_count(
-                            _add_usage_to_invocation_result(result, discarded_usage),
-                            provider_response_count,
-                        ),
-                        request=current_request,
-                    )
+                    return recovered
 
-        partial_results: list[Any] = [result]
-        max_continuations = int(settings["max_continuations"])
-        for continuation_attempt in range(1, max_continuations + 1):
-            continuation_request = _build_output_continuation_request(
+        responses.append(safe_truncated_response(current))
+        for attempt in range(1, settings.max_continuations + 1):
+            candidate = continuation_request(
                 current_request,
-                result,
-                max_output_tokens=upper_limit,
-                attempt=continuation_attempt,
+                current,
+                max_output_tokens=settings.upper_limit,
+                attempt=attempt,
             )
-            if not self._recovery_request_fits(endpoint, continuation_request):
+            if self._needs_compaction(endpoint, candidate):
                 break
-            self._emit_llm_progress(
+            self._emit(
                 "llm_output_limit_recovery_started",
                 endpoint=endpoint,
                 stage="continue",
-                attempt=continuation_attempt,
-                max_attempts=max_continuations,
-                previous_max_output_tokens=current_request.max_output_tokens,
-                max_output_tokens=upper_limit,
+                attempt=attempt,
+                max_output_tokens=settings.upper_limit,
             )
-            current_request = continuation_request
-            result = invoke_and_count(current_request)
-            if not _is_output_limited_result(result):
-                merged = _merge_output_recovery_results(partial_results, result)
-                self._emit_llm_progress(
+            current_request = candidate
+            current, _ = self._invoker().invoke(
+                endpoint,
+                current_request,
+                stream=False,
+                timeout_seconds=self._timeout_seconds(current_request),
+            )
+            if current.finish_reason != LLMFinishReason.LENGTH:
+                recovered = merge_responses(
+                    [*responses, current],
+                    discarded=discarded,
+                )
+                self._emit(
                     "llm_output_limit_recovery_succeeded",
                     endpoint=endpoint,
                     stage="continue",
-                    attempt=continuation_attempt,
-                    max_output_tokens=upper_limit,
+                    attempt=attempt,
+                    max_output_tokens=settings.upper_limit,
                 )
-                return _OutputRecoveryResult(
-                    value=_with_provider_response_count(
-                        _add_usage_to_invocation_result(merged, discarded_usage),
-                        provider_response_count,
-                    ),
-                    request=current_request,
-                )
-            partial_results.append(result)
+                return recovered
+            responses.append(safe_truncated_response(current))
 
-        exhausted = _merge_exhausted_output_recovery_results(partial_results)
-        self._emit_llm_progress(
+        exhausted = merge_responses(responses, discarded=discarded)
+        self._emit(
             "llm_output_limit_recovery_exhausted",
             endpoint=endpoint,
             stage="continue",
-            attempt=max(0, len(partial_results) - 1),
-            max_attempts=max_continuations,
-            max_output_tokens=upper_limit,
+            attempt=max(0, len(responses) - 1),
+            max_output_tokens=settings.upper_limit,
         )
-        return _OutputRecoveryResult(
-            value=_with_provider_response_count(
-                _add_usage_to_invocation_result(exhausted, discarded_usage),
-                provider_response_count,
-            ),
-            request=current_request,
+        return exhausted
+
+    def _success(self, endpoint: LLMEndpointModel, response: LLMResponseIR) -> LLMGenerationResult:
+        self.last_endpoint_id = endpoint.endpoint_id
+        self.last_model_id = endpoint.model_id
+        self._record_success(endpoint, response)
+        return LLMGenerationResult(
+            response=response,
+            preferred_endpoint_id=endpoint.endpoint_id,
+            preferred_model_id=endpoint.model_id,
         )
 
-    def _recovery_request_fits(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> bool:
-        advice = self._build_preflight_advice(
+    def _record_success(self, endpoint: LLMEndpointModel, response: LLMResponseIR) -> None:
+        if response.finish_reason == LLMFinishReason.ERROR:
+            raise LLMEndpointResponseError(
+                f"endpoint {endpoint.endpoint_id} returned finish_reason=error"
+            )
+        self.usage_ledger.record_success(
+            endpoint_id=endpoint.endpoint_id,
+            model_id=endpoint.model_id,
+            provider=endpoint.provider,
+            usage=response.usage,
+            provider_response_count=response.provider_response_count,
+        )
+
+    def _record_failure(self, endpoint: LLMEndpointModel, exc: Exception, attempt: int) -> str:
+        error_kind = _classify_retry_error(exc)
+        self.usage_ledger.record_failed_attempt(
+            endpoint_id=endpoint.endpoint_id,
+            model_id=endpoint.model_id,
+            provider=endpoint.provider,
+        )
+        self._emit(
+            "llm_endpoint_attempt_failed",
             endpoint=endpoint,
-            request=LLMPreflightRequest(
-                messages=list(request.messages),
-                max_output_tokens=request.max_output_tokens,
-                model_hint=request.model_hint,
-                tools=list(request.tools),
-                metadata=dict(request.metadata),
-            ),
-            fallback_chain=[],
+            attempt=attempt + 1,
+            error_kind=error_kind,
+            error_type=type(exc).__name__,
         )
-        return advice.status != LLMPreflightStatus.COMPACT_REQUIRED
+        return error_kind
 
-    def _emit_llm_progress(self, phase: str, *, endpoint: LLMEndpointModel, **payload: Any) -> None:
-        sink = _SCOPED_LLM_EVENT_SINK.get() or self.event_sink
-        if not callable(sink):
-            return
-        event = {
-            "phase": phase,
-            "endpoint_id": endpoint.endpoint_id,
-            "model_id": endpoint.model_id,
-            "provider": endpoint.provider,
-            **payload,
-        }
+    def _timeout_seconds(self, request: LLMRequestIR) -> float:
+        value = request.metadata.get("timeout_seconds")
+        if value is None:
+            purpose = str(request.metadata.get("purpose") or "").lower()
+            setting = "llm_compaction_timeout_seconds" if "compact" in purpose else "llm_request_timeout_seconds"
+            value = getattr(self.config, setting, _DEFAULT_TIMEOUT_SECONDS)
         try:
-            sink(event)
-        except Exception:
-            return
+            return max(1.0, float(value))
+        except (TypeError, ValueError):
+            return _DEFAULT_TIMEOUT_SECONDS
 
-    def generate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        self.refresh_runtime_settings()
-        result = self._invoke_endpoints_with_retry(
-            request,
-            invoke_fn=lambda ep, req: self._require_invoker().invoke(ep, req),
-        )
-        if result.kind == "success":
-            return result.value
-        if result.kind == "compact_required":
-            ep = result.endpoint
-            return CanonicalLLMOutcome(
-                text="",
-                reasoning_text="",
-                tool_calls=[],
-                finish_reason=LLMFinishReason.COMPACT_REQUIRED,
-                target_input_budget=result.target_input_budget,
-                reserved_output_tokens=result.reserved_output_tokens,
-                preferred_endpoint_id=ep.endpoint_id,
-                preferred_model_id=ep.model_id,
-            )
-        msg = (
-            "LLM generation failed: no enabled endpoints are configured."
-            if result.kind == "no_endpoints"
-            else (
-                "LLM generation failed after exhausting all configured endpoints "
-                f"(kind={result.error_kind or 'unknown'}, type={result.error_type or 'UnknownEndpointError'})."
-            )
-        )
-        return CanonicalLLMOutcome(
-            text=msg,
-            reasoning_text="",
-            tool_calls=[],
-            finish_reason=LLMFinishReason.ERROR,
-        )
+    def _emit(self, phase: str, *, endpoint: LLMEndpointModel, **payload: Any) -> None:
+        event = {"phase": phase, "endpoint_id": endpoint.endpoint_id, "model_id": endpoint.model_id, **payload}
+        for sink in (self.event_sink, _SCOPED_EVENT_SINK.get()):
+            if callable(sink):
+                sink(dict(event))
 
-    async def agenerate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        return await asyncio.to_thread(self.generate, request)
-
-    def generate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
-        self.refresh_runtime_settings()
-        result = self._invoke_endpoints_with_retry(
-            request,
-            invoke_fn=lambda ep, req: list(self._require_invoker().invoke_stream(ep, req)),
-        )
-        if result.kind == "success":
-            return result.value
-        if result.kind == "compact_required":
-            ep = result.endpoint
-            return [
-                NormalizedLLMStreamEvent(
-                    event_kind=LLMStreamEventKind.COMPACT_REQUIRED,
-                    finish_reason=LLMFinishReason.COMPACT_REQUIRED,
-                    target_input_budget=result.target_input_budget,
-                    reserved_output_tokens=result.reserved_output_tokens,
-                    preferred_endpoint_id=ep.endpoint_id,
-                    preferred_model_id=ep.model_id,
-                )
-            ]
-        msg = (
-            "LLM generation failed: no enabled endpoints are configured."
-            if result.kind == "no_endpoints"
-            else (
-                "LLM generation failed after exhausting all configured endpoints "
-                f"(kind={result.error_kind or 'unknown'}, type={result.error_type or 'UnknownEndpointError'})."
-            )
-        )
-        return [
-            NormalizedLLMStreamEvent(
-                event_kind=LLMStreamEventKind.ERROR,
-                error_text=msg,
-                finish_reason=LLMFinishReason.ERROR,
-            ),
-            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.ERROR),
-        ]
-
-    async def agenerate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
-        return await asyncio.to_thread(self.generate_stream, request)
-
-    def _build_preflight_advice(
-        self,
-        *,
-        endpoint: LLMEndpointModel | None,
-        request: LLMPreflightRequest,
-        fallback_chain: list[str],
-    ) -> LLMPreflightAdvice:
-        breakdown = self._build_preflight_breakdown(request)
-        reserved_output_tokens = request.max_output_tokens
-        if endpoint is not None:
-            endpoint_ceiling = _endpoint_max_output_tokens_upper_limit(endpoint) or endpoint.max_output_tokens
-            if endpoint_ceiling is not None:
-                reserved_output_tokens = min(request.max_output_tokens, endpoint_ceiling)
-        if endpoint is None or endpoint.context_window is None:
-            available_input_budget_chars = max(
-                int(breakdown.get("estimated_input_chars", 0)),
-                int(breakdown.get("hard_keep_chars", 0)),
-            )
-            target_budget = max(
-                256,
-                int(breakdown.get("conversation_chars", 0)),
-            )
-            hard_overflow = False
-        else:
-            margin_tokens = self._context_margin_tokens(endpoint.context_window)
-            available_input_tokens = max(endpoint.context_window - reserved_output_tokens - margin_tokens, 0)
-            available_input_budget_chars = int(available_input_tokens * self._chars_per_token())
-            remaining_conversation_budget = max(
-                available_input_budget_chars - int(breakdown.get("hard_keep_chars", 0)),
-                0,
-            )
-            target_budget = max(256, int(remaining_conversation_budget * 0.5))
-            hard_overflow = int(breakdown.get("hard_keep_chars", 0)) > available_input_budget_chars
-            breakdown["context_window_tokens"] = int(endpoint.context_window)
-            breakdown["margin_tokens"] = int(margin_tokens)
-            breakdown["available_input_tokens"] = int(available_input_tokens)
-        breakdown["available_input_budget_chars"] = int(available_input_budget_chars)
-        breakdown["hard_overflow"] = hard_overflow
-        active_model = endpoint.model_id if endpoint is not None else request.model_hint
-        estimated_input_chars = int(breakdown.get("estimated_input_chars", 0))
-        status = (
-            LLMPreflightStatus.COMPACT_REQUIRED
-            if estimated_input_chars > available_input_budget_chars
-            else LLMPreflightStatus.READY
-        )
-        return LLMPreflightAdvice(
-            status=status,
-            active_model=active_model,
-            fallback_chain=list(fallback_chain),
-            target_input_budget=target_budget,
-            reserved_output_tokens=reserved_output_tokens,
-            breakdown=breakdown,
-        )
-
-    def _build_preflight_breakdown(self, request: LLMPreflightRequest) -> dict[str, int | bool]:
-        snapshot = request.metadata.get("prompt_budget_snapshot")
-        if isinstance(snapshot, dict):
-            breakdown = {
-                key: int(snapshot.get(key, 0))
-                for key in (
-                    "system_chars",
-                    "tool_protocol_chars",
-                    "tools_schema_chars",
-                    "conversation_chars",
-                    "current_user_chars",
-                    "estimated_input_chars",
-                    "hard_keep_chars",
-                )
-            }
-            if "tools_schema_chars" not in snapshot:
-                tools_schema_chars = _estimate_tools_schema_chars(request.tools)
-                breakdown["tools_schema_chars"] = tools_schema_chars
-                breakdown["estimated_input_chars"] += tools_schema_chars
-                breakdown["hard_keep_chars"] += tools_schema_chars
-            return breakdown
-        system_chars = 0
-        tool_protocol_chars = 0
-        conversation_chars = 0
-        current_user_chars = 0
-        last_index = len(request.messages) - 1
-        for index, message in enumerate(request.messages):
-            content_chars = self._estimate_message_chars(message)
-            role = str(message.get("role") or "").strip()
-            if role == "system":
-                system_chars += content_chars
-                continue
-            if role == "tool" or (role == "assistant" and message.get("tool_calls")):
-                tool_protocol_chars += content_chars
-                continue
-            if role == "user" and index == last_index:
-                current_user_chars += content_chars
-                continue
-            conversation_chars += content_chars
-        tools_schema_chars = _estimate_tools_schema_chars(request.tools)
-        estimated_input_chars = system_chars + tool_protocol_chars + tools_schema_chars + conversation_chars + current_user_chars
-        return {
-            "system_chars": system_chars,
-            "tool_protocol_chars": tool_protocol_chars,
-            "tools_schema_chars": tools_schema_chars,
-            "conversation_chars": conversation_chars,
-            "current_user_chars": current_user_chars,
-            "estimated_input_chars": estimated_input_chars,
-            "hard_keep_chars": system_chars + tool_protocol_chars + tools_schema_chars + current_user_chars,
-        }
-
-    @staticmethod
-    def _estimate_message_chars(message: dict[str, Any]) -> int:
-        total = _message_content_chars(message.get("content"))
-        tool_calls = message.get("tool_calls")
-        if tool_calls:
-            try:
-                total += len(json.dumps(tool_calls, ensure_ascii=False, sort_keys=True))
-            except TypeError:
-                total += len(str(tool_calls))
-        tool_call_id = str(message.get("tool_call_id", "") or "").strip()
-        if tool_call_id:
-            total += len(tool_call_id)
-        provider_specific_fields = message.get("provider_specific_fields")
-        if provider_specific_fields:
-            try:
-                total += len(json.dumps(provider_specific_fields, ensure_ascii=False, sort_keys=True))
-            except TypeError:
-                total += len(str(provider_specific_fields))
-        return total
-
-    def _context_margin_tokens(self, context_window: int) -> int:
-        if self.config is None:
-            return min(self.safety_margin_tokens, max(1024, int(context_window * 0.05)))
-        return min(
-            int(getattr(self.config, "context_margin_cap", self.safety_margin_tokens)),
-            max(
-                int(getattr(self.config, "context_margin_min", 1024)),
-                int(context_window * float(getattr(self.config, "context_margin_factor", 0.05))),
-            ),
-        )
-
-    def _max_output_tokens_from_context_window(self, context_window: int) -> int:
-        cap = int(getattr(self.config, "default_max_output_tokens", 25_000) or 25_000)
-        floor = int(getattr(self.config, "fallback_max_output_tokens", 4096) or 4096)
-        margin = self._context_margin_tokens(int(context_window))
-        usable = max(512, int(context_window) - margin)
-        context_fraction = max(512, int(context_window) // 4)
-        return max(512, min(cap, max(floor, context_fraction), usable))
-
-    def _chars_per_token(self) -> float:
-        if self.config is None:
-            return 3.5
-        value = float(getattr(self.config, "chars_per_token", 3.5))
-        return value if value > 0 else 3.5
-
-    def _build_effective_request(
-        self,
-        request: CanonicalLLMRequest,
-        *,
-        endpoint: LLMEndpointModel | None,
-    ) -> CanonicalLLMRequest:
-        max_output_tokens = int(request.max_output_tokens)
-        thinking_budget_tokens = request.thinking_budget_tokens
-        metadata: dict[str, Any] = dict(request.metadata)
-        snapshot_levels = metadata.pop("think_levels", None)
-        explicit_think_level = str(metadata.get("think_level") or "").strip()
-        metadata.pop("think_level", None)
-        if metadata.get("timeout_seconds") is None:
-            metadata["timeout_seconds"] = self._timeout_seconds_for_metadata(metadata)
-        if endpoint is not None:
-            contract = self._adapter_for_endpoint(endpoint).thinking_contract()
-            if contract is not None:
-                snapshot_level = ""
-                if isinstance(snapshot_levels, dict):
-                    snapshot_level = str(snapshot_levels.get(endpoint.endpoint_id) or "").strip()
-                if explicit_think_level:
-                    resolved_think_level = contract.resolve(explicit_think_level)
-                    if resolved_think_level is None:
-                        raise ValueError(
-                            f"invalid think level for endpoint {endpoint.endpoint_id}: {explicit_think_level}"
-                        )
-                elif snapshot_level:
-                    resolved_think_level = contract.resolve(snapshot_level) or contract.default_choice_id
-                else:
-                    resolved_think_level = (
-                        self._effective_think_level_for_endpoint(endpoint, contract=contract)
-                        or contract.default_choice_id
-                    )
-                metadata["think_level"] = resolved_think_level
-            upper_limit = _endpoint_max_output_tokens_upper_limit(endpoint)
-            if upper_limit is not None:
-                max_output_tokens = min(max_output_tokens, upper_limit)
-            if thinking_budget_tokens is None:
-                thinking_budget_tokens = _positive_int_or_none(
-                    dict(endpoint.capabilities_blob or {}).get("thinking_budget_tokens")
-                )
-            metadata.update(
-                {
-                    "endpoint_id": endpoint.endpoint_id,
-                    "provider": endpoint.provider,
-                    "model_id": endpoint.model_id,
-                    "supports_streaming": bool(endpoint.supports_streaming),
-                }
-            )
-        return CanonicalLLMRequest(
-            messages=list(request.messages),
-            max_output_tokens=max_output_tokens,
-            thinking_budget_tokens=thinking_budget_tokens,
-            model_hint=request.model_hint or (endpoint.model_id if endpoint is not None else None),
-            temperature=request.temperature,
-            tools=list(request.tools),
-            metadata=metadata,
-        )
-
-    def _require_invoker(self) -> LLMEndpointInvokerPort:
+    def _invoker(self) -> LLMEndpointInvokerPort:
         if self.endpoint_invoker is None:
-            raise LLMEndpointInvocationError("llm endpoint invoker is not configured")
+            raise LLMEndpointInvocationError("LLM endpoint invoker is not configured")
         return self.endpoint_invoker
 
-def _last_message_text(messages: list[dict[str, Any]]) -> str:
-    for message in reversed(messages):
-        content = message.get("content", "")
-        if isinstance(content, str) and content.strip():
-            return content
-        if isinstance(content, list):
-            parts = [
-                str(part.get("text") or "")
-                for part in content
-                if isinstance(part, dict) and str(part.get("type") or "") == "text"
-            ]
-            text = "\n".join(part for part in parts if part).strip()
-            if text:
-                return text
-    return ""
+
+def _text_response(text: str, reason: LLMFinishReason) -> LLMResponseIR:
+    return LLMResponseIR(
+        message=LLMMessageIR(
+            role=MessageRole.ASSISTANT,
+            parts=(TextPartIR(str(text)),) if str(text) else (),
+            state=MessageState.COMPLETE,
+        ),
+        finish_reason=reason,
+        provider_response_count=0 if reason in {LLMFinishReason.ERROR, LLMFinishReason.COMPACT_REQUIRED} else 1,
+    )
 
 
-def _coerce_response_mode(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip().lower()
-    if not text:
-        return None
-    return text
+def _failure_result(text: str) -> LLMGenerationResult:
+    return LLMGenerationResult(response=_text_response(text, LLMFinishReason.ERROR))
 
 
-def _openai_api_base(base_url: str) -> str:
-    url = str(base_url or "").strip().rstrip("/")
-    for suffix in ("/chat/completions", "/chat", "/v1/messages", "/messages"):
-        if url.endswith(suffix):
-            return url[: -len(suffix)].rstrip("/")
-    return url
-
-
-def _build_tool_name_aliases(tools: list[dict[str, Any]]) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for tool in tools:
-        function = tool.get("function") if isinstance(tool, dict) else None
-        name = str((function or {}).get("name") or tool.get("name") or "").strip()
-        if not name:
-            continue
-        aliases[name] = name
-    return aliases
-
-
-def _external_tool_name(name: str, tool_name_aliases: dict[str, str] | None) -> str:
-    return str((tool_name_aliases or {}).get(name, name))
-
-
-def _canonical_tool_name(name: str, tool_name_aliases: dict[str, str] | None) -> str:
-    reverse = {alias: canonical for canonical, alias in (tool_name_aliases or {}).items()}
-    return str(reverse.get(name, name))
-
-
-def _coerce_tools_for_openai_chat(
-    tools: list[dict[str, Any]],
-    *,
-    tool_name_aliases: dict[str, str] | None = None,
-) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
-    for tool in tools:
-        if "type" in tool and "function" in tool:
-            payload = dict(tool)
-            function = dict(payload.get("function") or {})
-            name = str(function.get("name") or "").strip()
-            if name:
-                function["name"] = _external_tool_name(name, tool_name_aliases)
-            input_schema = function.pop("input_schema", None)
-            if input_schema is not None:
-                function["parameters"] = input_schema
-            payload["function"] = function
-            normalized.append(payload)
-            continue
-        name = str(tool.get("name") or "").strip()
-        if not name:
-            continue
-        normalized.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": _external_tool_name(name, tool_name_aliases),
-                    "description": str(tool.get("description") or f"Tool {name}"),
-                    "parameters": tool.get("input_schema")
-                    or {"type": "object", "properties": {}},
-                },
-            }
+def _classify_retry_error(exc: Exception) -> str:
+    if isinstance(exc, LLMCredentialUnavailableError):
+        return "credential"
+    if isinstance(exc, LLMRequestPreparationError):
+        return "request"
+    if isinstance(exc, LLMEndpointResponseError):
+        return "response_error"
+    message = str(exc).lower()
+    error_type = type(exc).__name__.lower()
+    if any(
+        marker in message
+        for marker in (
+            "error code: 401",
+            "status code: 401",
+            "http 401",
+            "unauthorized",
+            "invalid api key",
+            "invalid_api_key",
+            "error code: 403",
+            "status code: 403",
+            "http 403",
+            "forbidden",
         )
-    return normalized
+    ):
+        return "credential"
+    if "timeout" in message or "timed out" in message or "timeout" in error_type:
+        return "timeout"
+    if any(marker in message for marker in ("error code: 400", "status code: 400", "bad request")):
+        return "bad_request"
+    if any(marker in message for marker in ("connection refused", "connection reset", "broken pipe")) or "connection" in error_type:
+        return "connection"
+    if "429" in message or "rate limit" in message:
+        return "rate_limit"
+    if any(marker in message for marker in ("500", "502", "503", "504", "529", "overload")):
+        return "server"
+    return "unknown"
 
 
-def _message_content_chars(content: Any) -> int:
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("type") or "") == "text":
-                parts.append(str(item.get("text") or ""))
-        return len("\n".join(part for part in parts if part))
-    return len(str(content or ""))
-
-
-def _estimate_tools_schema_chars(tools: list[dict[str, Any]]) -> int:
-    if not tools:
-        return 0
-    try:
-        return len(json.dumps(tools, ensure_ascii=False, sort_keys=True))
-    except TypeError:
-        return len(str(tools))
-
-
-def _coerce_messages_for_openai_chat(
-    messages: list[dict[str, Any]],
-    *,
-    tool_name_aliases: dict[str, str] | None = None,
-    artifact_manager: Any = None,
-    supports_vision: bool = False,
-    image_url_format: str = "data_url",
-) -> list[dict[str, Any]]:
-    normalized: list[dict[str, Any]] = []
-    for message in messages:
-        payload = dict(message)
-        content = payload.get("content")
-        if isinstance(content, list):
-            payload["content"] = _coerce_content_parts_for_openai_chat(
-                content,
-                artifact_manager=artifact_manager,
-                supports_vision=supports_vision,
-                image_url_format=image_url_format,
-            )
-        tool_calls = list(payload.get("tool_calls") or [])
-        if tool_calls:
-            coerced_calls: list[dict[str, Any]] = []
-            for item in tool_calls:
-                if not isinstance(item, dict):
-                    continue
-                tool_payload = dict(item)
-                function = dict(tool_payload.get("function") or {})
-                name = str(function.get("name") or "").strip()
-                if name:
-                    function["name"] = _external_tool_name(name, tool_name_aliases)
-                tool_payload["function"] = function
-                coerced_calls.append(tool_payload)
-            payload["tool_calls"] = coerced_calls
-        normalized.append(payload)
-    return normalized
-
-
-def _coerce_content_parts_for_openai_chat(
-    content: list[Any],
-    *,
-    artifact_manager: Any = None,
-    supports_vision: bool = False,
-    image_url_format: str = "data_url",
-) -> list[dict[str, Any]]:
-    parts: list[dict[str, Any]] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        part_type = str(item.get("type") or "").strip()
-        if part_type == "artifact_image":
-            if not supports_vision:
-                continue
-            source_url = str(item.get("source_url") or "").strip()
-            if source_url.startswith(("http://", "https://")):
-                parts.append({"type": "image_url", "image_url": {"url": source_url}})
-                continue
-            if artifact_manager is None:
-                continue
-            to_data_url = getattr(artifact_manager, "to_data_url", None)
-            if not callable(to_data_url):
-                continue
-            data_url = to_data_url(str(item.get("representation_id") or ""))
-            if not data_url:
-                continue
-            parts.append({"type": "image_url", "image_url": {"url": _coerce_image_url_value(data_url, image_url_format)}})
-            continue
-        parts.append(dict(item))
-    return parts
-
-
-def _image_url_format(endpoint: LLMEndpointModel) -> str:
-    capabilities = dict(endpoint.capabilities_blob or {})
-    configured = str(
-        capabilities.get("image_url_format")
-        or capabilities.get("vision_image_url_format")
-        or ""
-    ).strip().lower()
-    if configured in {"data_url", "raw_base64"}:
-        return configured
-    # OpenAI-compatible VLM endpoints agree on the multipart shape, but differ
-    # in accepted image_url transports. Default to the standards-friendly data
-    # URL and let endpoint metadata opt into provider-specific variants.
-    return "data_url"
-
-
-def _coerce_image_url_value(data_url: str, image_url_format: str) -> str:
-    if str(image_url_format or "").strip().lower() != "raw_base64":
-        return data_url
-    if "," not in data_url:
-        return data_url
-    return data_url.split(",", 1)[1]
-
-
-def _summarize_provider_payload(
-    endpoint: LLMEndpointModel,
-    messages: list[dict[str, Any]],
-    *,
-    image_url_format: str,
-) -> dict[str, Any]:
-    image_parts: list[dict[str, Any]] = []
-    for message_index, message in enumerate(messages):
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for part_index, part in enumerate(content):
-            if not isinstance(part, dict) or part.get("type") != "image_url":
-                continue
-            url = str((part.get("image_url") or {}).get("url") or "")
-            if url.startswith("data:"):
-                transport = "data_url"
-                prefix = url.split(",", 1)[0][:96]
-            elif url.startswith("http://") or url.startswith("https://"):
-                transport = "http_url"
-                prefix = url[:96]
-            elif url:
-                transport = "raw_base64_or_provider_specific"
-                prefix = "<omitted>"
-            else:
-                transport = "empty"
-                prefix = ""
-            image_parts.append(
-                {
-                    "message_index": message_index,
-                    "part_index": part_index,
-                    "transport": transport,
-                    "prefix": prefix,
-                    "url_length": len(url),
-                    "bytes": "omitted",
-                }
-            )
-    return {
-        "endpoint_id": endpoint.endpoint_id,
-        "model_id": endpoint.model_id,
-        "provider": endpoint.provider,
-        "supports_vision": bool(endpoint.supports_vision),
-        "image_url_format": image_url_format,
-        "message_count": len(messages),
-        "image_parts": image_parts,
+def _retryable_error_kind(error_kind: str) -> bool:
+    return error_kind in {
+        "timeout",
+        "connection",
+        "rate_limit",
+        "server",
+        "response_error",
+        "unknown",
     }
 
 
-def _purge_legacy_llm_failure_audits(config: Any) -> None:
-    runtime_root = getattr(config, "runtime_root", None) if config is not None else None
-    if runtime_root is None:
-        return
-    audit_dir = Path(runtime_root) / "data" / "llm" / "audit"
-    removed = 0
-    try:
-        candidates = tuple(audit_dir.glob("llm_failure_*.json"))
-    except OSError:
-        return
-    for path in candidates:
-        try:
-            path.unlink()
-            removed += 1
-        except OSError:
-            continue
-    try:
-        audit_dir.rmdir()
-    except OSError:
-        pass
-    if removed:
-        _LOGGER.info("Removed %d legacy LLM failure audit files containing request payloads", removed)
-
-
-def _message_text(message: dict[str, Any]) -> str:
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        chunks: list[str] = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                text = item.get("text")
-                if text:
-                    chunks.append(str(text))
-        return "".join(chunks)
-    return ""
-
-
-def _message_reasoning_text(message: dict[str, Any]) -> str:
-    reasoning = message.get("reasoning_content")
-    if isinstance(reasoning, str):
-        return reasoning
-    provider_fields = message.get("provider_specific_fields")
-    if isinstance(provider_fields, dict):
-        nested = provider_fields.get("reasoning_content")
-        if isinstance(nested, str):
-            return nested
-    return ""
-
-
-def _message_provider_specific_fields(message: dict[str, Any]) -> dict[str, Any]:
-    fields: dict[str, Any] = {}
-    provider_fields = message.get("provider_specific_fields")
-    if isinstance(provider_fields, dict):
-        fields.update({str(key): value for key, value in provider_fields.items() if str(key).strip()})
-    reasoning = message.get("reasoning_content")
-    if isinstance(reasoning, str) and reasoning:
-        fields["reasoning_content"] = reasoning
-    return fields
-
-
-def _parse_tool_calls(
-    message: dict[str, Any],
-    *,
-    tool_name_aliases: dict[str, str] | None = None,
-) -> list[CanonicalToolCall]:
-    payload = list(message.get("tool_calls") or [])
-    result: list[CanonicalToolCall] = []
-    for item in payload:
-        function = item.get("function") if isinstance(item, dict) else None
-        if not isinstance(function, dict):
-            continue
-        name = str(function.get("name") or "").strip()
-        raw_args = function.get("arguments") or {}
-        args: dict[str, Any]
-        if isinstance(raw_args, str):
-            import json
-
-            try:
-                loaded = json.loads(raw_args)
-            except Exception:
-                loaded = {}
-            args = dict(loaded) if isinstance(loaded, dict) else {}
-        elif isinstance(raw_args, dict):
-            args = dict(raw_args)
-        else:
-            args = {}
-        if name:
-            result.append(
-                CanonicalToolCall(
-                    name=_canonical_tool_name(name, tool_name_aliases),
-                    args=args,
-                    call_id=str(item.get("id") or "").strip() or None,
-                )
-            )
-    return result
-
-
-def _openai_chat_stream_payload(raw_chunk: Any) -> dict[str, Any]:
-    payload = (
-        raw_chunk.model_dump()
-        if hasattr(raw_chunk, "model_dump")
-        else raw_chunk.to_dict()
-        if hasattr(raw_chunk, "to_dict")
-        else raw_chunk
+def _public_failure_text(exc: Exception | None) -> str:
+    if exc is None:
+        return "LLM invocation failed: kind=unknown type=UnknownError"
+    return (
+        "LLM invocation failed: "
+        f"kind={_classify_retry_error(exc)} type={type(exc).__name__}"
     )
-    return dict(payload) if isinstance(payload, dict) else {}
 
 
-def _without_openai_chat_stream_tool_calls(
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    rendered = dict(payload)
-    choices = []
-    for raw_choice in list(payload.get("choices") or []):
-        if not isinstance(raw_choice, dict):
-            choices.append(raw_choice)
-            continue
-        choice = dict(raw_choice)
-        delta = choice.get("delta")
-        if isinstance(delta, dict) and delta.get("tool_calls") is not None:
-            choice["delta"] = {**delta, "tool_calls": []}
-        choices.append(choice)
-    rendered["choices"] = choices
-    return rendered
+def _estimate_request_tokens(request: LLMRequestIR) -> int:
+    chars = 0
+    for message in request.messages:
+        chars += len(message.text) + len(message.reasoning_text)
+        for call in message.tool_calls:
+            chars += len(call.name) + len(json.dumps(thaw_json(call.arguments), ensure_ascii=False))
+    for tool in request.tools:
+        chars += len(tool.name) + len(tool.description) + len(json.dumps(thaw_json(tool.input_schema), ensure_ascii=False))
+    return max(1, (chars + 3) // 4)
 
 
-def _accumulate_openai_chat_stream_tool_calls(
-    payload: dict[str, Any],
-    drafts: dict[tuple[str, object], dict[str, Any]],
-) -> None:
-    choices = list(payload.get("choices") or [])
-    if not choices or not isinstance(choices[0], dict):
-        return
-    delta = choices[0].get("delta")
-    if not isinstance(delta, dict):
-        return
-    for position, raw_item in enumerate(list(delta.get("tool_calls") or [])):
-        if not isinstance(raw_item, dict):
-            continue
-        raw_index = raw_item.get("index")
-        call_id = str(raw_item.get("id") or "").strip()
-        if raw_index is not None:
-            key: tuple[str, object] = ("index", raw_index)
-        elif call_id:
-            key = ("id", call_id)
-        else:
-            key = ("position", position)
-        draft = drafts.setdefault(
-            key,
-            {
-                "position": raw_index if isinstance(raw_index, int) else position,
-                "call_id": "",
-                "name": "",
-                "argument_fragments": [],
-                "argument_object": {},
-            },
-        )
-        if call_id:
-            draft["call_id"] = call_id
-        function = raw_item.get("function")
-        if not isinstance(function, dict):
-            continue
-        name_fragment = str(function.get("name") or "")
-        if name_fragment:
-            current_name = str(draft.get("name") or "")
-            if not current_name:
-                draft["name"] = name_fragment
-            elif name_fragment == current_name:
-                pass
-            elif name_fragment.startswith(current_name):
-                draft["name"] = name_fragment
-            elif not current_name.endswith(name_fragment):
-                draft["name"] = current_name + name_fragment
-        arguments = function.get("arguments")
-        if isinstance(arguments, str):
-            draft["argument_fragments"].append(arguments)
-        elif isinstance(arguments, dict):
-            draft["argument_object"].update(arguments)
+def _retry_delay(attempt: int) -> float:
+    base = min(0.5 * (2 ** max(0, attempt - 1)), 32.0)
+    return base + random.random() * base * 0.25
 
 
-def _finalize_openai_chat_stream_tool_calls(
-    drafts: dict[tuple[str, object], dict[str, Any]],
-    *,
-    tool_name_aliases: dict[str, str] | None = None,
-) -> Iterable[NormalizedLLMStreamEvent]:
-    ordered = sorted(
-        drafts.values(),
-        key=lambda item: int(item.get("position") or 0),
+def _is_stub_endpoint(endpoint: LLMEndpointModel) -> bool:
+    capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
+    return bool(
+        capabilities.get("stub")
+        or str(endpoint.base_url).startswith("stub://")
     )
-    for draft in ordered:
-        name = str(draft.get("name") or "").strip()
-        if not name:
-            raise LLMEndpointInvocationError(
-                "llm stream contained a tool call without a function name"
-            )
-        args = dict(draft.get("argument_object") or {})
-        fragments = "".join(
-            str(item)
-            for item in list(draft.get("argument_fragments") or ())
-        )
-        if fragments:
-            try:
-                loaded = json.loads(fragments)
-            except Exception as exc:
-                raise LLMEndpointInvocationError(
-                    f"llm stream contained invalid JSON arguments for tool {name}"
-                ) from exc
-            if not isinstance(loaded, dict):
-                raise LLMEndpointInvocationError(
-                    f"llm stream contained non-object arguments for tool {name}"
-                )
-            args.update(loaded)
-        yield NormalizedLLMStreamEvent(
-            event_kind=LLMStreamEventKind.TOOL_CALL,
-            tool_call=CanonicalToolCall(
-                name=_canonical_tool_name(name, tool_name_aliases),
-                args=args,
-                call_id=str(draft.get("call_id") or "").strip() or None,
-            ),
-        )
-
-
-def _parse_openai_chat_stream_chunk(
-    raw_chunk: Any,
-    *,
-    tool_name_aliases: dict[str, str] | None = None,
-) -> list[NormalizedLLMStreamEvent]:
-    payload = raw_chunk.model_dump() if hasattr(raw_chunk, "model_dump") else raw_chunk.to_dict() if hasattr(raw_chunk, "to_dict") else raw_chunk
-    usage = _response_usage(payload)
-    choices = list((payload or {}).get("choices") or [])
-    if not choices:
-        if usage.reported or usage.cost:
-            return [
-                NormalizedLLMStreamEvent(
-                    event_kind=LLMStreamEventKind.DONE,
-                    **_usage_fields(usage),
-                )
-            ]
-        return []
-    first = choices[0] or {}
-    delta = first.get("delta") or {}
-    finish_reason = first.get("finish_reason")
-    events: list[NormalizedLLMStreamEvent] = []
-    content = delta.get("content")
-    reasoning_content = delta.get("reasoning_content")
-    if isinstance(content, str):
-        if content:
-            events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=content))
-    elif isinstance(content, list):
-        text = "".join(str(item.get("text") or "") for item in content if isinstance(item, dict))
-        if text:
-            events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=text))
-    if isinstance(reasoning_content, str):
-        if reasoning_content:
-            events.append(
-                NormalizedLLMStreamEvent(
-                    event_kind=LLMStreamEventKind.REASONING_DELTA,
-                    reasoning_text=reasoning_content,
-                    provider_specific_fields={"reasoning_content": reasoning_content},
-                )
-            )
-    for tool_call in _parse_tool_calls(delta if isinstance(delta, dict) else {}, tool_name_aliases=tool_name_aliases):
-        events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call))
-    if finish_reason is not None:
-        events.append(
-            NormalizedLLMStreamEvent(
-                event_kind=LLMStreamEventKind.DONE,
-                finish_reason=str(finish_reason),
-                **_usage_fields(usage),
-            )
-        )
-    return events

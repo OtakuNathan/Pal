@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
+from pal.shared.tool_protocol import new_tool_call
+
 from pal.execution.generated_tool_models import (
     ExecutionShellExecShellExecCapabilityMixinShellInput,
     MinionScopedExecutionOpMinionArtifactWriteInput,
@@ -38,7 +42,7 @@ from pal.execution.tool_facade import (
     ToolInvocationResult,
 )
 from pal.execution.tool_registry import _example_from_schema
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
+from pal.shared import ToolExecutionResult
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
 from pal.minion.tool_guidance import (
     minion_tool_guidance,
@@ -240,7 +244,7 @@ def _workflow_capability(
     async def invoke(call: CapabilityCall) -> ToolHandlerResult | ToolInvocationResult:
         meta = dict(call.meta)
         provider_call = meta.get("tool_call")
-        tool_call = CanonicalToolCall(
+        tool_call = new_tool_call(
             name=name,
             args=dict(call.args),
             call_id=str(getattr(provider_call, "call_id", "") or "") or None,
@@ -248,7 +252,7 @@ def _workflow_capability(
         result = handler(tool_call, meta)
         if inspect.isawaitable(result):
             result = await result
-        if isinstance(result, CanonicalToolResult):
+        if isinstance(result, ToolExecutionResult):
             if isinstance(
                 result.invocation_result,
                 (CompleteResult, PagedResult, RejectedResult, FailedResult),
@@ -435,12 +439,12 @@ class _ExecutionOverlay:
         value = self.runtime.get_capability_spec(name)
         return dict(value) if isinstance(value, dict) else None
 
-    async def execute_tool_async(self, call: CanonicalToolCall, **kwargs: Any) -> CanonicalToolResult:
+    async def execute_tool_async(self, call: ToolCallIR, **kwargs: Any) -> ToolExecutionResult:
         canonical = self.runtime.resolve_capability_address(call.name)
         if self.runtime.compiled_capability_index.by_canonical.get(canonical):
             facade_call = _manager_call_to_facade(
                 self.runtime,
-                CanonicalToolCall(name=canonical, args=dict(call.args or {}), call_id=call.call_id),
+                new_tool_call(name=canonical, args=dict(call.args or {}), call_id=call.call_id),
             )
             return await self.runtime.execute_tool_async(
                 facade_call,
@@ -452,7 +456,7 @@ class _ExecutionOverlay:
         if callable(execute):
             facade_call = _manager_call_to_facade(
                 self.delegate,
-                CanonicalToolCall(name=canonical, args=dict(call.args or {}), call_id=call.call_id),
+                new_tool_call(name=canonical, args=dict(call.args or {}), call_id=call.call_id),
             )
             return await execute(facade_call, **_supported_kwargs(execute, kwargs))
         return _error_result(call, "unknown tool", "unknown_tool")
@@ -471,7 +475,7 @@ class _OriginalAdapter:
     def __init__(self, owner: "MinionScopedExecutionRuntime") -> None:
         self.owner = owner
 
-    async def execute_tool_async(self, call: CanonicalToolCall, **kwargs: Any) -> CanonicalToolResult:
+    async def execute_tool_async(self, call: ToolCallIR, **kwargs: Any) -> ToolExecutionResult:
         return await self.owner._execute_original(call, **kwargs)
 
 
@@ -583,7 +587,7 @@ class MinionScopedExecutionRuntime:
             return lambda call, _ctx: asyncio.to_thread(_workspace_tool_result, call, self.workspace)
         return None
 
-    async def _execute_original(self, call: CanonicalToolCall, **kwargs: Any) -> CanonicalToolResult:
+    async def _execute_original(self, call: ToolCallIR, **kwargs: Any) -> ToolExecutionResult:
         execute = getattr(self._original_runtime, "execute_tool_async", None)
         if callable(execute):
             facade_call = _manager_call_to_facade(self._original_runtime, call)
@@ -631,12 +635,12 @@ class MinionScopedExecutionRuntime:
 
     async def execute_tool_async(
         self,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         allow_tools: bool = True,
         budget: Any = None,
         turn_id: str | None = None,
-    ) -> CanonicalToolResult:
+    ) -> ToolExecutionResult:
         raw_name = str(call.name or "").strip()
         if raw_name.startswith(("op_", "intro_")):
             return _error_result(
@@ -694,11 +698,11 @@ _SCOPED_FILE_MUTATIONS = frozenset(
 
 
 def _guard_scoped_workspace_mutation(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     *,
     target_name: str,
     workspace: dict[str, Any],
-) -> tuple[CanonicalToolCall, CanonicalToolResult | None]:
+) -> tuple[ToolCallIR, ToolExecutionResult | None]:
     """Reject host-side file mutations outside the role's compiled write set.
 
     Shell commands run inside bubblewrap and receive read-only overlays there.
@@ -786,34 +790,34 @@ def _workspace_scope_matches(path: str, scope: dict[str, Any]) -> bool:
 
 
 def _tool_call_with_effective_args(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     args: dict[str, Any],
-) -> CanonicalToolCall:
+) -> ToolCallIR:
     if call.name == "op_tool_call":
         outer = dict(call.args or {})
         outer["args"] = args
-        return CanonicalToolCall(
+        return new_tool_call(
             name=call.name,
             args=outer,
             call_id=call.call_id,
         )
-    return CanonicalToolCall(name=call.name, args=args, call_id=call.call_id)
+    return new_tool_call(name=call.name, args=args, call_id=call.call_id)
 
 
 def _path_not_writable_result(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     *,
     raw_path: str,
     relative_path: str,
     reason: str,
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     display = relative_path or raw_path
     text = (
         f"path is not writable in this role: {display}. "
         "Change only the paths in the bound write scope; verifier-owned corpus "
         "must be repaired by its Verifier."
     )
-    return CanonicalToolResult(
+    return ToolExecutionResult(
         name=call.name,
         ok=False,
         text=text,
@@ -856,7 +860,7 @@ def _scope_descriptor(
     )
 
 
-def _manager_call_to_facade(runtime: Any, call: CanonicalToolCall) -> CanonicalToolCall:
+def _manager_call_to_facade(runtime: Any, call: ToolCallIR) -> ToolCallIR:
     """Translate Manager-internal canonical addressing at the facade boundary.
 
     Minion policy and workspace handlers intentionally keep canonical paths as
@@ -887,14 +891,14 @@ def _manager_call_to_facade(runtime: Any, call: CanonicalToolCall) -> CanonicalT
     if len(matches) != 1:
         return call
     record = matches[0]
-    alias_call = CanonicalToolCall(
+    alias_call = new_tool_call(
         name=record.alias,
         args=dict(call.args or {}),
         call_id=call.call_id,
     )
     if record.execution.invocation_mode is InvocationMode.DIRECT:
         return alias_call
-    return CanonicalToolCall(
+    return new_tool_call(
         name="call_tool",
         args={"name": record.alias, "args": dict(call.args or {})},
         call_id=call.call_id,
@@ -910,8 +914,8 @@ def _scrub_spec(spec: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def _error_result(call: CanonicalToolCall, text: str, reason: str) -> CanonicalToolResult:
-    return CanonicalToolResult(
+def _error_result(call: ToolCallIR, text: str, reason: str) -> ToolExecutionResult:
+    return ToolExecutionResult(
         name=call.name,
         ok=False,
         text=text,
@@ -930,18 +934,18 @@ def _path_is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def _effective_capability_name(tool_call: CanonicalToolCall) -> str:
+def _effective_capability_name(tool_call: ToolCallIR) -> str:
     return effective_minion_capability_name(tool_call)
 
 
-def _effective_tool_args(tool_call: CanonicalToolCall) -> dict[str, Any]:
+def _effective_tool_args(tool_call: ToolCallIR) -> dict[str, Any]:
     return effective_minion_tool_args(tool_call)
 
 
 def _review_tool_evidence_ref(
     target_name: str,
-    tool_call: CanonicalToolCall,
-    result: CanonicalToolResult,
+    tool_call: ToolCallIR,
+    result: ToolExecutionResult,
 ) -> dict[str, Any]:
     if not (
         str(target_name).startswith(("op_exec_shell", "op_lsp_"))

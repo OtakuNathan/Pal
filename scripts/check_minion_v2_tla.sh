@@ -21,12 +21,14 @@ models=(
     DurableEffects
     RoleAssignmentRecovery
     WorkerProcessLifecycle
+    ContinuationLifecycle
     ReplanReuseLifecycle
     ImplementationTopology
     CanonicalWorktreeLifecycle
     FileMutationAuthorization
     ContractWorkItemLifecycle
     HarnessGenerationLifecycle
+    MinionRuntimeAuthority
 )
 
 cd "${repo_root}"

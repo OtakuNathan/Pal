@@ -8,7 +8,7 @@ from pal.core.compaction import CompactionEngine, CompactionPolicy
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.turn_executor import TurnExecutor
-from pal.llm.contracts import CanonicalLLMRequest
+from pal.llm.ir import LLMRequestIR
 from pal.shared import PromptAssemblyContext
 
 
@@ -58,8 +58,7 @@ class AgentTurnRuntime:
         should_enter_failure_flow_for_tool_result: Callable[[Any], bool],
         state: Any | None = None,
         guard_host: Any | None = None,
-        request_adapter: Callable[[CanonicalLLMRequest], CanonicalLLMRequest] | None = None,
-        tool_protocol_projector: Callable[[list[dict[str, Any]], int], list[dict[str, Any]]] | None = None,
+        request_adapter: Callable[[LLMRequestIR], LLMRequestIR] | None = None,
         execute_tool_async: Callable[..., Awaitable[Any]] | None = None,
         handle_llm_provider_errors: bool = True,
         compaction_policy: CompactionPolicy | None = None,
@@ -100,7 +99,7 @@ class AgentTurnRuntime:
             *,
             max_output_tokens: int = 1024,
             model_hint: str | None = None,
-        ) -> CanonicalLLMRequest:
+        ) -> LLMRequestIR:
             request = prompt_compiler.build_canonical_prompt(
                 assembly_context,
                 max_output_tokens=max_output_tokens,
@@ -122,7 +121,6 @@ class AgentTurnRuntime:
             render_failure_feedback_text=render_failure_feedback_text,
             should_enter_failure_flow_for_tool_result=should_enter_failure_flow_for_tool_result,
             handle_llm_provider_errors=handle_llm_provider_errors,
-            tool_protocol_projector=tool_protocol_projector,
             execute_tool_async=execute_tool_async,
             config=config,
             compaction_engine=compaction_engine,

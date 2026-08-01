@@ -323,7 +323,25 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         store = ContentAddressedArtifactStore(root, repository)
         prompt = store.put_json({"prompt": "initial"}, artifact_type="RolePromptPackArtifact")
         continuation = store.put_json(
-            {"session_id": "inv-session", "llm_round_count": 7},
+            {
+                "schema_version": "5",
+                "session_id": "inv-session",
+                "llm_round_count": 7,
+                "l1_items": [
+                    [
+                        {
+                            "role": "user",
+                            "content": "inspect the current candidate",
+                            "kind": "user_request",
+                        },
+                        {
+                            "role": "assistant",
+                            "content": "candidate inspected",
+                            "kind": "assistant_reply",
+                        },
+                    ]
+                ],
+            },
             artifact_type="AgentSessionContinuationArtifact",
         )
         repository.ensure_role_session(
@@ -391,6 +409,13 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertIsNotNone(restore_path)
         restored = json.loads(Path(restore_path).read_text(encoding="utf-8"))
         self.assertEqual(restored["schema_version"], "5")
+        self.assertNotIn("l1_items", restored)
+        self.assertEqual(len(restored["l1_turns"]), 1)
+        self.assertEqual(restored["l1_turns"][0]["state"], "settled")
+        self.assertIn(
+            "inspect the current candidate",
+            json.dumps(restored["l1_turns"]),
+        )
         self.assertEqual(restored["scope_kind"], "architecture_revision")
         self.assertEqual(restored["subject_key"], "arch-session")
         self.assertFalse(checkpoint_path.exists())

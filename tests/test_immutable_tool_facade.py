@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import json
 import unittest
@@ -29,7 +31,6 @@ from pal.execution.tool_facade import (
     ToolGuidance,
     ToolHandlerResult,
 )
-from pal.llm.contracts import CanonicalToolCall
 from pal.shared import SINGLETON_TARGET
 from tests.capability_fixture import (
     build_test_capability_handle,
@@ -154,10 +155,10 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("direct_echo", self.runtime.registry_generation.provider_specs)
         self.assertNotIn("echo", self.runtime.registry_generation.provider_specs)
         wrong_direct = self.runtime.invoke_direct_tool(
-            CanonicalToolCall(name="echo", args={"value": "x"})
+            new_tool_call(name="echo", args={"value": "x"})
         )
         wrong_indirect = self.runtime.invoke_indirect_tool(
-            CanonicalToolCall(name="direct_echo", args={"value": "x"})
+            new_tool_call(name="direct_echo", args={"value": "x"})
         )
         self.assertIsInstance(wrong_direct, RejectedResult)
         self.assertEqual(wrong_direct.error_code, "wrong_invocation_mode")
@@ -169,7 +170,7 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
     async def test_canonical_path_is_never_an_llm_invocation_name(self) -> None:
         mount_test_capability(self.runtime, **_echo_kwargs())
         result = self.runtime.invoke_indirect_tool(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_test_echo",
                 args={"value": "hidden"},
             )
@@ -199,7 +200,7 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             result = self.runtime.invoke_indirect_tool(
-                CanonicalToolCall(name=alias, args={"value": "same"})
+                new_tool_call(name=alias, args={"value": "same"})
             )
             self.assertIsInstance(result, CompleteResult)
             normalized.append(dict(result.output))
@@ -226,10 +227,10 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         omitted = self.runtime.invoke_indirect_tool(
-            CanonicalToolCall(name="nullable_echo", args={"value": "omitted"})
+            new_tool_call(name="nullable_echo", args={"value": "omitted"})
         )
         explicit = await self.runtime.invoke_indirect_tool_async(
-            CanonicalToolCall(
+            new_tool_call(
                 name="nullable_echo",
                 args={"value": "explicit", "optional": None},
             )
@@ -257,7 +258,7 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         result = self.runtime.invoke_indirect_tool(
-            CanonicalToolCall(name="write_echo", args={"value": "x"})
+            new_tool_call(name="write_echo", args={"value": "x"})
         )
         self.assertIsInstance(result, FailedResult)
         self.assertEqual(result.error_code, "missing_effect_receipt")
@@ -287,7 +288,7 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         complete = self.runtime.invoke_indirect_tool(
-            CanonicalToolCall(name="applied_echo", args={"value": "x"})
+            new_tool_call(name="applied_echo", args={"value": "x"})
         )
         self.assertIsInstance(complete, CompleteResult)
         self.assertEqual(complete.effect, EffectOutcome.APPLIED)
@@ -313,7 +314,7 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         uncertain = self.runtime.invoke_indirect_tool(
-            CanonicalToolCall(name="uncertain_echo", args={"value": "x"})
+            new_tool_call(name="uncertain_echo", args={"value": "x"})
         )
         self.assertIsInstance(uncertain, FailedResult)
         self.assertEqual(uncertain.effect, EffectOutcome.UNKNOWN)
@@ -332,14 +333,14 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
             **_echo_kwargs(handler=handler),
         )
         invalid = self.runtime.invoke_indirect_tool(
-            CanonicalToolCall(name="echo", args={"value": 7})
+            new_tool_call(name="echo", args={"value": 7})
         )
         self.assertIsInstance(invalid, RejectedResult)
         self.assertEqual(invalid.effect, EffectOutcome.NOT_STARTED)
         self.assertEqual(calls, 0)
 
         bad_output = self.runtime.invoke_indirect_tool(
-            CanonicalToolCall(name="echo", args={"value": "x"})
+            new_tool_call(name="echo", args={"value": "x"})
         )
         self.assertIsInstance(bad_output, FailedResult)
         self.assertEqual(bad_output.error_code, "output_validation_failed")
@@ -359,7 +360,7 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
             input_id="input-1",
         )
         result = self.runtime.invoke_indirect_tool(
-            CanonicalToolCall(
+            new_tool_call(
                 name="echo",
                 args={"value": "x"},
                 call_id="call-page",
@@ -402,14 +403,14 @@ class ImmutableToolFacadeTests(unittest.IsolatedAsyncioTestCase):
         old_generation = self.runtime.registry_generation
         running = asyncio.create_task(
             self.runtime.invoke_direct_tool_async(
-                CanonicalToolCall(name="slow_echo", args={"value": "old"}),
+                new_tool_call(name="slow_echo", args={"value": "old"}),
                 generation=old_generation,
             )
         )
         await started.wait()
         unmount_test_capability(self.runtime, handle)
         rejected = await self.runtime.invoke_direct_tool_async(
-            CanonicalToolCall(name="slow_echo", args={"value": "new"})
+            new_tool_call(name="slow_echo", args={"value": "new"})
         )
         self.assertIsInstance(rejected, RejectedResult)
         release.set()

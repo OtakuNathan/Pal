@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import shutil
 import subprocess
 import tempfile
@@ -9,7 +11,6 @@ from pathlib import Path
 from pal.core import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.git_tool import GitTool, classify_git_command
-from pal.llm.contracts import CanonicalToolCall
 from pal.shared import RuntimeStatus
 
 
@@ -179,7 +180,7 @@ class GitToolTests(unittest.TestCase):
             core.publish_module_capabilities("execution")
 
             result = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="git",
                     args={"cmd": "status --short", "cwd": str(root)},
                 )

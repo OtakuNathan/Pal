@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 import inspect
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
+from pal.shared import ToolExecutionResult
 
 
 @dataclass(frozen=True)
@@ -17,11 +19,11 @@ class ExecutionApprovalRequest:
 
 
 ApprovalClassifier = Callable[
-    [CanonicalToolCall],
+    [ToolCallIR],
     ExecutionApprovalRequest | None | Awaitable[ExecutionApprovalRequest | None],
 ]
 ApprovalRequester = Callable[
-    [ExecutionApprovalRequest, CanonicalToolCall],
+    [ExecutionApprovalRequest, ToolCallIR],
     str | Awaitable[str],
 ]
 
@@ -37,12 +39,12 @@ class ApprovalExecutionDecorator:
 
     async def execute_tool_async(
         self,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         allow_tools: bool = True,
         budget: Any = None,
         turn_id: str | None = None,
-    ) -> CanonicalToolResult:
+    ) -> ToolExecutionResult:
         request = self.classify(call)
         if inspect.isawaitable(request):
             request = await request
@@ -53,7 +55,7 @@ class ApprovalExecutionDecorator:
             normalized = str(decision or "timeout").strip().lower()
             if normalized != "accept":
                 text = f"approval {normalized}"
-                return CanonicalToolResult(
+                return ToolExecutionResult(
                     name=call.name,
                     ok=False,
                     text=text,

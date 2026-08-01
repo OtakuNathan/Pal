@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import os
 import shlex
@@ -17,7 +19,6 @@ from pal.execution.shell_exec import (
     SHELL_OUTPUT_ROOT,
     ShellExecTool,
 )
-from pal.llm import CanonicalToolCall
 
 
 def _python_command(source: str) -> str:
@@ -152,7 +153,7 @@ class ShellExecAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(record.binding.async_callable)
         result = await core.context.execution_runtime.execute_tool_async(
-            CanonicalToolCall(name="run_shell", args={"cmd": "printf async-ok"}),
+            new_tool_call(name="run_shell", args={"cmd": "printf async-ok"}),
             turn_id="shell-turn",
         )
 
@@ -176,7 +177,7 @@ class ShellExecAsyncTests(unittest.IsolatedAsyncioTestCase):
             )
             task = asyncio.create_task(
                 core.context.execution_runtime.execute_tool_async(
-                    CanonicalToolCall(
+                    new_tool_call(
                         name="run_shell",
                         args={"cmd": _python_command(source), "timeout_ms": 10_000},
                     ),
@@ -217,7 +218,7 @@ class ShellExecAsyncTests(unittest.IsolatedAsyncioTestCase):
             )
             task = asyncio.create_task(
                 core.context.execution_runtime.execute_tool_async(
-                    CanonicalToolCall(
+                    new_tool_call(
                         name="run_shell",
                         args={"cmd": _python_command(source), "timeout_ms": 10_000},
                     ),

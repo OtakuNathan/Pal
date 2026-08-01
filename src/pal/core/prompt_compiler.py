@@ -333,11 +333,13 @@ class PromptCompiler:
         max_output_tokens: int = 1024,
         model_hint: str | None = None,
     ):
-        from pal.llm.contracts import CanonicalLLMRequest
+        from pal.llm.conversions import request_ir_from_prompt
 
         prompt_ir = self.build_prompt_ir(assembly_context)
-        messages = normalize_prompt_messages(self._compile_prompt_ir_messages(prompt_ir))
-        return CanonicalLLMRequest(
+        messages = self._resolve_artifact_images(
+            normalize_prompt_messages(self._compile_prompt_ir_messages(prompt_ir))
+        )
+        return request_ir_from_prompt(
             messages=messages,
             max_output_tokens=max_output_tokens,
             model_hint=model_hint,
@@ -414,6 +416,58 @@ class PromptCompiler:
             primary_input=primary_input,
             turn_kind="failure",
         )
+
+    def _resolve_artifact_images(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Resolve Pal artifact handles before messages cross the LLM IR boundary.
+
+        Artifact identifiers are Pal runtime references, not provider wire data.  L1
+        therefore never stores an unresolved ``artifact_image`` part and shape
+        codecs remain pure IR-to-wire encoders.
+        """
+
+        manager = None
+        port_registry = getattr(self.context, "port_registry", None)
+        get_port = getattr(port_registry, "get", None)
+        if callable(get_port):
+            manager = get_port("artifact:artifact")
+
+        resolved_messages: list[dict[str, Any]] = []
+        for raw_message in messages:
+            message = dict(raw_message)
+            content = message.get("content")
+            if not isinstance(content, list):
+                resolved_messages.append(message)
+                continue
+            resolved_parts: list[dict[str, Any]] = []
+            for raw_part in content:
+                if not isinstance(raw_part, dict) or raw_part.get("type") != "artifact_image":
+                    if isinstance(raw_part, dict):
+                        resolved_parts.append(dict(raw_part))
+                    continue
+                source = str(raw_part.get("source_url") or "").strip()
+                representation_id = str(raw_part.get("representation_id") or "").strip()
+                if not source and manager is not None:
+                    to_data_url = getattr(manager, "to_data_url", None)
+                    if callable(to_data_url):
+                        source = str(to_data_url(representation_id) or "").strip()
+                if not source:
+                    raise ValueError(
+                        "artifact image could not be resolved before LLM IR construction: "
+                        f"representation_id={representation_id or '<missing>'}"
+                    )
+                resolved_parts.append(
+                    {
+                        "type": "image",
+                        "source": source,
+                        "media_type": str(raw_part.get("mime_type") or "").strip() or None,
+                    }
+                )
+            message["content"] = resolved_parts
+            resolved_messages.append(message)
+        return resolved_messages
 
     @staticmethod
     def _prompt_target(fragment: PromptFragment) -> str:

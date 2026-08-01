@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -291,59 +290,6 @@ class MinionCompactionPolicy:
         )
 
 
-def project_minion_tool_protocol(
-    messages: list[dict[str, Any]],
-    max_chars: int,
-) -> list[dict[str, Any]]:
-    """Bound a prompt projection while preserving recovery batches verbatim."""
-
-    source = [
-        dict(message)
-        for message in messages
-        if isinstance(message, dict)
-    ]
-    budget = max(4_096, int(max_chars or 0))
-    if _protocol_chars(source) <= budget:
-        return source
-    batches = _protocol_batches(source)
-    retained: set[int] = set()
-    dropped: list[str] = []
-    used = 0
-    for indices in reversed(batches):
-        batch = [source[index] for index in indices]
-        batch_chars = _protocol_chars(batch)
-        must_keep = _batch_requires_recovery(batch)
-        if must_keep or used + batch_chars <= int(budget * 0.70):
-            retained.update(indices)
-            used += batch_chars
-            continue
-        dropped.append(_batch_continuity_line(batch))
-
-    result = [
-        dict(message)
-        for index, message in enumerate(source)
-        if index in retained or not _belongs_to_tool_batch(index, batches)
-    ]
-    if dropped:
-        continuity = list(reversed(dropped))[-32:]
-        omitted = max(0, len(dropped) - len(continuity))
-        lines = [
-            '<minion_tool_continuity authority="journal_projection">',
-            (
-                f"{len(dropped)} closed successful tool batch(es) left the active prompt. "
-                "Their full validated protocol remains in the durable role-session journal."
-            ),
-        ]
-        if omitted:
-            lines.append(
-                f"{omitted} older continuity entries omitted from this bounded projection."
-            )
-        lines.extend(f"- {line}" for line in continuity)
-        lines.append("</minion_tool_continuity>")
-        result.insert(0, {"role": "user", "content": "\n".join(lines)})
-    return result
-
-
 def render_minion_compact_context_for_llm(
     *,
     summary: str,
@@ -528,119 +474,6 @@ def _find_forbidden_reasoning_key(value: Any) -> str:
     return ""
 
 
-def _protocol_batches(
-    messages: list[dict[str, Any]],
-) -> list[list[int]]:
-    batches: list[list[int]] = []
-    index = 0
-    while index < len(messages):
-        message = messages[index]
-        role = str(message.get("role") or "").strip()
-        if role == "assistant" and message.get("tool_calls"):
-            batch = [index]
-            cursor = index + 1
-            while (
-                cursor < len(messages)
-                and str(messages[cursor].get("role") or "").strip() == "tool"
-            ):
-                batch.append(cursor)
-                cursor += 1
-            batches.append(batch)
-            index = cursor
-            continue
-        if role == "tool":
-            batches.append([index])
-        index += 1
-    return batches
-
-
-def _belongs_to_tool_batch(
-    index: int,
-    batches: list[list[int]],
-) -> bool:
-    return any(index in batch for batch in batches)
-
-
-def _batch_requires_recovery(batch: list[dict[str, Any]]) -> bool:
-    assistant = next(
-        (
-            message
-            for message in batch
-            if str(message.get("role") or "") == "assistant"
-            and message.get("tool_calls")
-        ),
-        None,
-    )
-    if assistant is not None:
-        expected = len(list(assistant.get("tool_calls") or ()))
-        observed = sum(
-            1
-            for message in batch
-            if str(message.get("role") or "") == "tool"
-        )
-        if observed < expected:
-            return True
-    for message in batch:
-        if str(message.get("role") or "").strip() != "tool":
-            continue
-        state = dict(message.get("_pal_result_state") or {})
-        if not state:
-            continue
-        if not bool(state.get("ok")):
-            return True
-        if str(state.get("kind") or "") in {"failed", "rejected"}:
-            return True
-        if str(state.get("effect") or "") == "unknown":
-            return True
-    return False
-
-
-def _batch_continuity_line(batch: list[dict[str, Any]]) -> str:
-    assistant = next(
-        (
-            message
-            for message in batch
-            if str(message.get("role") or "") == "assistant"
-        ),
-        {},
-    )
-    names = [
-        str(dict(item.get("function") or {}).get("name") or "").strip()
-        for item in list(assistant.get("tool_calls") or ())
-        if isinstance(item, dict)
-    ]
-    observations = [
-        " ".join(str(message.get("content") or "").split())[:180]
-        for message in batch
-        if str(message.get("role") or "") == "tool"
-    ]
-    digest = hashlib.sha256(
-        json.dumps(
-            batch,
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()[:12]
-    tools = ", ".join(name for name in names if name) or "tool"
-    outcome = "; ".join(item for item in observations if item) or "completed"
-    return f"{tools}: {outcome} [journal:{digest}]"
-
-
-def _protocol_chars(messages: Sequence[dict[str, Any]]) -> int:
-    return sum(
-        len(
-            json.dumps(
-                message,
-                ensure_ascii=False,
-                sort_keys=True,
-                default=str,
-            )
-        )
-        for message in messages
-    )
-
-
 def _render_markdown_value(value: object) -> str:
     if value in (None, "", []):
         return ""
@@ -703,6 +536,5 @@ __all__ = [
     "MINION_COMPACTION_SYSTEM_PROMPT",
     "MinionCompactionPolicy",
     "is_minion_compaction_payload",
-    "project_minion_tool_protocol",
     "render_minion_compact_context_for_llm",
 ]

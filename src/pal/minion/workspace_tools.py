@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 import hashlib
 import mimetypes
 from pathlib import Path
 from typing import Any
 
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, ToolExecutionResult
 
-def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
+def _workspace_tool_result(call: ToolCallIR, workspace: dict[str, Any]) -> ToolExecutionResult:
     try:
         if call.name == "op_minion_artifact_write":
             artifact = _write_minion_artifact(workspace, call.args)
@@ -22,7 +23,7 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
             text = f"Artifact {action}: {artifact['relative_path']}"
         else:
             raise ValueError(f"unknown repo tool: {call.name}")
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=True,
             text=text,
@@ -33,7 +34,7 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
         )
     except Exception as exc:
         message = str(exc) or exc.__class__.__name__
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=False,
             text=message,

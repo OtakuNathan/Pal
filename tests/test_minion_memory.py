@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
+
 import asyncio
 import shutil
 import tempfile
@@ -9,13 +11,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from pal.core import CompactionClockKind, CompactionSnapshot
-from pal.core.turn_executor import TurnExecutor
-from pal.execution.tool_facade import EffectOutcome, FailedResult, RetryDirective
 from pal.llm import (
-    CanonicalLLMOutcome,
-    CanonicalToolCall,
-    CanonicalToolResult,
+    generation_result_from_values,
 )
+from pal.llm.ir import LLMMessageIR, MessageRole, ReasoningPartIR, TextPartIR
 from pal.memory import (
     L3ProviderSelector,
     L1MessageKind,
@@ -29,13 +28,11 @@ from pal.memory import (
 from pal.memory.prompt import MemoryPromptFragmentProvider
 from pal.minion.compact import (
     MinionCompactionPolicy,
-    project_minion_tool_protocol,
 )
 from pal.minion.runner import (
     MinionAgentLoopState,
     MinionRunner,
     _minion_llm_request_metadata,
-    _restore_minion_active_tool_protocol,
     _restore_minion_memory_state,
 )
 from pal.plugins.l3 import MockL3Plugin
@@ -335,107 +332,6 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         self.assertNotIn("Unreviewed candidate", rendered)
         self.assertNotIn("This candidate has not been accepted", rendered)
 
-    def test_tool_protocol_projection_retires_only_closed_successful_batches(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call-read",
-                        "type": "function",
-                        "function": {"name": "read_file", "arguments": "{}"},
-                    }
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "call-read",
-                "content": "x" * 5_000,
-                "_pal_result_state": {
-                    "ok": True,
-                    "kind": "complete",
-                    "effect": "none",
-                },
-            },
-            {"role": "assistant", "content": "continue from the validated read"},
-        ]
-
-        projected = project_minion_tool_protocol(messages, max_chars=4_096)
-
-        self.assertEqual(projected[-1], messages[-1])
-        self.assertIn("<minion_tool_continuity", projected[0]["content"])
-        self.assertIn("read_file", projected[0]["content"])
-        self.assertFalse(any(item.get("role") == "tool" for item in projected))
-
-    def test_tool_protocol_projection_keeps_recovery_batches_verbatim(self) -> None:
-        failed_batch = [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call-edit",
-                        "type": "function",
-                        "function": {"name": "edit_file", "arguments": "{}"},
-                    }
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "call-edit",
-                "content": "validation failed" + ("!" * 5_000),
-                "_pal_result_state": {
-                    "ok": False,
-                    "kind": "failed",
-                    "effect": "unknown",
-                },
-            },
-        ]
-
-        projected = project_minion_tool_protocol(failed_batch, max_chars=4_096)
-
-        self.assertEqual(projected, failed_batch)
-
-    def test_turn_executor_records_unknown_effect_as_enum_value(self) -> None:
-        executor = object.__new__(TurnExecutor)
-        call = CanonicalToolCall(name="edit_file", args={}, call_id="call-edit")
-        invocation = FailedResult(
-            error_code="handler_exception",
-            error="write outcome unavailable",
-            effect=EffectOutcome.UNKNOWN,
-            retry=RetryDirective.RECONCILE_FIRST,
-            llm_text="write outcome unavailable",
-        )
-        result = CanonicalToolResult(
-            name="edit_file",
-            ok=False,
-            llm_text="write outcome unavailable",
-            call_id="call-edit",
-            status="handler_exception",
-            invocation_result=invocation,
-        )
-        continuation = SimpleNamespace(
-            pending_tool_call_batch=[call],
-            pending_tool_results=[result],
-            pending_assistant_tool_text="",
-            pending_assistant_provider_specific_fields={},
-            tool_protocol_messages=[],
-            tool_delivery_records={},
-        )
-
-        executor._flush_tool_protocol_messages(continuation)
-
-        tool_message = continuation.tool_protocol_messages[-1]
-        self.assertEqual(tool_message["_pal_result_state"]["effect"], "unknown")
-        self.assertEqual(
-            project_minion_tool_protocol(
-                continuation.tool_protocol_messages,
-                max_chars=4_096,
-            ),
-            continuation.tool_protocol_messages,
-        )
-
     def test_minion_clock_counts_only_consumable_llm_rounds(self) -> None:
         runner = self._runner()
         service, _provider = self._memory_service()
@@ -451,7 +347,7 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
                 state,
                 EffectResult(
                     status=RuntimeStatus.OK,
-                    payload=CanonicalLLMOutcome(
+                    payload=generation_result_from_values(
                         finish_reason=LLMFinishReason.COMPACT_REQUIRED
                     )
                 ),
@@ -469,7 +365,7 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
                 state,
                 EffectResult(
                     status=RuntimeStatus.OK,
-                    payload=CanonicalLLMOutcome(
+                    payload=generation_result_from_values(
                         text="partial",
                         finish_reason="max_tokens",
                     )
@@ -483,7 +379,7 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
                 state,
                 EffectResult(
                     status=RuntimeStatus.OK,
-                    payload=CanonicalLLMOutcome(
+                    payload=generation_result_from_values(
                         text="",
                         finish_reason=LLMFinishReason.STOP,
                     ),
@@ -498,9 +394,9 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
                 state,
                 EffectResult(
                     status=RuntimeStatus.OK,
-                    payload=CanonicalLLMOutcome(
+                    payload=generation_result_from_values(
                         tool_calls=[
-                            CanonicalToolCall(
+                            new_tool_call(
                                 name="read_file",
                                 args={"file_path": "README.md"},
                             )
@@ -573,17 +469,26 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
                 summary_entry=entry,
             )
         )
-        service.commit_l1(
-            MemoryCommitRequest(
-                turn_id="checkpoint-run",
-                transcript=[
-                    L1TranscriptMessage(
-                        role="user",
-                        content="new work after compact",
-                        kind=L1MessageKind.USER_REQUEST,
-                    )
-                ],
-            )
+        service.begin_l1_turn("checkpoint-run", user_text="new work after compact")
+        service.upsert_l1_assistant(
+            "checkpoint-run",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(
+                    ReasoningPartIR("inspect the file first"),
+                    TextPartIR("I will inspect it."),
+                    new_tool_call(call_id="read-1", name="read_file", args={}),
+                ),
+                message_id="assistant-1",
+            ),
+        )
+        service.append_l1_tool_result(
+            "checkpoint-run",
+            ToolResultIR(
+                call_id="read-1",
+                name="read_file",
+                content="validated content",
+            ),
         )
         state = SimpleNamespace(
             llm_round_count=6,
@@ -596,40 +501,11 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
                 event=SimpleNamespace(event_id="checkpoint-active-input")
             ),
             pending_assistant_tool_text="",
-            pending_assistant_provider_specific_fields={},
             pending_tool_call_batch=[],
             pending_tool_results=[],
-            tool_protocol_messages=[
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "provider_specific_fields": {
-                        "reasoning_content": "inspect the file first"
-                    },
-                    "tool_calls": [
-                        {
-                            "id": "read-1",
-                            "type": "function",
-                            "function": {
-                                "name": "read_file",
-                                "arguments": "{}",
-                            },
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "read-1",
-                    "content": "validated content",
-                },
-            ],
-            tool_delivery_records={},
             tool_batch_count=1,
             preferred_llm_endpoint_id=None,
             preferred_llm_model_id=None,
-            turn_settings_snapshot={},
-            l1_input_committed=True,
-            l1_protocol_committed_count=2,
         )
         runner._persist_agent_session_checkpoint(
             pack.workspace,
@@ -644,39 +520,12 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], "5")
         self.assertEqual(payload["llm_round_count"], 6)
         self.assertEqual(payload["active_input_id"], "checkpoint-active-input")
-        self.assertEqual(
-            payload["active_tool_protocol_messages"][0][
-                "provider_specific_fields"
-            ],
-            {"reasoning_content": "inspect the file first"},
-        )
-        self.assertEqual(
-            _restore_minion_active_tool_protocol(payload),
-            payload["active_tool_protocol_messages"],
-        )
-        serialized_text = json.dumps(payload["l1_items"])
-        self.assertIn("restorable compact cursor", serialized_text)
+        self.assertNotIn("active_tool_protocol_messages", payload)
+        self.assertNotIn("tool_delivery_records", payload)
+        serialized_text = json.dumps(payload["l1_turns"])
         self.assertIn("new work after compact", serialized_text)
-        self.assertNotIn("inspect the file first", serialized_text)
+        self.assertIn("inspect the file first", serialized_text)
         self.assertFalse(checkpoint_path.with_name("protocol.jsonl").exists())
-
-        TurnExecutor.close_active_tool_protocol(continuation)
-        runner._persist_agent_session_checkpoint(
-            pack.workspace,
-            state,
-            continuation,
-            initial_instruction="continue module work",
-            response_keys=["effect-1"],
-            max_output_tokens=2048,
-        )
-        closed_payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        self.assertEqual(closed_payload["active_tool_protocol_messages"], [])
-        self.assertEqual(closed_payload["tool_delivery_records"], {})
-        self.assertEqual(closed_payload["l1_protocol_committed_count"], 0)
-        self.assertNotIn(
-            "inspect the file first",
-            json.dumps(closed_payload, ensure_ascii=False),
-        )
 
         restored_service, _restored_provider = self._memory_service()
         _restore_minion_memory_state(restored_service, payload)
@@ -696,6 +545,11 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
                 for message in transcript
             ),
         )
+        restored_turn = restored_service.active_l1_turn("checkpoint-run")
+        self.assertIsNotNone(restored_turn)
+        assert restored_turn is not None
+        self.assertEqual(restored_turn.pending_call_ids, frozenset())
+        self.assertIn("inspect the file first", restored_turn.messages[1].reasoning_text)
 
 
 if __name__ == "__main__":

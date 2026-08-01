@@ -257,7 +257,7 @@ IM channel 默认采用三阶段反馈：
 - endpoint candidate registry
 - fallback priority source
 
-`priority` 是 routing priority，不是质量权重。runtime 按升序构造 fallback candidate：数字越小越先尝试。生产配置应使用非负小整数；Codex/Codex proxy 这类本地认证备用 endpoint 推荐落在 `5..9` 这类正常区间，不要用负数制造特殊优先级。
+`priority` 是 routing priority，不是质量权重。runtime 按升序构造 fallback candidate：数字越小越先尝试。生产配置应使用非负小整数，不要用负数制造特殊优先级。
 
 ## memory
 

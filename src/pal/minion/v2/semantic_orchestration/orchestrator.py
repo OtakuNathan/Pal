@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
 from pal.minion.profiles import resolve_pinned_minion_pack
+from pal.minion.checkpoint import (
+    AgentSessionCheckpointError,
+    normalize_agent_session_checkpoint,
+)
 from pal.minion.harnesses import (
     HARNESS_LAUNCH_PAL_SANDBOX,
     PAL_HARNESS_ID,
@@ -6779,12 +6783,23 @@ class SemanticOrchestrator:
         )
         if process.returncode != 0 and not has_submission_receipt:
             error_tail = _meaningful_stderr_tail(stderr.decode("utf-8", errors="replace"))
-            self.repository.queue_role_attempt_retry(
-                assignment_id=str(assignment["assignment_id"]),
-                attempt_id_value=str(attempt["attempt_id"]),
-                error_kind="worker_process_failed",
-                error_text=worker_error or error_tail or "worker emitted no structured error",
+            terminal_error_kind, terminal_error, retry_directive = (
+                _worker_terminal_failure(events)
             )
+            details = (
+                terminal_error
+                or worker_error
+                or error_tail
+                or "worker emitted no structured error"
+            )
+            permanent = retry_directive == "do_not_retry"
+            if not permanent:
+                self.repository.queue_role_attempt_retry(
+                    assignment_id=str(assignment["assignment_id"]),
+                    attempt_id_value=str(attempt["attempt_id"]),
+                    error_kind=terminal_error_kind or "worker_process_failed",
+                    error_text=details,
+                )
             with contextlib.suppress(Exception):
                 self.repository.release_lease(
                     assignment_lease_resource,
@@ -6809,7 +6824,8 @@ class SemanticOrchestrator:
                     fencing_token=fencing_token,
                     status="failed",
                 )
-            details = worker_error or error_tail or "worker emitted no structured error"
+            if permanent:
+                raise PermanentEffectError(details)
             raise RuntimeError(f"V2 worker exited {process.returncode}: {details}")
         terminal = next((item for item in reversed(events) if str(item.get("event_kind") or "") == "terminal"), None)
         if terminal is None and has_submission_receipt:
@@ -7148,7 +7164,9 @@ class SemanticOrchestrator:
     ) -> tuple[Path | None, Path]:
         session = self.repository.read_role_session(session_id)
         if session is None:
-            raise RuntimeError(f"role session disappeared before process start: {session_id}")
+            raise AgentSessionCheckpointError(
+                f"role session disappeared before process start: {session_id}"
+            )
         attempt_dir = (
             invocation_root(self.service.runtime_root)
             / session_id
@@ -7167,31 +7185,38 @@ class SemanticOrchestrator:
         if not continuation_ref:
             return None, checkpoint_path
         if str(continuation_ref.get("artifact_type") or "") != "AgentSessionContinuationArtifact":
-            raise RuntimeError("role session continuation has the wrong artifact type")
-        payload = self.service.artifacts.read_json(continuation_ref)
+            raise AgentSessionCheckpointError(
+                "role session continuation has the wrong artifact type"
+            )
+        try:
+            payload = self.service.artifacts.read_json(continuation_ref)
+        except (OSError, ValueError) as exc:
+            raise AgentSessionCheckpointError(
+                "role session continuation artifact is unreadable"
+            ) from exc
         if not isinstance(payload, Mapping):
-            raise RuntimeError("role session continuation is not a JSON object")
+            raise AgentSessionCheckpointError(
+                "role session continuation is not a JSON object"
+            )
         restored = dict(payload)
         if str(restored.get("session_id") or "") != session_id:
-            raise RuntimeError("role session continuation has the wrong session identity")
+            raise AgentSessionCheckpointError(
+                "role session continuation has the wrong session identity"
+            )
         scope_kind = str(session.get("scope_kind") or "")
         subject_key = str(session.get("subject_key") or "")
         stored_scope = str(restored.get("scope_kind") or "")
         stored_subject = str(restored.get("subject_key") or "")
         if stored_scope and stored_scope != scope_kind:
-            raise RuntimeError("role session continuation has the wrong scope")
+            raise AgentSessionCheckpointError(
+                "role session continuation has the wrong scope"
+            )
         if stored_subject and stored_subject != subject_key:
-            raise RuntimeError("role session continuation has the wrong subject")
-        restored.update(
-            {
-                "schema_version": "5",
-                "scope_kind": scope_kind,
-                "subject_key": subject_key,
-                "tool_delivery_records": dict(
-                    restored.get("tool_delivery_records") or {}
-                ),
-            }
-        )
+            raise AgentSessionCheckpointError(
+                "role session continuation has the wrong subject"
+            )
+        restored.update({"scope_kind": scope_kind, "subject_key": subject_key})
+        restored = normalize_agent_session_checkpoint(restored)
         temporary = restore_path.parent / f".{restore_path.name}.{os.getpid()}.tmp"
         temporary.write_text(
             json.dumps(restored, ensure_ascii=False, sort_keys=True),
@@ -7929,6 +7954,34 @@ def _meaningful_stderr_tail(stderr: str, *, limit: int = 4000) -> str:
         and not line.lstrip().startswith(("re_han_default =", "re_skip_default =", "re_skip ="))
     ]
     return "\n".join(filtered)[-limit:]
+
+
+def _worker_terminal_failure(
+    events: list[Mapping[str, Any]],
+) -> tuple[str, str, str]:
+    """Return the structured failure emitted by the worker, when present."""
+
+    terminal = next(
+        (
+            item
+            for item in reversed(events)
+            if str(item.get("event_kind") or "") == "terminal"
+        ),
+        None,
+    )
+    if terminal is None:
+        return "", "", ""
+    payload = dict(terminal.get("payload") or {})
+    if str(payload.get("status") or "") != "failed":
+        return "", "", ""
+    error_kind = str(
+        payload.get("error_kind")
+        or payload.get("error_type")
+        or "worker_terminal_failed"
+    ).strip()
+    details = str(payload.get("error") or payload.get("summary") or "").strip()
+    retry_directive = str(payload.get("retry_directive") or "").strip()
+    return error_kind, details, retry_directive
 
 
 def _worker_event_timing(events: list[Mapping[str, Any]]) -> dict[str, int | float]:

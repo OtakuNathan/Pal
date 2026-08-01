@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import json
 import shutil
@@ -20,8 +22,7 @@ from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.tool_facade import CompleteResult, EffectKind, RetryPolicy
 from pal.foundation import PalV2Database
-from pal.llm.contracts import CanonicalToolCall
-from pal.llm import CanonicalLLMOutcome
+from pal.llm import generation_result_from_values
 from pal.lsp import build_lsp_plugin
 from pal.minion import register_with_core as register_minion_with_core
 from pal.skill import (
@@ -47,7 +48,7 @@ class _FakeLLMRuntime:
 
     async def agenerate(self, request):
         self.requests.append(request)
-        return CanonicalLLMOutcome(text=self.text, finish_reason="stop")
+        return generation_result_from_values(text=self.text, finish_reason="stop")
 
 
 class SkillSubsystemTests(unittest.TestCase):
@@ -176,7 +177,7 @@ Run the workflow.
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.structured["skill"]["capability_refs"], [])
         self.assertIn("identity_or_system_override", result.structured["removed_risks"])
-        self.assertNotIn("allowed-tools", service.llm_runtime.requests[0].messages[1]["content"])
+        self.assertNotIn("allowed-tools", service.llm_runtime.requests[0].messages[1].text)
 
     def test_commit_writes_skill_file_and_thin_affordance(self) -> None:
         candidate = asyncio.run(
@@ -360,7 +361,7 @@ Run the workflow.
         core.publish_module_capabilities("skill")
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(
+            new_tool_call(
                 name="call_tool",
                 args={"name": "skill_inject", "args": {"skill_id": "safe.workflow"}},
             )
@@ -407,24 +408,25 @@ Run the workflow.
         register_skill_with_core(core.context, self.service)
         core.publish_module_capabilities("skill")
 
-        skill = self.skill_repository.get_skill("pal.llm.adapter_endpoint.development")
+        skill = self.skill_repository.get_skill("pal.llm.model_hook_endpoint.development")
 
         self.assertIsNotNone(skill)
         assert skill is not None
         self.assertEqual(skill.module_id, "skill")
         self.assertTrue(skill.active)
-        self.assertIn("<runtime_root>/llm/adapters/", skill.manual_text)
-        self.assertIn("must not execute `/refresh_llm_endpoints`", skill.manual_text)
-        self.assertIn("Please run `/refresh_llm_endpoints`", skill.manual_text)
+        self.assertIn("<runtime_root>/llm/models/", skill.manual_text)
+        self.assertIn("production refresh/load step is user-controlled", skill.manual_text)
+        self.assertIn("If the user explicitly asks you to refresh", skill.manual_text)
+        self.assertIn("Please run `/refresh_llm_endpoint`", skill.manual_text)
         self.assertTrue(skill.metadata["requires_user_refresh"])
 
-        search = SkillSearchTool(service=self.service).invoke({"query": "add llm adapter endpoint provider", "top_k": 3})
-        self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.llm.adapter_endpoint.development")
+        search = SkillSearchTool(service=self.service).invoke({"query": "add llm model hook endpoint", "top_k": 3})
+        self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.llm.model_hook_endpoint.development")
         self.assertTrue(search.structured["hits"][0]["injectable"])
 
-        injected = SkillInjectTool(service=self.service).invoke({"skill_id": "pal.llm.adapter_endpoint.development"})
+        injected = SkillInjectTool(service=self.service).invoke({"skill_id": "pal.llm.model_hook_endpoint.development"})
         self.assertEqual(injected.status, "ok")
-        self.assertIn("Pal LLM Adapter and Endpoint Development", injected.structured["title"])
+        self.assertIn("Pal LLM Model Hook and Endpoint Development", injected.structured["title"])
         self.assertIn("user-controlled", injected.structured["manual_text"])
 
     def test_skill_module_declares_internal_channel_provider_skill(self) -> None:
@@ -519,18 +521,18 @@ Run the workflow.
             behavior_service.advise_async(BehaviorAdviceRequest(scenario="create pal plugin capability with build_plugin", top_k=5))
         )
         llm_advice = asyncio.run(
-            behavior_service.advise_async(BehaviorAdviceRequest(scenario="add llm adapter endpoint provider", top_k=5))
+            behavior_service.advise_async(BehaviorAdviceRequest(scenario="add llm model hook endpoint", top_k=5))
         )
         channel_advice = asyncio.run(
             behavior_service.advise_async(BehaviorAdviceRequest(scenario="add channel provider with provider.toml and slash command", top_k=5))
         )
 
         plugin = next(candidate for candidate in plugin_advice.candidates if candidate.affordance_id == "declared.skill.pal_plugin_development")
-        llm = next(candidate for candidate in llm_advice.candidates if candidate.affordance_id == "declared.skill.pal_llm_adapter_endpoint_development")
+        llm = next(candidate for candidate in llm_advice.candidates if candidate.affordance_id == "declared.skill.pal_llm_model_hook_endpoint_development")
         channel = next(candidate for candidate in channel_advice.candidates if candidate.affordance_id == "declared.skill.pal_channel_provider_development")
 
         self.assertEqual(plugin.skill_refs, ("pal.plugin.development",))
-        self.assertEqual(llm.skill_refs, ("pal.llm.adapter_endpoint.development",))
+        self.assertEqual(llm.skill_refs, ("pal.llm.model_hook_endpoint.development",))
         self.assertEqual(channel.skill_refs, ("pal.channel.provider.development",))
         self.assertEqual(plugin.visibility_mode, "discoverable")
         self.assertEqual(llm.visibility_mode, "discoverable")
@@ -539,7 +541,7 @@ Run the workflow.
         self.assertFalse(llm.metadata["resident"])
         self.assertFalse(channel.metadata["resident"])
         self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_plugin_development"))
-        self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_llm_adapter_endpoint_development"))
+        self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_llm_model_hook_endpoint_development"))
         self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_channel_provider_development"))
 
         pre_lsp_advice = asyncio.run(
@@ -607,7 +609,7 @@ Run the workflow.
             )
             llm_advice = asyncio.run(
                 behavior_service.advise_async(
-                    BehaviorAdviceRequest(scenario="加一个 LLM adapter endpoint provider", top_k=5)
+                    BehaviorAdviceRequest(scenario="加一个 LLM model hook endpoint", top_k=5)
                 )
             )
             channel_advice = asyncio.run(
@@ -622,8 +624,8 @@ Run the workflow.
             )
             self.assertEqual(plugin_advice.candidates[0].affordance_id, "declared.skill.pal_plugin_development")
             self.assertEqual(plugin_advice.candidates[0].skill_refs, ("pal.plugin.development",))
-            self.assertEqual(llm_advice.candidates[0].affordance_id, "declared.skill.pal_llm_adapter_endpoint_development")
-            self.assertEqual(llm_advice.candidates[0].skill_refs, ("pal.llm.adapter_endpoint.development",))
+            self.assertEqual(llm_advice.candidates[0].affordance_id, "declared.skill.pal_llm_model_hook_endpoint_development")
+            self.assertEqual(llm_advice.candidates[0].skill_refs, ("pal.llm.model_hook_endpoint.development",))
             self.assertEqual(channel_advice.candidates[0].affordance_id, "declared.skill.pal_channel_provider_development")
             self.assertEqual(channel_advice.candidates[0].skill_refs, ("pal.channel.provider.development",))
             self.assertEqual(lsp_advice.candidates[0].affordance_id, "declared.skill.pal_lsp_template_development")

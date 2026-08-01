@@ -26,10 +26,8 @@ from pal.execution import CapabilityCall
 from pal.core.runtime_config import RuntimeConfig
 from pal.identity import DEFAULT_PERSONA_ID, IdentityRepository
 from pal.llm import (
-    AnthropicMessagesEndpointInvoker,
-    CanonicalLLMRequest,
-    CanonicalLLMOutcome,
-    CanonicalToolCall,
+    request_ir_from_prompt,
+    generation_result_from_values,
     EncryptedFileSecretStore,
     EndpointResolver,
     InMemorySecretStore,
@@ -38,23 +36,16 @@ from pal.llm import (
     LLMPreflightRequest,
     LLMRuntime,
     LLMCredentialResolver,
-    OpenAIChatEndpointInvoker,
     RuntimeSettingRepository,
     SecretRef,
-    ZaiAnthropicMessagesEndpointInvoker,
     build_default_endpoint_invoker,
 )
-from pal.llm.adapters import LLMProviderAdapter, LLMProviderRegistry, build_default_provider_registry
-from pal.llm.llm_adaptor.anthropic_api import chat_messages_to_anthropic_messages
-from pal.llm.llm_adaptor.base import chat_messages_to_openai_compatible_messages
-from pal.llm.runtime import _parse_anthropic_messages_response, _split_openai_chat_sdk_kwargs
-from pal.llm.request_hooks import MAIN_LLM_REQUEST_HOOKS
+from pal.shared.tool_protocol import ToolCallIR
 from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3ProviderSelector, MemoryPackRequest, MemoryQuery, MemoryService
 from pal.plugins.l3 import SQLiteVecL3Plugin
 from pal.plugins import PluginBundleRepository
 from pal.proactive import ProactiveDefinition, ProactiveRepository
-from pal.shared import LLMFinishReason, LLMStreamEventKind, SINGLETON_TARGET
-from pal.stream_events import NormalizedLLMStreamEvent
+from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, LLMFinishReason, SINGLETON_TARGET
 from pal.wizard import WizardService
 from pal.web_fetch import DEFAULT_WEB_FETCH_USER_AGENT, BrowserServiceManager, WebFetchProviderRepository, plain_http_fetch
 from pal.web_search import WebSearchItem, WebSearchProviderRepository
@@ -356,280 +347,30 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(created.channel_kind, "slack")
 
-    def test_llm_endpoint_repository_orders_enabled_endpoints_by_priority(self) -> None:
-        repository = LLMEndpointRepository()
-        repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "anthropic_default",
-                    "provider": "anthropic",
-                    "model_id": "claude-sonnet",
-                    "api_mode": "anthropic_messages",
-                    "base_url": "https://api.anthropic.com/v1/messages",
-                    "credential_ref": "anthropic-key",
-                    "priority": 5,
-                    "context_window": 200000,
-                    "max_output_tokens": 8192,
-                    "supports_reasoning": True,
-                },
-                {
-                    "endpoint_id": "openai_default",
-                    "provider": "openai",
-                    "model_id": "gpt-5.4-mini",
-                    "api_mode": "openai_chat",
-                    "base_url": "https://api.openai.com/v1/chat/completions",
-                    "credential_ref": "openai-key",
-                    "priority": 1,
-                    "context_window": 128000,
-                    "max_output_tokens": 4096,
-                    "supports_tools": True,
-                    "supports_streaming": True,
-                },
-            ]
-        )
 
-        endpoints = repository.list_enabled()
-        primary = repository.get_primary_enabled()
 
-        self.assertEqual([item.endpoint_id for item in endpoints], ["openai_default", "anthropic_default"])
-        self.assertIsNotNone(primary)
-        self.assertEqual(primary.endpoint_id, "openai_default")
 
-    def test_endpoint_resolver_loads_enabled_endpoints_once(self) -> None:
-        repository = LLMEndpointRepository()
-        repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "first",
-                    "provider": "stub",
-                    "model_id": "first-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/first",
-                    "credential_ref": "stub-first",
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-        resolver = EndpointResolver(repository=repository)
-        repository.upsert(
-            endpoint_id="later",
-            provider="stub",
-            model_id="later-model",
-            api_mode="openai_chat",
-            base_url="stub://local/later",
-            credential_ref="stub-later",
-            priority=1,
-            enabled=True,
-        )
 
-        self.assertEqual([item.endpoint_id for item in resolver.enabled()], ["first"])
 
-    def test_llm_runtime_refreshes_endpoint_topology_from_database(self) -> None:
-        repository = LLMEndpointRepository()
-        settings = RuntimeSettingRepository()
-        settings.ensure_defaults()
-        repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "old",
-                    "provider": "stub",
-                    "model_id": "old-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/old",
-                    "credential_ref": "stub-old",
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-        settings.set_active_llm_endpoint_id("old")
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=repository),
-            settings_repository=settings,
-        )
-        self.assertEqual([item.endpoint_id for item in runtime.endpoint_resolver.enabled()], ["old"])
-        self.assertEqual(runtime.active_endpoint_id, "old")
 
-        repository.upsert(
-            endpoint_id="old",
-            provider="stub",
-            model_id="old-model",
-            api_mode="openai_chat",
-            base_url="stub://local/old",
-            credential_ref="stub-old",
-            priority=0,
-            enabled=False,
-        )
-        repository.upsert(
-            endpoint_id="new",
-            provider="stub",
-            model_id="new-model",
-            api_mode="openai_chat",
-            base_url="stub://local/new",
-            credential_ref="stub-new",
-            priority=0,
-            enabled=True,
-        )
-
-        payload = runtime.refresh_llm_endpoints()
-
-        self.assertEqual([item.endpoint_id for item in runtime.endpoint_resolver.enabled()], ["new"])
-        self.assertEqual(payload["added_endpoint_ids"], ["new"])
-        self.assertEqual(payload["removed_endpoint_ids"], ["old"])
-        self.assertEqual(payload["configured_active_endpoint_id"], "old")
-        self.assertIsNone(payload["active_endpoint_id"])
-        self.assertEqual(payload["primary_endpoint_id"], "new")
-        self.assertTrue(payload["credentials_refreshed"])
-        self.assertTrue(payload["provider_adapters_refreshed"])
-
-    def test_refresh_llm_endpoints_clears_cached_credentials(self) -> None:
-        repository = LLMEndpointRepository()
-        settings = RuntimeSettingRepository()
-        endpoint = repository.upsert(
-            endpoint_id="codex_bridge",
-            provider="openai",
-            model_id="openai/gpt-5.4",
-            api_mode="openai_chat",
-            base_url="http://127.0.0.1:8765/v1",
-            auth_kind="api_key_ref",
-            credential_ref="codex_bridge:api-key",
-            priority=0,
-            enabled=True,
-        )
-        settings.set_active_llm_endpoint_id("codex_bridge")
-        secret_store = InMemorySecretStore()
-        secret_ref = SecretRef(service="codex_bridge", account="api-key")
-        secret_store.set_secret(secret_ref, "old-token")
-        resolver = LLMCredentialResolver(secret_store=secret_store)
-        invoker = OpenAIChatEndpointInvoker(credentials=resolver)
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=repository),
-            settings_repository=settings,
-            endpoint_invoker=invoker,
-        )
-
-        self.assertEqual(resolver.resolve_api_key(endpoint), "old-token")
-        secret_store.set_secret(secret_ref, "new-token")
-        self.assertEqual(resolver.resolve_api_key(endpoint), "old-token")
-
-        payload = runtime.refresh_llm_endpoints()
-
-        refreshed_endpoint = runtime.endpoint_resolver.primary(preferred_endpoint_id="codex_bridge")
-        assert refreshed_endpoint is not None
-        self.assertTrue(payload["credentials_refreshed"])
-        self.assertTrue(payload["provider_adapters_refreshed"])
-        self.assertEqual(resolver.resolve_api_key(refreshed_endpoint), "new-token")
-
-    def test_resolve_max_output_tokens_refreshes_active_endpoint_setting(self) -> None:
-        repository = LLMEndpointRepository()
-        settings = RuntimeSettingRepository()
-        settings.ensure_defaults()
-        repository.upsert(
-            endpoint_id="planner_long",
-            provider="stub",
-            model_id="planner-model",
-            api_mode="openai_chat",
-            base_url="stub://local/planner",
-            credential_ref="stub-planner",
-            priority=0,
-            enabled=True,
-            max_output_tokens=8192,
-        )
-        repository.upsert(
-            endpoint_id="coder_fast",
-            provider="stub",
-            model_id="coder-model",
-            api_mode="openai_chat",
-            base_url="stub://local/coder",
-            credential_ref="stub-coder",
-            priority=1,
-            enabled=True,
-            max_output_tokens=4096,
-        )
-        settings.set_active_llm_endpoint_id("planner_long")
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=repository),
-            settings_repository=settings,
-        )
-        self.assertEqual(runtime.resolve_max_output_tokens(), 8192)
-
-        settings.set_active_llm_endpoint_id("coder_fast")
-
-        self.assertEqual(runtime.resolve_max_output_tokens(), 4096)
-        self.assertEqual(runtime.resolve_max_output_tokens(preferred_endpoint_id="planner_long"), 8192)
-
-    def test_openai_chat_credential_resolver_uses_secret_store_ref(self) -> None:
-        repository = LLMEndpointRepository()
-        repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "deepseek",
-                    "provider": "deepseek",
-                    "model_id": "deepseek/deepseek-chat",
-                    "api_mode": "openai_chat",
-                    "base_url": "https://api.deepseek.com/chat/completions",
-                    "credential_ref": "deepseek-prod",
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-        endpoint = repository.get_primary_enabled()
-        self.assertIsNotNone(endpoint)
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "sk-test")
-        resolver = LLMCredentialResolver(secret_store=secret_store)
-
-        secret = resolver.resolve_api_key(endpoint)
-
-        assert endpoint is not None
-        self.assertEqual(secret, "sk-test")
-        self.assertEqual(resolver.secret_ref_for_endpoint(endpoint), SecretRef(service="deepseek-prod", account="api-key"))
-
-    def test_openai_chat_credential_resolver_parses_service_account_ref(self) -> None:
-        repository = LLMEndpointRepository()
-        repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "deepseek",
-                    "provider": "deepseek",
-                    "model_id": "deepseek/deepseek-chat",
-                    "api_mode": "openai_chat",
-                    "base_url": "https://api.deepseek.com/chat/completions",
-                    "credential_ref": "deepseek-prod:api-key",
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-        endpoint = repository.get_primary_enabled()
-        self.assertIsNotNone(endpoint)
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "sk-test")
-        resolver = LLMCredentialResolver(secret_store=secret_store)
-
-        secret = resolver.resolve_api_key(endpoint)
-
-        assert endpoint is not None
-        self.assertEqual(secret, "sk-test")
-        self.assertEqual(resolver.secret_ref_for_endpoint(endpoint), SecretRef(service="deepseek-prod", account="api-key"))
 
     def test_oauth_credential_resolver_uses_oauth_profile_ref(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="codex_oauth",
-            provider="openai_codex_oauth",
-            model_id="gpt-5.1-codex",
-            api_mode="openai_chat",
-            base_url="https://api.openai.com/v1/chat/completions",
+            endpoint_id="openai_oauth",
+            provider="openai",
+            model_id="gpt-test",
+            wire_shape="openai_response",
+            base_url="https://api.openai.com/v1/responses",
             auth_kind="oauth",
-            credential_ref="codex_oauth",
+            credential_ref="openai_oauth",
+            thinking_levels_blob=["off"],
+            default_thinking_level="off",
             priority=0,
             enabled=True,
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(
-            SecretRef(service="codex_oauth", account="oauth-profile"),
+            SecretRef(service="openai_oauth", account="oauth-profile"),
             json.dumps(
                 {
                     "access_token": "oauth-access-token",
@@ -643,1302 +384,46 @@ class PalV2BootstrapTests(unittest.TestCase):
         auth = resolver.resolve_auth(endpoint)
 
         self.assertEqual(auth.kind, "oauth")
-        self.assertEqual(auth.secret_ref, SecretRef(service="codex_oauth", account="oauth-profile"))
+        self.assertEqual(auth.secret_ref, SecretRef(service="openai_oauth", account="oauth-profile"))
         self.assertEqual(auth.access_token, "oauth-access-token")
         self.assertEqual(auth.profile["refresh_token"], "oauth-refresh-token")
         self.assertEqual(resolver.resolve_api_key(endpoint), "oauth-access-token")
 
-    def test_openai_chat_invoker_maps_oauth_access_token_to_bearer_key(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="codex_oauth",
-            provider="openai_codex_oauth",
-            model_id="gpt-5.1-codex",
-            api_mode="openai_chat",
-            base_url="https://api.openai.com/v1/chat/completions",
-            auth_kind="oauth",
-            credential_ref="codex_oauth:oauth-profile",
-            priority=0,
-            enabled=True,
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(
-            SecretRef(service="codex_oauth", account="oauth-profile"),
-            json.dumps({"access_token": "oauth-access-token"}),
-        )
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
 
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=64,
-            ),
-        )
 
-        self.assertEqual(kwargs["api_key"], "oauth-access-token")
-        self.assertEqual(kwargs["api_base"], "https://api.openai.com/v1")
-        self.assertNotIn("oauth-access-token", str(invoker.last_payload_summary))
 
-    def test_openai_chat_invoker_supplies_dummy_key_for_local_openai_endpoint(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="codex_bridge",
-            provider="openai",
-            model_id="gpt-5.4",
-            api_mode="openai_chat",
-            base_url="http://127.0.0.1:8765/v1",
-            auth_kind="local_provider_auth",
-            credential_ref="",
-            priority=0,
-            enabled=True,
-        )
-        invoker = OpenAIChatEndpointInvoker()
 
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=64),
-        )
 
-        self.assertEqual(kwargs["api_key"], "local-provider-auth")
-        self.assertEqual(kwargs["api_base"], "http://127.0.0.1:8765/v1")
-        self.assertIn("input", kwargs)
-        self.assertNotIn("messages", kwargs)
 
-    def test_openai_chat_invoker_renders_openai_provider_as_responses_shape(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="openai-responses",
-            provider="openai",
-            model_id="gpt-5.4",
-            api_mode="openai_chat",
-            base_url="https://api.openai.com/v1",
-            auth_kind="api_key_ref",
-            credential_ref="openai-prod:api-key",
-            priority=0,
-            enabled=True,
-            supports_reasoning=True,
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="openai-prod", account="api-key"), "openai-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
 
-        shape, kwargs, _ = invoker._build_openai_request_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[
-                    {"role": "system", "content": "system rules"},
-                    {"role": "user", "content": "hello"},
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [
-                            {
-                                "id": "call_1",
-                                "type": "function",
-                                "function": {"name": "probe", "arguments": "{}"},
-                            }
-                        ],
-                    },
-                    {"role": "tool", "content": "probe result", "tool_call_id": "call_1"},
-                ],
-                max_output_tokens=64,
-                metadata={"think_level": "deep"},
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "probe",
-                            "description": "Probe.",
-                            "parameters": {"type": "object", "properties": {}},
-                        },
-                    }
-                ],
-            ),
-        )
 
-        self.assertEqual(shape, "responses")
-        self.assertEqual(kwargs["api_key"], "openai-token")
-        self.assertEqual(kwargs["model"], "gpt-5.4")
-        self.assertNotIn("instructions", kwargs)
-        self.assertEqual(kwargs["input"][0], {"role": "developer", "content": "system rules"})
-        self.assertEqual(kwargs["reasoning"], {"effort": "high"})
-        self.assertEqual(kwargs["tools"][0]["name"], "probe")
-        self.assertNotIn("messages", kwargs)
-        self.assertIn({"type": "function_call", "name": "probe", "arguments": "{}", "call_id": "call_1"}, kwargs["input"])
-        self.assertIn({"type": "function_call_output", "call_id": "call_1", "output": "probe result"}, kwargs["input"])
 
-    def test_openai_chat_invoker_wraps_chat_developer_instructions_as_user_context(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="deepseek",
-            provider="deepseek",
-            model_id="deepseek-v4-pro",
-            api_mode="openai_chat",
-            base_url="https://api.deepseek.com",
-            auth_kind="api_key_ref",
-            credential_ref="deepseek-prod:api-key",
-            priority=0,
-            enabled=True,
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
 
-        shape, kwargs, _ = invoker._build_openai_request_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[
-                    {"role": "system", "content": "initial rules"},
-                    {"role": "user", "content": "hello"},
-                    {"role": "developer", "content": "runtime guidance"},
-                    {"role": "system", "content": "late system guidance"},
-                ],
-                max_output_tokens=64,
-            ),
-        )
 
-        self.assertEqual(shape, "chat_completions")
-        self.assertEqual(kwargs["messages"][0], {"role": "system", "content": "initial rules"})
-        self.assertEqual(kwargs["messages"][2]["role"], "user")
-        self.assertIn("<developer-instruction>", kwargs["messages"][2]["content"])
-        self.assertIn("runtime guidance", kwargs["messages"][2]["content"])
-        self.assertEqual(kwargs["messages"][3]["role"], "user")
-        self.assertIn("<system-instruction>", kwargs["messages"][3]["content"])
-        self.assertIn("late system guidance", kwargs["messages"][3]["content"])
 
-    def test_openai_chat_invoker_forwards_generation_controls_for_codex_bridge_responses(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="codex_bridge",
-            provider="codex_bridge",
-            model_id="hosted_vllm/gpt-5.4",
-            api_mode="openai_chat",
-            base_url="http://127.0.0.1:8765/v1",
-            auth_kind="api_key_ref",
-            credential_ref="codex_bridge:api-key",
-            priority=0,
-            enabled=True,
-            capabilities_blob={"codex_bridge": True},
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="codex_bridge", account="api-key"), "bridge-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
 
-        shape, kwargs, _ = invoker._build_openai_request_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=64,
-                temperature=0.7,
-                metadata={"think_level": "xhigh"},
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "probe",
-                            "description": "Probe.",
-                            "parameters": {"type": "object", "properties": {}},
-                        },
-                    }
-                ],
-            ),
-        )
 
-        self.assertEqual(shape, "responses")
-        self.assertEqual(kwargs["api_key"], "bridge-token")
-        self.assertEqual(kwargs["model"], "gpt-5.4")
-        self.assertIn("input", kwargs)
-        self.assertNotIn("messages", kwargs)
-        self.assertIn("tools", kwargs)
-        self.assertEqual(kwargs["temperature"], 0.7)
-        self.assertEqual(kwargs["tool_choice"], "auto")
-        self.assertEqual(kwargs["reasoning"], {"effort": "xhigh"})
-        self.assertNotIn("extra_body", kwargs)
 
-    def test_routing_invoker_uses_native_openai_responses_sdk(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="openai-native",
-            provider="openai",
-            model_id="gpt-5.4",
-            api_mode="openai_chat",
-            base_url="https://api.openai.com/v1",
-            auth_kind="api_key_ref",
-            credential_ref="openai-prod:api-key",
-            priority=0,
-            enabled=True,
-            supports_reasoning=True,
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="openai-prod", account="api-key"), "openai-token")
-        calls: list[tuple[str, dict[str, object]]] = []
 
-        class FakeResponse:
-            def to_dict(self):
-                return {
-                    "output": [
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": "pong"}],
-                        }
-                    ]
-                }
 
-        class FakeResponses:
-            def create(self, **kwargs):
-                calls.append(("create", dict(kwargs)))
-                return FakeResponse()
 
-        class FakeOpenAIClient:
-            def __init__(self, **kwargs):
-                calls.append(("client", dict(kwargs)))
-                self.responses = FakeResponses()
 
-        fake_openai = types.SimpleNamespace(OpenAI=FakeOpenAIClient)
-        invoker = build_default_endpoint_invoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
 
-        with patch.dict(sys.modules, {"openai": fake_openai}):
-            outcome = invoker.invoke(
-                endpoint,
-                CanonicalLLMRequest(
-                    messages=[{"role": "system", "content": "rules"}, {"role": "user", "content": "hello"}],
-                    max_output_tokens=64,
-                    metadata={"think_level": "deep"},
-                ),
-            )
 
-        self.assertEqual(outcome.text, "pong")
-        self.assertEqual(calls[0][0], "client")
-        self.assertEqual(calls[0][1]["api_key"], "openai-token")
-        self.assertEqual(calls[0][1]["base_url"], "https://api.openai.com/v1")
-        self.assertEqual(calls[0][1]["max_retries"], 0)
-        self.assertEqual(calls[1][0], "create")
-        self.assertEqual(calls[1][1]["model"], "gpt-5.4")
-        self.assertNotIn("instructions", calls[1][1])
-        self.assertEqual(calls[1][1]["input"][0], {"role": "developer", "content": "rules"})
-        self.assertEqual(calls[1][1]["reasoning"], {"effort": "high"})
-        self.assertIn("input", calls[1][1])
-        self.assertNotIn("messages", calls[1][1])
 
-    def test_routing_invoker_uses_native_anthropic_messages_sdk(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="anthropic-native",
-            provider="anthropic",
-            model_id="anthropic/claude-sonnet-4-5",
-            api_mode="anthropic_messages",
-            base_url="https://api.anthropic.com/v1/messages",
-            auth_kind="api_key_ref",
-            credential_ref="anthropic-prod:api-key",
-            priority=0,
-            enabled=True,
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="anthropic-prod", account="api-key"), "anthropic-token")
-        calls: list[tuple[str, dict[str, object]]] = []
 
-        class FakeResponse:
-            def to_dict(self):
-                return {
-                    "stop_reason": "tool_use",
-                    "content": [
-                        {"type": "text", "text": "thinking done"},
-                        {
-                            "type": "tool_use",
-                            "id": "call_1",
-                            "name": "probe_alias",
-                            "input": {"ok": True},
-                        },
-                    ],
-                }
 
-        class FakeMessages:
-            def create(self, **kwargs):
-                calls.append(("create", dict(kwargs)))
-                return FakeResponse()
 
-        class FakeAnthropicClient:
-            def __init__(self, **kwargs):
-                calls.append(("client", dict(kwargs)))
-                self.messages = FakeMessages()
 
-        fake_anthropic = types.SimpleNamespace(Anthropic=FakeAnthropicClient)
-        invoker = build_default_endpoint_invoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
 
-        with patch.dict(sys.modules, {"anthropic": fake_anthropic}):
-            outcome = invoker.invoke(
-                endpoint,
-                CanonicalLLMRequest(
-                    messages=[
-                        {"role": "system", "content": "rules"},
-                        {"role": "user", "content": "hello"},
-                        {"role": "developer", "content": "runtime guidance"},
-                        {"role": "system", "content": "late system guidance"},
-                    ],
-                    max_output_tokens=4096,
-                    metadata={"think_level": "deep"},
-                    tools=[
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": "probe_alias",
-                                "description": "Probe.",
-                                "parameters": {"type": "object", "properties": {}},
-                            },
-                        }
-                    ],
-                ),
-            )
 
-        self.assertEqual(outcome.text, "thinking done")
-        self.assertEqual(outcome.finish_reason, LLMFinishReason.TOOL_CALLS)
-        self.assertEqual(outcome.tool_calls[0].name, "probe_alias")
-        self.assertEqual(outcome.tool_calls[0].args, {"ok": True})
-        self.assertEqual(outcome.tool_calls[0].call_id, "call_1")
-        self.assertEqual(calls[0][0], "client")
-        self.assertEqual(calls[0][1]["api_key"], "anthropic-token")
-        self.assertEqual(calls[0][1]["base_url"], "https://api.anthropic.com")
-        self.assertEqual(calls[0][1]["max_retries"], 0)
-        self.assertEqual(calls[1][0], "create")
-        self.assertEqual(calls[1][1]["model"], "claude-sonnet-4-5")
-        self.assertEqual(calls[1][1]["system"], "rules")
-        rendered_messages = calls[1][1]["messages"]
-        self.assertEqual(len(rendered_messages), 1)
-        self.assertEqual(rendered_messages[0]["role"], "user")
-        rendered_content = rendered_messages[0]["content"]
-        self.assertEqual(rendered_content[0]["text"], "hello")
-        self.assertIn("<developer-instruction>", rendered_content[1]["text"])
-        self.assertIn("runtime guidance", rendered_content[1]["text"])
-        self.assertIn("<system-instruction>", rendered_content[2]["text"])
-        self.assertIn("late system guidance", rendered_content[2]["text"])
-        self.assertEqual(calls[1][1]["tools"][0]["name"], "probe_alias")
-        self.assertEqual(calls[1][1]["thinking"], {"type": "enabled", "budget_tokens": 2048})
 
-    def test_openai_chat_invoker_maps_glm_think_level_to_thinking_body(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="glm-5.2",
-            provider="zhipu",
-            model_id="glm-5.2",
-            api_mode="openai_chat",
-            base_url="https://api.z.ai/api/coding/paas/v4",
-            auth_kind="api_key_ref",
-            credential_ref="glm-prod:api-key",
-            priority=0,
-            enabled=True,
-            supports_reasoning=True,
-            capabilities_blob={"supports_thinking": True},
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=64,
-                metadata={"think_level": "xhigh"},
-            ),
-        )
-
-        self.assertEqual(kwargs["model"], "glm-5.2")
-        self.assertEqual(kwargs["thinking"], {"type": "enabled"})
-        self.assertEqual(kwargs["reasoning_effort"], "max")
-        self.assertNotIn("extra_body", kwargs)
-        self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
-        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
-        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "enabled"}})
-        self.assertEqual(request_kwargs["reasoning_effort"], "max")
-        self.assertNotIn("thinking", request_kwargs)
-
-    def test_openai_chat_invoker_preserves_deepseek_v4_tool_history_contract(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="deepseek-v4-flash",
-            provider="deepseek",
-            model_id="deepseek-v4-flash",
-            api_mode="openai_chat",
-            base_url="https://api.deepseek.com",
-            auth_kind="api_key_ref",
-            credential_ref="deepseek-prod:api-key",
-            priority=0,
-            enabled=True,
-            supports_reasoning=True,
-            capabilities_blob={},
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[
-                    {"role": "user", "content": "inspect"},
-                    {
-                        "role": "assistant",
-                        "provider_specific_fields": {"reasoning_content": "use the probe"},
-                        "tool_calls": [
-                            {
-                                "id": "call_1",
-                                "type": "function",
-                                "function": {"name": "probe", "arguments": "{}"},
-                            }
-                        ],
-                    },
-                    {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
-                ],
-                max_output_tokens=64,
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "probe",
-                            "description": "Probe.",
-                            "parameters": {"type": "object", "properties": {}},
-                        },
-                    }
-                ],
-                metadata={"think_level": "max"},
-            ),
-        )
-
-        assistant = kwargs["messages"][1]
-        self.assertEqual(assistant["content"], "")
-        self.assertEqual(assistant["reasoning_content"], "use the probe")
-        self.assertNotIn("tool_choice", kwargs)
-        self.assertEqual(kwargs["thinking"], {"type": "enabled"})
-        self.assertEqual(kwargs["reasoning_effort"], "max")
-        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
-        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "enabled"}})
-
-    def test_openai_chat_invoker_replays_reasoning_content_for_openai_shape_reasoning_providers(self) -> None:
-        cases = [
-            ("generic-reasoner", "openai_compatible", "generic-reasoner", "https://example.test/v1", "generic-reasoner"),
-            ("glm-5", "zhipu", "glm-5.1", "https://api.z.ai/api/coding/paas/v4", "glm-5.1"),
-            ("deepseek-r1", "deepseek", "deepseek-reasoner", "https://api.deepseek.com", "deepseek-reasoner"),
-        ]
-        for endpoint_id, provider, model_id, base_url, expected_model in cases:
-            with self.subTest(endpoint_id=endpoint_id):
-                endpoint = LLMEndpointRepository().upsert(
-                    endpoint_id=endpoint_id,
-                    provider=provider,
-                    model_id=model_id,
-                    api_mode="openai_chat",
-                    base_url=base_url,
-                    auth_kind="api_key_ref",
-                    credential_ref=f"{endpoint_id}:api-key",
-                    priority=0,
-                    enabled=True,
-                    supports_reasoning=True,
-                    capabilities_blob={"supports_thinking": True},
-                )
-                secret_store = InMemorySecretStore()
-                secret_store.set_secret(SecretRef(service=endpoint_id, account="api-key"), "token")
-                invoker = OpenAIChatEndpointInvoker(
-                    credentials=LLMCredentialResolver(secret_store=secret_store)
-                )
-
-                kwargs, _ = invoker._build_completion_kwargs(
-                    endpoint,
-                    CanonicalLLMRequest(
-                        messages=[
-                            {"role": "user", "content": "run probe"},
-                            {
-                                "role": "assistant",
-                                "content": "",
-                                "provider_specific_fields": {"reasoning_content": "hidden reasoning"},
-                                "tool_calls": [
-                                    {
-                                        "id": "call_1",
-                                        "type": "function",
-                                        "function": {"name": "probe_tool", "arguments": "{}"},
-                                    }
-                                ],
-                            },
-                            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
-                        ],
-                        max_output_tokens=64,
-                        metadata={"think_level": "high"},
-                    ),
-                )
-
-                assistant_message = next(message for message in kwargs["messages"] if message["role"] == "assistant")
-                self.assertEqual(kwargs["model"], expected_model)
-                self.assertEqual(assistant_message["reasoning_content"], "hidden reasoning")
-                self.assertNotIn("provider_specific_fields", assistant_message)
-
-    def test_openai_compatible_message_renderer_strips_internal_provider_fields_by_default(self) -> None:
-        rendered = chat_messages_to_openai_compatible_messages(
-            [
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "reasoning_content": "hidden top-level",
-                    "provider_specific_fields": {"reasoning_content": "hidden nested"},
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": "probe_tool", "arguments": "{}"},
-                        }
-                    ],
-                }
-            ]
-        )
-
-        self.assertEqual(rendered[0]["role"], "assistant")
-        self.assertNotIn("reasoning_content", rendered[0])
-        self.assertNotIn("provider_specific_fields", rendered[0])
-
-    def test_openai_chat_invoker_appends_zai_tool_routing_reminder_to_last_user_message(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="glm-5-tools",
-            provider="zhipu",
-            model_id="glm-5.1",
-            api_mode="openai_chat",
-            base_url="https://api.z.ai/api/coding/paas/v4",
-            auth_kind="api_key_ref",
-            credential_ref="glm-prod:api-key",
-            priority=0,
-            enabled=True,
-            supports_reasoning=True,
-            capabilities_blob={"supports_thinking": True},
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store),
-            message_hooks=MAIN_LLM_REQUEST_HOOKS,
-        )
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[
-                    {"role": "system", "content": "rules"},
-                    {"role": "user", "content": "Implement the task."},
-                    {"role": "assistant", "content": "I will work on it."},
-                    {"role": "user", "content": "Continue."},
-                ],
-                max_output_tokens=64,
-                tools=[
-                    {"type": "function", "function": {"name": "run_shell", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "delete_path", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "tree", "parameters": {"type": "object"}}},
-                ],
-                metadata={"think_level": "high"},
-            ),
-        )
-
-        rendered_messages = kwargs["messages"]
-        self.assertEqual(rendered_messages[-1]["role"], "user")
-        self.assertTrue(str(rendered_messages[-1]["content"]).startswith("Continue."))
-        self.assertIn("<system-reminder id=\"behavior-routing-reminder\">", rendered_messages[-1]["content"])
-        self.assertIn("Behavior-routing guidance", rendered_messages[-1]["content"])
-        self.assertIn("Choose the smallest available capability", rendered_messages[-1]["content"])
-        self.assertIn("Do not guess unavailable capability names", rendered_messages[-1]["content"])
-        self.assertNotIn("op_file_write", rendered_messages[-1]["content"])
-        self.assertNotIn("op_path_delete", rendered_messages[-1]["content"])
-        self.assertNotIn("op_exec_shell", rendered_messages[-1]["content"])
-        self.assertNotIn("behavior-routing-reminder", str(rendered_messages[0:3]))
-        self.assertNotIn("tool-routing hook", rendered_messages[-1]["content"])
-        self.assertNotIn("surface=", rendered_messages[-1]["content"])
-        self.assertEqual(kwargs["thinking"], {"type": "enabled"})
-        self.assertEqual(kwargs["reasoning_effort"], "high")
-        self.assertNotIn("extra_body", kwargs)
-        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
-        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "enabled"}})
-
-    def test_openai_chat_invoker_does_not_append_tool_routing_reminder_without_registered_hooks(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="glm-5-tools-no-hooks",
-            provider="zhipu",
-            model_id="glm-5.1",
-            api_mode="openai_chat",
-            base_url="https://api.z.ai/api/coding/paas/v4",
-            auth_kind="api_key_ref",
-            credential_ref="glm-prod:api-key",
-            priority=0,
-            enabled=True,
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "Continue."}],
-                max_output_tokens=64,
-                tools=[
-                    {"type": "function", "function": {"name": "run_shell", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object"}}},
-                ],
-            ),
-        )
-
-        self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
-
-    def test_openai_chat_invoker_accepts_legacy_main_behavior_routing_hook_name(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="glm-5-tools-legacy-hook",
-            provider="zhipu",
-            model_id="glm-5.1",
-            api_mode="openai_chat",
-            base_url="https://api.z.ai/api/coding/paas/v4",
-            auth_kind="api_key_ref",
-            credential_ref="glm-prod:api-key",
-            priority=0,
-            enabled=True,
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store),
-            message_hooks=("main_behavior_routing",),
-        )
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "Implement the task."}],
-                max_output_tokens=64,
-                tools=[
-                    {"type": "function", "function": {"name": "run_shell", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}},
-                ],
-            ),
-        )
-
-        self.assertIn("<system-reminder id=\"behavior-routing-reminder\">", kwargs["messages"][-1]["content"])
-
-    def test_openai_chat_invoker_does_not_append_zai_tool_routing_reminder_without_shell_tool(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="glm-5-file-only",
-            provider="zhipu",
-            model_id="glm-5.1",
-            api_mode="openai_chat",
-            base_url="https://api.z.ai/api/coding/paas/v4",
-            auth_kind="api_key_ref",
-            credential_ref="glm-prod:api-key",
-            priority=0,
-            enabled=True,
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=64,
-                tools=[
-                    {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object"}}},
-                ],
-            ),
-        )
-
-        self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
-
-    def test_openai_chat_zai_tool_routing_reminder_does_not_name_unavailable_repo_tools(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="glm-5-main-tools",
-            provider="zhipu",
-            model_id="glm-5.1",
-            api_mode="openai_chat",
-            base_url="https://api.z.ai/api/coding/paas/v4",
-            auth_kind="api_key_ref",
-            credential_ref="glm-prod:api-key",
-            priority=0,
-            enabled=True,
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store),
-            message_hooks=MAIN_LLM_REQUEST_HOOKS,
-        )
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": "The previous log mentioned op_tree and op_search, but this main runtime only has file tools.",
-                    }
-                ],
-                max_output_tokens=64,
-                tools=[
-                    {"type": "function", "function": {"name": "run_shell", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object"}}},
-                ],
-            ),
-        )
-
-        rendered = str(kwargs["messages"][-1]["content"])
-        self.assertIn("behavior-routing-reminder", rendered)
-        reminder = rendered.split("<system-reminder", 1)[1]
-        self.assertNotIn("op_file_write", reminder)
-        self.assertNotIn("op_tree", reminder)
-        self.assertNotIn("op_search", reminder)
-        self.assertIn("Do not guess unavailable capability names", reminder)
-        self.assertNotIn("tool-routing hook", reminder)
-        self.assertNotIn("surface=", reminder)
-
-    def test_anthropic_invoker_appends_zai_tool_routing_reminder_for_zhipu_anthropic_shape(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="glm-5-anthropic-shape",
-            provider="zhipu",
-            model_id="glm-5.2",
-            api_mode="anthropic_messages",
-            base_url="https://open.bigmodel.cn/api/anthropic",
-            auth_kind="api_key_ref",
-            credential_ref="glm-prod:api-key",
-            priority=0,
-            enabled=True,
-            supports_reasoning=True,
-            capabilities_blob={"supports_thinking": True},
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = ZaiAnthropicMessagesEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store),
-            message_hooks=MAIN_LLM_REQUEST_HOOKS,
-        )
-
-        client_kwargs, request_kwargs, _ = invoker._build_messages_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "system", "content": "rules"}, {"role": "user", "content": "Continue."}],
-                max_output_tokens=4096,
-                tools=[
-                    {"type": "function", "function": {"name": "run_shell", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "write_file", "parameters": {"type": "object"}}},
-                    {"type": "function", "function": {"name": "delete_path", "parameters": {"type": "object"}}},
-                ],
-                metadata={"think_level": "high"},
-            ),
-        )
-
-        self.assertEqual(client_kwargs["api_key"], "glm-token")
-        self.assertEqual(client_kwargs["base_url"], "https://open.bigmodel.cn/api/anthropic")
-        self.assertEqual(request_kwargs["thinking"], {"type": "enabled", "budget_tokens": 2048})
-        rendered_messages = request_kwargs["messages"]
-        self.assertEqual(rendered_messages[-1]["role"], "user")
-        final_text = rendered_messages[-1]["content"][-1]["text"]
-        self.assertIn("<system-reminder id=\"behavior-routing-reminder\">", final_text)
-        self.assertIn("Behavior-routing guidance", final_text)
-        self.assertIn("Choose the smallest available capability", final_text)
-        self.assertNotIn("op_exec_shell", final_text)
-        self.assertNotIn("op_file_write", final_text)
-        self.assertNotIn("op_path_delete", final_text)
-        self.assertNotIn("tool-routing hook", final_text)
-        self.assertNotIn("surface=", final_text)
-
-    def test_routing_invoker_prefers_zai_anthropic_shell_over_generic_anthropic(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="glm-5-anthropic-route",
-            provider="zhipu",
-            model_id="glm-5.2",
-            api_mode="anthropic_messages",
-            base_url="https://open.bigmodel.cn/api/anthropic",
-            auth_kind="api_key_ref",
-            credential_ref="glm-prod:api-key",
-            priority=0,
-            enabled=True,
-        )
-        invoker = build_default_endpoint_invoker()
-
-        selected = invoker._select(endpoint)
-
-        self.assertIsInstance(selected, ZaiAnthropicMessagesEndpointInvoker)
-
-    def test_openai_chat_invoker_maps_glm_off_to_disabled_thinking_body(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="glm-5-off",
-            provider="zhipu",
-            model_id="glm-5.1",
-            api_mode="openai_chat",
-            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-            auth_kind="api_key_ref",
-            credential_ref="glm-prod:api-key",
-            priority=0,
-            enabled=True,
-            supports_reasoning=True,
-            capabilities_blob={"supports_thinking": True},
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=64,
-                metadata={"think_level": "off"},
-            ),
-        )
-
-        self.assertEqual(kwargs["model"], "glm-5.1")
-        self.assertEqual(kwargs["thinking"], {"type": "disabled"})
-        self.assertNotIn("reasoning_effort", kwargs)
-        self.assertNotIn("extra_body", kwargs)
-        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
-        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "disabled"}})
-
-    def test_openai_chat_invoker_maps_deepseek_think_level_to_reasoning_and_thinking_body(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="deepseek-v4-flash",
-            provider="deepseek",
-            model_id="deepseek-v4-flash",
-            api_mode="openai_chat",
-            base_url="https://api.deepseek.com",
-            auth_kind="api_key_ref",
-            credential_ref="deepseek-prod:api-key",
-            priority=0,
-            enabled=True,
-            supports_reasoning=True,
-            capabilities_blob={"supports_thinking": True},
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=64,
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "read_file",
-                            "parameters": {"type": "object", "properties": {}},
-                        },
-                    }
-                ],
-                metadata={"think_level": "xhigh"},
-            ),
-        )
-
-        self.assertEqual(kwargs["api_key"], "deepseek-token")
-        self.assertEqual(kwargs["model"], "deepseek-v4-flash")
-        self.assertEqual(kwargs["reasoning_effort"], "max")
-        self.assertEqual(kwargs["thinking"], {"type": "enabled"})
-        self.assertNotIn("tool_choice", kwargs)
-        self.assertNotIn("extra_body", kwargs)
-        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
-        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "enabled"}})
-
-    def test_openai_chat_invoker_maps_deepseek_off_to_disabled_thinking_without_reasoning_effort(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="deepseek-v4-pro-off",
-            provider="deepseek",
-            model_id="deepseek-v4-pro",
-            api_mode="openai_chat",
-            base_url="https://api.deepseek.com",
-            auth_kind="api_key_ref",
-            credential_ref="deepseek-prod:api-key",
-            priority=0,
-            enabled=True,
-            supports_reasoning=True,
-            capabilities_blob={"supports_thinking": True},
-        )
-        secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store)
-        )
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=64,
-                metadata={"think_level": "off"},
-            ),
-        )
-
-        self.assertEqual(kwargs["model"], "deepseek-v4-pro")
-        self.assertEqual(kwargs["thinking"], {"type": "disabled"})
-        self.assertNotIn("reasoning_effort", kwargs)
-        self.assertNotIn("extra_body", kwargs)
-        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
-        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "disabled"}})
-
-    def test_llm_provider_registry_can_register_runtime_provider(self) -> None:
-        class DemoProvider(LLMProviderAdapter):
-            provider_names = frozenset({"demo_provider"})
-            model_provider_prefix = "hosted_vllm"
-
-            def apply_request(self, request: CanonicalLLMRequest, draft) -> None:  # type: ignore[no-untyped-def]
-                draft.extra["seed"] = 7
-
-        registry = LLMProviderRegistry()
-        registry.register(DemoProvider)
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="demo",
-            provider="demo_provider",
-            model_id="demo-model",
-            api_mode="openai_chat",
-            base_url="http://127.0.0.1:8765/v1",
-            auth_kind="local_provider_auth",
-            credential_ref="",
-            priority=0,
-            enabled=True,
-        )
-
-        adapter = registry.resolve(endpoint)
-        draft = adapter.new_draft([{"role": "user", "content": "hello"}])
-        adapter.apply_request(CanonicalLLMRequest(messages=[], max_output_tokens=16), draft)
-        kwargs = draft.to_kwargs()
-
-        self.assertEqual(kwargs["model"], "demo-model")
-        self.assertEqual(kwargs["seed"], 7)
-
-    def test_llm_provider_registry_can_unregister_runtime_provider(self) -> None:
-        class DemoProvider(LLMProviderAdapter):
-            provider_names = frozenset({"demo_unregister"})
-            model_provider_prefix = "hosted_vllm"
-
-        registry = LLMProviderRegistry()
-        registry.register(DemoProvider)
-        registry.unregister(DemoProvider)
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="demo_unregister",
-            provider="demo_unregister",
-            model_id="demo-model",
-            api_mode="openai_chat",
-            base_url="http://127.0.0.1:8765/v1",
-            auth_kind="local_provider_auth",
-            credential_ref="",
-            priority=0,
-            enabled=True,
-        )
-
-        adapter = registry.resolve(endpoint)
-
-        self.assertEqual(adapter.api_model(), "demo-model")
-
-    def test_llm_provider_registry_restores_builtin_mapping_after_runtime_adapter_removed(self) -> None:
-        adapters_dir = self.runtime_root / "llm" / "adapters"
-        adapters_dir.mkdir(parents=True, exist_ok=True)
-        adapter_path = adapters_dir / "override_openai.py"
-        adapter_path.write_text(
-            "\n".join(
-                [
-                    "from pal.llm import LLMProviderAdapter",
-                    "",
-                    "class RuntimeOpenAIOverride(LLMProviderAdapter):",
-                    "    provider_names = frozenset({'openai'})",
-                    "    model_provider_prefix = 'hosted_vllm'",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-        registry = build_default_provider_registry(load_entry_points=False)
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="openai_restore",
-            provider="openai",
-            model_id="demo-model",
-            api_mode="openai_chat",
-            base_url="https://api.openai.com/v1",
-            auth_kind="api_key_ref",
-            credential_ref="",
-            priority=0,
-            enabled=True,
-        )
-
-        registry.load_runtime_adapters(self.runtime_root)
-        self.assertEqual(registry.resolve(endpoint).api_model(), "demo-model")
-
-        adapter_path.unlink()
-        registry.load_runtime_adapters(self.runtime_root)
-
-        self.assertEqual(registry.resolve(endpoint).api_model(), "demo-model")
-
-    def test_openai_chat_invoker_uses_injected_provider_registry(self) -> None:
-        class DemoProvider(LLMProviderAdapter):
-            provider_names = frozenset({"demo_injected"})
-            model_provider_prefix = "hosted_vllm"
-
-            def apply_request(self, request: CanonicalLLMRequest, draft) -> None:  # type: ignore[no-untyped-def]
-                _ = request
-                draft.extra["seed"] = 11
-
-        registry = build_default_provider_registry(load_entry_points=False)
-        registry.register(DemoProvider)
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="demo_injected",
-            provider="demo_injected",
-            model_id="demo-model",
-            api_mode="openai_chat",
-            base_url="http://127.0.0.1:8765/v1",
-            auth_kind="local_provider_auth",
-            credential_ref="",
-            priority=0,
-            enabled=True,
-        )
-        invoker = OpenAIChatEndpointInvoker(provider_registry=registry)
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=16),
-        )
-
-        self.assertEqual(kwargs["model"], "demo-model")
-        self.assertEqual(kwargs["seed"], 11)
-
-    def test_openai_chat_invoker_sets_openai_chat_and_sdk_timeouts(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="timeout_demo",
-            provider="openai_compatible",
-            model_id="demo-model",
-            api_mode="openai_chat",
-            base_url="https://example.invalid/v1",
-            auth_kind="local_provider_auth",
-            credential_ref="",
-            priority=0,
-            enabled=True,
-        )
-        invoker = OpenAIChatEndpointInvoker()
-
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=16,
-                metadata={"timeout_seconds": 37.0},
-            ),
-        )
-
-        self.assertEqual(kwargs["timeout"], 37)
-        self.assertEqual(kwargs["request_timeout"], 37.0)
-        self.assertEqual(kwargs["force_timeout"], 37.0)
-        self.assertEqual(kwargs["max_retries"], 0)
-
-    def test_routing_invoker_exposes_selected_provider_payload_summary(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="stub_route",
-            provider="stub",
-            model_id="stub-model",
-            api_mode="openai_chat",
-            base_url="stub://local/route",
-            credential_ref="",
-            priority=0,
-            enabled=True,
-        )
-        invoker = build_default_endpoint_invoker()
-
-        outcome = invoker.invoke(
-            endpoint,
-            CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=16),
-        )
-
-        self.assertEqual(outcome.text, "hello")
-        self.assertEqual(invoker.last_payload_summary["endpoint_id"], "stub_route")
-        self.assertEqual(invoker.last_payload_summary["message_count"], 1)
-
-    def test_llm_runtime_logs_typed_failure_without_persisting_request_content(self) -> None:
-        class EmptyResponseInvoker:
-            def __init__(self) -> None:
-                self.last_payload_summary: dict[str, object] = {}
-
-            def invoke(self, endpoint, request):
-                _ = endpoint
-                self.last_payload_summary = {
-                    "message_count": len(request.messages),
-                    "roles": [message.get("role") for message in request.messages],
-                    "authorization": "Bearer secret-provider-token",
-                    "image_parts": [
-                        {
-                            "message_index": 1,
-                            "part_index": 0,
-                            "transport": "http_url",
-                            "prefix": "https://private.invalid/user-secret-image",
-                            "url_length": 49,
-                        }
-                    ],
-                }
-                raise LLMEndpointInvocationError(
-                    "llm response contained no assistant content or tool calls; echoed first user message"
-                )
-
-            def invoke_stream(self, endpoint, request):
-                _ = endpoint, request
-                raise NotImplementedError
-
-        endpoint_repository = LLMEndpointRepository()
-        endpoint_repository.upsert(
-            endpoint_id="glm_demo",
-            provider="openai_compatible",
-            model_id="glm-demo",
-            api_mode="openai_chat",
-            base_url="https://example.invalid/v1",
-            credential_ref="secret-provider-token",
-            priority=0,
-            enabled=True,
-        )
-        events: list[dict[str, object]] = []
-        legacy_audit_dir = self.runtime_root / "data" / "llm" / "audit"
-        legacy_audit_dir.mkdir(parents=True, exist_ok=True)
-        legacy_audit = legacy_audit_dir / "llm_failure_legacy.json"
-        legacy_audit.write_text('{"messages":["legacy private prompt"]}', encoding="utf-8")
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=RuntimeSettingRepository(),
-            endpoint_invoker=EmptyResponseInvoker(),
-            config=RuntimeConfig(runtime_root=self.runtime_root, llm_endpoint_retry_attempts=1),
-            event_sink=events.append,
-        )
-        self.assertFalse(legacy_audit.exists())
-
-        with self.assertLogs("pal.llm.runtime", level="WARNING") as captured:
-            outcome = runtime.generate(
-                CanonicalLLMRequest(
-                    messages=[
-                        {"role": "system", "content": "stable instructions"},
-                        {"role": "user", "content": "first user message"},
-                        {"role": "user", "content": "second user message"},
-                    ],
-                    max_output_tokens=64,
-                    tools=[{"type": "function", "function": {"name": "demo", "parameters": {"type": "object"}}}],
-                    metadata={
-                        "purpose": "minion_worker",
-                        "api_key": "secret-api-key",
-                        "prompt_observation_tag": "obs_failure_audit",
-                    },
-                )
-            )
-
-        self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
-        audit_files = sorted((self.runtime_root / "data" / "llm" / "audit").glob("llm_failure_*.json"))
-        self.assertEqual(audit_files, [])
-        self.assertNotIn("error_message", events[0])
-        self.assertEqual(events[0]["error_type"], "LLMEndpointInvocationError")
-        logs = "\n".join(captured.output)
-        self.assertIn("error_kind=unknown", logs)
-        self.assertIn("error_type=LLMEndpointInvocationError", logs)
-        for secret in (
-            "stable instructions",
-            "first user message",
-            "second user message",
-            "parameters",
-            "obs_failure_audit",
-            "private.invalid",
-            "secret-api-key",
-            "secret-provider-token",
-        ):
-            self.assertNotIn(secret, logs)
-
-    def test_openai_chat_wall_timeout_returns_without_waiting_for_stuck_call(self) -> None:
-        from pal.llm.runtime import LLMEndpointInvocationError, _run_llm_with_wall_timeout
-
-        started_at = time.monotonic()
-        with self.assertRaises(LLMEndpointInvocationError):
-            _run_llm_with_wall_timeout(
-                lambda: time.sleep(2.0),
-                timeout_seconds=0.05,
-                description="test openai_chat call",
-            )
-
-        self.assertLess(time.monotonic() - started_at, 0.5)
-
-    def test_refresh_llm_endpoints_reloads_runtime_root_provider_adapters(self) -> None:
-        adapters_dir = self.runtime_root / "llm" / "adapters"
-        adapters_dir.mkdir(parents=True, exist_ok=True)
-        adapter_path = adapters_dir / "runtime_demo.py"
-
-        def write_adapter(seed: int) -> None:
-            adapter_path.write_text(
-                "\n".join(
-                    [
-                        "from __future__ import annotations",
-                        "from pal.llm import CanonicalLLMRequest, LLMProviderAdapter, OpenAIChatCompletionDraft",
-                        "",
-                        "class RuntimeDemoProvider(LLMProviderAdapter):",
-                        "    provider_names = frozenset({'runtime_demo'})",
-                        "    model_provider_prefix = 'hosted_vllm'",
-                        "",
-                        "    def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:",
-                        "        _ = request",
-                        f"        draft.extra['seed'] = {seed}",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-        write_adapter(1)
-        repository = LLMEndpointRepository()
-        settings = RuntimeSettingRepository()
-        endpoint = repository.upsert(
-            endpoint_id="runtime_demo",
-            provider="runtime_demo",
-            model_id="demo-model",
-            api_mode="openai_chat",
-            base_url="http://127.0.0.1:8765/v1",
-            auth_kind="local_provider_auth",
-            credential_ref="",
-            priority=0,
-            enabled=True,
-        )
-        invoker = OpenAIChatEndpointInvoker(runtime_root=self.runtime_root)
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=repository),
-            settings_repository=settings,
-            endpoint_invoker=invoker,
-        )
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=16),
-        )
-        self.assertEqual(kwargs["seed"], 1)
-
-        write_adapter(2)
-        payload = runtime.refresh_llm_endpoints()
-        refreshed_endpoint = runtime.endpoint_resolver.primary()
-        assert refreshed_endpoint is not None
-        kwargs, _ = invoker._build_completion_kwargs(
-            refreshed_endpoint,
-            CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=16),
-        )
-
-        self.assertTrue(payload["provider_adapters_refreshed"])
-        self.assertEqual(payload["provider_adapter_load_errors"], [])
-        self.assertEqual(kwargs["model"], "demo-model")
-        self.assertEqual(kwargs["seed"], 2)
 
     def test_encrypted_file_secret_store_reloads_when_file_changes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_secret_reload_test_") as tmp:
             secrets_path = Path(tmp) / "secrets.json"
             first = EncryptedFileSecretStore(secrets_path)
-            ref = SecretRef(service="codex_bridge", account="api-key")
+            ref = SecretRef(service="example_llm", account="api-key")
             self.assertIsNone(first.get_secret(ref))
 
             second = EncryptedFileSecretStore(secrets_path)
@@ -1949,7 +434,7 @@ class PalV2BootstrapTests(unittest.TestCase):
     def test_encrypted_file_secret_store_survives_hostname_change(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_secret_hostname_test_") as tmp:
             secrets_path = Path(tmp) / "secrets.json"
-            ref = SecretRef(service="codex_bridge", account="api-key")
+            ref = SecretRef(service="example_llm", account="api-key")
 
             with patch("pal.llm.secret_store.socket.gethostname", return_value="before-reboot"):
                 first = EncryptedFileSecretStore(secrets_path)
@@ -1966,15 +451,15 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="pal_secret_legacy_hostname_test_") as tmp:
             secrets_path = Path(tmp) / "secrets.json"
-            ref = SecretRef(service="codex_bridge", account="api-key")
+            ref = SecretRef(service="example_llm", account="api-key")
             with patch("pal.llm.secret_store.socket.gethostname", return_value="current-host"):
                 old_key = _derive_fernet_key(runtime_root=str(secrets_path.parent), include_hostname=True)
             encrypted = Fernet(old_key).encrypt(b"bridge-token").decode()
             secrets_path.write_text(
                 json.dumps(
                     {
-                        "codex_bridge:api-key": {
-                            "service": "codex_bridge",
+                        "example_llm:api-key": {
+                            "service": "example_llm",
                             "account": "api-key",
                             "encrypted": encrypted,
                         }
@@ -1994,19 +479,21 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_oauth_profile_without_access_token_does_not_become_api_key(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="codex_oauth",
-            provider="openai_codex_oauth",
-            model_id="gpt-5.1-codex",
-            api_mode="openai_chat",
-            base_url="https://api.openai.com/v1/chat/completions",
+            endpoint_id="openai_oauth",
+            provider="openai",
+            model_id="gpt-test",
+            wire_shape="openai_response",
+            base_url="https://api.openai.com/v1/responses",
             auth_kind="oauth",
-            credential_ref="codex_oauth",
+            credential_ref="openai_oauth",
+            thinking_levels_blob=["off"],
+            default_thinking_level="off",
             priority=0,
             enabled=True,
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(
-            SecretRef(service="codex_oauth", account="oauth-profile"),
+            SecretRef(service="openai_oauth", account="oauth-profile"),
             json.dumps({"refresh_token": "oauth-refresh-token"}),
         )
         resolver = LLMCredentialResolver(secret_store=secret_store)
@@ -2016,351 +503,13 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNone(auth.access_token)
         self.assertIsNone(resolver.resolve_api_key(endpoint))
 
-    def test_llm_runtime_preflight_reads_budget_from_database(self) -> None:
-        repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        settings_repository.ensure_defaults()
-        repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "stub_endpoint",
-                    "provider": "stub",
-                    "model_id": "stub-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/llm",
-                    "credential_ref": "stub-key",
-                    "context_window": 10000,
-                    "max_output_tokens": 1200,
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=repository),
-            settings_repository=settings_repository,
-        )
 
-        advice = runtime.preflight(
-            LLMPreflightRequest(
-                messages=[{"role": "system", "content": "x" * 5000}],
-                max_output_tokens=1500,
-            )
-        )
 
-        self.assertEqual(advice.active_model, "stub-model")
-        self.assertEqual(advice.reserved_output_tokens, 1200)
-        self.assertEqual(advice.target_input_budget, 11108)
-        self.assertEqual(advice.fallback_chain, [])
-        self.assertEqual(advice.breakdown["system_chars"], 5000)
-        self.assertEqual(advice.breakdown["tool_protocol_chars"], 0)
-        self.assertEqual(advice.breakdown["tools_schema_chars"], 0)
-        self.assertEqual(advice.breakdown["conversation_chars"], 0)
-        self.assertEqual(advice.breakdown["current_user_chars"], 0)
-        self.assertEqual(advice.breakdown["hard_keep_chars"], 5000)
-        self.assertEqual(advice.breakdown["estimated_input_chars"], 5000)
-        self.assertEqual(advice.breakdown["available_input_budget_chars"], 27216)
-        self.assertFalse(bool(advice.breakdown["hard_overflow"]))
 
-    def test_llm_runtime_preflight_marks_hard_overflow_when_hard_keep_exceeds_budget(self) -> None:
-        repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        settings_repository.ensure_defaults()
-        repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "tiny_endpoint",
-                    "provider": "stub",
-                    "model_id": "tiny-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/llm",
-                    "credential_ref": "stub-key",
-                    "context_window": 2000,
-                    "max_output_tokens": 256,
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=repository),
-            settings_repository=settings_repository,
-            config=RuntimeConfig(),
-        )
 
-        advice = runtime.preflight(
-            LLMPreflightRequest(
-                messages=[
-                    {"role": "system", "content": "s" * 3000},
-                    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
-                    {"role": "tool", "content": "t" * 2000, "tool_call_id": "call_1"},
-                    {"role": "user", "content": "u" * 1000},
-                ],
-                max_output_tokens=512,
-            )
-        )
 
-        self.assertEqual(advice.status, "compact_required")
-        self.assertTrue(bool(advice.breakdown["hard_overflow"]))
-        self.assertEqual(advice.breakdown["system_chars"], 3000)
-        self.assertGreaterEqual(advice.breakdown["tool_protocol_chars"], 2000)
-        self.assertEqual(advice.breakdown["tools_schema_chars"], 0)
-        self.assertEqual(advice.breakdown["current_user_chars"], 1000)
-        self.assertGreaterEqual(advice.breakdown["hard_keep_chars"], 6000)
-        self.assertLess(advice.breakdown["available_input_budget_chars"], advice.breakdown["hard_keep_chars"])
 
-    def test_llm_runtime_preflight_counts_tool_schema_budget(self) -> None:
-        repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        settings_repository.ensure_defaults()
-        repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "stub_endpoint",
-                    "provider": "stub",
-                    "model_id": "stub-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/llm",
-                    "credential_ref": "stub-key",
-                    "context_window": 10000,
-                    "max_output_tokens": 1200,
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=repository),
-            settings_repository=settings_repository,
-        )
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "large_tool",
-                    "description": "d" * 500,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"payload": {"type": "string", "description": "x" * 300}},
-                    },
-                },
-            }
-        ]
-        expected_tool_chars = len(json.dumps(tools, ensure_ascii=False, sort_keys=True))
 
-        advice = runtime.preflight(
-            LLMPreflightRequest(
-                messages=[{"role": "user", "content": "u"}],
-                max_output_tokens=256,
-                tools=tools,
-            )
-        )
-
-        self.assertEqual(advice.breakdown["tools_schema_chars"], expected_tool_chars)
-        self.assertEqual(advice.breakdown["estimated_input_chars"], expected_tool_chars + 1)
-        self.assertEqual(advice.breakdown["hard_keep_chars"], expected_tool_chars + 1)
-
-    def test_runtime_setting_repository_persists_think_level(self) -> None:
-        repository = RuntimeSettingRepository()
-
-        repository.ensure_defaults()
-        self.assertIsNone(repository.get_think_level("endpoint-a"))
-
-        repository.set_think_level("endpoint-a", "deep")
-        repository.set_think_level("endpoint-b", "low")
-        self.assertEqual(repository.get_think_level("endpoint-a"), "deep")
-        self.assertEqual(repository.get_think_level("endpoint-b"), "low")
-
-    def test_llm_runtime_uses_provider_choices_and_persists_them_per_endpoint(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "glm",
-                    "provider": "zhipu",
-                    "model_id": "glm-5.2",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/glm",
-                    "credential_ref": "stub-key",
-                    "supports_reasoning": True,
-                    "capabilities_blob": {"supports_thinking": True},
-                    "priority": 0,
-                    "enabled": True,
-                },
-                {
-                    "endpoint_id": "claude",
-                    "provider": "anthropic",
-                    "model_id": "claude-sonnet",
-                    "api_mode": "anthropic_messages",
-                    "base_url": "stub://local/claude",
-                    "credential_ref": "stub-key",
-                    "supports_reasoning": True,
-                    "priority": 1,
-                    "enabled": True,
-                },
-            ]
-        )
-        settings = RuntimeSettingRepository()
-        settings.set_active_llm_endpoint_id("glm")
-        settings.set("think_level", "xhigh")
-
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings,
-        )
-
-        self.assertEqual(runtime.think_level, "max")
-        self.assertEqual(settings.get_think_level("glm"), "max")
-        self.assertIsNone(settings.get_legacy_think_level())
-        self.assertEqual(
-            [choice["id"] for choice in runtime.thinking_status()["choices"]],
-            ["off", "high", "max"],
-        )
-
-        runtime.set_active_endpoint("claude")
-        self.assertEqual(runtime.think_level, "medium")
-        self.assertEqual(runtime.set_think_level("minimal"), "low")
-        runtime.set_active_endpoint("glm")
-        self.assertEqual(runtime.think_level, "max")
-        self.assertEqual(settings.get_think_level("claude"), "low")
-
-    def test_llm_runtime_injects_think_level_into_request_metadata(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "stub_endpoint",
-                    "provider": "zhipu",
-                    "model_id": "glm-5.2",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/llm",
-                    "credential_ref": "stub-key",
-                    "context_window": 10000,
-                    "max_output_tokens": 1200,
-                    "supports_reasoning": True,
-                    "capabilities_blob": {
-                        "supports_thinking": True,
-                        "thinking_contract": {
-                            "default": "high",
-                            "choices": [
-                                "off",
-                                {"id": "high", "label": "focused", "aliases": ["deep"]},
-                            ],
-                        }
-                    },
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-        settings_repository.set_think_level("stub_endpoint", "deep")
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings_repository,
-        )
-
-        runtime.generate(
-            CanonicalLLMRequest(
-                messages=[{"role": "system", "content": "hello"}],
-                max_output_tokens=256,
-                metadata={"origin": "test"},
-            )
-        )
-
-        self.assertIsNotNone(runtime.last_request)
-        self.assertEqual(runtime.last_request.metadata["think_level"], "high")
-
-    def test_llm_runtime_injects_default_timeout_into_effective_request(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "stub_endpoint",
-                    "provider": "stub",
-                    "model_id": "stub-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/llm",
-                    "credential_ref": "stub-key",
-                    "context_window": 10000,
-                    "max_output_tokens": 1200,
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-
-        class CaptureInvoker:
-            def __init__(self) -> None:
-                self.requests: list[CanonicalLLMRequest] = []
-
-            def invoke(self, endpoint, request: CanonicalLLMRequest):  # type: ignore[no-untyped-def]
-                self.requests.append(request)
-                return CanonicalLLMOutcome(text="ok", finish_reason=LLMFinishReason.STOP)
-
-        invoker = CaptureInvoker()
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings_repository,
-            endpoint_invoker=invoker,
-            config=RuntimeConfig(llm_request_timeout_seconds=37.0),
-        )
-
-        runtime.generate(
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=256,
-            )
-        )
-
-        self.assertEqual(invoker.requests[0].metadata["timeout_seconds"], 37.0)
-
-    def test_llm_runtime_preserves_longer_explicit_request_timeout(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "stub_endpoint",
-                    "provider": "stub",
-                    "model_id": "stub-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/llm",
-                    "credential_ref": "stub-key",
-                    "context_window": 10000,
-                    "max_output_tokens": 1200,
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-
-        class CaptureInvoker:
-            def __init__(self) -> None:
-                self.requests: list[CanonicalLLMRequest] = []
-
-            def invoke(self, endpoint, request: CanonicalLLMRequest):  # type: ignore[no-untyped-def]
-                self.requests.append(request)
-                return CanonicalLLMOutcome(text="ok", finish_reason=LLMFinishReason.STOP)
-
-        invoker = CaptureInvoker()
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings_repository,
-            endpoint_invoker=invoker,
-            config=RuntimeConfig(llm_request_timeout_seconds=300.0),
-        )
-
-        runtime.generate(
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=256,
-                metadata={"timeout_seconds": 3000.0},
-            )
-        )
-
-        self.assertEqual(invoker.requests[0].metadata["timeout_seconds"], 3000.0)
 
     def test_compose_runtime_loads_first_party_sqlite_vec_plugin_via_plugin_host(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -3399,830 +1548,22 @@ class PalV2BootstrapTests(unittest.TestCase):
         hot_ids = [eid for eid, state in service.l2_store.heat_registry.items() if state.heat_level == L2HeatLevel.HOT]
         self.assertEqual(len(hot_ids), 10)
 
-    def test_openai_chat_invoker_does_not_map_think_level_to_reasoning_effort_for_plain_openai_chat(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="plain-openai-chat",
-            provider="openai_compatible",
-            model_id="gpt-test",
-            api_mode="openai_chat",
-            base_url="https://example.test/v1",
-            credential_ref="openai-compatible-prod",
-            enabled=True,
-        )
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
-        )
 
-        kwargs, _ = invoker._build_completion_kwargs(
-            endpoint,
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=64,
-                metadata={"think_level": "deep"},
-            ),
-        )
 
-        self.assertNotIn("reasoning_effort", kwargs)
 
-    def test_llm_runtime_retries_primary_then_falls_back_to_next_endpoint(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "primary",
-                    "provider": "stub",
-                    "model_id": "primary-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/primary",
-                    "credential_ref": "stub-primary",
-                    "priority": 0,
-                    "enabled": True,
-                },
-                {
-                    "endpoint_id": "fallback",
-                    "provider": "stub",
-                    "model_id": "fallback-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/fallback",
-                    "credential_ref": "stub-fallback",
-                    "priority": 1,
-                    "enabled": True,
-                },
-            ]
-        )
 
-        class RetryThenFallbackInvoker:
-            def __init__(self) -> None:
-                self.calls: list[str] = []
 
-            def invoke(self, endpoint, request):
-                self.calls.append(endpoint.endpoint_id)
-                if endpoint.endpoint_id == "primary":
-                    raise RuntimeError("primary transport failed")
-                return CanonicalLLMOutcome(
-                    text=f"reply via {endpoint.endpoint_id}",
-                    tool_calls=[],
-                    finish_reason=LLMFinishReason.STOP,
-                )
 
-        invoker = RetryThenFallbackInvoker()
-        events: list[dict[str, object]] = []
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings_repository,
-            endpoint_invoker=invoker,
-            endpoint_retry_attempts=2,
-            event_sink=events.append,
-        )
 
-        outcome = runtime.generate(
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=256,
-            )
-        )
 
-        self.assertEqual(invoker.calls, ["primary", "primary", "fallback"])
-        self.assertEqual(outcome.text, "reply via fallback")
-        self.assertEqual(runtime.last_endpoint_id, "fallback")
-        self.assertEqual(runtime.last_model_id, "fallback-model")
-        self.assertNotIn("think_level", runtime.last_request.metadata)
-        self.assertEqual(runtime.last_request.metadata["endpoint_id"], "fallback")
-        self.assertEqual(
-            [event["phase"] for event in events],
-            [
-                "llm_endpoint_attempt_failed",
-                "llm_endpoint_retry_scheduled",
-                "llm_endpoint_attempt_failed",
-                "llm_endpoint_exhausted",
-                "llm_endpoint_fallback_started",
-                "llm_endpoint_fallback_succeeded",
-            ],
-        )
-        self.assertEqual(events[0]["endpoint_id"], "primary")
-        self.assertEqual(events[0]["attempt"], 1)
-        self.assertEqual(events[1]["next_attempt"], 2)
-        self.assertEqual(events[3]["next_endpoint_id"], "fallback")
-        self.assertEqual(events[-1]["endpoint_id"], "fallback")
 
-    def test_llm_runtime_agenerate_does_not_block_event_loop(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "blocking",
-                    "provider": "stub",
-                    "model_id": "blocking-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/blocking",
-                    "credential_ref": "stub-blocking",
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
 
-        class BlockingInvoker:
-            def invoke(self, endpoint, request):
-                _ = endpoint, request
-                time.sleep(0.08)
-                return CanonicalLLMOutcome(text="done", tool_calls=[], finish_reason=LLMFinishReason.STOP)
 
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings_repository,
-            endpoint_invoker=BlockingInvoker(),
-        )
 
-        async def scenario() -> CanonicalLLMOutcome:
-            task = asyncio.create_task(
-                runtime.agenerate(
-                    CanonicalLLMRequest(
-                        messages=[{"role": "user", "content": "hello"}],
-                        max_output_tokens=64,
-                    )
-                )
-            )
-            started_at = time.monotonic()
-            await asyncio.sleep(0.01)
-            self.assertLess(time.monotonic() - started_at, 0.05)
-            return await asyncio.wait_for(task, timeout=1.0)
 
-        outcome = asyncio.run(scenario())
 
-        self.assertEqual(outcome.text, "done")
 
-    def test_llm_runtime_generate_stream_returns_normalized_events(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "streaming",
-                    "provider": "stub",
-                    "model_id": "streaming-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/streaming",
-                    "credential_ref": "stub-streaming",
-                    "priority": 0,
-                    "enabled": True,
-                    "supports_streaming": True,
-                }
-            ]
-        )
 
-        class StreamingInvoker:
-            def invoke(self, endpoint, request):
-                _ = endpoint
-                _ = request
-                return CanonicalLLMOutcome(text="unused", tool_calls=[], finish_reason=LLMFinishReason.STOP)
-
-            def invoke_stream(self, endpoint, request):
-                _ = endpoint
-                _ = request
-                return [
-                    NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="hello "),
-                    NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="world"),
-                    NormalizedLLMStreamEvent(
-                        event_kind=LLMStreamEventKind.DONE,
-                        finish_reason=LLMFinishReason.STOP,
-                        response_mode="chat",
-                    ),
-                ]
-
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings_repository,
-            endpoint_invoker=StreamingInvoker(),
-        )
-
-        events = runtime.generate_stream(
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "stream me"}],
-                max_output_tokens=128,
-            )
-        )
-
-        self.assertEqual([event.event_kind for event in events], [LLMStreamEventKind.TEXT_DELTA, LLMStreamEventKind.TEXT_DELTA, LLMStreamEventKind.DONE])
-        self.assertEqual("".join(event.text for event in events), "hello world")
-        self.assertEqual(events[-1].finish_reason, LLMFinishReason.STOP)
-        self.assertEqual(events[-1].response_mode, "chat")
-
-    def test_openai_chat_invoker_stream_normalizes_reasoning_only_chunks(self) -> None:
-        endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="deepseek-like",
-            provider="deepseek",
-            model_id="deepseek/deepseek-chat",
-            api_mode="openai_chat",
-            base_url="https://api.deepseek.com/v1",
-            credential_ref="deepseek-prod",
-            enabled=True,
-            supports_streaming=True,
-        )
-
-        class FakeChunk:
-            def __init__(self, payload):
-                self.payload = payload
-
-            def to_dict(self):
-                return dict(self.payload)
-
-        class FakeResponse:
-            def to_dict(self):
-                return {
-                    "choices": [
-                        {
-                            "finish_reason": "stop",
-                            "message": {"content": "pong", "tool_calls": []},
-                        }
-                    ]
-                }
-
-        class FakeOpenAICompletions:
-            calls = []
-
-            @staticmethod
-            def create(**kwargs):
-                FakeOpenAICompletions.calls.append(dict(kwargs))
-                if kwargs.get("stream"):
-                    return [
-                        FakeChunk(
-                            {
-                                "choices": [
-                                    {
-                                        "finish_reason": None,
-                                        "delta": {"reasoning_content": "thinking", "content": None},
-                                    }
-                                ]
-                            }
-                        ),
-                        FakeChunk(
-                            {
-                                "choices": [
-                                    {
-                                        "finish_reason": "length",
-                                        "delta": {"reasoning_content": "still thinking", "content": None},
-                                    }
-                                ]
-                            }
-                        ),
-                    ]
-                return FakeResponse()
-
-        class FakeOpenAIClient:
-            def __init__(self, **kwargs):
-                self.client_kwargs = kwargs
-                self.chat = types.SimpleNamespace(
-                    completions=FakeOpenAICompletions(),
-                )
-
-        class FakeOpenAI:
-            OpenAI = FakeOpenAIClient
-
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
-        )
-        request = CanonicalLLMRequest(
-            messages=[{"role": "user", "content": "Reply with exactly: pong"}],
-            max_output_tokens=32,
-        )
-
-        with patch.dict(sys.modules, {"openai": FakeOpenAI}):
-            events = list(invoker.invoke_stream(endpoint, request))
-
-        self.assertEqual(
-            [event.event_kind for event in events],
-            [LLMStreamEventKind.REASONING_DELTA, LLMStreamEventKind.REASONING_DELTA, LLMStreamEventKind.DONE],
-        )
-        self.assertEqual("".join(event.reasoning_text for event in events), "thinkingstill thinking")
-        self.assertEqual(events[-1].finish_reason, "length")
-        self.assertEqual(
-            FakeOpenAICompletions.calls[0]["stream_options"],
-            {"include_usage": True},
-        )
-
-    def test_openai_chat_response_parser_preserves_reasoning_text(self) -> None:
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
-        )
-
-        class FakeResponse:
-            def to_dict(self):
-                return {
-                    "usage": {
-                        "prompt_tokens": 17,
-                        "completion_tokens": 5,
-                        "cost": 0.0125,
-                    },
-                    "choices": [
-                        {
-                            "finish_reason": "stop",
-                            "message": {
-                                "content": "pong",
-                                "reasoning_content": "thinking",
-                                "tool_calls": [],
-                            },
-                        }
-                    ]
-                }
-
-        outcome = invoker._parse_openai_chat_response(FakeResponse())
-
-        self.assertEqual(outcome.text, "pong")
-        self.assertEqual(outcome.reasoning_text, "thinking")
-        self.assertEqual(outcome.provider_specific_fields["reasoning_content"], "thinking")
-        self.assertEqual(outcome.input_tokens, 17)
-        self.assertEqual(outcome.output_tokens, 5)
-        self.assertEqual(outcome.cost, 0.0125)
-
-    def test_openai_chat_stream_assembles_fragmented_tool_arguments(self) -> None:
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
-        )
-        chunks = [
-            {
-                "choices": [
-                    {
-                        "finish_reason": None,
-                        "delta": {"reasoning_content": "checking", "content": None},
-                    }
-                ]
-            },
-            {
-                "choices": [
-                    {
-                        "finish_reason": None,
-                        "delta": {
-                            "tool_calls": [
-                                {
-                                    "index": 0,
-                                    "id": "call_1",
-                                    "function": {
-                                        "name": "probe_search",
-                                        "arguments": "{\"query\":\"alpha",
-                                    },
-                                }
-                            ]
-                        },
-                    }
-                ]
-            },
-            {
-                "choices": [
-                    {
-                        "finish_reason": None,
-                        "delta": {
-                            "tool_calls": [
-                                {
-                                    "index": 0,
-                                    "function": {
-                                        "arguments": " beta\",\"limit\":",
-                                    },
-                                }
-                            ]
-                        },
-                    }
-                ]
-            },
-            {
-                "choices": [
-                    {
-                        "finish_reason": None,
-                        "delta": {
-                            "tool_calls": [
-                                {
-                                    "index": 0,
-                                    "function": {"arguments": "3}"},
-                                }
-                            ]
-                        },
-                    }
-                ]
-            },
-            {
-                "choices": [
-                    {"finish_reason": "tool_calls", "delta": {}}
-                ]
-            },
-        ]
-
-        events = list(invoker._iter_openai_chat_stream(chunks))
-
-        self.assertEqual(
-            [event.event_kind for event in events],
-            [
-                LLMStreamEventKind.REASONING_DELTA,
-                LLMStreamEventKind.TOOL_CALL,
-                LLMStreamEventKind.DONE,
-            ],
-        )
-        self.assertEqual(events[1].tool_call.name, "probe_search")
-        self.assertEqual(events[1].tool_call.call_id, "call_1")
-        self.assertEqual(
-            events[1].tool_call.args,
-            {"query": "alpha beta", "limit": 3},
-        )
-        self.assertEqual(events[-1].finish_reason, LLMFinishReason.TOOL_CALLS)
-
-    def test_openai_chat_response_parser_treats_scalar_tool_arguments_as_invalid(self) -> None:
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
-        )
-
-        outcome = invoker._parse_openai_chat_response(
-            {
-                "choices": [
-                    {
-                        "finish_reason": "tool_calls",
-                        "message": {
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "id": "call_1",
-                                    "function": {
-                                        "name": "probe_search",
-                                        "arguments": "3",
-                                    },
-                                }
-                            ],
-                        },
-                    }
-                ]
-            }
-        )
-
-        self.assertEqual(outcome.tool_calls[0].args, {})
-
-    def test_anthropic_stream_adapter_emits_completed_tool_input_once(self) -> None:
-        invoker = AnthropicMessagesEndpointInvoker()
-        outcome = CanonicalLLMOutcome(
-            reasoning_text="checking",
-            tool_calls=[
-                CanonicalToolCall(
-                    name="probe_search",
-                    args={"query": "alpha beta", "limit": 3},
-                    call_id="toolu_1",
-                )
-            ],
-            finish_reason=LLMFinishReason.TOOL_CALLS,
-        )
-
-        with patch.object(invoker, "invoke", return_value=outcome):
-            events = list(invoker.invoke_stream(object(), object()))
-
-        self.assertEqual(
-            [event.event_kind for event in events],
-            [
-                LLMStreamEventKind.REASONING_DELTA,
-                LLMStreamEventKind.TOOL_CALL,
-                LLMStreamEventKind.DONE,
-            ],
-        )
-        self.assertEqual(events[1].tool_call.args, {"query": "alpha beta", "limit": 3})
-        self.assertEqual(events[1].tool_call.call_id, "toolu_1")
-
-    def test_anthropic_parser_and_renderer_preserve_thinking_blocks_for_tool_continuation(self) -> None:
-        class FakeResponse:
-            def to_dict(self):
-                return {
-                    "stop_reason": "tool_use",
-                    "usage": {
-                        "input_tokens": 23,
-                        "output_tokens": 11,
-                        "total_cost": 0.031,
-                    },
-                    "content": [
-                        {"type": "thinking", "thinking": "hidden reasoning", "signature": "sig-1"},
-                        {"type": "redacted_thinking", "data": "opaque"},
-                        {
-                            "type": "tool_use",
-                            "id": "toolu_1",
-                            "name": "probe_tool",
-                            "input": {"ok": True},
-                        },
-                    ],
-                }
-
-        outcome = _parse_anthropic_messages_response(FakeResponse())
-
-        self.assertEqual(outcome.reasoning_text, "hidden reasoning")
-        self.assertEqual(outcome.provider_specific_fields["reasoning_content"], "hidden reasoning")
-        self.assertEqual(outcome.provider_specific_fields["anthropic_thinking_blocks"][0]["signature"], "sig-1")
-        self.assertEqual(outcome.provider_specific_fields["anthropic_thinking_blocks"][1]["type"], "redacted_thinking")
-        self.assertEqual(outcome.input_tokens, 23)
-        self.assertEqual(outcome.output_tokens, 11)
-        self.assertEqual(outcome.cost, 0.031)
-
-        _, messages = chat_messages_to_anthropic_messages(
-            [
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "provider_specific_fields": outcome.provider_specific_fields,
-                    "tool_calls": [
-                        {
-                            "id": "toolu_1",
-                            "type": "function",
-                            "function": {"name": "probe_tool", "arguments": "{\"ok\": true}"},
-                        }
-                    ],
-                }
-            ]
-        )
-
-        blocks = messages[0]["content"]
-        self.assertEqual([block["type"] for block in blocks], ["thinking", "redacted_thinking", "tool_use"])
-        self.assertEqual(blocks[0]["signature"], "sig-1")
-
-    def test_anthropic_renderer_coalesces_adjacent_user_turns(self) -> None:
-        _, messages = chat_messages_to_anthropic_messages(
-            [
-                {"role": "system", "content": "rules"},
-                {"role": "user", "content": "task"},
-                {"role": "user", "content": "runtime reminder"},
-                {
-                    "role": "assistant",
-                    "content": "use tools",
-                    "tool_calls": [
-                        {"id": "call_a", "type": "function", "function": {"name": "read_a", "arguments": "{}"}},
-                        {"id": "call_b", "type": "function", "function": {"name": "read_b", "arguments": "{}"}},
-                    ],
-                },
-                {"role": "tool", "tool_call_id": "call_a", "content": "a"},
-                {"role": "tool", "tool_call_id": "call_b", "content": "b"},
-            ]
-        )
-
-        self.assertEqual([message["role"] for message in messages], ["user", "assistant", "user"])
-        self.assertEqual([block["type"] for block in messages[0]["content"]], ["text", "text"])
-        self.assertEqual([block["type"] for block in messages[2]["content"]], ["tool_result", "tool_result"])
-
-    def test_openai_chat_responses_parser_extracts_text_and_tool_calls(self) -> None:
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
-        )
-
-        class FakeResponse:
-            def to_dict(self):
-                return {
-                    "output": [
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": "pong"}],
-                        },
-                        {
-                            "type": "function_call",
-                            "call_id": "call_1",
-                            "name": "probe_alias",
-                            "arguments": "{\"ok\": true}",
-                        },
-                    ]
-                }
-
-        outcome = invoker._parse_openai_responses_response(
-            FakeResponse(),
-            tool_name_aliases={"probe": "probe_alias"},
-        )
-
-        self.assertEqual(outcome.text, "pong")
-        self.assertEqual(outcome.finish_reason, LLMFinishReason.TOOL_CALLS)
-        self.assertEqual(outcome.tool_calls[0].name, "probe")
-        self.assertEqual(outcome.tool_calls[0].args, {"ok": True})
-        self.assertEqual(outcome.tool_calls[0].call_id, "call_1")
-
-    def test_openai_chat_response_parser_rejects_empty_assistant_without_tool_calls(self) -> None:
-        invoker = OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
-        )
-
-        class FakeResponse:
-            def to_dict(self):
-                return {
-                    "choices": [
-                        {
-                            "finish_reason": "stop",
-                            "message": {
-                                "content": "",
-                                "tool_calls": [],
-                            },
-                        }
-                    ]
-                }
-
-        with self.assertRaises(LLMEndpointInvocationError):
-            invoker._parse_openai_chat_response(FakeResponse())
-
-    def test_llm_runtime_treats_empty_assistant_without_tool_calls_as_endpoint_failure(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "empty-primary",
-                    "provider": "stub",
-                    "model_id": "empty-primary-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/empty-primary",
-                    "credential_ref": "stub-empty-primary",
-                    "priority": 0,
-                    "enabled": True,
-                },
-                {
-                    "endpoint_id": "fallback",
-                    "provider": "stub",
-                    "model_id": "fallback-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/fallback",
-                    "credential_ref": "stub-fallback",
-                    "priority": 1,
-                    "enabled": True,
-                },
-            ]
-        )
-
-        class EmptyThenFallbackInvoker:
-            def invoke(self, endpoint, request):
-                _ = request
-                if endpoint.endpoint_id == "empty-primary":
-                    return CanonicalLLMOutcome(text="", tool_calls=[], finish_reason=LLMFinishReason.STOP)
-                return CanonicalLLMOutcome(text="fallback reply", finish_reason=LLMFinishReason.STOP)
-
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings_repository,
-            endpoint_invoker=EmptyThenFallbackInvoker(),
-            endpoint_retry_attempts=1,
-        )
-
-        outcome = runtime.generate(
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=128,
-            )
-        )
-
-        self.assertEqual(outcome.text, "fallback reply")
-        self.assertEqual(runtime.last_endpoint_id, "fallback")
-
-    def test_llm_runtime_treats_empty_stream_without_tool_calls_as_endpoint_failure(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "empty-primary",
-                    "provider": "stub",
-                    "model_id": "empty-primary-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/empty-primary",
-                    "credential_ref": "stub-empty-primary",
-                    "priority": 0,
-                    "enabled": True,
-                },
-                {
-                    "endpoint_id": "fallback",
-                    "provider": "stub",
-                    "model_id": "fallback-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/fallback",
-                    "credential_ref": "stub-fallback",
-                    "priority": 1,
-                    "enabled": True,
-                },
-            ]
-        )
-
-        class EmptyThenFallbackStreamInvoker:
-            def invoke_stream(self, endpoint, request):
-                _ = request
-                if endpoint.endpoint_id == "empty-primary":
-                    return [NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.STOP)]
-                return [
-                    NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="fallback stream"),
-                    NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.STOP),
-                ]
-
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings_repository,
-            endpoint_invoker=EmptyThenFallbackStreamInvoker(),
-            endpoint_retry_attempts=1,
-        )
-
-        events = runtime.generate_stream(
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=128,
-            )
-        )
-
-        self.assertEqual("".join(event.text for event in events), "fallback stream")
-        self.assertEqual(runtime.last_endpoint_id, "fallback")
-
-    def test_llm_runtime_returns_error_outcome_when_all_endpoints_fail(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "broken",
-                    "provider": "stub",
-                    "model_id": "broken-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/broken",
-                    "credential_ref": "stub-broken",
-                    "priority": 0,
-                    "enabled": True,
-                }
-            ]
-        )
-
-        class AlwaysFailingInvoker:
-            def invoke(self, endpoint, request):
-                _ = endpoint
-                _ = request
-                raise RuntimeError("backend offline")
-
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings_repository,
-            endpoint_invoker=AlwaysFailingInvoker(),
-            endpoint_retry_attempts=2,
-        )
-
-        outcome = runtime.generate(
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
-                max_output_tokens=128,
-            )
-        )
-
-        self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
-        self.assertIn("kind=unknown", outcome.text)
-        self.assertIn("type=RuntimeError", outcome.text)
-        self.assertNotIn("backend offline", outcome.text)
-
-    def test_llm_runtime_returns_compact_required_when_fallback_endpoint_window_is_tighter(self) -> None:
-        endpoint_repository = LLMEndpointRepository()
-        settings_repository = RuntimeSettingRepository()
-        endpoint_repository.ensure_defaults(
-            [
-                {
-                    "endpoint_id": "primary",
-                    "provider": "stub",
-                    "model_id": "primary-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/primary",
-                    "credential_ref": "stub-primary",
-                    "context_window": 10000,
-                    "max_output_tokens": 1000,
-                    "priority": 0,
-                    "enabled": True,
-                },
-                {
-                    "endpoint_id": "fallback-small",
-                    "provider": "stub",
-                    "model_id": "fallback-small-model",
-                    "api_mode": "openai_chat",
-                    "base_url": "stub://local/fallback-small",
-                    "credential_ref": "stub-fallback-small",
-                    "context_window": 1200,
-                    "max_output_tokens": 512,
-                    "priority": 1,
-                    "enabled": True,
-                },
-            ]
-        )
-
-        class PrimaryFailsInvoker:
-            def invoke(self, endpoint, request):
-                _ = request
-                if endpoint.endpoint_id == "primary":
-                    raise RuntimeError("primary transport failed")
-                return CanonicalLLMOutcome(text="unexpected", tool_calls=[], finish_reason=LLMFinishReason.STOP)
-
-        runtime = LLMRuntime(
-            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
-            settings_repository=settings_repository,
-            endpoint_invoker=PrimaryFailsInvoker(),
-            endpoint_retry_attempts=1,
-        )
-
-        outcome = runtime.generate(
-            CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "x" * 2000}],
-                max_output_tokens=700,
-            )
-        )
-
-        self.assertEqual(outcome.finish_reason, LLMFinishReason.COMPACT_REQUIRED)
-        self.assertEqual(outcome.preferred_endpoint_id, "fallback-small")
-        self.assertEqual(outcome.preferred_model_id, "fallback-small-model")
-        self.assertGreater(outcome.reserved_output_tokens, 0)
-        self.assertGreater(outcome.target_input_budget, 0)
 
     def test_wizard_provisions_stub_runtime_before_bootstrap_composition(self) -> None:
         provisioned = self.wizard.provision_stub_runtime(self.runtime_root / "stub_runtime")
@@ -4645,40 +1986,6 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(getattr(new_endpoint, "_authorized", False))
         self.assertTrue(new_endpoint.paired)
 
-    def test_llm_capabilities_are_read_only_and_do_not_expose_credentials(self) -> None:
-        self.wizard.seed_defaults(self.registration)
-        handle = self._compose_runtime(
-            wizard=self.wizard,
-            registration=self.registration,
-            database=self.database,
-        )
-
-        llm_list = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="llm_list")
-        )
-        llm_active = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="llm_active")
-        )
-        llm_think_level = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="llm_think_level")
-        )
-        llm_show = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="llm_show", args={"model_id": "stub-model"})
-        )
-
-        self.assertEqual(llm_list.status, "ok")
-        self.assertEqual(llm_active.status, "ok")
-        self.assertEqual(llm_think_level.status, "ok")
-        self.assertEqual(llm_show.status, "ok")
-        self.assertEqual(llm_list.structured["items"][0]["model_id"], "stub-model")
-        self.assertEqual(llm_active.structured["model_id"], "stub-model")
-        self.assertEqual(llm_active.structured["active_endpoint_id"], "stub_llm_default")
-        self.assertNotIn("credential_ref", llm_show.structured)
-        self.assertNotIn("base_url", llm_show.structured)
-        self.assertEqual(llm_show.structured["model_id"], "stub-model")
-        self.assertEqual(llm_show.structured["endpoint_id"], "stub_llm_default")
-        self.assertIsNone(llm_think_level.structured["effective_think_level"])
-        self.assertEqual(llm_think_level.structured["available_levels"], ())
 
     def test_compose_runtime_consumes_wizard_owned_database(self) -> None:
         handle = self._compose_runtime(
@@ -4961,6 +2268,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertNotIn("Set-Cookie", document.response_headers or {})
 
 
+
+
 class PalV2SocketEndpointUnitTests(unittest.TestCase):
     def test_unstarted_socket_endpoint_stop_does_not_unlink_existing_socket_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_socket_owner_test_") as root:
@@ -4994,9 +2303,9 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
             reply_target={"session_id": "session-1", "request_id": "req-1"},
         )
 
-        endpoint.send_stream_event(
+        endpoint.send_stream_update(
             response_handle,
-            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="pong"),
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="pong"),
         )
         endpoint.queue_reply("pong", response_handle=response_handle)
 
@@ -5023,9 +2332,9 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
             reply_target={"session_id": "session-1", "request_id": "req-1"},
         )
 
-        endpoint.send_stream_event(
+        endpoint.send_stream_update(
             stream_handle,
-            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="pong"),
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="pong"),
         )
         endpoint.queue_reply("pong", response_handle=final_handle)
 
@@ -5053,13 +2362,13 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
             reply_target={"session_id": "session-1", "request_id": "req-1"},
         )
 
-        endpoint.queue_stream_event(
-            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="pong"),
+        endpoint.queue_stream_update(
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="pong"),
             response_handle=stream_handle,
         )
         endpoint.queue_reply("pong", response_handle=final_handle)
 
-        self.assertEqual(len(endpoint.stream_outbox), 1)
+        self.assertEqual(len(endpoint.stream_update_outbox), 1)
         self.assertFalse(endpoint.outbox)
 
     def test_telegram_streamed_text_keeps_final_reply_for_batched_delivery(self) -> None:
@@ -5072,9 +2381,9 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
         )
         response_handle = ResponseHandle(endpoint_id="telegram_main", reply_target={"chat_id": "42"})
 
-        endpoint.send_stream_event(
+        endpoint.send_stream_update(
             response_handle,
-            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="pong"),
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="pong"),
         )
         endpoint.queue_reply("pong", response_handle=response_handle)
 
@@ -5176,19 +2485,19 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(envelopes), 1)
             envelope = envelopes[0]
 
-            self.endpoint.queue_stream_event(
-                NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="po"),
+            self.endpoint.queue_stream_update(
+                ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="po"),
                 response_handle=envelope.response_handle,
             )
-            self.endpoint.queue_stream_event(
-                NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="ng"),
+            self.endpoint.queue_stream_update(
+                ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="ng"),
                 response_handle=envelope.response_handle,
             )
-            self.endpoint.queue_stream_event(
-                NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason="stop"),
+            self.endpoint.queue_stream_update(
+                ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="stop"),
                 response_handle=envelope.response_handle,
             )
-            self.assertEqual(self.endpoint.flush_stream_outbox(), [])
+            self.assertEqual(self.endpoint.flush_stream_update_outbox(), [])
 
             first = await read_socket_message(reader)
             second = await read_socket_message(reader)
@@ -5737,7 +3046,30 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             "accept",
         )
 
-    async def test_telegram_endpoint_interactive_update_falls_back_to_new_message_when_edit_fails(self) -> None:
+    async def test_telegram_endpoint_duplicate_interactive_update_is_serialized(self) -> None:
+        spec = InteractionMessageSpec(
+            interaction_id="ctl_panel_duplicate",
+            interaction_kind="control_panel",
+            text="Select a model",
+            buttons=((InteractionButtonSpec(label="Model", action_key="control.model.set"),),),
+            expires_at=None,
+        )
+        response_handle = self.endpoint.build_response_handle(reply_target={"chat_id": "42"})
+        for _ in range(2):
+            self.endpoint.queue_status(
+                "interactive_update",
+                payload={"spec": spec},
+                response_handle=response_handle,
+            )
+
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+
+        messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertEqual(len(messages), 1)
+        self.assertTrue(any(kind == "edit_message_text" for kind, _ in self.fake_bot.actions))
+
+    async def test_telegram_endpoint_not_modified_edit_is_idempotent(self) -> None:
         self.endpoint._interactive_messages["ctl_panel_stale"] = {
             "chat_id": 42,
             "message_id": 10,
@@ -5768,9 +3100,43 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
-        self.assertTrue(messages)
-        self.assertEqual(messages[-1]["text"], "Pal Control Panel")
+        self.assertFalse(messages)
         self.assertIn("ctl_panel_stale", self.endpoint._interactive_messages)
+        self.assertEqual(self.endpoint._interactive_messages["ctl_panel_stale"]["message_id"], 10)
+
+    async def test_telegram_endpoint_stale_interaction_falls_back_to_new_message(self) -> None:
+        self.endpoint._interactive_messages["ctl_panel_stale"] = {
+            "chat_id": 42,
+            "message_id": 10,
+            "interaction_kind": "control_panel",
+            "expires_at_monotonic": None,
+            "actions": {},
+        }
+
+        async def _raise_edit_message_text(**kwargs):
+            _ = kwargs
+            raise RuntimeError("Message to edit not found")
+
+        self.fake_bot.edit_message_text = _raise_edit_message_text
+        spec = InteractionMessageSpec(
+            interaction_id="ctl_panel_stale",
+            interaction_kind="control_panel",
+            text="Pal Control Panel",
+            buttons=((InteractionButtonSpec(label="Think", action_key="control.think.open"),),),
+            expires_at=None,
+        )
+        self.endpoint.queue_status(
+            "interactive_update",
+            payload={"spec": spec},
+            response_handle=self.endpoint.build_response_handle(reply_target={"chat_id": "42"}),
+        )
+
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+
+        messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["text"], "Pal Control Panel")
         self.assertNotEqual(self.endpoint._interactive_messages["ctl_panel_stale"]["message_id"], 10)
 
     async def test_telegram_endpoint_prunes_expired_interactions(self) -> None:

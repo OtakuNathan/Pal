@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import hashlib
 import json
@@ -17,7 +19,7 @@ from pal.execution.tool_facade import (
     RetryDirective,
     rejection,
 )
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
+from pal.shared import ToolExecutionResult
 from pal.minion.v2 import (
     ActionEnvelope,
     AggregateType,
@@ -99,14 +101,14 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
 
 class _FakeExecutionAdapter:
     def __init__(self) -> None:
-        self.calls: list[CanonicalToolCall] = []
+        self.calls: list[ToolCallIR] = []
         self.lsp_structured: dict[str, object] = {
             "status": "ok",
             "diagnostics": [],
             "diagnostics_state": "fresh",
         }
 
-    async def execute_tool_async(self, call: CanonicalToolCall, **_kwargs: object) -> CanonicalToolResult:
+    async def execute_tool_async(self, call: ToolCallIR, **_kwargs: object) -> ToolExecutionResult:
         self.calls.append(call)
         if call.name == "op_exec_shell":
             completed = subprocess.run(
@@ -118,7 +120,7 @@ class _FakeExecutionAdapter:
                 stderr=subprocess.PIPE,
                 check=False,
             )
-            return CanonicalToolResult(
+            return ToolExecutionResult(
                 name=call.name,
                 ok=True,
                 text="shell completed",
@@ -132,7 +134,7 @@ class _FakeExecutionAdapter:
                 call_id=call.call_id,
             )
         if call.name == "op_lsp_diagnostics":
-            return CanonicalToolResult(
+            return ToolExecutionResult(
                 name=call.name,
                 ok=True,
                 text="diagnostics",
@@ -217,7 +219,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             role="verifier",
         )
         result = swe_verification_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_verification_pass",
                 args={},
             ),
@@ -309,7 +311,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         workspace["minion_v2"] = binding
 
         finding = add_finding_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name=ADD_FINDING_CAPABILITY,
                 args={
                     "finding_kind": "module_defect",
@@ -330,7 +332,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(finding.ok, finding.text)
 
         result = swe_verification_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_verification_request_module_repair",
                 args={},
                 call_id="scenario-repair",
@@ -393,7 +395,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         binding["swe_verification_tool_contract"] = contract
         workspace["minion_v2"] = binding
         finding = add_finding_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name=ADD_FINDING_CAPABILITY,
                 args={
                     "finding_kind": "verification_defect",
@@ -413,7 +415,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(finding.ok, finding.llm_text)
 
         result = swe_verification_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_verification_request_corpus_repair",
                 args={},
             ),
@@ -461,7 +463,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
 
         result = swe_verification_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_verification_pass",
                 args={},
                 call_id="unchanged-corpus-pass",
@@ -508,7 +510,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             role="verifier",
         )
         recorded = add_finding_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name=ADD_FINDING_CAPABILITY,
                 args={
                     "finding_kind": "module_defect",
@@ -532,7 +534,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(recorded.ok, recorded.llm_text)
 
         result = swe_verification_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_verification_pass",
                 args={},
             ),
@@ -589,7 +591,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
 
         result = swe_verification_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_verification_pass",
                 args={},
                 call_id="empty-corpus-pass",
@@ -1345,7 +1347,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         Path(str(workspace["review_scratch_dir"])).mkdir(parents=True, exist_ok=True)
         if role in {"reviewer", "verifier"}:
             initialized = update_checklist_tool_result(
-                CanonicalToolCall(
+                new_tool_call(
                     name="op_minion_update_checklist",
                     args={
                         "plan": [
@@ -1372,7 +1374,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.call_index += 1
         if name == "op_minion_verification_submit":
             initialized = update_checklist_tool_result(
-                CanonicalToolCall(
+                new_tool_call(
                     name="op_minion_update_checklist",
                     args={
                         "plan": [
@@ -1387,7 +1389,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                 workspace,
             )
             self.assertTrue(initialized.ok, initialized.llm_text)
-        call = CanonicalToolCall(
+        call = new_tool_call(
             name=name,
             args=args or {},
             call_id=f"verification-call-{self.call_index}",
@@ -1429,7 +1431,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         produced: list[dict[str, object]] | None = None,
     ):
         self.call_index += 1
-        call = CanonicalToolCall(
+        call = new_tool_call(
             name=name,
             args=args or {},
             call_id=f"candidate-call-{self.call_index}",
@@ -1985,7 +1987,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
 
         premature = swe_verification_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_verification_pass",
                 args={},
                 call_id="candidate-delta-premature",
@@ -2008,7 +2010,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
         self.assertTrue(recorded.ok, recorded.text)
         accepted = swe_verification_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_verification_pass",
                 args={},
                 call_id="candidate-delta-accepted",
@@ -2035,7 +2037,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             role="verifier",
         )
         next_result = swe_verification_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_verification_pass",
                 args={},
                 call_id="next-candidate-with-old-evidence",
@@ -2100,7 +2102,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         )
 
         def handler(call, _context):
-            return CanonicalToolResult(
+            return ToolExecutionResult(
                 name=call.name,
                 ok=False,
                 text=rejected.llm_text,
@@ -2127,7 +2129,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         try:
             result = asyncio.run(
                 runtime.execute_tool_async(
-                    CanonicalToolCall(name="candidate_submit", args={})
+                    new_tool_call(name="candidate_submit", args={})
                 )
             )
             self.assertIsInstance(result.invocation_result, RejectedResult)

@@ -3,9 +3,21 @@ from __future__ import annotations
 import json
 from enum import Enum
 from functools import lru_cache
-from typing import Annotated, Any, Generic, Literal, TypeVar
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from pal.shared.tool_protocol import (
+    CompleteResult,
+    EffectOutcome,
+    FailedResult,
+    PagedResult,
+    RejectedResult,
+    RetryDirective,
+    TOOL_INVOCATION_RESULT_ADAPTER,
+    ToolAffordance,
+    ToolInvocationResult,
+)
 
 
 class StrictToolModel(BaseModel):
@@ -74,21 +86,6 @@ class PagingMode(str, Enum):
     SUPPORTED = "supported"
 
 
-class EffectOutcome(str, Enum):
-    NONE = "none"
-    NOT_STARTED = "not_started"
-    NOT_APPLIED = "not_applied"
-    APPLIED = "applied"
-    UNKNOWN = "unknown"
-
-
-class RetryDirective(str, Enum):
-    CORRECT_INPUT = "correct_input"
-    SAFE = "safe"
-    RECONCILE_FIRST = "reconcile_first"
-    DO_NOT_RETRY = "do_not_retry"
-
-
 class ToolGuidance(StrictToolModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
@@ -121,14 +118,6 @@ class EffectReceipt(StrictToolModel):
 
     outcome: EffectOutcome
     receipt: dict[str, Any] = Field(default_factory=dict)
-
-
-class ToolAffordance(StrictToolModel):
-    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
-
-    tool: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    reason: str
 
 
 class ToolHandlerResult(StrictToolModel):
@@ -176,57 +165,6 @@ class ToolRejectedError(ValueError):
         self.retry = retry
         self.affordances = list(affordances or ())
         self.details = dict(details or {})
-
-
-T = TypeVar("T")
-
-
-class CompleteResult(StrictToolModel, Generic[T]):
-    kind: Literal["complete"] = "complete"
-    output: T
-    effect: EffectOutcome
-    llm_text: str
-    affordances: list[ToolAffordance] = Field(default_factory=list)
-    context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
-
-
-class PagedResult(StrictToolModel):
-    kind: Literal["paged"] = "paged"
-    result_handle: dict[str, Any]
-    page_text: str
-    effect: EffectOutcome
-    llm_text: str
-    affordances: list[ToolAffordance]
-    context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
-
-
-class RejectedResult(StrictToolModel):
-    kind: Literal["rejected"] = "rejected"
-    error_code: str
-    error: str
-    effect: Literal[EffectOutcome.NOT_STARTED] = EffectOutcome.NOT_STARTED
-    retry: RetryDirective
-    llm_text: str
-    affordances: list[ToolAffordance] = Field(default_factory=list)
-    details: dict[str, Any] = Field(default_factory=dict)
-
-
-class FailedResult(StrictToolModel):
-    kind: Literal["failed"] = "failed"
-    error_code: str
-    error: str
-    effect: EffectOutcome
-    retry: RetryDirective
-    llm_text: str
-    affordances: list[ToolAffordance] = Field(default_factory=list)
-    details: dict[str, Any] = Field(default_factory=dict)
-
-
-ToolInvocationResult = Annotated[
-    CompleteResult[Any] | PagedResult | RejectedResult | FailedResult,
-    Field(discriminator="kind"),
-]
-TOOL_INVOCATION_RESULT_ADAPTER = TypeAdapter(ToolInvocationResult)
 
 
 def validate_output(model: type[BaseModel], value: Any) -> BaseModel:

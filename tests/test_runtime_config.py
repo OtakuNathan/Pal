@@ -21,8 +21,6 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(cfg.llm_compaction_timeout_seconds, 180.0)
         self.assertEqual(cfg.llm_compaction_retry_attempts, 3)
         self.assertEqual(cfg.keep_recent_tool_messages, 5)
-        self.assertEqual(cfg.l1_tool_result_max_chars, 8_000)
-        self.assertEqual(cfg.l1_tool_result_preview_chars, 4_000)
         self.assertEqual(cfg.embedding_ollama_remote_base_urls, ())
         self.assertEqual(cfg.embedding_ollama_model_name, "bge-m3")
         self.assertEqual(cfg.embedding_ollama_remote_timeout_seconds, 8.0)
@@ -94,13 +92,11 @@ class RuntimeConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
             config_path.write_text(
-                '[memory]\nkeep_recent_tool_messages = 20\nl1_tool_result_max_chars = 12_000\nl1_tool_result_preview_chars = 6_000\nembedding_ollama_remote_base_urls = ["http://mac.local:11434", "192.168.31.145:11434"]\nembedding_ollama_model_name = "bge-m3"\nembedding_ollama_remote_timeout_seconds = 3.5\n',
+                '[memory]\nkeep_recent_tool_messages = 20\nembedding_ollama_remote_base_urls = ["http://mac.local:11434", "192.168.31.145:11434"]\nembedding_ollama_model_name = "bge-m3"\nembedding_ollama_remote_timeout_seconds = 3.5\n',
                 encoding="utf-8",
             )
             cfg = RuntimeConfig.load(Path(tmpdir))
             self.assertEqual(cfg.keep_recent_tool_messages, 20)
-            self.assertEqual(cfg.l1_tool_result_max_chars, 12_000)
-            self.assertEqual(cfg.l1_tool_result_preview_chars, 6_000)
             self.assertEqual(cfg.embedding_ollama_remote_base_urls, ("http://mac.local:11434", "192.168.31.145:11434"))
             self.assertEqual(cfg.embedding_ollama_model_name, "bge-m3")
             self.assertEqual(cfg.embedding_ollama_remote_timeout_seconds, 3.5)

@@ -123,7 +123,7 @@ def lsp_declared_skills(*, module_id: str = "lsp") -> tuple[SkillDescriptor, ...
                 "or create an LSP server template."
             ),
             avoid_when=(
-                "Avoid for ordinary plugin development, LLM adapters, channel providers, Minion workspace setup, "
+                "Avoid for ordinary plugin development, LLM model hooks, channel providers, Minion workspace setup, "
                 "or one-off project files that do not add reusable LSP support."
             ),
             source_format="internal_skill",

@@ -159,4 +159,4 @@ Remaining areas may still be intentionally minimal or provider-dependent:
 - Prompt assembly still goes through prompt fragment providers.
 - Channel inbox is a normalized mailbox view, not the raw adapter input queue.
 - The stagnation guard is a separate process, not hard-coded inline branching.
-- Provider wire shape is rendered by `llm_adaptor`, not by changing L1 records.
+- Provider wire shape is rendered by `llm.shapes`, not by changing L1 IR.

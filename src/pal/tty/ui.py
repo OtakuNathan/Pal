@@ -240,7 +240,13 @@ class TtyRepl:
             key_bindings=bindings,
         )
         try:
-            return await selector.prompt_async()
+            # ChoiceInput does not expose Application.erase_when_done even
+            # though a completed slash-command menu is transient UI. Build
+            # its application once, mark it transient, and run that exact
+            # application so the selected menu is removed from the terminal.
+            application = selector._create_application()
+            application.erase_when_done = True
+            return await application.run_async()
         except KeyboardInterrupt:
             return ""
 

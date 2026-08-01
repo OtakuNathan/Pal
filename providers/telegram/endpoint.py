@@ -11,12 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
-from pal.channel.contracts import ChannelDeliveryError, EndpointConfig, ResponseHandle
+from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate, EndpointConfig, ResponseHandle
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
 from pal.foundation.artifact import ArtifactIngestor
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
-from pal.stream_events import NormalizedLLMStreamEvent
 
 from .interaction_store import TelegramInteractionStore
 
@@ -204,6 +203,25 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _telegram_message_is_not_modified(exc: Exception | str) -> bool:
+    normalized = " ".join(str(exc or "").lower().replace("_", " ").split())
+    return "message is not modified" in normalized
+
+
+def _telegram_interaction_target_is_stale(error: Exception | str) -> bool:
+    """Return whether retrying the existing Telegram message cannot succeed."""
+
+    normalized = " ".join(str(error or "").lower().replace("_", " ").split())
+    stale_markers = (
+        "message to edit not found",
+        "message can't be edited",
+        "message can not be edited",
+        "message cannot be edited",
+        "message id invalid",
+    )
+    return any(marker in normalized for marker in stale_markers)
+
+
 @dataclass
 class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     runtime_root: Any = None
@@ -314,7 +332,14 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             loop.create_task(self._apply_control_catalog_async(payload))
             return
         if kind in {"interactive_open", "interactive_update", "interactive_resolve", "interactive_expire"}:
-            loop.create_task(self._apply_interactive_status_async(response_handle, kind=kind, payload=payload))
+            self._schedule_ordered_send(
+                response_handle,
+                lambda: self._apply_interactive_status_async(
+                    response_handle,
+                    kind=kind,
+                    payload=payload,
+                ),
+            )
             return
         if kind == "typing_start":
             key = self._typing_key(response_handle)
@@ -328,8 +353,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         if kind == "receipt_marker":
             loop.create_task(self._send_receipt_marker_async(response_handle, payload))
 
-    def send_stream_event(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
-        super().send_stream_event(response_handle, event)
+    def send_stream_update(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
+        super().send_stream_update(response_handle, update)
 
     def apply_auth_material(self, material: dict[str, Any]) -> dict[str, Any]:
         bot_token = str(material.get("bot_token") or "").strip()
@@ -989,6 +1014,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             if await self._edit_interaction_message_async(existing, spec=spec):
                 self._remember_interaction(spec, existing)
                 return
+            if not _telegram_interaction_target_is_stale(self.last_delivery_error):
+                # A transient edit failure must not create a second active
+                # keyboard. Keep the durable target and let a later update
+                # retry the same message.
+                return
             super().forget_interaction_message(spec.interaction_id)
         chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
         thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
@@ -1051,8 +1081,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         try:
             await self.application.bot.edit_message_text(**kwargs)
         except Exception as exc:
+            if _telegram_message_is_not_modified(exc):
+                self.last_delivery_error = ""
+                return True
             self.last_delivery_error = str(exc)
             return False
+        self.last_delivery_error = ""
         return True
 
     def _prune_interactive_messages(self, *, now: float | None = None) -> None:

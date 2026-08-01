@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
+
+from pal.shared.tool_protocol import new_tool_call
+
 import hashlib
 import json
 import logging
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from pal.foundation import HeatPolicy, HeatStateMachine, utc_now
 from pal.memory.contracts import (
@@ -40,6 +44,12 @@ from pal.memory.compact import (
 )
 from pal.memory.repository import L3ProviderSelector
 from pal.memory.tool_protocol import l1_tool_protocol_validation_error
+from pal.memory.turn_ir import L1TurnIR, L1TurnProtocolError, L1TurnState, L1TurnStore
+from pal.llm.ir import (
+    LLMMessageIR,
+    MessageRole,
+    TextPartIR,
+)
 from pal.shared import RuntimeStatus
 
 L2_WORKING_SET_CAPACITY = 128
@@ -86,7 +96,20 @@ class DetachedL3Provider:
 
 @dataclass
 class InMemoryL1Store(L1Store):
-    items: list[list[L1TranscriptMessage]] = field(default_factory=list)
+    turns: L1TurnStore = field(default_factory=L1TurnStore)
+
+    @property
+    def items(self) -> list[list[L1TranscriptMessage]]:
+        return [_transcript_from_turn(turn) for turn in self.turns.turns]
+
+    @items.setter
+    def items(self, value: list[list[L1TranscriptMessage]]) -> None:
+        replacement = L1TurnStore()
+        for index, transcript in enumerate(value):
+            turn_id = _transcript_turn_id(transcript) or f"legacy-{index}"
+            turn = _turn_from_transcript(turn_id, normalize_l1_transcript(transcript))
+            replacement.turns.append(turn)
+        self.turns = replacement
 
     def append(self, item: list[L1TranscriptMessage] | str) -> None:
         normalized = normalize_l1_transcript(item)
@@ -94,7 +117,19 @@ class InMemoryL1Store(L1Store):
         if protocol_error:
             raise ValueError(f"invalid L1 tool protocol: {protocol_error}")
         if normalized:
-            self.items.append(normalized)
+            turn_id = _transcript_turn_id(normalized) or f"legacy-{len(self.turns.turns)}"
+            if self.turns.get(turn_id) is not None:
+                raise L1TurnProtocolError(f"L1 turn already exists: {turn_id}")
+            self.turns.turns.append(_turn_from_transcript(turn_id, normalized))
+
+    def begin(self, turn_id: str, *, user_text: str = "", metadata: dict[str, Any] | None = None) -> L1TurnIR:
+        return self.turns.begin(turn_id, user_text=user_text, metadata=metadata)
+
+    def active(self, turn_id: str) -> L1TurnIR:
+        return self.turns.require_active(turn_id)
+
+    def replace(self, turn: L1TurnIR) -> None:
+        self.turns.replace(turn)
 
 
 @dataclass
@@ -240,6 +275,54 @@ class MemoryService(MemoryServicePort):
         if self.l3_selector is None:
             self.l3_selector = L3ProviderSelector(resolver=lambda provider_id: DetachedL3Provider(provider_id=provider_id))
 
+    def begin_l1_turn(
+        self,
+        turn_id: str,
+        *,
+        user_text: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> L1TurnIR:
+        existing = self.l1_store.turns.get(turn_id)
+        if existing is not None:
+            if existing.state != L1TurnState.ACTIVE:
+                raise L1TurnProtocolError(f"L1 turn is already closed: {turn_id}")
+            return existing
+        return self.l1_store.begin(turn_id, user_text=user_text, metadata=metadata)
+
+    def active_l1_turn(self, turn_id: str) -> L1TurnIR | None:
+        turn = self.l1_store.turns.get(turn_id)
+        return turn if turn is not None and turn.state == L1TurnState.ACTIVE else None
+
+    def upsert_l1_assistant(self, turn_id: str, message: LLMMessageIR) -> L1TurnIR:
+        current = self.l1_store.active(turn_id)
+        updated = current.upsert_assistant(message)
+        self.l1_store.replace(updated)
+        return updated
+
+    def append_l1_tool_result(self, turn_id: str, result: ToolResultIR) -> L1TurnIR:
+        current = self.l1_store.active(turn_id)
+        updated = current.append_tool_result(result)
+        self.l1_store.replace(updated)
+        return updated
+
+    def settle_l1_turn(self, turn_id: str) -> L1TurnIR:
+        current = self.l1_store.active(turn_id)
+        updated = current.settle()
+        self.l1_store.replace(updated)
+        return updated
+
+    def interrupt_l1_turn(self, turn_id: str, *, reason: str = "") -> L1TurnIR:
+        current = self.l1_store.active(turn_id)
+        updated = current.interrupt(reason=reason)
+        self.l1_store.replace(updated)
+        return updated
+
+    def abort_l1_turn(self, turn_id: str, *, reason: str = "") -> L1TurnIR:
+        current = self.l1_store.active(turn_id)
+        updated = current.abort(reason=reason)
+        self.l1_store.replace(updated)
+        return updated
+
     def compact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
         summary_entry = request.summary_entry
         if not isinstance(summary_entry, L2Entry):
@@ -251,26 +334,30 @@ class MemoryService(MemoryServicePort):
         if not str(summary_entry.rendered or "").strip():
             raise ValueError("memory compact summary_entry is not rendered")
         projected_entries = [summary_entry]
-        previous_l1_items = list(self.l1_store.items)
+        previous_l1_turns = list(self.l1_store.turns.turns)
         previous_l2_items = dict(self.l2_store.items)
         previous_top_of_mind_refs = list(self.l2_store.top_of_mind_refs)
         previous_heat_registry = dict(self.l2_store.heat_registry)
         try:
-            self.l1_store.items = [
-                normalize_l1_transcript(
-                    [
-                        L1TranscriptMessage(
-                            role="assistant",
-                            content=summary_entry.rendered or summary_entry.summary,
-                            kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
-                            payload=dict(summary_entry.payload or {}),
-                        )
-                    ]
-                )
+            active_turns = [
+                turn for turn in self.l1_store.turns.turns
+                if turn.state == L1TurnState.ACTIVE
             ]
+            summary_transcript = normalize_l1_transcript(
+                [
+                    L1TranscriptMessage(
+                        role="assistant",
+                        content=summary_entry.rendered or summary_entry.summary,
+                        kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
+                        payload=dict(summary_entry.payload or {}),
+                    )
+                ]
+            )
+            summary_turn = _turn_from_transcript("compact-summary", summary_transcript)
+            self.l1_store.turns.turns = [summary_turn, *active_turns]
             self.remove_projected_entries([SUMMARY_ENTRY_ID])
         except Exception:
-            self.l1_store.items = previous_l1_items
+            self.l1_store.turns.turns = previous_l1_turns
             self.l2_store.items = previous_l2_items
             self.l2_store.top_of_mind_refs = previous_top_of_mind_refs
             self.l2_store.heat_registry = previous_heat_registry
@@ -295,7 +382,7 @@ class MemoryService(MemoryServicePort):
     ) -> MemoryCompactResult:
         """Commit memory and its dependent projection as one rollback boundary."""
 
-        previous_l1_items = list(self.l1_store.items)
+        previous_l1_turns = list(self.l1_store.turns.turns)
         previous_l2_items = dict(self.l2_store.items)
         previous_top_of_mind_refs = list(self.l2_store.top_of_mind_refs)
         previous_heat_registry = dict(self.l2_store.heat_registry)
@@ -304,7 +391,7 @@ class MemoryService(MemoryServicePort):
             after_commit()
             return result
         except Exception:
-            self.l1_store.items = previous_l1_items
+            self.l1_store.turns.turns = previous_l1_turns
             self.l2_store.items = previous_l2_items
             self.l2_store.top_of_mind_refs = previous_top_of_mind_refs
             self.l2_store.heat_registry = previous_heat_registry
@@ -365,9 +452,9 @@ class MemoryService(MemoryServicePort):
         hot_entries = self.l2_store.list_hot_entries()
         active_input_id = str(request.active_input_id or "").strip()
         valid_l1_items = [
-            transcript
-            for transcript in self.l1_store.items
-            if not l1_tool_protocol_validation_error(transcript)
+            _transcript_from_turn(turn)
+            for turn in self.l1_store.turns.turns
+            if turn.state != L1TurnState.ACTIVE
         ]
         l1_recent_context = [
             message
@@ -418,7 +505,7 @@ class MemoryService(MemoryServicePort):
             self.l2_store.heat_registry.pop(entry_id, None)
 
     def soft_reset(self) -> None:
-        self.l1_store.items = []
+        self.l1_store.turns.clear()
         self.l2_store.items = {}
         self.l2_store.top_of_mind_refs = []
         self.l2_store.heat_registry = {}
@@ -608,3 +695,142 @@ def _is_memory_projection_entry(entry: L2Entry) -> bool:
     scope = str(getattr(entry, "scope", "") or "").strip()
     source_kind = str(getattr(entry, "source_kind", "") or "").strip()
     return scope != "behavior" and kind != "behavior_rule" and source_kind != "behavior_advice"
+
+
+def _transcript_turn_id(transcript: list[L1TranscriptMessage]) -> str:
+    for message in transcript:
+        value = str(dict(message.payload or {}).get("_pal_turn_id") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _turn_from_transcript(turn_id: str, transcript: list[L1TranscriptMessage]) -> L1TurnIR:
+    messages: list[LLMMessageIR] = []
+    for item in transcript:
+        role = MessageRole(str(item.role or "user"))
+        metadata = dict(item.payload or {})
+        parts: list[Any] = []
+        if item.content:
+            parts.append(TextPartIR(str(item.content)))
+        if role == MessageRole.ASSISTANT:
+            for call in item.tool_calls or ():
+                function = call.get("function") if isinstance(call, dict) else None
+                function = function if isinstance(function, dict) else call
+                if not isinstance(function, dict):
+                    continue
+                raw = function.get("arguments") or function.get("args") or {}
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except json.JSONDecodeError:
+                        raw = {}
+                parts.append(
+                    new_tool_call(
+                        name=str(function.get("name") or ""),
+                        arguments=dict(raw) if isinstance(raw, dict) else {},
+                        call_id=str(call.get("id") or call.get("call_id") or "") or None,
+                    )
+                )
+        elif role == MessageRole.TOOL:
+            call_id = str(item.tool_call_id or "").strip()
+            if call_id:
+                result_state = metadata.get("_pal_result_state")
+                result_state = (
+                    dict(result_state)
+                    if isinstance(result_state, dict)
+                    else {}
+                )
+                parts.append(
+                    ToolResultIR(
+                        call_id=call_id,
+                        name=str(metadata.get("tool_name") or "tool"),
+                        content=str(item.content or ""),
+                        ok=bool(result_state.get("ok", True)),
+                        status=str(
+                            result_state.get("kind")
+                            or result_state.get("status")
+                            or "ok"
+                        ),
+                        structured=result_state or None,
+                    )
+                )
+        messages.append(
+            LLMMessageIR(
+                role=role,
+                parts=tuple(parts),
+                semantic_kind=str(item.kind or ""),
+                metadata=metadata,
+            )
+        )
+    active = L1TurnIR(turn_id=turn_id, messages=tuple(messages))
+    if active.pending_call_ids:
+        raise L1TurnProtocolError("legacy L1 transcript contains unresolved tool calls")
+    return active.settle()
+
+
+def _transcript_from_turn(turn: L1TurnIR) -> list[L1TranscriptMessage]:
+    transcript: list[L1TranscriptMessage] = []
+    for message in turn.messages:
+        payload: dict[str, Any] = _mutable_mapping(message.metadata)
+        tool_calls = None
+        if message.tool_calls:
+            tool_calls = [
+                {
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": json.dumps(_mutable_mapping(call.arguments), ensure_ascii=False),
+                    },
+                }
+                for call in message.tool_calls
+            ]
+        results = [part for part in message.parts if isinstance(part, ToolResultIR)]
+        if results:
+            result = results[0]
+            payload["tool_name"] = result.name
+            structured = (
+                dict(result.structured)
+                if isinstance(result.structured, Mapping)
+                else {}
+            )
+            payload["_pal_result_state"] = {
+                "ok": bool(result.ok),
+                "kind": str(structured.get("kind") or result.status or "ok"),
+                "effect": str(structured.get("effect") or ""),
+            }
+            transcript.append(
+                L1TranscriptMessage(
+                    role="tool",
+                    content=result.content,
+                    kind=message.semantic_kind or L1MessageKind.TOOL_RESULT,
+                    tool_call_id=result.call_id,
+                    payload=payload,
+                )
+            )
+        else:
+            transcript.append(
+                L1TranscriptMessage(
+                    role=message.role.value,
+                    content=message.text,
+                    kind=message.semantic_kind,
+                    tool_calls=tool_calls,
+                    payload=payload,
+                )
+            )
+    return transcript
+
+
+def _mutable_mapping(value: Mapping[Any, Any]) -> dict[Any, Any]:
+    return {key: _mutable_value(item) for key, item in value.items()}
+
+
+def _mutable_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _mutable_mapping(value)
+    if isinstance(value, (list, tuple)):
+        return [_mutable_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return [_mutable_value(item) for item in value]
+    return value

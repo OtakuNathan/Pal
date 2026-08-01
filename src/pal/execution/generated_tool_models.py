@@ -579,7 +579,7 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageOutput = _strict_m
 LlmCapabilitiesLLMIntrospectionProviderShowInput = _strict_model(
     'LlmCapabilitiesLLMIntrospectionProviderShowInput',
     {
-        'model_id': (str, Field(...)),
+        'endpoint_id': (str, Field(...)),
     },
 )
 

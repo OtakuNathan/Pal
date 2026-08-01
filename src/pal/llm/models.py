@@ -1,4 +1,4 @@
-/ from __future__ import annotations
+from __future__ import annotations
 
 from peewee import BooleanField, Check, CharField, IntegerField, TextField
 from playhouse.sqlite_ext import JSONField
@@ -11,7 +11,13 @@ class LLMEndpointModel(BaseModel):
     provider = CharField()
     model_id = TextField()
     display_name = TextField(null=True)
-    api_mode = CharField(constraints=[Check("api_mode IN ('openai_chat', 'anthropic_messages')")])
+    wire_shape = CharField(
+        constraints=[
+            Check(
+                "wire_shape IN ('openai_completion', 'openai_response', 'anthropic_messages')"
+            )
+        ]
+    )
     base_url = TextField()
     auth_kind = CharField(
         default="api_key_ref",
@@ -20,7 +26,8 @@ class LLMEndpointModel(BaseModel):
     credential_ref = TextField()
     context_window = IntegerField(null=True)
     max_output_tokens = IntegerField(null=True)
-    supports_reasoning = BooleanField(default=False)
+    thinking_levels_blob = JSONField(default=list)
+    default_thinking_level = CharField()
     supports_tools = BooleanField(default=True)
     supports_streaming = BooleanField(default=True)
     supports_vision = BooleanField(default=False)
@@ -37,7 +44,7 @@ class LLMEndpointModel(BaseModel):
         table_name = "llm_endpoints"
         indexes = (
             (("enabled", "priority"), False),
-            (("enabled", "supports_tools", "supports_reasoning", "supports_streaming"), False),
+            (("enabled", "supports_tools", "supports_streaming"), False),
         )
 
 

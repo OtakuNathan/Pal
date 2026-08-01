@@ -5,50 +5,7 @@ from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
 
-
-@dataclass(frozen=True)
-class LLMUsage:
-    """Provider-neutral token and cost accounting for one or more responses."""
-
-    input_tokens: int = 0
-    uncached_input_tokens: int = 0
-    cached_input_tokens: int = 0
-    cache_write_input_tokens: int = 0
-    output_tokens: int = 0
-    reasoning_tokens: int = 0
-    cost: float = 0.0
-    reported: bool = False
-
-    def __add__(self, other: object) -> "LLMUsage":
-        if not isinstance(other, LLMUsage):
-            return NotImplemented
-        return LLMUsage(
-            input_tokens=self.input_tokens + other.input_tokens,
-            uncached_input_tokens=self.uncached_input_tokens + other.uncached_input_tokens,
-            cached_input_tokens=self.cached_input_tokens + other.cached_input_tokens,
-            cache_write_input_tokens=self.cache_write_input_tokens + other.cache_write_input_tokens,
-            output_tokens=self.output_tokens + other.output_tokens,
-            reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
-            cost=self.cost + other.cost,
-            reported=self.reported or other.reported,
-        )
-
-    @property
-    def cache_hit_rate(self) -> float:
-        return self.cached_input_tokens / self.input_tokens if self.input_tokens > 0 else 0.0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "input_tokens": max(0, int(self.input_tokens)),
-            "uncached_input_tokens": max(0, int(self.uncached_input_tokens)),
-            "cached_input_tokens": max(0, int(self.cached_input_tokens)),
-            "cache_write_input_tokens": max(0, int(self.cache_write_input_tokens)),
-            "output_tokens": max(0, int(self.output_tokens)),
-            "reasoning_tokens": max(0, int(self.reasoning_tokens)),
-            "cost": max(0.0, float(self.cost)),
-            "reported": bool(self.reported),
-            "cache_hit_rate": self.cache_hit_rate,
-        }
+from pal.llm.ir import LLMUsageIR
 
 
 @dataclass
@@ -61,13 +18,13 @@ class _UsageBucket:
     provider_response_count: int = 0
     failed_attempt_count: int = 0
     usage_reported_request_count: int = 0
-    usage: LLMUsage = field(default_factory=LLMUsage)
+    usage: LLMUsageIR = field(default_factory=LLMUsageIR)
 
-    def record_success(self, usage: LLMUsage, *, provider_response_count: int) -> None:
+    def record_success(self, usage: LLMUsageIR, *, provider_response_count: int) -> None:
         self.successful_request_count += 1
         self.provider_response_count += max(1, int(provider_response_count or 0))
         self.usage_reported_request_count += int(usage.reported)
-        self.usage = self.usage + usage
+        self.usage = _add_usage(self.usage, usage)
 
     def record_failed_attempt(self) -> None:
         self.failed_attempt_count += 1
@@ -91,7 +48,7 @@ class _UsageBucket:
             "failed_attempt_count": self.failed_attempt_count,
             "usage_reported_request_count": self.usage_reported_request_count,
             "usage_reporting_rate": usage_reporting_rate,
-            **self.usage.to_dict(),
+            **_usage_to_dict(self.usage),
         }
 
 
@@ -110,7 +67,7 @@ class LLMUsageLedger:
         endpoint_id: str,
         model_id: str,
         provider: str,
-        usage: LLMUsage,
+        usage: LLMUsageIR,
         provider_response_count: int,
     ) -> None:
         with self._lock:
@@ -160,3 +117,40 @@ class LLMUsageLedger:
             )
             self._by_endpoint[normalized] = bucket
         return bucket
+
+
+def _add_usage(left: LLMUsageIR, right: LLMUsageIR) -> LLMUsageIR:
+    return LLMUsageIR(
+        input_tokens=left.input_tokens + right.input_tokens,
+        uncached_input_tokens=left.uncached_input_tokens + right.uncached_input_tokens,
+        cached_input_tokens=left.cached_input_tokens + right.cached_input_tokens,
+        cache_write_input_tokens=(
+            left.cache_write_input_tokens + right.cache_write_input_tokens
+        ),
+        output_tokens=left.output_tokens + right.output_tokens,
+        reasoning_tokens=left.reasoning_tokens + right.reasoning_tokens,
+        cost=left.cost + right.cost,
+        reported=left.reported or right.reported,
+    )
+
+
+def _usage_to_dict(usage: LLMUsageIR) -> dict[str, Any]:
+    input_tokens = max(0, int(usage.input_tokens))
+    return {
+        "input_tokens": input_tokens,
+        "uncached_input_tokens": max(0, int(usage.uncached_input_tokens)),
+        "cached_input_tokens": max(0, int(usage.cached_input_tokens)),
+        "cache_write_input_tokens": max(
+            0,
+            int(usage.cache_write_input_tokens),
+        ),
+        "output_tokens": max(0, int(usage.output_tokens)),
+        "reasoning_tokens": max(0, int(usage.reasoning_tokens)),
+        "cost": max(0.0, float(usage.cost)),
+        "reported": bool(usage.reported),
+        "cache_hit_rate": (
+            max(0, int(usage.cached_input_tokens)) / input_tokens
+            if input_tokens > 0
+            else 0.0
+        ),
+    }

@@ -59,7 +59,7 @@ def _assert_runtime_drained(testcase: unittest.TestCase, handle, endpoint: _Memo
         testcase.assertFalse(scope.active_turn_id)
     testcase.assertFalse(endpoint.mailbox.has_pending())
     testcase.assertFalse(endpoint.has_queued_replies())
-    testcase.assertFalse(endpoint.has_queued_stream_events())
+    testcase.assertFalse(endpoint.has_queued_stream_updates())
     testcase.assertFalse(endpoint.has_queued_status())
 
 

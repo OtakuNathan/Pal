@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 from pathlib import Path
 from typing import Any, Mapping
 
 from pal.execution.tool_facade import EmptyToolInput, rejection
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.review_findings import partition_findings
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
@@ -15,7 +16,7 @@ from pal.minion.v2.work_items import (
     findings_from_work_items,
     submission_work_items,
 )
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 REVIEW_SUBMIT_CAPABILITY = "op_minion_review_submit"
@@ -45,9 +46,9 @@ REVIEW_SUBMIT_TOOL_SPEC: dict[str, Any] = {
 
 
 def review_submit_tool_result(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: Mapping[str, Any],
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     try:
         if dict(call.args or {}):
             raise ValueError("review_submit takes no arguments")
@@ -87,7 +88,7 @@ def review_submit_tool_result(
             f"{len(blocking)} blocking finding(s) and "
             f"{len(advisories)} advisory finding(s)."
         )
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=True,
             text=text,
@@ -99,7 +100,7 @@ def review_submit_tool_result(
     except Exception as exc:
         text = f"{exc.__class__.__name__}: {exc}"
         llm_text = f"{text} Complete the audit/checklist and retry."
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=False,
             text=text,

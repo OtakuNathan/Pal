@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import argparse
 import asyncio
 import contextlib
@@ -12,7 +14,6 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from pal.foundation import utc_now
-from pal.llm.contracts import CanonicalToolCall
 from pal.minion.harness_request import (
     architect_harness_assignment_fingerprint,
     compile_architect_harness_request,
@@ -308,7 +309,7 @@ class CodexArchitectWorker:
                         turn_id=turn_id,
                     )
                     submission = contract_submit_tool_result(
-                        CanonicalToolCall(
+                        new_tool_call(
                             name="contract_submit",
                             args={},
                             call_id=(
@@ -700,7 +701,7 @@ class CodexArchitectWorker:
     ) -> None:
         result = await asyncio.to_thread(
             update_checklist_tool_result,
-            CanonicalToolCall(
+            new_tool_call(
                 name="update_checklist",
                 args={"plan": plan},
                 call_id=operation_key,

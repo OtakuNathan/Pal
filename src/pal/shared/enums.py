@@ -65,10 +65,12 @@ class GuardAction(StrEnum):
 
 class LLMFinishReason(StrEnum):
     STOP = "stop"
-    STUB = "stub"
     TOOL_CALLS = "tool_calls"
-    FALLBACK = "fallback"
+    LENGTH = "length"
+    CONTENT_FILTER = "content_filter"
     ERROR = "error"
+    STUB = "stub"
+    FALLBACK = "fallback"
     COMPACT_REQUIRED = "compact_required"
 
 
@@ -78,7 +80,7 @@ class LLMResponseMode(StrEnum):
     REVIEW = "review"
 
 
-class LLMStreamEventKind(StrEnum):
+class ChannelStreamUpdateKind(StrEnum):
     TEXT_DELTA = "text_delta"
     REASONING_DELTA = "reasoning_delta"
     TOOL_CALL = "op_tool_call"

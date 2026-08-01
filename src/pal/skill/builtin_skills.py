@@ -4,7 +4,7 @@ from pal.skill.contracts import SkillApplicabilitySTAR, SkillDescriptor
 
 
 PAL_PLUGIN_DEVELOPMENT_SKILL_ID = "pal.plugin.development"
-PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID = "pal.llm.adapter_endpoint.development"
+PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_SKILL_ID = "pal.llm.model_hook_endpoint.development"
 PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID = "pal.channel.provider.development"
 
 
@@ -200,89 +200,58 @@ Before calling the plugin done:
 """
 
 
-PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_MANUAL = """# Pal LLM Adapter and Endpoint Development
+PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_MANUAL = """# Pal LLM Model Hook and Endpoint Development
 
-Use this skill when Pal needs to add, review, repair, or explain an LLM provider adapter and its matching `llm_endpoints` row.
+Use this skill when Pal needs to add, review, repair, or explain an LLM endpoint or exact-model request hook.
 
 ## Boundary
 
-LLM provider adapters belong to the `llm` subsystem, not the plugin system. Do not create a Pal plugin for LLM transport behavior. Do not register adapters through `PluginHost`, `PluginBuildContext.services`, capability providers, prompt fragments, or global side effects outside `pal.llm`.
+Wire rendering belongs to Pal's three built-in shape codecs. A hook may tune one exact model; it must not select transports, providers, credentials, or endpoints.
 
-The production refresh/load step is user-controlled. You may prepare files, propose endpoint rows, and run isolated tests, but you must not execute `/refresh_llm_endpoints`, call `refresh_llm_endpoints`, set the active endpoint, or otherwise load the adapter into the running Pal runtime without explicit user direction. Final handoff must tell the user that refresh is required and list exactly what to refresh.
+The production refresh/load step is user-controlled. Prepare files and isolated tests without switching the active endpoint unless the user asks.
 
-## Runtime Adapter Location
+## Runtime Hook Location
 
-Put runtime-root adapter source under:
+Put runtime-root model-hook source under:
 
 ```text
-<runtime_root>/llm/adapters/
+<runtime_root>/llm/models/
 ```
 
 Supported layouts:
 
 ```text
-<runtime_root>/llm/adapters/my_provider.py
-<runtime_root>/llm/adapters/my_provider/adapter.py
+<runtime_root>/llm/models/my_exact_model.py
 ```
 
-Each adapter module should define one or more `LLMProviderAdapter` subclasses. Explicit exports are allowed:
+Each module exports a `MODEL_HOOK` for one exact `model_id`:
 
 ```python
-ADAPTER = MyProviderAdapter
-ADAPTERS = (MyProviderAdapter, OtherProviderAdapter)
-```
+from pal.llm import ModelHook
 
-## Adapter Contract
-
-Keep adapter code small and deterministic. It should translate Pal's canonical request and endpoint metadata into OpenAI-compatible request fields, not perform network calls, mutate databases, read secrets, or import PalCore internals.
-
-Minimal adapter:
-
-```python
-from pal.llm import (
-    CanonicalLLMRequest,
-    LLMProviderAdapter,
-    OpenAIChatCompletionDraft,
-    ThinkingChoice,
-    ThinkingContract,
+MODEL_HOOK = ModelHook(
+    model_id="my-exact-model",
+    developer_instructions=("Follow this model-specific instruction.",),
 )
-
-
-class MyProviderAdapter(LLMProviderAdapter):
-    provider_names = frozenset({"my_provider"})
-    adapter_names = frozenset({"my_provider"})
-    model_provider_prefix = "openai"
-    model_provider_aliases = frozenset({"openai"})
-
-    def provider_thinking_contract(self) -> ThinkingContract:
-        return ThinkingContract(
-            choices=(
-                ThinkingChoice("off", "off"),
-                ThinkingChoice("high", "high", aliases=("deep",)),
-            ),
-            default_choice_id="high",
-        )
-
-    def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:
-        choice_id = self.resolve_think_level(request.metadata.get("think_level"))
-        if choice_id == "off":
-            draft.extra_body["thinking"] = {"type": "disabled"}
 ```
 
-Use `provider_names` for endpoint `provider` matching. Use `adapter_names` when an endpoint sets `capabilities_blob.adapter` or `capabilities_blob.llm_adapter`. Use `model_provider_prefix` and `model_provider_aliases` to strip known provider prefixes from `model_id` before sending the model name to the provider API.
+## Hook Contract
+
+Keep hooks small and deterministic. They may add developer instructions or use `adjust_messages(messages)` and `adjust_tools(tools)` to replace only those immutable IR tuples. Exact `model_id` equality is the only match rule. Generation policy, endpoint, provider, credential, wire shape, routing metadata, and every other request field are read-only. Hooks must not perform network calls, read secrets, or mutate databases.
 
 ## Endpoint Row
 
 Create or update endpoint metadata only after checking the existing endpoint list. Required fields include:
 
 - `endpoint_id`: stable unique ID, such as `my_provider_gpt_5`.
-- `provider`: must match the adapter `provider_names` unless `capabilities_blob.adapter` selects the adapter.
-- `model_id`: model name or provider-prefixed model, such as `my-model` or `openai/my-model`.
-- `api_mode`: normally `openai_chat`; use `anthropic_messages` only for Anthropic-shaped endpoints.
+- `provider`: display, credential, and telemetry identity only.
+- `model_id`: exact model identifier used by model-hook lookup.
+- `wire_shape`: exactly `openai_completion`, `openai_response`, or `anthropic_messages`.
 - `base_url`: provider base URL, without credentials.
 - `auth_kind`: `api_key_ref`, `oauth`, or `local_provider_auth`.
-- `credential_ref`: secret reference such as `my_provider:api-key`; never store the key in the adapter.
-- capability flags: `supports_tools`, `supports_streaming`, `supports_reasoning`, `supports_vision`, and optional `capabilities_blob`.
+- `credential_ref`: secret reference such as `my_provider:api-key`; never store the key in the model hook.
+- capability flags: `supports_tools`, `supports_streaming`, `supports_vision`, and optional `capabilities_blob`.
+- `thinking_levels_blob` and `default_thinking_level`: explicit endpoint-supported enum values.
 
 Prefer preparing a clear endpoint patch or SQL preview when no dedicated endpoint-management capability exists. Mutating the production database or secrets requires explicit user approval.
 
@@ -290,27 +259,26 @@ Prefer preparing a clear endpoint patch or SQL preview when no dedicated endpoin
 
 Before asking the user to refresh:
 
-1. Inspect the current `pal.llm.adapters.LLMProviderAdapter` contract and existing endpoint shape.
-2. Write adapter source in the runtime-root adapter directory.
-3. Compile the adapter file with `python -m py_compile <adapter_file>`.
-4. Load it only in an isolated registry or subprocess, not the live Pal runtime.
-5. Build a representative `OpenAIChatEndpointInvoker(...)._build_completion_kwargs(...)` payload with a fake or test endpoint.
-6. Assert model prefix, `api_base`, auth behavior, tools, `tool_choice`, `temperature`, max tokens, reasoning/thinking fields, and vendor-specific `extra_body`.
-7. Confirm the adapter does not import plugin, channel, control, service, or PalCore internals.
+1. Inspect `pal.llm.model_hooks.ModelHook` and the endpoint row.
+2. Write the exact-model hook under the runtime-root model directory.
+3. Compile it with `python -m py_compile <hook_file>`.
+4. Load it through `ModelHookRegistry` in an isolated test.
+5. Build a representative `LLMRequestIR` and assert only messages or tool definitions change.
+6. Confirm routing, provider, credential, and wire shape cannot change.
 8. If endpoint metadata changes are needed, verify them against a temporary database or produce an exact patch for user approval.
 9. Do not switch the active endpoint during development.
 
 ## Handoff
 
-When the adapter and endpoint are ready, report:
+When the model hook and endpoint are ready, report:
 
-- adapter file path and endpoint ID
+- hook file path, exact model ID, and endpoint ID
 - tests or smoke checks run
 - endpoint/database/secret changes made or still pending
 - any load errors found in isolated checks
-- a clear statement: "I did not refresh the running Pal runtime. Please run `/refresh_llm_endpoints` when you want to load this adapter."
+- a clear statement that the running endpoint was not switched
 
-If the user explicitly asks you to refresh, then use the normal LLM refresh path and report `provider_adapter_load_errors` if present.
+If the user has not asked for a refresh, hand off with: "Please run `/refresh_llm_endpoint` when you want to load the verified endpoint and model hook." If the user explicitly asks you to refresh, use the normal LLM refresh path and report model-hook load errors.
 """
 
 
@@ -578,23 +546,20 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
             metadata={"internal": True},
         ),
         SkillDescriptor(
-            skill_id=PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID,
+            skill_id=PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_SKILL_ID,
             module_id=module_id,
-            title="Pal LLM Adapter and Endpoint Development",
-            summary="Develop and validate runtime-root LLM provider adapters and matching endpoint rows safely.",
-            manual_text=PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_MANUAL,
+            title="Pal LLM Model Hook and Endpoint Development",
+            summary="Develop and validate exact-model hooks and matching endpoint rows safely.",
+            manual_text=PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_MANUAL,
             activation_terms=(
-                "llm adapter",
                 "llm endpoint",
-                "provider adapter",
-                "endpoint adapter",
-                "runtime adapter",
-                "OpenAI-compatible adapter",
+                "model hook",
+                "endpoint hook",
+                "runtime model hook",
                 "new model provider",
                 "add llm provider",
-                "pal.llm_provider_adapters",
-                "llm/adapters",
-                "refresh_llm_endpoints",
+                "llm/models",
+                "refresh_llm_endpoint",
             ),
             capability_refs=(
                 "llm_list",
@@ -602,18 +567,18 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 "llm_set_active_endpoint",
             ),
             applicability_star=SkillApplicabilitySTAR(
-                situation="Pal needs to integrate a new LLM provider or repair endpoint-specific request serialization.",
-                task="Create or update a runtime-root LLM adapter and matching endpoint metadata without destabilizing PalCore.",
-                action="Use the adapter contract, endpoint checklist, isolated tests, and user-controlled refresh handoff.",
-                result="The adapter and endpoint are ready to load, with tests completed and production refresh left to the user.",
+                situation="Pal needs to tune one exact model or add validated endpoint metadata.",
+                task="Create or update a runtime-root exact-model hook and matching endpoint metadata without destabilizing PalCore.",
+                action="Use the model-hook contract, endpoint checklist, isolated tests, and user-controlled refresh handoff.",
+                result="The model hook and endpoint are ready to load, with tests completed and production refresh left to the user.",
             ),
             use_when=(
-                "Use when the user asks Pal to add an LLM adapter, add an LLM endpoint, fix provider-specific OpenAI-compatible "
-                "serialization, or prepare a new model provider integration."
+                "Use when the user asks Pal to add an LLM endpoint, add an exact-model request hook, "
+                "or prepare a new model integration using one of Pal's built-in wire shapes."
             ),
             avoid_when=(
                 "Avoid for Pal plugins, channel endpoints such as Telegram/socket, or ordinary endpoint switching that "
-                "does not require adapter code."
+                "does not require model-hook code."
             ),
             source_format="internal_skill",
             source_refs=("pal.skill.builtin_skills", "docs/pal_llm_contract.md"),
@@ -662,7 +627,7 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 "slash-command handling path, inline interaction rendering, or runtime-root channel integration."
             ),
             avoid_when=(
-                "Avoid for ordinary Pal plugins, LLM provider adapters, or changes that only switch an existing endpoint "
+                "Avoid for ordinary Pal plugins, LLM model hooks, or changes that only switch an existing endpoint "
                 "without adding provider or endpoint code."
             ),
             sanitization_notes=(

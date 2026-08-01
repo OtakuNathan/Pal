@@ -151,7 +151,10 @@ class AsyncStdioMcpConnector:
         merged_env = {**os.environ, **dict(self.config.env)}
         env = merged_env if self.config.env else None
         command_args = list(self.config.command)
-        command_args = [_expand_env_vars(arg, merged_env) for arg in command_args]
+        # Resolve the executable for ordinary PATH/config use, but never copy
+        # environment secrets into argv.  Wrappers such as mcp-remote resolve
+        # ${VAR} header placeholders from their child environment themselves.
+        command_args[0] = _expand_env_vars(command_args[0], merged_env)
         self.process = await asyncio.create_subprocess_exec(
             *command_args,
             cwd=self.config.cwd or None,

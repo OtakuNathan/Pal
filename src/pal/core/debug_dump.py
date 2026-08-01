@@ -228,7 +228,7 @@ def _channel_snapshot(channel_runtime: Any) -> dict[str, Any]:
             "outbox_size": _safe_len(getattr(channel_runtime, "outbox", ())),
             "attachment_outbox_size": _safe_len(getattr(channel_runtime, "attachment_outbox", ())),
             "status_outbox_size": _safe_len(getattr(channel_runtime, "status_outbox", ())),
-            "stream_outbox_size": _safe_len(getattr(channel_runtime, "stream_outbox", ())),
+            "stream_update_outbox_size": _safe_len(getattr(channel_runtime, "stream_update_outbox", ())),
         },
         "endpoints": [_endpoint_snapshot(endpoint) for endpoint in endpoints],
     }
@@ -249,7 +249,7 @@ def _endpoint_snapshot(endpoint: Any) -> dict[str, Any]:
         "outbox_size": _safe_len(getattr(endpoint, "outbox", ())),
         "attachment_outbox_size": _safe_len(getattr(endpoint, "attachment_outbox", ())),
         "status_outbox_size": _safe_len(getattr(endpoint, "status_outbox", ())),
-        "stream_outbox_size": _safe_len(getattr(endpoint, "stream_outbox", ())),
+        "stream_update_outbox_size": _safe_len(getattr(endpoint, "stream_update_outbox", ())),
         "health": _redact(health),
         "backlog": _redact(backlog),
         "last_delivery_error": _redact(getattr(endpoint, "last_delivery_error", "")),

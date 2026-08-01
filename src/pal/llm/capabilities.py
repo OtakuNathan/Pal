@@ -32,7 +32,7 @@ class LLMModelListItem:
     endpoint_id: str
     display_name: str | None
     provider: str
-    api_mode: str
+    wire_shape: str
     priority: int
 
 
@@ -42,10 +42,11 @@ class LLMModelSnapshot:
     endpoint_id: str
     display_name: str | None
     provider: str
-    api_mode: str
+    wire_shape: str
     context_window: int | None
     max_output_tokens: int | None
-    supports_reasoning: bool
+    thinking_levels: tuple[str, ...]
+    default_thinking_level: str
     supports_tools: bool
     supports_streaming: bool
     supports_vision: bool
@@ -61,10 +62,11 @@ class LLMActiveModelSnapshot:
     endpoint_id: str | None
     display_name: str | None
     provider: str | None
-    api_mode: str | None
+    wire_shape: str | None
     context_window: int | None
     max_output_tokens: int | None
-    supports_reasoning: bool | None
+    thinking_levels: tuple[str, ...]
+    default_thinking_level: str | None
     supports_tools: bool | None
     supports_streaming: bool | None
     supports_vision: bool | None
@@ -100,16 +102,13 @@ class LLMIntrospectionProvider:
     module_id: str = "llm"
 
     def iter_endpoints(self) -> list[LLMEndpointModel]:
-        try:
-            return list(self.runtime.endpoint_resolver.enabled())
-        except Exception:
-            return []
+        return list(self.runtime.endpoint_resolver.enabled())
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list",
-        description="List enabled llm models ordered by priority. Use model_id with llm show.",
+        description="List enabled llm endpoints ordered by priority. Use endpoint_id with llm show.",
         aliases=("llm_list",),
     )
     def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -120,7 +119,7 @@ class LLMIntrospectionProvider:
                 endpoint_id=endpoint.endpoint_id,
                 display_name=getattr(endpoint, "display_name", None),
                 provider=endpoint.provider,
-                api_mode=str(getattr(endpoint, "api_mode", "") or ""),
+                wire_shape=str(getattr(endpoint, "wire_shape", "") or ""),
                 priority=int(getattr(endpoint, "priority", 0) or 0),
             ).__dict__
             for endpoint in self.iter_endpoints()
@@ -153,25 +152,25 @@ class LLMIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="show",
-        description="Show public metadata for one enabled llm model by model_id",
+        description="Show public metadata for one enabled llm endpoint by endpoint_id",
         InputModel=LlmCapabilitiesLLMIntrospectionProviderShowInput,
         aliases=("llm_show",),
     )
     def show_model(self, call: IntrospectionCall) -> IntrospectionResult:
-        model_id = str(call.args.get("model_id") or "").strip()
-        if not model_id:
+        endpoint_id = str(call.args.get("endpoint_id") or "").strip()
+        if not endpoint_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="model_id is required",
-                llm_text="model_id is required",
+                text="endpoint_id is required",
+                llm_text="endpoint_id is required",
             )
-        endpoint = self._find_endpoint_by_model_id(model_id)
+        endpoint = self._find_endpoint(endpoint_id)
         if endpoint is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
-                text="llm model not found",
-                structured={"model_id": model_id},
-                llm_text="llm model not found",
+                text="llm endpoint not found",
+                structured={"endpoint_id": endpoint_id},
+                llm_text="llm endpoint not found",
             )
         snapshot = _model_snapshot(endpoint)
         return IntrospectionResult(
@@ -277,8 +276,15 @@ class LLMIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("LLM active model", snapshot.__dict__),
         )
 
-    def _find_endpoint_by_model_id(self, model_id: str) -> LLMEndpointModel | None:
-        return next((endpoint for endpoint in self.iter_endpoints() if endpoint.model_id == model_id), None)
+    def _find_endpoint(self, endpoint_id: str) -> LLMEndpointModel | None:
+        return next(
+            (
+                endpoint
+                for endpoint in self.iter_endpoints()
+                if endpoint.endpoint_id == endpoint_id
+            ),
+            None,
+        )
 
 
 def _model_snapshot(endpoint: LLMEndpointModel) -> LLMModelSnapshot:
@@ -287,10 +293,11 @@ def _model_snapshot(endpoint: LLMEndpointModel) -> LLMModelSnapshot:
         endpoint_id=endpoint.endpoint_id,
         display_name=getattr(endpoint, "display_name", None),
         provider=endpoint.provider,
-        api_mode=str(getattr(endpoint, "api_mode", "") or ""),
+        wire_shape=str(getattr(endpoint, "wire_shape", "") or ""),
         context_window=getattr(endpoint, "context_window", None),
         max_output_tokens=getattr(endpoint, "max_output_tokens", None),
-        supports_reasoning=bool(getattr(endpoint, "supports_reasoning", False)),
+        thinking_levels=tuple(str(item) for item in (getattr(endpoint, "thinking_levels_blob", None) or ())),
+        default_thinking_level=str(getattr(endpoint, "default_thinking_level", "") or "off"),
         supports_tools=bool(getattr(endpoint, "supports_tools", False)),
         supports_streaming=bool(getattr(endpoint, "supports_streaming", False)),
         supports_vision=bool(getattr(endpoint, "supports_vision", False)),
@@ -310,10 +317,11 @@ def inspect_llm(provider: LLMIntrospectionProvider) -> LLMActiveModelSnapshot:
             endpoint_id=None,
             display_name=None,
             provider=None,
-            api_mode=None,
+            wire_shape=None,
             context_window=None,
             max_output_tokens=None,
-            supports_reasoning=None,
+            thinking_levels=(),
+            default_thinking_level=None,
             supports_tools=None,
             supports_streaming=None,
             supports_vision=None,
@@ -328,10 +336,11 @@ def inspect_llm(provider: LLMIntrospectionProvider) -> LLMActiveModelSnapshot:
         endpoint_id=snapshot.endpoint_id,
         display_name=snapshot.display_name,
         provider=active.provider,
-        api_mode=snapshot.api_mode,
+        wire_shape=snapshot.wire_shape,
         context_window=snapshot.context_window,
         max_output_tokens=snapshot.max_output_tokens,
-        supports_reasoning=snapshot.supports_reasoning,
+        thinking_levels=snapshot.thinking_levels,
+        default_thinking_level=snapshot.default_thinking_level,
         supports_tools=snapshot.supports_tools,
         supports_streaming=snapshot.supports_streaming,
         supports_vision=snapshot.supports_vision,
@@ -440,6 +449,7 @@ def register_with_core(context: MainContext, runtime: LLMRuntime) -> ModuleHandl
             "show_llm_status": provider.handle_status_control_action,
         },
         ports={"llm": runtime},
+        shutdown_sync=runtime.close,
     )
     context.register_module(handle)
     return handle

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
+
 import asyncio
 import json
 import os
@@ -38,10 +40,11 @@ from pal.core.runtime_config import RuntimeConfig
 from pal.core.turns import ToolObservation, channel_turn_program
 from pal.execution import CapabilityResult
 from pal.foundation import EventEnvelope
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
+from pal.llm.contracts import generation_result_from_values, request_ir_from_prompt
+from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryService, register_with_core as register_memory_with_core
-from pal.shared import EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
-from pal.stream_events import NormalizedLLMStreamEvent
+from pal.memory.turn_ir import L1TurnProtocolError, L1TurnState
+from pal.shared import ChannelStreamUpdate, EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
 
 
 class _StubEndpoint(ChannelEndpointQueueBase):
@@ -90,7 +93,9 @@ class _FakeLLMEndpoint:
     model_id: str
     display_name: str = ""
     provider: str = "test"
-    api_mode: str = "openai_chat"
+    wire_shape: str = "openai_completion"
+    thinking_levels_blob: tuple[str, ...] = ("off",)
+    default_thinking_level: str = "off"
     context_window: int | None = 1000
     max_output_tokens: int | None = 256
     priority: int = 0
@@ -731,62 +736,40 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    def _make_tool_protocol_continuation(self, *, prompt_log_enabled: bool) -> TurnContinuation:
-        envelope = self._make_channel_envelope(turn_id="turn-tool-memory", request_id="req-tool-memory")
-        continuation = TurnContinuation(
-            turn_id="turn-tool-memory",
-            channel_envelope=envelope,
-            program=channel_turn_program(envelope),
-            correlation_id="req-tool-memory",
-            control_scope_key="socket:socket_main:sess-1",
-            turn_settings_snapshot={"think_level": "balanced", "prompt_log_enabled": prompt_log_enabled},
-        )
-        continuation.tool_protocol_messages.extend(
-            [
-                {
-                    "role": "assistant",
-                    "content": "checking runtime state",
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": "shell", "arguments": "{\"cmd\": \"date\"}"},
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call_1",
-                    "content": "large tool result that should not be durable by default",
-                },
-            ]
-        )
-        return continuation
-
-    @staticmethod
-    def _make_tool_reply_outcome() -> TurnOutcome:
-        return TurnOutcome(
-            turn_id="turn-tool-memory",
-            final_reply="final answer",
-            commit_payload=L1CommitPayload(
-                turn_id="turn-tool-memory",
-                transcript=[
-                    L1TranscriptMessage(role="user", content="hello", kind=L1MessageKind.USER_REQUEST),
-                    L1TranscriptMessage(
-                        role="assistant",
-                        content="final answer",
-                        kind=L1MessageKind.ASSISTANT_REPLY,
-                    ),
-                ],
+    def _seed_l1_tool_protocol(self) -> None:
+        self.memory_service.begin_l1_turn("turn-tool-memory", user_text="hello")
+        self.memory_service.upsert_l1_assistant(
+            "turn-tool-memory",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(
+                    TextPartIR("checking runtime state"),
+                    new_tool_call(call_id="call_1", name="shell", args={"cmd": "date"}),
+                ),
+                semantic_kind=L1MessageKind.ASSISTANT_TOOL_CALL,
             ),
         )
+        self.memory_service.append_l1_tool_result(
+            "turn-tool-memory",
+            ToolResultIR(
+                call_id="call_1",
+                name="shell",
+                content="large tool result that remains durable",
+            ),
+        )
+        self.memory_service.upsert_l1_assistant(
+            "turn-tool-memory",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(TextPartIR("final answer"),),
+                semantic_kind=L1MessageKind.ASSISTANT_REPLY,
+            ),
+        )
+        self.memory_service.settle_l1_turn("turn-tool-memory")
 
     async def test_l1_commit_persists_full_tool_protocol_by_default(self) -> None:
-        continuation = self._make_tool_protocol_continuation(prompt_log_enabled=False)
-
-        outcome = self.core._enrich_transcript_with_tool_protocol(self._make_tool_reply_outcome(), continuation)
-
-        transcript = outcome.commit_payload.transcript
+        self._seed_l1_tool_protocol()
+        transcript = self.memory_service.l1_store.items[-1]
         self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
         self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[2].tool_call_id, "call_1")
@@ -794,11 +777,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(hasattr(message, "tool_trace") for message in transcript))
 
     async def test_l1_commit_persists_full_tool_protocol_when_prompt_log_enabled(self) -> None:
-        continuation = self._make_tool_protocol_continuation(prompt_log_enabled=True)
-
-        outcome = self.core._enrich_transcript_with_tool_protocol(self._make_tool_reply_outcome(), continuation)
-
-        transcript = outcome.commit_payload.transcript
+        self._seed_l1_tool_protocol()
+        transcript = self.memory_service.l1_store.items[-1]
         self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
         self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[2].tool_call_id, "call_1")
@@ -908,6 +888,31 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("LLM endpoints refreshed.", self.endpoint.outbox[-1].text)
         self.assertIn("Primary endpoint for future turns: new", self.endpoint.outbox[-1].text)
         self.assertIn("Removed/disabled: old", self.endpoint.outbox[-1].text)
+
+    async def test_refresh_llm_endpoint_also_refreshes_loaded_minion_runtime(self) -> None:
+        class MinionPort:
+            calls = 0
+
+            async def refresh_llm_endpoints(inner_self):
+                inner_self.calls += 1
+                return {"ok": True, "runtime_loaded": True, "refreshed": True}
+
+        minion = MinionPort()
+        self.core.context.port_registry["minion:minion"] = minion
+
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="refresh_llm_endpoint",
+                target_scope="runtime",
+                route=self.route,
+            )
+        )
+
+        self.assertEqual(minion.calls, 1)
+        self.assertIn(
+            "Dependent LLM runtimes refreshed: minion:minion",
+            self.endpoint.outbox[-1].text,
+        )
 
     async def test_show_model_lists_enabled_endpoints_and_marks_current(self) -> None:
         await self.core.handle_control_action_async(
@@ -1149,7 +1154,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 control_scope_key="socket:socket_main:sess-1",
                 turn_settings_snapshot={"think_level": "balanced", "prompt_log_enabled": True},
             )
-            request = CanonicalLLMRequest(
+            request = request_ir_from_prompt(
                 messages=[
                     {"role": "user", "content": "hello"},
                     {
@@ -1171,16 +1176,16 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.dict(os.environ, {"PAL_LOG_ROOT": tmp}):
                 self.core._debug_log_prompt(continuation, request)
-                self.core._debug_log_outcome(continuation, CanonicalLLMOutcome(text="world"))
+                self.core._debug_log_outcome(continuation, generation_result_from_values(text="world"))
                 self.core._debug_log_reply(continuation, "final")
 
             content = (Path(tmp) / "pal.log").read_text(encoding="utf-8")
             self.assertIn("=== PAL PROMPT DEBUG ===", content)
-            self.assertIn("'role': 'assistant'", content)
-            self.assertIn("'tool_calls'", content)
-            self.assertIn("'id': 'call_debug_1'", content)
-            self.assertIn("'role': 'tool'", content)
-            self.assertIn("'tool_call_id': 'call_debug_1'", content)
+            self.assertIn('"role": "assistant"', content)
+            self.assertIn('"kind": "tool_call"', content)
+            self.assertIn('"call_id": "call_debug_1"', content)
+            self.assertIn('"role": "tool"', content)
+            self.assertIn('"kind": "tool_result"', content)
             self.assertIn("debug tool result", content)
             self.assertIn("=== PAL LLM OUTCOME ===", content)
             self.assertIn("=== PAL REPLY ===", content)
@@ -1197,7 +1202,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 control_scope_key="socket:socket_main:sess-1",
                 turn_settings_snapshot={"think_level": "balanced", "prompt_log_enabled": False},
             )
-            request = CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=64)
+            request = request_ir_from_prompt(messages=[{"role": "user", "content": "hello"}], max_output_tokens=64)
 
             with patch.dict(os.environ, {"PAL_LOG_ROOT": tmp}):
                 self.core._debug_log_prompt(continuation, request)
@@ -1523,48 +1528,52 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         scope_state = self.core._ensure_scope_state(scope_key)
         scope_state.active_turn_id = "turn-1"
         scope_state.drained_event.clear()
-        self.endpoint.queue_stream_event(
-            NormalizedLLMStreamEvent(event_kind="text_delta", text="hello"),
+        self.endpoint.queue_stream_update(
+            ChannelStreamUpdate(kind="text_delta", text="hello"),
             response_handle=response_handle,
         )
         task = asyncio.create_task(asyncio.sleep(10))
         self.core.state.turn_tasks["turn-1"] = task
-        continuation.tool_protocol_messages.extend(
-            [
-                {
-                    "role": "assistant",
-                    "content": "checking the runtime",
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": "shell", "arguments": "{\"cmd\": \"date\"}"},
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call_1",
-                    "content": "shell result before interrupt",
-                },
-                {
-                    "role": "assistant",
-                    "content": "starting an incomplete tool batch",
-                    "tool_calls": [
-                        {
-                            "id": "call_incomplete",
-                            "type": "function",
-                            "function": {"name": "shell", "arguments": "{\"cmd\": \"sleep 10\"}"},
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "orphan_call",
-                    "content": "orphan tool result should not be committed",
-                },
-            ]
+        self.memory_service.begin_l1_turn("turn-1", user_text="hello")
+        self.memory_service.upsert_l1_assistant(
+            "turn-1",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(
+                    TextPartIR("checking the runtime"),
+                    new_tool_call(call_id="call_1", name="shell", args={"cmd": "date"}),
+                ),
+                semantic_kind=L1MessageKind.ASSISTANT_TOOL_CALL,
+            ),
         )
+        self.memory_service.append_l1_tool_result(
+            "turn-1",
+            ToolResultIR(
+                call_id="call_1",
+                name="shell",
+                content="shell result before interrupt",
+            ),
+        )
+        self.memory_service.upsert_l1_assistant(
+            "turn-1",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(
+                    TextPartIR("starting an incomplete tool batch"),
+                    new_tool_call(call_id="call_incomplete", name="shell", args={"cmd": "sleep 10"}),
+                ),
+                semantic_kind=L1MessageKind.ASSISTANT_TOOL_CALL,
+            ),
+        )
+        with self.assertRaises(L1TurnProtocolError):
+            self.memory_service.append_l1_tool_result(
+                "turn-1",
+                ToolResultIR(
+                    call_id="orphan_call",
+                    name="shell",
+                    content="orphan tool result should not be committed",
+                ),
+            )
         continuation.tool_observations.append(
             ToolObservation(tool_name="shell", ok=True, summary="shell result before interrupt")
         )
@@ -1575,12 +1584,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(interrupted)
         self.assertTrue(continuation.interrupted)
         self.assertTrue(self.endpoint._stream_sessions[id(response_handle)]["closed"])
-        self.assertEqual(self.memory_service.l1_store.items, [])
-        self.assertEqual(len(scope_state.interrupted_turns_to_settle), 1)
-        next_envelope = self._make_channel_envelope(turn_id="turn-after-interrupt", request_id="req-after", text="continue")
-        await self.core._settle_interrupted_turns_for_next_user_async(next_envelope, scope_state)
-        self.assertEqual(len(scope_state.interrupted_turns_to_settle), 0)
-        self.assertTrue(continuation.l1_interrupted_settlement_committed)
+        closed = self.memory_service.l1_store.turns.get("turn-1")
+        self.assertEqual(closed.state, L1TurnState.INTERRUPTED)
         self.assertEqual(len(self.memory_service.l1_store.items), 1)
         transcript = self.memory_service.l1_store.items[-1]
         self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
@@ -1595,7 +1600,6 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transcript[2].tool_call_id, "call_1")
         self.assertIn("shell result before interrupt", transcript[2].content)
         committed_text = "\n".join(message.content for message in transcript)
-        self.assertIn("I found a runtime clue before interruption.", committed_text)
         self.assertNotIn("turn_checkpoint", committed_text)
         self.assertNotIn("call_incomplete", json.dumps([message.tool_calls for message in transcript], ensure_ascii=False))
         self.assertNotIn("orphan tool result", committed_text)
@@ -1627,14 +1631,10 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             await self.core.run_turn_continuation_async(continuation)
 
         self.assertEqual(len(self.memory_service.l1_store.items), 1)
-        checkpoint = self.memory_service.l1_store.items[-1]
-        kinds = [item.kind for item in checkpoint]
-        self.assertIn(L1MessageKind.USER_REQUEST, kinds)
-        self.assertIn(L1MessageKind.TURN_ABORTED, kinds)
-        summary = next(item.content for item in checkpoint if item.kind == L1MessageKind.TURN_ABORTED)
-        self.assertIn("status: aborted", summary)
-        self.assertIn("RuntimeError: boom", summary)
-        self.assertIn("turn_outcome: not committed", summary)
+        turn = self.memory_service.l1_store.turns.get("turn-aborted")
+        self.assertEqual(turn.state, L1TurnState.ABORTED)
+        self.assertEqual(turn.metadata["settlement_reason"], "RuntimeError: boom")
+        self.assertEqual(turn.messages[0].semantic_kind, L1MessageKind.USER_REQUEST)
 
     async def test_interrupt_by_scope_deduplicates_concurrent_interrupts(self) -> None:
         response_handle = ResponseHandle(

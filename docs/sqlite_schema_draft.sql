@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS llm_endpoints (
   provider          TEXT NOT NULL,              -- openai | anthropic | custom
   model_id          TEXT NOT NULL,              -- exact model identifier
   display_name      TEXT,
-  api_mode          TEXT NOT NULL,              -- openai_chat | anthropic_messages
+  wire_shape        TEXT NOT NULL,              -- openai_completion | openai_response | anthropic_messages
   base_url          TEXT NOT NULL,
 
   -- Auth
@@ -111,7 +111,8 @@ CREATE TABLE IF NOT EXISTS llm_endpoints (
   -- Capability metadata
   context_window      INTEGER,
   max_output_tokens   INTEGER,
-  supports_reasoning  INTEGER NOT NULL DEFAULT 0,
+  thinking_levels_blob TEXT NOT NULL DEFAULT '["off"]', -- JSON enum subset
+  default_thinking_level TEXT,
   supports_tools      INTEGER NOT NULL DEFAULT 1,
   supports_streaming  INTEGER NOT NULL DEFAULT 1,
   supports_vision     INTEGER NOT NULL DEFAULT 0,
@@ -129,9 +130,10 @@ CREATE TABLE IF NOT EXISTS llm_endpoints (
   created_at        TEXT NOT NULL,
   updated_at        TEXT NOT NULL,
 
-  CHECK (api_mode IN ('openai_chat', 'anthropic_messages')),
+  CHECK (wire_shape IN ('openai_completion', 'openai_response', 'anthropic_messages')),
   CHECK (auth_kind IN ('api_key_ref', 'oauth', 'local_provider_auth')),
   CHECK (capabilities_blob IS NULL OR json_valid(capabilities_blob)),
+  CHECK (json_valid(thinking_levels_blob)),
   CHECK (input_modalities_blob IS NULL OR json_valid(input_modalities_blob)),
   CHECK (output_modalities_blob IS NULL OR json_valid(output_modalities_blob))
 );
@@ -140,7 +142,7 @@ CREATE INDEX IF NOT EXISTS idx_llm_endpoints_priority
 ON llm_endpoints(enabled, priority);
 
 CREATE INDEX IF NOT EXISTS idx_llm_endpoints_capabilities
-ON llm_endpoints(enabled, supports_tools, supports_reasoning, supports_streaming);
+ON llm_endpoints(enabled, supports_tools, supports_streaming);
 
 
 -- ============================================================

@@ -115,6 +115,10 @@ class MinionManagerProvider:
         self._require_manager()
         self.client.request_sync("v2_wake")
 
+    async def refresh_llm_endpoints(self) -> dict[str, Any]:
+        await asyncio.to_thread(self._require_manager)
+        return await self.client.refresh_llm_endpoints()
+
     def _on_harness_registry_generation(
         self,
         generation: MinionHarnessRegistryGeneration,

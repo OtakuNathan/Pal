@@ -32,6 +32,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("doctor", help="Check local Pal runtime dependencies")
 
+    # -- llm -----------------------------------------------------------------
+    llm_parser = subparsers.add_parser("llm", help="Manage configured LLM endpoints")
+    from pal.llm.cli import configure_llm_parser
+
+    configure_llm_parser(llm_parser)
+
     # -- run -----------------------------------------------------------------
     run_parser = subparsers.add_parser("run", help="Run the Pal runtime")
     run_parser.add_argument("--runtime-root", type=Path, required=True)
@@ -63,22 +69,6 @@ def _build_parser() -> argparse.ArgumentParser:
     browser_service_parser.add_argument("--token", required=True)
     browser_service_parser.add_argument("--idle-timeout-seconds", type=int, default=60)
     browser_service_parser.add_argument("--max-concurrency", type=int, default=2)
-
-    # -- codex-bridge --------------------------------------------------------
-    codex_bridge_parser = subparsers.add_parser(
-        "codex-bridge",
-        aliases=("codex-proxy",),
-        help="Run a local OpenAI-compatible bridge backed by Codex CLI",
-    )
-    codex_bridge_parser.set_defaults(command="codex-bridge")
-    codex_bridge_parser.add_argument("--host", default="127.0.0.1")
-    codex_bridge_parser.add_argument("--port", type=int, default=8765)
-    codex_bridge_parser.add_argument("--codex-bin", default=None)
-    codex_bridge_parser.add_argument("--timeout-seconds", type=int, default=120)
-    codex_bridge_parser.add_argument("--api-key-env", default="PAL_CODEX_BRIDGE_API_KEY")
-    codex_bridge_parser.add_argument("--models-env", default="PAL_CODEX_BRIDGE_MODELS")
-    codex_bridge_parser.add_argument("--max-concurrency", type=int, default=None)
-    codex_bridge_parser.add_argument("--max-concurrency-env", default="PAL_CODEX_BRIDGE_MAX_CONCURRENCY")
 
     # -- eval tools ----------------------------------------------------------
     eval_parser = subparsers.add_parser("eval", help="Run versioned Pal evaluations")
@@ -114,6 +104,11 @@ def main() -> int:
         from pal.wizard.cli import run_dependency_doctor
         return run_dependency_doctor()
 
+    if args.command == "llm":
+        from pal.llm.cli import run_llm_cli
+
+        return run_llm_cli(args)
+
     # -- setup is synchronous, no asyncio ------------------------------------
     if args.command == "setup":
         from pal.wizard.cli import run_setup_wizard
@@ -138,19 +133,6 @@ def main() -> int:
             token=str(args.token),
             idle_timeout_seconds=int(args.idle_timeout_seconds),
             max_concurrency=int(args.max_concurrency),
-        )
-    if args.command == "codex-bridge":
-        from pal.llm.codex_openai_bridge import run_codex_openai_bridge_cli
-
-        return run_codex_openai_bridge_cli(
-            host=str(args.host),
-            port=int(args.port),
-            codex_bin=getattr(args, "codex_bin", None),
-            timeout_seconds=int(args.timeout_seconds),
-            api_key_env=str(args.api_key_env),
-            models_env=str(args.models_env),
-            max_concurrency=getattr(args, "max_concurrency", None),
-            max_concurrency_env=str(args.max_concurrency_env),
         )
     if args.command == "eval" and args.eval_command == "tools":
         from pal.eval_tools import DEFAULT_TOOLS_BENCHMARK, run_tools_eval_cli

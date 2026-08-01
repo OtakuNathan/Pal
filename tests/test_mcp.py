@@ -171,7 +171,7 @@ class McpConnectorAndManagerTests(unittest.TestCase):
 
         self.assertEqual(expanded, "/opt/mcp/server --root=/srv/mcp --literal=$PAL_MCP_MISSING")
 
-    def test_mcp_command_env_var_expansion_uses_process_env_without_env_override(self) -> None:
+    def test_mcp_only_expands_executable_and_preserves_argument_placeholders(self) -> None:
         captured: dict[str, object] = {}
 
         async def fake_create_subprocess_exec(*args, **kwargs):
@@ -193,8 +193,61 @@ class McpConnectorAndManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-        self.assertEqual(captured["args"], ("/opt/mcp/server", "--root=/srv/mcp", "--literal=$PAL_MCP_MISSING"))
+        self.assertEqual(
+            captured["args"],
+            ("/opt/mcp/server", "--root=${PAL_MCP_HOME}", "--literal=$PAL_MCP_MISSING"),
+        )
         self.assertIsNone(captured["env"])
+
+    def test_mcp_secret_header_stays_out_of_argv(self) -> None:
+        captured: dict[str, object] = {}
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["env"] = kwargs.get("env")
+            raise RuntimeError("stop before spawning")
+
+        async def scenario() -> None:
+            connector = AsyncStdioMcpConnector(
+                McpServerConfig(
+                    server_id="secret-header",
+                    command=("/opt/mcp-remote", "--header", "Authorization:${MCP_AUTH}"),
+                    env={"MCP_AUTH": "Bearer secret-value"},
+                )
+            )
+            with patch("asyncio.create_subprocess_exec", side_effect=fake_create_subprocess_exec):
+                with self.assertRaisesRegex(RuntimeError, "stop before spawning"):
+                    await connector._start()
+
+        asyncio.run(scenario())
+
+        self.assertEqual(
+            captured["args"],
+            ("/opt/mcp-remote", "--header", "Authorization:${MCP_AUTH}"),
+        )
+        self.assertEqual(captured["env"]["MCP_AUTH"], "Bearer secret-value")
+
+    def test_mcp_rescan_restricts_config_files_containing_environment_secrets(self) -> None:
+        config_root = self.root / "plugins" / "mcp"
+        config_root.mkdir(parents=True)
+        config_path = config_root / "private.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    'server_id = "private"',
+                    'command = "/opt/private-mcp"',
+                    "enabled = false",
+                    "[env]",
+                    'PRIVATE_TOKEN = "secret-value"',
+                ]
+            ),
+            encoding="utf-8",
+        )
+        config_path.chmod(0o664)
+
+        asyncio.run(McpManager(runtime_root=self.root).rescan())
+
+        self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
 
     def test_sidecar_rpc_timeout_covers_connection_phase(self) -> None:
         async def slow_open_connection(endpoint):

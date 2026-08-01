@@ -13,6 +13,7 @@ from pal.identity import IdentityRepository
 from pal.identity.models import PalPersonaModel, UserPreferencesModel
 from pal.llm import LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
+from pal.llm.schema import assert_llm_endpoint_schema_current
 from pal.memory import MemoryCaseModel, MemoryEmbeddingModel, MemoryEmbeddingVecModel, MemoryFactModel, MemoryTopicModel
 from pal.plugins import PluginBundleModel
 from pal.proactive import ProactiveDefinitionModel, ProactiveRunModel
@@ -94,12 +95,13 @@ DEFAULT_LLM_ENDPOINTS = (
         "provider": "stub",
         "model_id": "stub-model",
         "display_name": "Stub LLM",
-        "api_mode": "openai_chat",
+        "wire_shape": "openai_completion",
         "base_url": "stub://local/llm",
         "credential_ref": "stub-credential",
         "context_window": 8192,
         "max_output_tokens": 1024,
-        "supports_reasoning": False,
+        "thinking_levels_blob": ["off"],
+        "default_thinking_level": "off",
         "supports_tools": True,
         "supports_streaming": False,
         "supports_vision": False,
@@ -197,6 +199,14 @@ class WizardService(WizardServicePort):
         # Wizard owns the on-disk runtime association. Bootstrap only
         # composes in-process services from the already-associated database.
         database = PalV2Database(db_path=registration.runtime.db_path)
+        if registration.runtime.db_path.exists():
+            import sqlite3
+
+            connection = sqlite3.connect(registration.runtime.db_path)
+            try:
+                assert_llm_endpoint_schema_current(connection)
+            finally:
+                connection.close()
         database.initialize(ALL_MODELS)
         return database
 
@@ -291,6 +301,9 @@ class WizardService(WizardServicePort):
             if len(candidates) != 1:
                 return None
             db_path = candidates[0]
+        from pal.llm.schema import migrate_llm_endpoint_schema
+
+        migrate_llm_endpoint_schema(db_path)
         database = PalV2Database(db_path=db_path)
         try:
             database.initialize(ALL_MODELS)
@@ -310,12 +323,13 @@ class WizardService(WizardServicePort):
                 WizardLLMEndpoint(
                     endpoint_id=endpoint.endpoint_id,
                     model_id=endpoint.model_id,
-                    api_mode=endpoint.api_mode,
+                    wire_shape=endpoint.wire_shape,
                     base_url=endpoint.base_url,
                     api_key=None,
                     context_window=endpoint.context_window,
                     max_output_tokens=endpoint.max_output_tokens,
-                    supports_reasoning=endpoint.supports_reasoning,
+                    thinking_levels=list(endpoint.thinking_levels_blob or ()),
+                    default_thinking_level=str(endpoint.default_thinking_level or "off"),
                     supports_tools=endpoint.supports_tools,
                     supports_streaming=endpoint.supports_streaming,
                     supports_vision=endpoint.supports_vision,
@@ -419,11 +433,9 @@ class WizardService(WizardServicePort):
             base_url = str(ep.base_url or "")
             if provider:
                 pass
-            elif base_url.lower().startswith("codex://"):
-                provider = "codex_cli"
-            elif "anthropic" in ep.api_mode:
+            elif ep.wire_shape == "anthropic_messages":
                 provider = "anthropic"
-            elif "openai" in ep.api_mode or ep.api_mode == "openai_chat":
+            elif ep.wire_shape in {"openai_completion", "openai_response"}:
                 # Try to infer from base_url
                 if "deepseek" in base_url:
                     provider = "deepseek"
@@ -453,13 +465,14 @@ class WizardService(WizardServicePort):
                 "provider": provider,
                 "model_id": ep.model_id,
                 "display_name": ep.endpoint_id,
-                "api_mode": ep.api_mode,
+                "wire_shape": ep.wire_shape,
                 "base_url": base_url,
                 "auth_kind": auth_kind,
                 "credential_ref": credential_ref,
                 "context_window": ep.context_window or 8192,
                 "max_output_tokens": ep.max_output_tokens or 4096,
-                "supports_reasoning": ep.supports_reasoning,
+                "thinking_levels_blob": list(ep.thinking_levels),
+                "default_thinking_level": ep.default_thinking_level,
                 "supports_tools": ep.supports_tools,
                 "supports_streaming": ep.supports_streaming,
                 "supports_vision": ep.supports_vision,

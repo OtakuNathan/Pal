@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import unittest
 
 from pal.core.runtime import PalCore
@@ -15,7 +17,6 @@ from pal.execution.tool_facade import (
     ToolExecutionSemantics,
     ToolGuidance,
 )
-from pal.llm.contracts import CanonicalToolCall
 from tests.capability_fixture import mount_test_capability
 
 
@@ -88,7 +89,7 @@ class ToolSearchTests(unittest.TestCase):
 
     def search(self, **args: object) -> dict[str, object]:
         result = self.core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="search_tools", args=dict(args))
+            new_tool_call(name="search_tools", args=dict(args))
         )
         self.assertTrue(result.ok, result.text)
         return dict(result.structured or {})

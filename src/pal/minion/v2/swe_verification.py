@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 from pal.execution.generated_tool_models import (
     MinionV2SweVerificationOpMinionVerificationRequestArchitectureRevisionInput,
     MinionV2SweVerificationOpMinionVerificationRequestContractRevisionInput,
@@ -15,7 +17,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from pal.execution.tool_facade import EmptyToolInput
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
@@ -33,7 +34,7 @@ from pal.minion.v2.work_items import (
     submission_work_items,
 )
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 SWE_VERIFICATION_CAPABILITIES = (
@@ -264,10 +265,10 @@ def compile_swe_verification_tool_contract(
 
 
 def swe_verification_tool_result(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: Mapping[str, Any],
     produced_artifacts: list[dict[str, Any]],
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     try:
         outcome = _OUTCOME_BY_CAPABILITY[call.name]
         args = dict(call.args or {})
@@ -402,7 +403,7 @@ def swe_verification_tool_result(
             },
         )
         _append_unique_artifact(produced_artifacts, artifact)
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=True,
             text="Semantic verification submission recorded by Manager. Stop now.",
@@ -415,7 +416,7 @@ def swe_verification_tool_result(
         )
     except Exception as exc:
         text = f"{exc.__class__.__name__}: {exc}"
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=False,
             text=text,

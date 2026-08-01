@@ -20,9 +20,10 @@ from pal.failure import (
     VerificationResult,
 )
 from pal.foundation import utc_now
-from pal.llm.contracts import CanonicalLLMRequest, CanonicalToolResult
+from pal.llm.conversions import request_ir_from_prompt
+from pal.llm.ir import LLMRequestIR
 from pal.memory.contracts import L2Entry
-from pal.shared import LLMResponseMode, RuntimeStatus
+from pal.shared import LLMResponseMode, RuntimeStatus, ToolExecutionResult
 
 
 _SAFE_MODE_LLM_TIMEOUT_SECONDS = 45.0
@@ -44,7 +45,7 @@ class FailureOrchestrator:
         *,
         call_port_async: Callable[..., Awaitable[Any]],
         build_canonical_prompt: Callable[..., Any],
-        debug_log_prompt: Callable[[CanonicalLLMRequest], None],
+        debug_log_prompt: Callable[[LLMRequestIR], None],
         tool_surface,
     ) -> None:
         self.context = context
@@ -175,7 +176,7 @@ class FailureOrchestrator:
                     )
                 except Exception as exc:
                     text = f"safe-mode tool failed: {type(exc).__name__}: {exc}"
-                    tool_result = CanonicalToolResult(
+                    tool_result = ToolExecutionResult(
                         name=effect.tool_call.name,
                         ok=False,
                         llm_text=text,
@@ -210,7 +211,7 @@ class FailureOrchestrator:
                 },
             )
 
-    def _build_safe_mode_request(self, effect: LLMRequestEffect) -> CanonicalLLMRequest:
+    def _build_safe_mode_request(self, effect: LLMRequestEffect) -> LLMRequestIR:
         metadata = dict(effect.assembly_context.metadata or {})
         stage = str(metadata.get("failure_stage") or "diagnose").strip() or "diagnose"
         primary_input = str(metadata.get("failure_primary_input") or "").strip()
@@ -223,7 +224,7 @@ class FailureOrchestrator:
                 },
                 ensure_ascii=True,
             )
-        return CanonicalLLMRequest(
+        return request_ir_from_prompt(
             messages=[
                 {"role": "system", "content": _SAFE_MODE_SYSTEM_PROMPT},
                 {"role": "user", "content": primary_input},

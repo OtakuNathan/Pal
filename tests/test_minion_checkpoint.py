@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import unittest
+
+from pal.minion.checkpoint import (
+    AgentSessionCheckpointError,
+    normalize_agent_session_checkpoint,
+)
+from pal.minion.v2.semantic_orchestration.orchestrator import (
+    _worker_terminal_failure,
+)
+
+
+class MinionCheckpointTests(unittest.TestCase):
+    def test_schema_five_legacy_l1_is_migrated_by_shape(self) -> None:
+        migrated = normalize_agent_session_checkpoint(
+            {
+                "schema_version": "5",
+                "session_id": "session-1",
+                "active_tool_protocol_messages": [],
+                "tool_delivery_records": {},
+                "l1_items": [
+                    [
+                        {
+                            "role": "user",
+                            "content": "inspect",
+                            "kind": "user_request",
+                        }
+                    ],
+                    [
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "kind": "assistant_tool_call",
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": '{"file_path":"a.cpp"}',
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "content": "source",
+                            "kind": "tool_result",
+                            "tool_call_id": "call-1",
+                        },
+                    ],
+                ],
+            }
+        )
+
+        self.assertEqual(migrated["schema_version"], "5")
+        self.assertEqual(len(migrated["l1_turns"]), 2)
+        self.assertTrue(
+            all(turn["state"] == "settled" for turn in migrated["l1_turns"])
+        )
+        self.assertNotIn("l1_items", migrated)
+        self.assertNotIn("active_tool_protocol_messages", migrated)
+        self.assertNotIn("tool_delivery_records", migrated)
+
+    def test_current_l1_requires_current_schema(self) -> None:
+        with self.assertRaisesRegex(
+            AgentSessionCheckpointError,
+            "unsupported checkpoint schema",
+        ):
+            normalize_agent_session_checkpoint(
+                {
+                    "schema_version": "4",
+                    "l1_turns": [
+                        {
+                            "turn_id": "turn-1",
+                            "state": "settled",
+                            "revision": 1,
+                            "metadata": {},
+                            "messages": [],
+                        }
+                    ],
+                }
+            )
+
+    def test_checkpoint_without_an_l1_truth_source_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            AgentSessionCheckpointError,
+            "neither current nor migratable L1",
+        ):
+            normalize_agent_session_checkpoint(
+                {"schema_version": "5", "session_id": "session-1"}
+            )
+
+    def test_worker_terminal_error_is_not_hidden_by_empty_stderr(self) -> None:
+        error_kind, details, retry_directive = _worker_terminal_failure(
+            [
+                {
+                    "event_kind": "terminal",
+                    "payload": {
+                        "status": "failed",
+                        "error_kind": "invalid_agent_session_checkpoint",
+                        "error": "continuation does not contain L1",
+                        "retry_directive": "do_not_retry",
+                    },
+                }
+            ]
+        )
+
+        self.assertEqual(error_kind, "invalid_agent_session_checkpoint")
+        self.assertEqual(details, "continuation does not contain L1")
+        self.assertEqual(retry_directive, "do_not_retry")
+
+
+if __name__ == "__main__":
+    unittest.main()

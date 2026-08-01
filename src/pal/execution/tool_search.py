@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
+from pal.shared.tool_protocol import new_tool_call
+
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.execution.generated_tool_models import (
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput,
@@ -11,7 +15,7 @@ from pal.execution.generated_tool_models import (
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchOutput,
 )
 from pal.execution.tool_semantics import DIRECT_NONE
-from pal.llm.contracts import CanonicalToolCall
+from uuid import uuid4
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -70,7 +74,7 @@ class ExecutionDiscoveryCapabilityMixin:
                 llm_text="name is required",
             )
         result = self.runtime.invoke_indirect_tool(
-            CanonicalToolCall(name=name, args=dict(call.args.get("args") or {}))
+            new_tool_call(call_id=f"call_{uuid4().hex}", name=name, arguments=dict(call.args.get("args") or {}))
         )
         return _invocation_capability_result(self.runtime, name, result)
 

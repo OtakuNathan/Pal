@@ -4,11 +4,14 @@ import asyncio
 import io
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from prompt_toolkit.shortcuts.choice_input import ChoiceInput
 from rich.console import Console
 from rich.markdown import Markdown
 
 from pal.tty.render import AssistantBodyRenderer, OutputBoundary, TtyRenderer
+from pal.tty.interactions import TtyInteraction, TtyInteractionOption
 from pal.tty.session import SocketDisconnected, SocketProtocolError, SocketSession
 from pal.tty.ui import TtyRepl
 
@@ -239,6 +242,33 @@ class SocketSessionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TtyReplTests(unittest.IsolatedAsyncioTestCase):
+    async def test_navigation_interaction_is_erased_after_selection(self) -> None:
+        repl, _writer, _console_value = _build_repl([], [], ids=[])
+
+        class _Application:
+            erase_when_done = False
+
+            async def run_async(self):
+                return "b1"
+
+        application = _Application()
+        interaction = TtyInteraction(
+            interaction_id="choose-model",
+            interaction_kind="model_select",
+            state="interactive_open",
+            text="Choose a model.",
+            options=(
+                TtyInteractionOption(label="Fast", token="b0"),
+                TtyInteractionOption(label="Deep", token="b1"),
+            ),
+        )
+
+        with patch.object(ChoiceInput, "_create_application", return_value=application):
+            selected = await repl._select_interaction_navigation(interaction)
+
+        self.assertEqual(selected, "b1")
+        self.assertTrue(application.erase_when_done)
+
     async def test_multi_turn_reuses_socket_and_renders_markdown_once(self) -> None:
         repl, writer, console = _build_repl(
             [

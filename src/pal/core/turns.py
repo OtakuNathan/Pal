@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 from collections.abc import Generator
 from dataclasses import dataclass, field
 import json
@@ -12,11 +14,11 @@ from pal.failure.contracts import (
     FailureDraft,
     VerificationResult,
 )
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult
-from pal.shared import ChannelEnvelope, EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus
+from pal.llm.contracts import LLMGenerationResult
+from pal.shared import ChannelEnvelope, EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus, ToolExecutionResult
 from pal.shared.payloads import extract_text_from_payload
 from pal.memory import L1MessageKind, L1TranscriptMessage
-from pal.stream_events import NormalizedLLMStreamEvent
+from pal.shared.agent_io import ChannelStreamUpdate
 
 
 @dataclass(frozen=True)
@@ -82,7 +84,7 @@ class LLMRequestEffect(EffectRequest):
 
 @dataclass(frozen=True)
 class ToolCallEffect(EffectRequest):
-    tool_call: CanonicalToolCall = field(default_factory=lambda: CanonicalToolCall(name="", args={}))
+    tool_call: ToolCallIR | None = None
     kind: str = EffectKind.TOOL_CALL
 
 
@@ -102,9 +104,9 @@ class MailboxReplyEffect(EffectRequest):
 
 
 @dataclass(frozen=True)
-class MailboxReplyStreamEffect(EffectRequest):
+class MailboxReplyStreamUpdateEffect(EffectRequest):
     channel_envelope: ChannelEnvelope = field(default_factory=lambda: ChannelEnvelope(event=None, endpoint=None, response_handle=None))  # type: ignore[arg-type]
-    event: NormalizedLLMStreamEvent = field(default_factory=NormalizedLLMStreamEvent)
+    update: ChannelStreamUpdate = field(default_factory=ChannelStreamUpdate)
     kind: str = EffectKind.MAILBOX_REPLY_STREAM
 
 
@@ -119,10 +121,10 @@ class AgentLoopFrame:
 
 
 BuildAgentContext = Callable[[AgentLoopFrame], PromptAssemblyContext]
-RenderAgentFinalText = Callable[[CanonicalLLMOutcome | None], str]
+RenderAgentFinalText = Callable[[LLMGenerationResult | None], str]
 BuildAgentCommitPayload = Callable[[str, list[ToolObservation], list[str]], L1CommitPayload]
 BuildMailboxEffect = Callable[[str], MailboxReplyEffect | None]
-BuildRetryNote = Callable[[CanonicalLLMOutcome | None, list[ToolObservation], int], str]
+BuildRetryNote = Callable[[LLMGenerationResult | None, list[ToolObservation], int], str]
 
 
 @dataclass
@@ -145,21 +147,13 @@ class TurnContinuation:
     preferred_llm_model_id: str | None = None
     turn_settings_snapshot: dict[str, Any] = field(default_factory=dict)
     tool_observations: list[ToolObservation] = field(default_factory=list)
-    tool_protocol_messages: list[dict[str, Any]] = field(default_factory=list)
-    tool_delivery_records: dict[str, dict[str, Any]] = field(default_factory=dict)
-    pending_tool_call_batch: list[CanonicalToolCall] = field(default_factory=list)
-    pending_tool_results: list[CanonicalToolResult] = field(default_factory=list)
+    pending_tool_call_batch: list[ToolCallIR] = field(default_factory=list)
+    pending_tool_results: list[ToolExecutionResult] = field(default_factory=list)
     pending_assistant_tool_text: str = ""
-    pending_assistant_provider_specific_fields: dict[str, Any] = field(default_factory=dict)
     emitted_reply_texts: list[str] = field(default_factory=list)
     pending_compact_memory_candidate_batches: list[dict[str, Any]] = field(default_factory=list)
     budget_failure_feedback_text: str = ""
     prompt_budget_snapshot: dict[str, Any] = field(default_factory=dict)
-    l1_input_committed: bool = False
-    l1_protocol_committed_count: int = 0
-    l1_exit_checkpoint_committed: bool = False
-    l1_interrupted_settlement_queued: bool = False
-    l1_interrupted_settlement_committed: bool = False
 
 
 @dataclass(frozen=True)
@@ -340,7 +334,7 @@ def agent_turn_program(
         )
 
 
-def render_final_reply(channel_envelope: ChannelEnvelope, outcome: CanonicalLLMOutcome) -> str:
+def render_final_reply(channel_envelope: ChannelEnvelope, outcome: LLMGenerationResult) -> str:
     _ = channel_envelope
     return outcome.text
 
@@ -657,12 +651,12 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _as_llm_outcome(payload: Any) -> CanonicalLLMOutcome | None:
-    return payload if isinstance(payload, CanonicalLLMOutcome) else None
+def _as_llm_outcome(payload: Any) -> LLMGenerationResult | None:
+    return payload if isinstance(payload, LLMGenerationResult) else None
 
 
-def _as_tool_result(payload: Any) -> CanonicalToolResult | None:
-    return payload if isinstance(payload, CanonicalToolResult) else None
+def _as_tool_result(payload: Any) -> ToolExecutionResult | None:
+    return payload if isinstance(payload, ToolExecutionResult) else None
 
 
 def _append_tool_observation(observations: list[ToolObservation], payload: Any) -> None:

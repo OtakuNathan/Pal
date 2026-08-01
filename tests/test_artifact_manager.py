@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import importlib.util
 import shutil
@@ -22,8 +24,10 @@ from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.prompt_compiler import PromptCompiler
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import EventEnvelope, PalV2Database
-from pal.llm.contracts import CanonicalToolCall
-from pal.llm.runtime import _coerce_messages_for_openai_chat
+from pal.llm.conversions import request_ir_from_prompt
+from pal.llm.ir import WireShape
+from pal.llm.shapes import codec_for_shape
+from pal.llm.shapes.base import ShapeContext
 from pal.shared import EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
 
 
@@ -146,7 +150,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("invoice.txt", fragments[0].content)
         self.assertNotIn(str(self.root), fragments[0].content)
 
-        compiler = PromptCompiler(type("Context", (), {"prompt_fragment_registry": _Registry(provider)})())
+        compiler = PromptCompiler(_PromptContext(_Registry(provider), self.manager))
         request = compiler.build_canonical_prompt(
             PromptAssemblyContext(
                 event=event,
@@ -157,17 +161,12 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        self.assertEqual(request.messages[-1]["role"], "user")
-        self.assertIsInstance(request.messages[-1]["content"], list)
-        text_parts = [
-            str(part.get("text") or "")
-            for part in request.messages[-1]["content"]
-            if isinstance(part, dict) and part.get("type") == "text"
-        ]
-        self.assertIn('<runtime_context_update kind="artifact">', text_parts[0])
-        self.assertIn("Available Artifacts", text_parts[1])
-        self.assertEqual(text_parts[-2], "看看这个附件")
-        self.assertIn("<runtime_reminder", text_parts[-1])
+        self.assertEqual(request.messages[-1].role.value, "user")
+        text = request.messages[-1].text
+        self.assertIn('<runtime_context_update kind="artifact">', text)
+        self.assertIn("Available Artifacts", text)
+        self.assertIn("看看这个附件", text)
+        self.assertIn("<runtime_reminder", text)
 
     def test_artifact_info_exposes_local_file_metadata_for_tool_use(self) -> None:
         ref = self._register_text(name="invoice.txt", text="invoice total is 42")
@@ -366,28 +365,17 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(exposure.inline_parts), 1)
-        coerced = _coerce_messages_for_openai_chat(
+        coerced = _openai_messages(
             [{"role": "user", "content": [{"type": "text", "text": "look"}, exposure.inline_parts[0].to_message_part()]}],
             artifact_manager=self.manager,
-            supports_vision=True,
         )
 
         image_part = coerced[0]["content"][1]
         self.assertEqual(image_part["type"], "image_url")
         self.assertTrue(image_part["image_url"]["url"].startswith("data:image/"))
         self.assertEqual(exposure.inline_parts[0].artifact_id, ref.artifact_id)
-        raw_base64_coerced = _coerce_messages_for_openai_chat(
-            [{"role": "user", "content": [{"type": "text", "text": "look"}, exposure.inline_parts[0].to_message_part()]}],
-            artifact_manager=self.manager,
-            supports_vision=True,
-            image_url_format="raw_base64",
-        )
-        raw_url = raw_base64_coerced[0]["content"][1]["image_url"]["url"]
-        self.assertFalse(raw_url.startswith("data:image/"))
-        self.assertNotIn(",", raw_url)
-
         provider = ArtifactPromptFragmentProvider(service=self.manager)
-        compiler = PromptCompiler(type("Context", (), {"prompt_fragment_registry": _Registry(provider)})())
+        compiler = PromptCompiler(_PromptContext(_Registry(provider), self.manager))
         request = compiler.build_canonical_prompt(
             PromptAssemblyContext(
                 event=EventEnvelope(
@@ -404,9 +392,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(request.messages), 1)
-        merged_content = request.messages[0]["content"]
-        self.assertIsInstance(merged_content, list)
-        merged_text = "\n".join(str(part.get("text") or "") for part in merged_content if isinstance(part, dict))
+        merged_content = request.messages[0].parts
+        merged_text = request.messages[0].text
         self.assertIn("Available Artifacts", merged_text)
         self.assertIn("visual_content: attached_inline", merged_text)
         self.assertIn("answer from vision directly", merged_text)
@@ -414,14 +401,9 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("inspect_inline_image", merged_text)
         self.assertNotIn("actions: info, read, search", merged_text)
         self.assertIn("what do you see?", merged_text)
-        self.assertEqual(merged_content[0]["type"], "artifact_image")
-        self.assertTrue(any(part.get("type") == "artifact_image" for part in merged_content if isinstance(part, dict)))
+        self.assertEqual(merged_content[0].__class__.__name__, "ImagePartIR")
 
-        merged_coerced = _coerce_messages_for_openai_chat(
-            request.messages,
-            artifact_manager=self.manager,
-            supports_vision=True,
-        )
+        merged_coerced = _encode_openai_request(request)
         self.assertTrue(any(part.get("type") == "image_url" for part in merged_coerced[0]["content"]))
 
         later_request = compiler.build_canonical_prompt(
@@ -438,15 +420,9 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        later_content = later_request.messages[0]["content"]
-        self.assertIsInstance(later_content, list)
-        later_text_parts = [
-            str(part.get("text") or "")
-            for part in later_content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ]
-        self.assertEqual(later_text_parts[-2], "try this artifact again")
-        self.assertIn("<runtime_reminder", later_text_parts[-1])
+        later_text = later_request.messages[0].text
+        self.assertIn("try this artifact again", later_text)
+        self.assertIn("<runtime_reminder", later_text)
 
         no_caption_request = compiler.build_canonical_prompt(
             PromptAssemblyContext(
@@ -462,9 +438,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        no_caption_content = no_caption_request.messages[0]["content"]
-        self.assertIsInstance(no_caption_content, list)
-        self.assertEqual(no_caption_content[0]["type"], "artifact_image")
+        no_caption_content = no_caption_request.messages[0].parts
+        self.assertEqual(no_caption_content[0].__class__.__name__, "ImagePartIR")
 
     @unittest.skipUnless(importlib.util.find_spec("fitz") is not None, "PyMuPDF is not installed")
     def test_pdf_text_extraction_creates_page_representations(self) -> None:
@@ -502,7 +477,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("list_artifacts", contracts)
         search = await core.context.execution_runtime.execute_tool_async(
-            CanonicalToolCall(name="search_tools", args={"query": "artifact refund", "module_id": "artifact", "top_k": 10}),
+            new_tool_call(name="search_tools", args={"query": "artifact refund", "module_id": "artifact", "top_k": 10}),
             turn_id=self.turn_id,
         )
         self.assertTrue(search.ok, search.text)
@@ -511,7 +486,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_artifact", hit_names)
 
         read_tool = await core.context.execution_runtime.execute_tool_async(
-            CanonicalToolCall(name="read_tool", args={"name": "read_artifact"}),
+            new_tool_call(name="read_tool", args={"name": "read_artifact"}),
             turn_id=self.turn_id,
         )
         self.assertTrue(read_tool.ok, read_tool.text)
@@ -520,7 +495,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("representation", schema["properties"])
 
         called = await core.context.execution_runtime.execute_tool_async(
-            CanonicalToolCall(name="call_tool", args={"name": "read_artifact", "args": {"artifact_id": ref.artifact_id}}),
+            new_tool_call(name="call_tool", args={"name": "read_artifact", "args": {"artifact_id": ref.artifact_id}}),
             turn_id=self.turn_id,
         )
         self.assertEqual(called.status, RuntimeStatus.OK, called.text)
@@ -563,13 +538,12 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         part_dict = exposure.inline_parts[0].to_message_part()
         self.assertEqual(part_dict["source_url"], "https://api.telegram.org/file/botFAKE_TOKEN/photos/file_123.jpg")
 
-        coerced = _coerce_messages_for_openai_chat(
+        coerced = _openai_messages(
             [{"role": "user", "content": [
                 {"type": "text", "text": "look"},
                 exposure.inline_parts[0].to_message_part(),
             ]}],
             artifact_manager=self.manager,
-            supports_vision=True,
         )
         image_part = coerced[0]["content"][1]
         self.assertEqual(image_part["type"], "image_url")
@@ -608,13 +582,12 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(exposure.inline_parts), 1)
         self.assertEqual(exposure.inline_parts[0].source_url, "")
 
-        coerced = _coerce_messages_for_openai_chat(
+        coerced = _openai_messages(
             [{"role": "user", "content": [
                 {"type": "text", "text": "look"},
                 exposure.inline_parts[0].to_message_part(),
             ]}],
             artifact_manager=self.manager,
-            supports_vision=True,
         )
         image_part = coerced[0]["content"][1]
         self.assertTrue(image_part["image_url"]["url"].startswith("data:image/"))
@@ -626,6 +599,39 @@ class _Registry:
 
     def list_for_prompt(self):
         return list(self.providers)
+
+
+class _Ports:
+    def __init__(self, artifact_manager: ArtifactManager) -> None:
+        self.artifact_manager = artifact_manager
+
+    def get(self, key: str):
+        return self.artifact_manager if key == "artifact:artifact" else None
+
+
+class _PromptContext:
+    def __init__(self, registry: _Registry, artifact_manager: ArtifactManager) -> None:
+        self.prompt_fragment_registry = registry
+        self.port_registry = _Ports(artifact_manager)
+
+
+def _openai_messages(messages, *, artifact_manager: ArtifactManager):
+    compiler = PromptCompiler(_PromptContext(_Registry(), artifact_manager))
+    request = request_ir_from_prompt(
+        messages=compiler._resolve_artifact_images(messages),
+        max_output_tokens=1024,
+    )
+    return _encode_openai_request(request)
+
+
+def _encode_openai_request(request):
+    context = ShapeContext(
+        wire_shape=WireShape.OPENAI_COMPLETION,
+        endpoint_id="test",
+        model_id="test-model",
+    )
+    payload = codec_for_shape(WireShape.OPENAI_COMPLETION).encode(request, context).payload
+    return payload["messages"]
 
 
 if __name__ == "__main__":

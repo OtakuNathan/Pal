@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
+from pal.shared.tool_protocol import new_tool_call
+
 import asyncio
 import contextlib
 import inspect
@@ -49,7 +53,7 @@ from pal.execution.tool_registry import (
     ToolRegistryGeneration,
     compile_registry_generation,
 )
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
+from pal.shared import ToolExecutionResult
 from pal.plugins.l3.registry import L3PluginRegistry
 from pal.plugins.l3.stubs import NullL3Plugin
 from pal.execution.tool_result_pager import (
@@ -441,7 +445,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def invoke_direct_tool(
         self,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         allow_tools: bool = True,
         budget: ToolCallBudget | None = None,
@@ -460,7 +464,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def invoke_indirect_tool(
         self,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         allow_tools: bool = True,
         budget: ToolCallBudget | None = None,
@@ -479,7 +483,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     async def invoke_direct_tool_async(
         self,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         allow_tools: bool = True,
         budget: ToolCallBudget | None = None,
@@ -498,7 +502,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     async def invoke_indirect_tool_async(
         self,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         allow_tools: bool = True,
         budget: ToolCallBudget | None = None,
@@ -518,7 +522,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def _invoke_tool_record_sync(
         self,
         generation: ToolRegistryGeneration,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         invocation_mode: InvocationMode,
         allow_tools: bool,
@@ -567,7 +571,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     async def _invoke_tool_record_async(
         self,
         generation: ToolRegistryGeneration,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         invocation_mode: InvocationMode,
         allow_tools: bool,
@@ -618,7 +622,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     @staticmethod
     def _resolve_invocation_record(
         generation: ToolRegistryGeneration,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         invocation_mode: InvocationMode,
     ) -> CompiledToolRecord | RejectedResult:
@@ -698,7 +702,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         self,
         generation: ToolRegistryGeneration,
         record: CompiledToolRecord,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         validated: BaseModel | dict[str, Any],
         *,
         allow_tools: bool,
@@ -718,10 +722,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 )
             return self._complete_builtin(record, payload)
         if record.alias == "call_tool":
-            target = CanonicalToolCall(
-                name=str(args.get("name") or ""),
-                args=dict(args.get("args") or {}),
+            target = new_tool_call(
                 call_id=call.call_id,
+                name=str(args.get("name") or ""),
+                arguments=dict(args.get("args") or {}),
             )
             return self._invoke_tool_record_sync(
                 generation,
@@ -744,7 +748,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         self,
         generation: ToolRegistryGeneration,
         record: CompiledToolRecord,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         validated: BaseModel | dict[str, Any],
         *,
         allow_tools: bool,
@@ -764,10 +768,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 )
             return self._complete_builtin(record, payload)
         if record.alias == "call_tool":
-            target = CanonicalToolCall(
-                name=str(args.get("name") or ""),
-                args=dict(args.get("args") or {}),
+            target = new_tool_call(
                 call_id=call.call_id,
+                name=str(args.get("name") or ""),
+                arguments=dict(args.get("args") or {}),
             )
             return await self._invoke_tool_record_async(
                 generation,
@@ -789,7 +793,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def _read_tool_result_builtin(
         self,
         record: CompiledToolRecord,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         args: dict[str, Any],
         *,
         turn_id: str | None,
@@ -1036,7 +1040,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def _call_record_sync(
         self,
         record: CompiledToolRecord,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         validated: BaseModel | dict[str, Any],
         turn_id: str | None,
         budget: ToolCallBudget | None,
@@ -1057,7 +1061,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     async def _call_record_async(
         self,
         record: CompiledToolRecord,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         validated: BaseModel | dict[str, Any],
         turn_id: str | None,
         budget: ToolCallBudget | None,
@@ -1079,7 +1083,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def _normalize_invocation_result(
         self,
         record: CompiledToolRecord,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         raw: Any,
         *,
         budget: ToolCallBudget | None,
@@ -1209,7 +1213,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def _page_validated_output(
         self,
         record: CompiledToolRecord,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         output: Any,
         rendered: str,
         outcome: EffectOutcome,
@@ -1327,11 +1331,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
         alias: str,
         call_id: str | None,
         result: ToolInvocationResult,
-    ) -> CanonicalToolResult:
+    ) -> ToolExecutionResult:
         rendered = ExecutionRuntime._render_invocation_for_llm(result)
         if isinstance(result, CompleteResult):
             structured = result.output if isinstance(result.output, dict) else {"output": result.output}
-            return CanonicalToolResult(
+            return ToolExecutionResult(
                 name=alias,
                 ok=True,
                 text=rendered,
@@ -1347,7 +1351,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 ),
             )
         payload = result.model_dump(mode="json")
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=alias,
             ok=False if isinstance(result, (RejectedResult, FailedResult)) else True,
             text=rendered,
@@ -1396,12 +1400,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def execute_tool(
         self,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         allow_tools: bool = True,
         budget: ToolCallBudget | None = None,
         turn_id: str | None = None,
-    ) -> CanonicalToolResult:
+    ) -> ToolExecutionResult:
         captured = self._registry_generation
         invocation = self.invoke_direct_tool(
             call,
@@ -1414,12 +1418,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     async def execute_tool_async(
         self,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         allow_tools: bool = True,
         budget: ToolCallBudget | None = None,
         turn_id: str | None = None,
-    ) -> CanonicalToolResult:
+    ) -> ToolExecutionResult:
         captured = self._registry_generation
         invocation = await self.invoke_direct_tool_async(
             call,
@@ -1432,7 +1436,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def _invocation_meta(
         self,
-        call: CanonicalToolCall,
+        call: ToolCallIR,
         *,
         turn_id: str | None,
         budget: ToolCallBudget | None,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 from types import SimpleNamespace
 import unittest
@@ -14,7 +16,6 @@ from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelDeliveryError
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
-from pal.llm import CanonicalToolCall
 from tests.runtime_channel_providers import telegram_endpoint_module
 
 
@@ -138,7 +139,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("channel_send_message", direct_names)
 
         search = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(
+            new_tool_call(
                 name="search_tools",
                 args={"query": "send message to channel endpoint", "top_k": 5},
             )
@@ -149,7 +150,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
             [hit["alias"] for hit in search.structured["hits"]],
         )
         read = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(
+            new_tool_call(
                 name="read_tool",
                 args={"name": "channel_send_message"},
             )
@@ -161,7 +162,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(schema["additionalProperties"])
 
         result = await core.context.execution_runtime.execute_tool_async(
-            CanonicalToolCall(
+            new_tool_call(
                 name="call_tool",
                 args={
                     "name": "channel_send_message",
@@ -185,7 +186,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
     async def test_llm_tool_rejects_slash_command(self) -> None:
         core, _, endpoint = self._build_core()
         result = await core.context.execution_runtime.execute_tool_async(
-            CanonicalToolCall(
+            new_tool_call(
                 name="call_tool",
                 args={
                     "name": "channel_send_message",
@@ -212,7 +213,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         )
 
         result = await core.context.execution_runtime.execute_tool_async(
-            CanonicalToolCall(
+            new_tool_call(
                 name="call_tool",
                 args={
                     "name": "channel_send_message",

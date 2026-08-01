@@ -128,7 +128,13 @@ class McpManager:
             errors: list[str] = []
             for path in sorted((*root.glob("*.toml"), *root.glob("*.json"))):
                 try:
-                    for config in load_mcp_server_file(path):
+                    loaded_configs = load_mcp_server_file(path)
+                    if any(config.config.env for config in loaded_configs):
+                        # MCP env blocks commonly hold bearer tokens.  Keep
+                        # them private even when a config was copied in under
+                        # a permissive umask.
+                        path.chmod(0o600)
+                    for config in loaded_configs:
                         discovered[config.config.server_id] = (config, path)
                 except Exception as exc:
                     errors.append(f"{path}:{exc}")

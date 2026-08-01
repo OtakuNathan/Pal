@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import unittest
 
 from pal.core import PalCore as _PalCoreBootstrap
 from pal.execution.approval import ApprovalExecutionDecorator, ExecutionApprovalRequest
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
+from pal.shared import ToolExecutionResult
 
 
 class RecordingRuntime:
     def __init__(self) -> None:
-        self.calls: list[CanonicalToolCall] = []
+        self.calls: list[ToolCallIR] = []
 
-    async def execute_tool_async(self, call: CanonicalToolCall, **_kwargs) -> CanonicalToolResult:
+    async def execute_tool_async(self, call: ToolCallIR, **_kwargs) -> ToolExecutionResult:
         self.calls.append(call)
-        return CanonicalToolResult(name=call.name, ok=True, text="ok", llm_text="ok", status="ok")
+        return ToolExecutionResult(name=call.name, ok=True, text="ok", llm_text="ok", status="ok")
 
 
 class ApprovalExecutionDecoratorTests(unittest.TestCase):
@@ -32,7 +34,7 @@ class ApprovalExecutionDecoratorTests(unittest.TestCase):
                 request=lambda request, _call: requested.append(request.risk) or "accept",
             )
 
-            result = await runtime.execute_tool_async(CanonicalToolCall(name="op_test", args={}))
+            result = await runtime.execute_tool_async(new_tool_call(name="op_test", args={}))
 
             self.assertTrue(result.ok)
             self.assertEqual(requested, ["high"])
@@ -53,7 +55,7 @@ class ApprovalExecutionDecoratorTests(unittest.TestCase):
                 request=lambda _request, _call: "reject",
             )
 
-            result = await runtime.execute_tool_async(CanonicalToolCall(name="op_test", args={}))
+            result = await runtime.execute_tool_async(new_tool_call(name="op_test", args={}))
 
             self.assertFalse(result.ok)
             self.assertEqual(result.structured["reason"], "approval_not_accepted")

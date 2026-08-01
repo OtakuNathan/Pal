@@ -12,16 +12,16 @@ from pal.channel.contracts import (
     ChannelEnvelope,
     ChannelMessageReceipt,
     ChannelRuntimePort,
+    ChannelStreamUpdate,
     QueuedAttachment,
     QueuedReply,
     QueuedStatus,
-    QueuedStreamEvent,
+    QueuedStreamUpdate,
 )
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
 from pal.core.mailbox import Mailbox
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
-from pal.stream_events import NormalizedLLMStreamEvent
 
 
 @dataclass
@@ -63,7 +63,7 @@ class ChannelRuntime(ChannelRuntimePort):
     outbox: deque[QueuedReply] = field(default_factory=deque)
     attachment_outbox: deque[QueuedAttachment] = field(default_factory=deque)
     status_outbox: deque[QueuedStatus] = field(default_factory=deque)
-    stream_outbox: deque[QueuedStreamEvent] = field(default_factory=deque)
+    stream_update_outbox: deque[QueuedStreamUpdate] = field(default_factory=deque)
     on_ready: Callable[[], None] | None = None
     control_catalog_payload: dict[str, object] | None = None
     _loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
@@ -222,7 +222,7 @@ class ChannelRuntime(ChannelRuntimePort):
             endpoint.flush_status_outbox()
             for event in endpoint.flush_attachment_outbox():
                 self.mailbox.put(event)
-            for event in endpoint.flush_stream_outbox():
+            for event in endpoint.flush_stream_update_outbox():
                 self.mailbox.put(event)
             for event in endpoint.flush_outbox():
                 self.mailbox.put(event)
@@ -261,21 +261,21 @@ class ChannelRuntime(ChannelRuntimePort):
         self._notify_ready()
         return reply_id
 
-    def queue_stream_event(self, envelope: ChannelEnvelope, event: NormalizedLLMStreamEvent) -> str:
+    def queue_stream_update(self, envelope: ChannelEnvelope, update: ChannelStreamUpdate) -> str:
         endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
         if endpoint is not None:
-            return endpoint.queue_stream_event(event, response_handle=envelope.response_handle)
-        event_id = str(uuid4())
-        self.stream_outbox.append(
-            QueuedStreamEvent(
-                event_id=event_id,
+            return endpoint.queue_stream_update(update, response_handle=envelope.response_handle)
+        update_id = str(uuid4())
+        self.stream_update_outbox.append(
+            QueuedStreamUpdate(
+                update_id=update_id,
                 response_handle=envelope.response_handle,
                 endpoint=envelope.endpoint,
-                event=event,
+                update=update,
             )
         )
         self._notify_ready()
-        return event_id
+        return update_id
 
     def queue_attachment(self, envelope: ChannelEnvelope, attachment: AttachmentSpec) -> str:
         endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
@@ -298,17 +298,17 @@ class ChannelRuntime(ChannelRuntimePort):
             if endpoint.endpoint.endpoint_id == response_handle.endpoint_id:
                 endpoint.abort_stream(response_handle, reason=reason)
                 break
-        if not self.stream_outbox:
+        if not self.stream_update_outbox:
             return
-        remaining: deque[QueuedStreamEvent] = deque()
-        while self.stream_outbox:
-            queued = self.stream_outbox.popleft()
+        remaining: deque[QueuedStreamUpdate] = deque()
+        while self.stream_update_outbox:
+            queued = self.stream_update_outbox.popleft()
             same_endpoint = queued.response_handle.endpoint_id == response_handle.endpoint_id
             same_target = queued.response_handle.reply_target == response_handle.reply_target
             if same_endpoint and same_target:
                 continue
             remaining.append(queued)
-        self.stream_outbox = remaining
+        self.stream_update_outbox = remaining
 
     def queue_status(
         self,
@@ -369,8 +369,8 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def flush_outbox(self) -> None:
         self.sync_endpoints()
-        if self.stream_outbox:
-            self.stream_outbox.clear()
+        if self.stream_update_outbox:
+            self.stream_update_outbox.clear()
         if self.status_outbox:
             self.status_outbox.clear()
         if self.attachment_outbox:

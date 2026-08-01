@@ -9,12 +9,8 @@ from pal.llm.models import LLMEndpointModel
 from pal.llm.secret_store import KeyringSecretStore, SecretRef, SecretStorePort
 
 
-def default_env_var_for_endpoint(endpoint: LLMEndpointModel) -> str | None:
-    if endpoint.api_mode == "anthropic_messages" or endpoint.provider.lower() == "anthropic":
-        return "ANTHROPIC_API_KEY"
-    if endpoint.api_mode == "openai_chat" or endpoint.provider.lower() == "openai":
-        return "OPENAI_API_KEY"
-    return None
+class LLMCredentialUnavailableError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -88,14 +84,8 @@ class LLMCredentialResolver:
         return ResolvedLLMAuth(kind="api_key_ref", secret_ref=secret_ref, api_key=self.resolve_api_key(endpoint))
 
     def _candidate_env_vars(self, endpoint: LLMEndpointModel) -> list[str]:
-        candidates: list[str] = []
         credential_ref = str(endpoint.credential_ref or "").strip()
-        if credential_ref:
-            candidates.append(credential_ref)
-        default_env = default_env_var_for_endpoint(endpoint)
-        if default_env and default_env not in candidates:
-            candidates.append(default_env)
-        return candidates
+        return [credential_ref] if credential_ref else []
 
     def _get_from_keyring(self, endpoint: LLMEndpointModel) -> str | None:
         secret_ref = self.secret_ref_for_endpoint(endpoint)

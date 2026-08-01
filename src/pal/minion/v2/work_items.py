@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 import hashlib
 import json
 from pathlib import PurePosixPath
@@ -8,13 +10,12 @@ from typing import Any, Literal, Mapping
 from pydantic import Field
 
 from pal.execution.tool_facade import StrictToolModel, rejection
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
     SubmissionDraftStore,
     assert_authoring_schema_budget,
 )
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 UPDATE_CHECKLIST_CAPABILITY = "op_minion_update_checklist"
@@ -254,9 +255,9 @@ def submission_work_items(value: Any) -> list[dict[str, str]]:
 
 
 def update_checklist_tool_result(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: Mapping[str, Any],
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     try:
         checklist = normalize_checklist(dict(call.args or {}))
         context = work_item_context(workspace)
@@ -367,9 +368,9 @@ def update_checklist_tool_result(
 
 
 def add_finding_tool_result(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: Mapping[str, Any],
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     try:
         finding = normalize_finding(dict(call.args or {}))
         binding = dict(workspace.get("minion_v2") or {})
@@ -663,11 +664,11 @@ def _runtime_root(workspace: Mapping[str, Any]):
 
 
 def _ok(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     text: str,
     structured: Mapping[str, Any],
-) -> CanonicalToolResult:
-    return CanonicalToolResult(
+) -> ToolExecutionResult:
+    return ToolExecutionResult(
         name=call.name,
         ok=True,
         text=text,
@@ -679,13 +680,13 @@ def _ok(
 
 
 def _invalid(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     exc: Exception,
     recovery: str,
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     text = f"{exc.__class__.__name__}: {exc}"
     llm_text = f"{text} {recovery}"
-    return CanonicalToolResult(
+    return ToolExecutionResult(
         name=call.name,
         ok=False,
         text=text,

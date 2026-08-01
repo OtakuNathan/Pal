@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pal.execution.generated_tool_models import (
     MinionV2AskQuestionInput,
 )
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 ASK_QUESTION_CAPABILITY = "op_minion_ask_question"
@@ -34,14 +35,14 @@ ASK_QUESTION_TOOL_SPEC: dict[str, Any] = {
 
 
 async def ask_question_tool_result(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     *,
     request_user: (
         Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None
     ),
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     if request_user is None:
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=False,
             text="Architect user interaction is unavailable in this runtime",
@@ -90,7 +91,7 @@ async def ask_question_tool_result(
             str(answers[0].get("answer") or "") if answers else ""
         )
         if not answer.strip():
-            return CanonicalToolResult(
+            return ToolExecutionResult(
                 name=call.name,
                 ok=False,
                 text="Architect user question was cancelled",
@@ -107,7 +108,7 @@ async def ask_question_tool_result(
             raise RuntimeError(
                 "Manager returned an answer without appending task.yaml"
             )
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=True,
             text=f"User answered: {answer}",
@@ -127,7 +128,7 @@ async def ask_question_tool_result(
         )
     except Exception as exc:
         text = f"{exc.__class__.__name__}: {exc}"
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=False,
             text=text,

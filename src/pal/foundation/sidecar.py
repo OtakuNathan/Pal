@@ -5,7 +5,7 @@ import contextlib
 import inspect
 import os
 import socket
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -90,6 +90,76 @@ class SidecarRpcClient:
                 payload={"method": method, "timeout_seconds": timeout},
             ) from exc
 
+    async def stream(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield one result per sidecar frame until the stream terminates.
+
+        The timeout is an idle timeout for each frame, rather than a deadline for
+        the whole stream. Closing or cancelling the iterator closes the owned
+        sidecar connection.
+        """
+
+        timeout = max(float(self.request_timeout_seconds), 0.001)
+        request_id = str(uuid4())
+        if self.unix_only:
+            reader, writer = await open_sidecar_connection(
+                self.endpoint,
+                unix_only=True,
+            )
+        else:
+            reader, writer = await open_sidecar_connection(self.endpoint)
+        try:
+            writer.write(
+                pack_sidecar_message(
+                    {
+                        "type": "request",
+                        "id": request_id,
+                        "method": method,
+                        "params": dict(params or {}),
+                        "stream": True,
+                    }
+                )
+            )
+            await writer.drain()
+            while True:
+                try:
+                    response = await asyncio.wait_for(
+                        read_sidecar_message(reader),
+                        timeout=timeout,
+                    )
+                except TimeoutError as exc:
+                    raise SidecarRpcError(
+                        f"sidecar stream was idle for {timeout:.3g}s",
+                        kind="timeout",
+                        payload={"method": method, "timeout_seconds": timeout},
+                    ) from exc
+                if str(response.get("id") or "") != request_id:
+                    raise SidecarRpcError(
+                        "sidecar returned mismatched stream request id",
+                        payload=response,
+                    )
+                frame_type = str(response.get("type") or "")
+                if frame_type == "stream_item":
+                    if not bool(response.get("ok")):
+                        raise _sidecar_error_from_response(response)
+                    yield dict(response.get("result") or {})
+                    continue
+                if frame_type == "stream_end":
+                    if not bool(response.get("ok")):
+                        raise _sidecar_error_from_response(response)
+                    return
+                raise SidecarRpcError(
+                    f"sidecar returned unexpected stream frame: {frame_type or '<missing>'}",
+                    payload=response,
+                )
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
     async def _request_once(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = str(uuid4())
         if self.unix_only:
@@ -118,17 +188,21 @@ class SidecarRpcClient:
         if str(response.get("id") or "") != request_id:
             raise SidecarRpcError("sidecar returned mismatched request id", payload=response)
         if not bool(response.get("ok")):
-            error = dict(response.get("error") or {})
-            raise SidecarRpcError(
-                str(error.get("message") or "sidecar request failed"),
-                kind=str(error.get("kind") or "protocol"),
-                payload=error,
-            )
+            raise _sidecar_error_from_response(response)
         result = response.get("result")
         return dict(result or {})
 
     def request_sync(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return run_blocking(self.request(method, params))
+
+
+def _sidecar_error_from_response(response: dict[str, Any]) -> SidecarRpcError:
+    error = dict(response.get("error") or {})
+    return SidecarRpcError(
+        str(error.get("message") or "sidecar request failed"),
+        kind=str(error.get("kind") or "protocol"),
+        payload=error,
+    )
 
 
 def run_blocking(awaitable):

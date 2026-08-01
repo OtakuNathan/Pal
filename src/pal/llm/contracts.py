@@ -1,9 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Protocol
+from pal.shared.tool_protocol import ToolCallIR as _ToolCallIR
 
-from pal.stream_events import NormalizedLLMStreamEvent
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Protocol
+
+from pal.llm.ir import (
+    LLMFinishReason,
+    LLMRequestIR,
+    LLMResponseIR,
+    LLMResponseUpdate,
+    LLMMessageIR,
+    LLMUsageIR,
+    MessageRole,
+    ReasoningPartIR,
+    TextPartIR,
+)
+from pal.llm.conversions import request_ir_from_prompt
 
 
 @dataclass(frozen=True)
@@ -77,72 +90,70 @@ def _normalize_thinking_name(value: object) -> str:
 
 
 @dataclass(frozen=True)
-class CanonicalLLMRequest:
-    messages: list[dict[str, Any]]
-    max_output_tokens: int
-    model_hint: str | None = None
-    temperature: float | None = None
-    tools: list[dict[str, Any]] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-    thinking_budget_tokens: int | None = None
-
-
-@dataclass(frozen=True)
-class CanonicalToolCall:
-    name: str
-    args: dict[str, Any]
-    call_id: str | None = None
-
-
-@dataclass(frozen=True)
-class CanonicalToolResult:
-    name: str
-    ok: bool
-    llm_text: str
-    text: str = ""
-    structured: dict[str, Any] | None = None
-    call_id: str | None = None
-    status: str = ""
-    invocation_result: Any | None = None
-    context_delivery: dict[str, Any] | None = None
-
-    def __post_init__(self) -> None:
-        if not str(self.llm_text or "").strip():
-            raise ValueError("CanonicalToolResult.llm_text must be non-empty")
-        if not str(self.status or "").strip():
-            object.__setattr__(self, "status", "ok" if self.ok else "error")
-
-
-@dataclass(frozen=True)
-class CanonicalLLMOutcome:
-    text: str = ""
-    reasoning_text: str = ""
-    tool_calls: list[CanonicalToolCall] = field(default_factory=list)
-    finish_reason: str = "stop"
-    input_tokens: int = 0
-    uncached_input_tokens: int = 0
-    cached_input_tokens: int = 0
-    cache_write_input_tokens: int = 0
-    output_tokens: int = 0
-    reasoning_tokens: int = 0
-    cost: float = 0.0
-    usage_reported: bool = False
-    provider_response_count: int = 0
+class LLMGenerationResult:
+    response: LLMResponseIR
     response_mode: str | None = None
     target_input_budget: int = 0
     reserved_output_tokens: int = 0
     preferred_endpoint_id: str | None = None
     preferred_model_id: str | None = None
-    provider_specific_fields: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def text(self) -> str:
+        return self.response.text
+
+    @property
+    def reasoning_text(self) -> str:
+        return self.response.reasoning_text
+
+    @property
+    def tool_calls(self) -> tuple[_ToolCallIR, ...]:
+        return self.response.tool_calls
+
+    @property
+    def finish_reason(self) -> LLMFinishReason:
+        return self.response.finish_reason
+
+    @property
+    def input_tokens(self) -> int:
+        return self.response.usage.input_tokens
+
+    @property
+    def uncached_input_tokens(self) -> int:
+        return self.response.usage.uncached_input_tokens
+
+    @property
+    def cached_input_tokens(self) -> int:
+        return self.response.usage.cached_input_tokens
+
+    @property
+    def cache_write_input_tokens(self) -> int:
+        return self.response.usage.cache_write_input_tokens
+
+    @property
+    def output_tokens(self) -> int:
+        return self.response.usage.output_tokens
+
+    @property
+    def reasoning_tokens(self) -> int:
+        return self.response.usage.reasoning_tokens
+
+    @property
+    def cost(self) -> float:
+        return self.response.usage.cost
+
+    @property
+    def usage_reported(self) -> bool:
+        return self.response.usage.reported
+
+    @property
+    def provider_response_count(self) -> int:
+        return self.response.provider_response_count
 
 
 @dataclass(frozen=True)
 class LLMPreflightRequest:
-    messages: list[dict[str, Any]]
-    max_output_tokens: int
-    model_hint: str | None = None
-    tools: list[dict[str, Any]] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    request: LLMRequestIR
 
 
 @dataclass(frozen=True)
@@ -162,14 +173,75 @@ class LLMRuntimePort(Protocol):
     async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
         ...
 
-    def generate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
+    def generate(self, request: LLMRequestIR) -> LLMGenerationResult:
         ...
 
-    async def agenerate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
+    async def agenerate(self, request: LLMRequestIR) -> LLMGenerationResult:
         ...
 
-    def generate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
+    def astream(self, request: LLMRequestIR) -> AsyncIterator[LLMResponseUpdate]:
         ...
 
-    async def agenerate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
-        ...
+def generation_result_from_values(
+    text: str = "",
+    *,
+    reasoning_text: str = "",
+    tool_calls: list[_ToolCallIR] | tuple[_ToolCallIR, ...] = (),
+    finish_reason: LLMFinishReason | str = LLMFinishReason.STOP,
+    input_tokens: int = 0,
+    uncached_input_tokens: int = 0,
+    cached_input_tokens: int = 0,
+    cache_write_input_tokens: int = 0,
+    output_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    cost: float = 0.0,
+    usage_reported: bool = False,
+    provider_response_count: int = 1,
+    response_mode: str | None = None,
+    target_input_budget: int = 0,
+    reserved_output_tokens: int = 0,
+    preferred_endpoint_id: str | None = None,
+    preferred_model_id: str | None = None,
+) -> LLMGenerationResult:
+    reason = _normalize_finish_reason(finish_reason)
+    parts: list[Any] = []
+    if reasoning_text:
+        parts.append(ReasoningPartIR(str(reasoning_text)))
+    if text:
+        parts.append(TextPartIR(str(text)))
+    parts.extend(tool_calls)
+    return LLMGenerationResult(
+        response=LLMResponseIR(
+            message=LLMMessageIR(role=MessageRole.ASSISTANT, parts=tuple(parts)),
+            finish_reason=reason,
+            usage=LLMUsageIR(
+                input_tokens=input_tokens,
+                uncached_input_tokens=uncached_input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                cache_write_input_tokens=cache_write_input_tokens,
+                output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens,
+                cost=cost,
+                reported=usage_reported,
+            ),
+            provider_response_count=provider_response_count,
+        ),
+        response_mode=response_mode,
+        target_input_budget=target_input_budget,
+        reserved_output_tokens=reserved_output_tokens,
+        preferred_endpoint_id=preferred_endpoint_id,
+        preferred_model_id=preferred_model_id,
+    )
+
+
+def _normalize_finish_reason(value: LLMFinishReason | str) -> LLMFinishReason:
+    if isinstance(value, LLMFinishReason):
+        return value
+    normalized = str(value or "").strip().lower()
+    if normalized in {"length", "max_tokens", "max_output_tokens", "token_limit", "output_truncated"}:
+        return LLMFinishReason.LENGTH
+    if normalized in {"tool_calls", "tool_use", "function_call"}:
+        return LLMFinishReason.TOOL_CALLS
+    if normalized in {"error", "failed", "cancelled", "canceled"}:
+        return LLMFinishReason.ERROR
+    return LLMFinishReason(normalized or LLMFinishReason.STOP.value)

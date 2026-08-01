@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +9,7 @@ from types import SimpleNamespace
 from pal.core import PalCore
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.llm import EndpointResolver, LLMRuntime, RuntimeSettingRepository
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
+from pal.llm.contracts import generation_result_from_values, request_ir_from_prompt
 from pal.llm.capabilities import LLMIntrospectionProvider, register_with_core as register_llm_with_core
 from pal.runtime_app import open_runtime
 from pal.shared import LLMFinishReason
@@ -20,11 +19,12 @@ class _FailoverInvoker:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def invoke(self, endpoint, request):
+    def invoke(self, endpoint, request, **kwargs):
+        _ = kwargs
         self.calls.append(endpoint.endpoint_id)
         if endpoint.endpoint_id == "broken":
             raise RuntimeError("broken endpoint")
-        return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
+        return generation_result_from_values(text=f"ok:{endpoint.endpoint_id}").response, ()
 
     def invoke_stream(self, endpoint, request):
         raise NotImplementedError
@@ -35,13 +35,24 @@ def _fake_endpoint(endpoint_id: str, model_id: str):
         endpoint_id=endpoint_id,
         model_id=model_id,
         provider="openai",
-        base_url="",
+        display_name=model_id,
+        wire_shape="openai_completion",
+        base_url="https://example.test/v1",
+        auth_kind="api_key_ref",
+        credential_ref=f"{endpoint_id.upper()}_API_KEY",
         capabilities_blob={},
+        thinking_levels_blob=["off"],
+        default_thinking_level="off",
+        supports_tools=True,
         supports_streaming=False,
         supports_vision=False,
         max_output_tokens=1024,
         context_window=8192,
         input_modalities_blob=[],
+        output_modalities_blob=[],
+        priority=0,
+        enabled=True,
+        notes=None,
     )
 
 
@@ -82,7 +93,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                     settings_repository=RuntimeSettingRepository(),
                     endpoint_invoker=invoker,
                 )
-                request = CanonicalLLMRequest(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64)
+                request = request_ir_from_prompt(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64)
 
                 first = runtime.generate(request)
                 second = runtime.generate(request)
@@ -108,7 +119,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         )
 
         outcome = runtime.generate(
-            CanonicalLLMRequest(
+            request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hi"}],
                 max_output_tokens=64,
                 metadata={"preferred_endpoint_id": "missing", "preferred_endpoint_source": "profile"},
@@ -135,7 +146,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         )
 
         outcome = runtime.generate(
-            CanonicalLLMRequest(
+            request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hi"}],
                 max_output_tokens=64,
                 metadata={"preferred_endpoint_id": "broken", "preferred_endpoint_source": "profile"},
@@ -184,7 +195,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         )
 
         outcome = runtime.generate(
-            CanonicalLLMRequest(
+            request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hi"}],
                 max_output_tokens=64,
                 metadata={"endpoint_fallback_policy": "none"},
@@ -197,71 +208,17 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         self.assertNotIn("broken endpoint", outcome.text)
         self.assertEqual(invoker.calls, ["broken"])
 
-    def test_codex_cli_connection_failure_skips_same_failure_domain(self) -> None:
-        class _Invoker:
-            def __init__(self) -> None:
-                self.calls: list[str] = []
-
-            def invoke(self, endpoint, request):
-                _ = request
-                self.calls.append(endpoint.endpoint_id)
-                if str(endpoint.provider) == "codex_cli":
-                    raise TimeoutError("timed out waiting for codex app-server output")
-                return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
-
-            def invoke_stream(self, endpoint, request):
-                raise NotImplementedError
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            handle = open_runtime(Path(tmpdir))
-            try:
-                codex_a = SimpleNamespace(
-                    endpoint_id="codex_a",
-                    model_id="gpt-5.4",
-                    provider="codex_cli",
-                    base_url="codex://cli",
-                    capabilities_blob={"official_codex_cli": True},
-                    supports_streaming=False,
-                    max_output_tokens=1024,
-                    context_window=8192,
-                )
-                codex_b = SimpleNamespace(
-                    endpoint_id="codex_b",
-                    model_id="gpt-5.3-codex-spark",
-                    provider="codex_cli",
-                    base_url="codex://cli",
-                    capabilities_blob={"official_codex_cli": True},
-                    supports_streaming=False,
-                    max_output_tokens=1024,
-                    context_window=8192,
-                )
-                glm = _fake_endpoint("glm", "glm-5.1")
-                glm.provider = "zhipu"
-                invoker = _Invoker()
-                runtime = LLMRuntime(
-                    endpoint_resolver=EndpointResolver(endpoints=(codex_a, codex_b, glm)),
-                    settings_repository=RuntimeSettingRepository(),
-                    endpoint_invoker=invoker,
-                )
-
-                outcome = runtime.generate(CanonicalLLMRequest(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64))
-
-                self.assertEqual(outcome.text, "ok:glm")
-                self.assertEqual(invoker.calls, ["codex_a", "glm"])
-            finally:
-                asyncio.run(handle.stop_async())
-
     def test_timeout_error_exhausts_endpoint_and_falls_back(self) -> None:
         class _Invoker:
             def __init__(self) -> None:
                 self.calls: list[str] = []
 
-            def invoke(self, endpoint, request):
-                _ = request
+            def invoke(self, endpoint, request, **kwargs):
+                _ = request, kwargs
                 self.calls.append(endpoint.endpoint_id)
                 if endpoint.endpoint_id == "slow":
                     raise TimeoutError("timed out waiting for provider response")
-                return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
+                return generation_result_from_values(text=f"ok:{endpoint.endpoint_id}").response, ()
 
             def invoke_stream(self, endpoint, request):
                 raise NotImplementedError
@@ -278,14 +235,14 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
             event_sink=events.append,
         )
 
-        outcome = runtime.generate(CanonicalLLMRequest(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64))
+        outcome = runtime.generate(request_ir_from_prompt(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64))
 
         self.assertEqual(outcome.text, "ok:working")
-        self.assertEqual(invoker.calls, ["slow", "working"])
+        self.assertEqual(invoker.calls, ["slow", "slow", "slow", "working"])
         self.assertEqual(events[0]["phase"], "llm_endpoint_attempt_failed")
         self.assertEqual(events[0]["error_kind"], "timeout")
-        self.assertEqual(events[1]["phase"], "llm_endpoint_exhausted")
-        self.assertEqual(events[1]["reason"], "timeout")
+        self.assertEqual(events[3]["phase"], "llm_endpoint_exhausted")
+        self.assertEqual(events[3]["reason"], "timeout")
         self.assertIn("llm_endpoint_fallback_succeeded", [event["phase"] for event in events])
 
     def test_bad_request_skips_identical_retry_and_falls_back(self) -> None:
@@ -293,12 +250,12 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls: list[str] = []
 
-            def invoke(self, endpoint, request):
-                _ = request
+            def invoke(self, endpoint, request, **kwargs):
+                _ = request, kwargs
                 self.calls.append(endpoint.endpoint_id)
                 if endpoint.endpoint_id == "malformed":
                     raise RuntimeError("Error code: 400 - invalid tool continuation")
-                return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
+                return generation_result_from_values(text=f"ok:{endpoint.endpoint_id}").response, ()
 
             def invoke_stream(self, endpoint, request):
                 raise NotImplementedError
@@ -316,7 +273,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         )
 
         outcome = runtime.generate(
-            CanonicalLLMRequest(
+            request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hi"}],
                 max_output_tokens=64,
             )
@@ -333,13 +290,12 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls: list[str] = []
 
-            def invoke(self, endpoint, request):
-                _ = request
+            def invoke(self, endpoint, request, **kwargs):
+                _ = request, kwargs
                 self.calls.append(endpoint.endpoint_id)
                 if endpoint.endpoint_id == "blocked":
-                    time.sleep(2.0)
-                    return CanonicalLLMOutcome(text="late blocked reply")
-                return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
+                    raise TimeoutError("provider exceeded configured timeout")
+                return generation_result_from_values(text=f"ok:{endpoint.endpoint_id}").response, ()
 
             def invoke_stream(self, endpoint, request):
                 raise NotImplementedError
@@ -353,7 +309,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
             endpoint_invoker=invoker,
             endpoint_retry_attempts=1,
         )
-        request = CanonicalLLMRequest(
+        request = request_ir_from_prompt(
             messages=[{"role": "user", "content": "hi"}],
             max_output_tokens=64,
             metadata={"timeout_seconds": 1},

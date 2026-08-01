@@ -19,7 +19,7 @@ from pal.behavior.contracts import (
 from pal.behavior.decorators import SkillBlueprint
 from pal.behavior.repository import BehaviorRepository
 from pal.foundation.persistence import database_proxy, utc_now
-from pal.llm.contracts import CanonicalLLMRequest
+from pal.llm.conversions import request_ir_from_prompt
 from pal.shared import LLMFinishReason
 from pal.shared.text_search import jieba_search_terms
 from pal.skill.contracts import (
@@ -198,7 +198,7 @@ class SkillService:
                 desired_skill_id=desired_skill_id,
                 risk_hints=risk_hints,
             )
-        request = CanonicalLLMRequest(
+        request = request_ir_from_prompt(
             messages=[
                 {"role": "system", "content": _SANITIZER_SYSTEM_PROMPT},
                 {

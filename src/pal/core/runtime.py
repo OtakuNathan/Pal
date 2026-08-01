@@ -39,7 +39,8 @@ from pal.execution.contracts import CapabilityResult
 from pal.foundation import AttachmentSpec, EventEnvelope, utc_now
 from pal.foundation.log_paths import pal_log_path
 from pal.failure import FailureSignal, FailureUserFeedback
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
+from pal.llm.contracts import LLMGenerationResult
+from pal.llm.ir import LLMRequestIR
 from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryCommitRequest
 from pal.memory.compact import coerce_memory_candidate_list, memory_candidates_from_compact_result
 from pal.memory.interactions import memory_candidate_approval_delivery
@@ -148,7 +149,7 @@ class TurnManager:
             if isinstance(continuation, TurnContinuation):
                 continuation.interrupted = True
                 continuation.interrupt_reason = reason
-                self._queue_interrupted_turn_settlement(scope_state, continuation)
+                await self._close_l1_turn_async(continuation, state="interrupted", reason=reason)
             output_port = self.context.port_registry.get("agent_io:output") or self.context.port_registry.get("channel:channel")
             if output_port is not None and isinstance(continuation, TurnContinuation):
                 abort_result = output_port.abort_stream(continuation.channel_envelope.response_handle, reason=reason)
@@ -175,25 +176,15 @@ class TurnManager:
         if isinstance(continuation, TurnContinuation):
             continuation.interrupted = True
             continuation.interrupt_reason = reason
-            if reason == "interrupted":
-                scope_key = continuation.control_scope_key or self.state.turn_scopes.get(turn_id) or ""
-                if scope_key:
-                    self._queue_interrupted_turn_settlement(self._ensure_scope_state(scope_key), continuation)
+            memory_service = self.context.port_registry.get("memory:memory")
+            close = getattr(memory_service, "interrupt_l1_turn", None)
+            if callable(close):
+                try:
+                    close(continuation.turn_id, reason=reason)
+                except Exception:
+                    pass
         self.guard.clear(turn_id)
         self._mark_turn_exited(turn_id)
-
-    @staticmethod
-    def _queue_interrupted_turn_settlement(scope_state: Any, continuation: TurnContinuation) -> None:
-        event = getattr(getattr(continuation, "channel_envelope", None), "event", None)
-        if str(getattr(event, "event_kind", "") or "") != EventKind.USER_MESSAGE:
-            return
-        if continuation.l1_interrupted_settlement_queued or continuation.l1_interrupted_settlement_committed:
-            return
-        queue = getattr(scope_state, "interrupted_turns_to_settle", None)
-        if queue is None:
-            return
-        queue.append(continuation)
-        continuation.l1_interrupted_settlement_queued = True
 
     async def commit_l1_exit_checkpoint_async(
         self,
@@ -203,380 +194,36 @@ class TurnManager:
         status: str,
         reason: str,
     ) -> None:
-        if continuation.l1_exit_checkpoint_committed:
-            return
-        transcript = self._build_l1_exit_checkpoint_transcript(
-            continuation,
-            kind=kind,
-            status=status,
-            reason=reason,
-        )
-        if not transcript:
-            return
-        continuation.l1_exit_checkpoint_committed = True
-        memory_service = self.context.port_registry.get("memory:memory")
-        if memory_service is None:
-            return
-        try:
-            request = MemoryCommitRequest(
-                turn_id=continuation.turn_id,
-                transcript=transcript,
-                metadata={"exit_checkpoint_status": status},
-            )
-            async_method = getattr(memory_service, "acommit_l1", None)
-            if callable(async_method):
-                result = async_method(request)
-                if inspect.isawaitable(result):
-                    result = await result
-            else:
-                sync_method = getattr(memory_service, "commit_l1")
-                result = await asyncio.to_thread(sync_method, request)
-        except Exception as exc:
-            self.state.diagnostics.append(
-                {
-                    "kind": "memory.exit_checkpoint.failed",
-                    "turn_id": continuation.turn_id,
-                    "status": status,
-                    "error": f"{exc.__class__.__name__}: {exc}",
-                }
-            )
-            return
-        if getattr(result, "status", RuntimeStatus.OK) != RuntimeStatus.OK:
-            self.state.diagnostics.append(
-                {
-                    "kind": "memory.exit_checkpoint.retry",
-                    "turn_id": continuation.turn_id,
-                    "status": getattr(result, "status", ""),
-                    "exit_status": status,
-                }
-            )
+        _ = (kind, status)
+        await self._close_l1_turn_async(continuation, state="aborted", reason=reason)
 
-    async def commit_l1_interrupted_settlement_async(self, continuation: TurnContinuation) -> None:
-        if continuation.l1_interrupted_settlement_committed:
-            return
-        transcript = self._build_l1_interrupted_settlement_transcript(continuation)
-        continuation.l1_interrupted_settlement_committed = True
-        if not transcript:
-            return
+    async def _close_l1_turn_async(
+        self,
+        continuation: TurnContinuation,
+        *,
+        state: str,
+        reason: str,
+    ) -> None:
         memory_service = self.context.port_registry.get("memory:memory")
-        if memory_service is None:
+        method_name = {
+            "interrupted": "interrupt_l1_turn",
+            "aborted": "abort_l1_turn",
+        }.get(state)
+        method = getattr(memory_service, method_name or "", None)
+        if not callable(method):
             return
         try:
-            request = MemoryCommitRequest(
-                turn_id=continuation.turn_id,
-                transcript=transcript,
-                metadata={"exit_status": "interrupted_settlement"},
-            )
-            async_method = getattr(memory_service, "acommit_l1", None)
-            if callable(async_method):
-                result = async_method(request)
-                if inspect.isawaitable(result):
-                    result = await result
-            else:
-                sync_method = getattr(memory_service, "commit_l1")
-                result = await asyncio.to_thread(sync_method, request)
+            value = method(continuation.turn_id, reason=reason)
+            if inspect.isawaitable(value):
+                await value
         except Exception as exc:
             self.state.diagnostics.append(
                 {
-                    "kind": "memory.interrupted_settlement.failed",
+                    "kind": f"memory.turn.{state}_failed",
                     "turn_id": continuation.turn_id,
                     "error": f"{exc.__class__.__name__}: {exc}",
                 }
             )
-            return
-        if getattr(result, "status", RuntimeStatus.OK) != RuntimeStatus.OK:
-            self.state.diagnostics.append(
-                {
-                    "kind": "memory.interrupted_settlement.retry",
-                    "turn_id": continuation.turn_id,
-                    "status": getattr(result, "status", ""),
-                }
-            )
-
-    def _build_l1_interrupted_settlement_transcript(
-        self,
-        continuation: TurnContinuation,
-    ) -> list[L1TranscriptMessage]:
-        transcript, protocol_assistant_contents = self._uncommitted_l1_turn_prefix(
-            continuation,
-        )
-        for text in continuation.emitted_reply_texts:
-            rendered = str(text or "").strip()
-            if not rendered:
-                continue
-            if rendered in protocol_assistant_contents:
-                continue
-            transcript.append(
-                self._tag_l1_turn_message(
-                    continuation,
-                    L1TranscriptMessage(
-                        role="assistant",
-                        content=rendered,
-                        kind=L1MessageKind.ASSISTANT_REPLY,
-                    ),
-                )
-            )
-        return transcript
-
-    def _build_l1_exit_checkpoint_transcript(
-        self,
-        continuation: TurnContinuation,
-        *,
-        kind: L1MessageKind,
-        status: str,
-        reason: str,
-    ) -> list[L1TranscriptMessage]:
-        user_text = extract_text_from_payload(continuation.channel_envelope.event.payload).strip()
-        transcript, protocol_assistant_contents = self._uncommitted_l1_turn_prefix(
-            continuation,
-        )
-
-        for text in continuation.emitted_reply_texts:
-            rendered = str(text or "").strip()
-            if not rendered:
-                continue
-            if rendered in protocol_assistant_contents:
-                continue
-            transcript.append(
-                self._tag_l1_turn_message(
-                    continuation,
-                    L1TranscriptMessage(
-                        role="assistant",
-                        content=rendered,
-                        kind=L1MessageKind.ASSISTANT_REPLY,
-                    ),
-                )
-            )
-
-        summary = self._render_l1_exit_checkpoint_summary(
-            continuation,
-            kind=kind,
-            status=status,
-            reason=reason,
-            user_text=user_text,
-        )
-        transcript.append(
-            self._tag_l1_turn_message(
-                continuation,
-                L1TranscriptMessage(role="assistant", content=summary, kind=kind),
-            )
-        )
-        return transcript
-
-    def _uncommitted_l1_turn_prefix(
-        self,
-        continuation: TurnContinuation,
-    ) -> tuple[list[L1TranscriptMessage], list[str]]:
-        """Return only the closed current-turn material not already in L1."""
-
-        transcript: list[L1TranscriptMessage] = []
-        user_text = extract_text_from_payload(
-            continuation.channel_envelope.event.payload
-        ).strip()
-        if user_text and not continuation.l1_input_committed:
-            transcript.append(
-                self._tag_l1_turn_message(
-                    continuation,
-                    L1TranscriptMessage(
-                        role="user",
-                        content=user_text,
-                        kind=L1MessageKind.USER_REQUEST,
-                    ),
-                )
-            )
-
-        all_safe_protocol = self._safe_tool_protocol_messages(
-            continuation.tool_protocol_messages
-        )
-        _, all_assistant_contents = l1_tool_protocol_transcript(
-            all_safe_protocol,
-            truncate_tool_result=self._truncate_tool_result_for_l1,
-        )
-        committed_count = max(
-            0,
-            min(
-                int(continuation.l1_protocol_committed_count or 0),
-                len(continuation.tool_protocol_messages),
-            ),
-        )
-        safe_suffix = self._safe_tool_protocol_messages(
-            continuation.tool_protocol_messages[committed_count:]
-        )
-        protocol_transcript, _ = l1_tool_protocol_transcript(
-            safe_suffix,
-            truncate_tool_result=self._truncate_tool_result_for_l1,
-        )
-        transcript.extend(
-            self._tag_l1_turn_message(continuation, message)
-            for message in protocol_transcript
-        )
-        return transcript, all_assistant_contents
-
-    @staticmethod
-    def _tag_l1_turn_message(
-        continuation: TurnContinuation,
-        message: L1TranscriptMessage,
-    ) -> L1TranscriptMessage:
-        input_id = str(
-            getattr(
-                getattr(continuation.channel_envelope, "event", None),
-                "event_id",
-                "",
-            )
-            or continuation.turn_id
-        )
-        return L1TranscriptMessage(
-            role=message.role,
-            content=message.content,
-            kind=message.kind,
-            tool_calls=message.tool_calls,
-            tool_call_id=message.tool_call_id,
-            payload={
-                **dict(message.payload or {}),
-                "_pal_input_id": input_id,
-            },
-        )
-
-    def _render_l1_exit_checkpoint_summary(
-        self,
-        continuation: TurnContinuation,
-        *,
-        kind: L1MessageKind,
-        status: str,
-        reason: str,
-        user_text: str,
-    ) -> str:
-        lines = [
-            f'<turn_checkpoint kind="{kind.value}">',
-            "This is recovery context from a previous turn, not a new user request.",
-            f"turn_id: {continuation.turn_id}",
-            f"status: {status}",
-        ]
-        reason_text = self._truncate_checkpoint_text(reason, max_chars=240)
-        if reason_text:
-            lines.append(f"reason: {reason_text}")
-        user_preview = self._truncate_checkpoint_text(user_text, max_chars=360)
-        if user_preview:
-            lines.append(f"user_request: {user_preview}")
-        if continuation.tool_observations:
-            lines.append("completed_tools:")
-            for observation in continuation.tool_observations[:8]:
-                ok = "ok" if getattr(observation, "ok", False) else "error"
-                summary = self._truncate_checkpoint_text(getattr(observation, "summary", ""), max_chars=220)
-                lines.append(f"- {getattr(observation, 'tool_name', '')} ({ok}): {summary}")
-            if len(continuation.tool_observations) > 8:
-                lines.append(f"- ... +{len(continuation.tool_observations) - 8} more")
-        else:
-            lines.append("completed_tools: none recorded")
-        if continuation.pending_tool_call_batch:
-            lines.append(f"pending_tool_batch: {len(continuation.pending_tool_call_batch)} tool call(s) were not fully recorded")
-        lines.append("turn_outcome: not committed")
-        lines.append("</turn_checkpoint>")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _safe_tool_protocol_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        safe_messages: list[dict[str, Any]] = []
-        index = 0
-        raw_messages = [message for message in list(messages or []) if isinstance(message, dict)]
-        while index < len(raw_messages):
-            message = raw_messages[index]
-            role = str(message.get("role", "") or "").strip()
-            if role != "assistant" or not message.get("tool_calls"):
-                index += 1
-                continue
-            tool_call_ids = TurnManager._extract_tool_protocol_call_ids(message.get("tool_calls"))
-            if not tool_call_ids:
-                index += 1
-                continue
-            pending_ids = set(tool_call_ids)
-            batch: list[dict[str, Any]] = [message]
-            cursor = index + 1
-            while cursor < len(raw_messages) and pending_ids:
-                candidate = raw_messages[cursor]
-                candidate_role = str(candidate.get("role", "") or "").strip()
-                candidate_tool_call_id = str(candidate.get("tool_call_id") or "").strip()
-                if candidate_role != "tool" or candidate_tool_call_id not in pending_ids:
-                    break
-                batch.append(candidate)
-                pending_ids.remove(candidate_tool_call_id)
-                cursor += 1
-            if not pending_ids:
-                safe_messages.extend(batch)
-                index = cursor
-                continue
-            index = cursor
-        return safe_messages
-
-    @staticmethod
-    def _tool_protocol_validation_error(messages: list[dict[str, Any]]) -> str:
-        pending_tool_ids: set[str] = set()
-        pending_assistant_index: int | None = None
-        for index, message in enumerate(messages):
-            if not isinstance(message, dict):
-                return f"tool protocol message at index {index} is not an object"
-            role = str(message.get("role", "") or "").strip()
-            if pending_tool_ids and role != "tool":
-                return (
-                    f"assistant tool_calls at index {pending_assistant_index} missing tool results: "
-                    f"{', '.join(sorted(pending_tool_ids))}"
-                )
-            if role == "assistant" and message.get("tool_calls"):
-                tool_call_ids = TurnManager._extract_tool_protocol_call_ids(message.get("tool_calls"))
-                if not tool_call_ids:
-                    return f"assistant tool_calls at index {index} do not have complete ids"
-                if len(tool_call_ids) != len(set(tool_call_ids)):
-                    return f"assistant tool_calls at index {index} contain duplicate ids"
-                pending_tool_ids = set(tool_call_ids)
-                pending_assistant_index = index
-                continue
-            if role == "tool":
-                tool_call_id = str(message.get("tool_call_id") or "").strip()
-                if not tool_call_id:
-                    return f"tool message at index {index} is missing tool_call_id"
-                if not pending_tool_ids:
-                    return f"tool message at index {index} has no preceding assistant tool_calls"
-                if tool_call_id not in pending_tool_ids:
-                    return f"tool message at index {index} has unexpected tool_call_id {tool_call_id}"
-                pending_tool_ids.remove(tool_call_id)
-                continue
-            return f"tool protocol message at index {index} has unexpected role {role}"
-        if pending_tool_ids:
-            return (
-                f"assistant tool_calls at index {pending_assistant_index} missing tool results: "
-                f"{', '.join(sorted(pending_tool_ids))}"
-            )
-        return ""
-
-    @staticmethod
-    def _extract_tool_protocol_call_ids(tool_calls: object) -> list[str]:
-        if not isinstance(tool_calls, list) or not tool_calls:
-            return []
-        ids: list[str] = []
-        for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                return []
-            call_id = str(tool_call.get("id") or "").strip()
-            if not call_id:
-                return []
-            ids.append(call_id)
-        return ids
-
-    def _truncate_tool_result_for_l1(self, content: str) -> str:
-        max_chars = max(0, int(getattr(self.config, "l1_tool_result_max_chars", 8_000) or 0))
-        if not max_chars or len(content) <= max_chars:
-            return content
-        configured_preview = int(getattr(self.config, "l1_tool_result_preview_chars", 4_000) or 0)
-        preview_chars = max(1, min(configured_preview or max_chars, max_chars))
-        preview = content[:preview_chars].rstrip()
-        return f"{preview}\n\n[... truncated, original: {len(content)} chars]"
-
-    @staticmethod
-    def _truncate_checkpoint_text(value: object, *, max_chars: int) -> str:
-        text = " ".join(str(value or "").split())
-        if len(text) <= max_chars:
-            return text
-        return f"{text[: max(1, max_chars - 18)].rstrip()}...[truncated]"
 
     def _build_turn_settings_snapshot(self) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
@@ -977,22 +624,6 @@ class PalCore:
         if channel_runtime is not None:
             channel_runtime.queue_status(channel_envelope, kind, payload=dict(payload or {}))
 
-    async def _settle_interrupted_turns_for_next_user_async(
-        self,
-        channel_envelope: ChannelEnvelope,
-        scope_state: Any,
-    ) -> None:
-        event = getattr(channel_envelope, "event", None)
-        if str(getattr(event, "event_kind", "") or "") != EventKind.USER_MESSAGE:
-            return
-        queue = getattr(scope_state, "interrupted_turns_to_settle", None)
-        if queue is None:
-            return
-        while queue:
-            continuation = queue.popleft()
-            if isinstance(continuation, TurnContinuation):
-                await self.turn_manager.commit_l1_interrupted_settlement_async(continuation)
-
     def _start_channel_turn_task_locked(
         self,
         channel_envelope: ChannelEnvelope,
@@ -1027,7 +658,6 @@ class PalCore:
                 scope_state = self._ensure_scope_state(control_scope_key)
                 if scope_state.quiescing:
                     continue
-                await self._settle_interrupted_turns_for_next_user_async(next_envelope, scope_state)
                 self._start_channel_turn_task_locked(
                     next_envelope,
                     control_scope_key,
@@ -1052,7 +682,6 @@ class PalCore:
                 self.state.pending_channel_turns.append(channel_envelope)
                 should_queue = True
             else:
-                await self._settle_interrupted_turns_for_next_user_async(channel_envelope, scope_state)
                 self._start_channel_turn_task_locked(channel_envelope, control_scope_key, scope_state)
         if should_reject:
             await self._reply_to_route_async(
@@ -1081,7 +710,6 @@ class PalCore:
         scope_state = self._ensure_scope_state(control_scope_key)
         if scope_state.quiescing:
             raise RuntimeError("scope is quiescing")
-        await self._settle_interrupted_turns_for_next_user_async(channel_envelope, scope_state)
         # The hot path is: start turn -> interpret yielded effects -> resume
         # until the generator returns a TurnOutcome.
         continuation = self.turn_manager.start(channel_envelope)
@@ -1401,6 +1029,24 @@ class PalCore:
             if callable(settings_refresh):
                 settings_refresh()
             payload = {"enabled_count": None, "primary_endpoint_id": getattr(llm_runtime, "active_endpoint_id", None)}
+        dependent_refreshes: dict[str, dict[str, Any]] = {}
+        dependent_refresh_errors: dict[str, str] = {}
+        refreshed_ports: set[int] = {id(llm_runtime)}
+        for port_name, port in self.context.port_registry.items():
+            if id(port) in refreshed_ports:
+                continue
+            refresh_dependent = getattr(port, "refresh_llm_endpoints", None)
+            if not callable(refresh_dependent):
+                continue
+            refreshed_ports.add(id(port))
+            try:
+                result = refresh_dependent()
+                if inspect.isawaitable(result):
+                    result = await result
+                if isinstance(result, dict):
+                    dependent_refreshes[port_name] = dict(result)
+            except Exception as exc:
+                dependent_refresh_errors[port_name] = f"{exc.__class__.__name__}: {exc}"
         enabled_count = payload.get("enabled_count")
         primary = payload.get("primary_endpoint_id") or "-"
         active = payload.get("active_endpoint_id") or "-"
@@ -1419,6 +1065,25 @@ class PalCore:
             lines.append(f"Added: {', '.join(str(item) for item in added)}")
         if removed:
             lines.append(f"Removed/disabled: {', '.join(str(item) for item in removed)}")
+        refreshed_dependents = [
+            name
+            for name, result in dependent_refreshes.items()
+            if bool(result.get("refreshed"))
+        ]
+        cold_dependents = [
+            name
+            for name, result in dependent_refreshes.items()
+            if not bool(result.get("refreshed"))
+        ]
+        if refreshed_dependents:
+            lines.append(f"Dependent LLM runtimes refreshed: {', '.join(refreshed_dependents)}")
+        if cold_dependents:
+            lines.append(
+                "Dependent LLM runtimes not loaded yet: "
+                + ", ".join(cold_dependents)
+            )
+        for port_name, error in dependent_refresh_errors.items():
+            lines.append(f"Dependent LLM runtime refresh failed ({port_name}): {error}")
         await self._complete_action_reply_async(action, "\n".join(lines))
 
     @staticmethod
@@ -1875,18 +1540,25 @@ class PalCore:
     async def _run_turn_continuation_async(self, continuation: TurnContinuation) -> TurnOutcome:
         current: EffectResult | None = None
         try:
+            await self.turn_executor._ensure_l1_turn_async(
+                continuation,
+                PromptAssemblyContext(
+                    event=continuation.channel_envelope.event,
+                    core_mode=self.state.mode,
+                ),
+            )
             while True:
                 if continuation.interrupted:
                     raise asyncio.CancelledError(continuation.interrupt_reason or "interrupted")
                 yielded = self.turn_manager.resume(continuation, current)
                 if isinstance(yielded, TurnOutcome):
-                    outcome = self._enrich_transcript_with_tool_protocol(yielded, continuation)
+                    outcome = yielded
                     await self._schedule_post_turn_commit_async(
                         outcome,
                         event=continuation.channel_envelope.event,
                     )
                     await self._deliver_pending_compact_memory_candidates_async(continuation)
-                    self.turn_executor.close_active_tool_protocol(continuation)
+                    self.turn_executor.clear_execution_cursors(continuation)
                     return outcome
                 current = await self._execute_turn_effect_async(continuation, yielded)
         except asyncio.CancelledError:
@@ -1899,96 +1571,6 @@ class PalCore:
                 reason=f"{exc.__class__.__name__}: {exc}",
             )
             raise
-
-    def _enrich_transcript_with_tool_protocol(self, outcome: TurnOutcome, continuation: TurnContinuation) -> TurnOutcome:
-        from pal.memory.contracts import L1MessageKind, L1TranscriptMessage
-
-        original = outcome.commit_payload.transcript
-        user_msg = next((m for m in original if m.role == "user"), None)
-        new_transcript: list[L1TranscriptMessage] = []
-        input_id = str(
-            getattr(
-                getattr(continuation.channel_envelope, "event", None),
-                "event_id",
-                "",
-            )
-            or continuation.turn_id
-        )
-        if user_msg and not continuation.l1_input_committed:
-            new_transcript.append(
-                L1TranscriptMessage(
-                    role=user_msg.role,
-                    content=user_msg.content,
-                    kind=user_msg.kind,
-                    tool_calls=user_msg.tool_calls,
-                    tool_call_id=user_msg.tool_call_id,
-                    payload={
-                        **dict(user_msg.payload or {}),
-                        "_pal_input_id": input_id,
-                    },
-                )
-            )
-        _, protocol_assistant_contents = l1_tool_protocol_transcript(
-            [
-                dict(message)
-                for message in continuation.tool_protocol_messages
-                if isinstance(message, dict)
-            ]
-        )
-        committed_count = max(
-            0,
-            int(continuation.l1_protocol_committed_count or 0),
-        )
-        if committed_count < len(continuation.tool_protocol_messages):
-            protocol_transcript, _ = l1_tool_protocol_transcript(
-                [
-                    dict(message)
-                    for message in continuation.tool_protocol_messages[
-                        committed_count:
-                    ]
-                    if isinstance(message, dict)
-                ],
-                truncate_tool_result=self.turn_manager._truncate_tool_result_for_l1,
-            )
-            new_transcript.extend(
-                L1TranscriptMessage(
-                    role=message.role,
-                    content=message.content,
-                    kind=message.kind,
-                    tool_calls=message.tool_calls,
-                    tool_call_id=message.tool_call_id,
-                    payload={
-                        **dict(message.payload or {}),
-                        "_pal_input_id": input_id,
-                    },
-                )
-                for message in protocol_transcript
-            )
-        assistant_msgs = [m for m in original if m.role == "assistant"]
-        for m in assistant_msgs:
-            content = str(m.content or "").strip()
-            if content and content in protocol_assistant_contents:
-                protocol_assistant_contents.remove(content)
-                continue
-            new_transcript.append(L1TranscriptMessage(
-                role=m.role,
-                content=m.content,
-                kind=L1MessageKind.ASSISTANT_REPLY,
-                payload={
-                    **dict(getattr(m, "payload", {}) or {}),
-                    "_pal_input_id": input_id,
-                },
-            ))
-        return TurnOutcome(
-            turn_id=outcome.turn_id,
-            final_reply=outcome.final_reply,
-            commit_payload=L1CommitPayload(
-                turn_id=outcome.commit_payload.turn_id,
-                transcript=new_transcript,
-                tool_observations=outcome.commit_payload.tool_observations,
-            ),
-            reply_texts=outcome.reply_texts,
-        )
 
     async def _deliver_pending_compact_memory_candidates_async(self, continuation: TurnContinuation) -> None:
         batches = list(getattr(continuation, "pending_compact_memory_candidate_batches", []) or [])
@@ -2121,16 +1703,16 @@ class PalCore:
         self,
         continuation: TurnContinuation,
         llm_runtime,
-        request: CanonicalLLMRequest,
-    ) -> CanonicalLLMOutcome:
+        request: LLMRequestIR,
+    ) -> LLMGenerationResult:
         return asyncio.run(self._stream_llm_request_async(continuation, llm_runtime, request))
 
     async def _stream_llm_request_async(
         self,
         continuation: TurnContinuation,
         llm_runtime,
-        request: CanonicalLLMRequest,
-    ) -> CanonicalLLMOutcome:
+        request: LLMRequestIR,
+    ) -> LLMGenerationResult:
         return await self.turn_executor.stream_llm_request_async(continuation, llm_runtime, request)
 
     def _build_turn_prompt(
@@ -2139,7 +1721,7 @@ class PalCore:
         assembly_context: PromptAssemblyContext,
         *,
         max_output_tokens: int,
-    ) -> CanonicalLLMRequest:
+    ) -> LLMRequestIR:
         return self.turn_executor.build_turn_prompt(
             continuation,
             assembly_context,
@@ -2149,7 +1731,7 @@ class PalCore:
     def _fallback_final_reply(self, continuation: TurnContinuation) -> str:
         return self.turn_executor.fallback_final_reply(continuation)
 
-    def _infer_response_mode(self, outcome: CanonicalLLMOutcome | None, *, used_tools: bool) -> str:
+    def _infer_response_mode(self, outcome: LLMGenerationResult | None, *, used_tools: bool) -> str:
         return self.turn_executor.infer_response_mode(outcome, used_tools=used_tools)
 
     def _select_turn_temperature(self, response_mode: str) -> float:
@@ -2158,7 +1740,7 @@ class PalCore:
     def _debug_log_prompt(self, *args) -> None:
         if not self._prompt_log_enabled_from_args(*args):
             return
-        request = _last_arg_of_type(args, CanonicalLLMRequest)
+        request = _last_arg_of_type(args, LLMRequestIR)
         if request is None:
             return
         self._append_prompt_log(render_prompt_debug_log(request, context=self._prompt_debug_context(*args)))
@@ -2166,7 +1748,7 @@ class PalCore:
     def _debug_log_outcome(self, *args) -> None:
         if not self._prompt_log_enabled_from_args(*args):
             return
-        outcome = _last_arg_of_type(args, CanonicalLLMOutcome)
+        outcome = _last_arg_of_type(args, LLMGenerationResult)
         if outcome is None:
             return
         provider_payload = summarize_last_provider_payload(self.context.port_registry.get("llm:llm"))
@@ -2195,7 +1777,7 @@ class PalCore:
         for item in args:
             if isinstance(item, TurnContinuation):
                 return bool(item.turn_settings_snapshot.get("prompt_log_enabled"))
-        request = _last_arg_of_type(args, CanonicalLLMRequest)
+        request = _last_arg_of_type(args, LLMRequestIR)
         if request is not None and "prompt_log_enabled" in request.metadata:
             return bool(request.metadata.get("prompt_log_enabled"))
         return bool(self.state.prompt_log_enabled)
@@ -2229,7 +1811,7 @@ class PalCore:
     ) -> None:
         result = await self.turn_executor.schedule_post_turn_commit_async(outcome)
         if (
-            getattr(result, "status", "") == RuntimeStatus.OK
+            str(getattr(result, "state", "")) == "settled"
             and event is not None
             and str(event.event_kind or "") == EventKind.USER_MESSAGE
             and str(event.source_kind or "") == SourceKind.CHANNEL

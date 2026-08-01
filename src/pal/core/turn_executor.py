@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
+from pal.shared.json_values import thaw_json
+
 import asyncio
 import inspect
 import json
@@ -15,7 +18,6 @@ from pal.core.compaction import (
     CompactionRunResult,
     CompactionSnapshot,
 )
-from pal.core.prompt_compiler import normalize_prompt_messages
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import (
     ToolExecutionRecord,
@@ -27,13 +29,24 @@ from pal.core.turns import (
     LLMPreflightEffect,
     LLMRequestEffect,
     MailboxReplyEffect,
-    MailboxReplyStreamEffect,
+    MailboxReplyStreamUpdateEffect,
     MemoryCompactEffect,
     ToolCallEffect,
     ToolObservation,
 )
 from pal.failure import FailureSignal
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolResult, LLMPreflightRequest
+from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest
+from pal.llm.conversions import tool_definition_ir_from_dict
+from pal.llm.ir import (
+    LLMFinishReason,
+    LLMMessageIR,
+    LLMRequestIR,
+    LLMResponseDeltaKind,
+    LLMResponseIR,
+    MessageRole,
+    MessageState,
+    TextPartIR,
+)
 from pal.memory.compact import memory_candidates_from_compact_result
 from pal.memory.contracts import (
     L1MessageKind,
@@ -41,34 +54,20 @@ from pal.memory.contracts import (
     MemoryCommitRequest,
     MemoryPackRequest,
 )
-from pal.memory.tool_protocol import (
-    l1_tool_protocol_transcript,
-    l1_tool_protocol_validation_error,
-)
 from pal.shared import (
     GuardAction,
-    LLMFinishReason,
     LLMPreflightStatus,
     LLMResponseMode,
-    LLMStreamEventKind,
+    ChannelStreamUpdateKind,
     RuntimeStatus,
-    append_tool_protocol_messages,
+    ToolExecutionResult,
     default_tool_result_text,
-    ensure_tool_call_identity,
 )
-from pal.shared.result_rendering import render_head_tail_preview_for_llm
 from pal.shared.payloads import extract_text_from_payload
-from pal.stream_events import NormalizedLLMStreamEvent
+from pal.shared.result_rendering import render_head_tail_preview_for_llm
+from pal.shared.agent_io import ChannelStreamUpdate
 
 LOGGER = logging.getLogger(__name__)
-
-_FORWARD_STREAM_KINDS = frozenset({
-    LLMStreamEventKind.TEXT_DELTA,
-    LLMStreamEventKind.REASONING_DELTA,
-    LLMStreamEventKind.TOOL_CALL,
-    LLMStreamEventKind.DONE,
-    LLMStreamEventKind.ERROR,
-})
 
 class TurnExecutor:
     def __init__(
@@ -87,7 +86,6 @@ class TurnExecutor:
         render_failure_feedback_text: Callable[[Any], str],
         should_enter_failure_flow_for_tool_result: Callable[[Any], bool],
         handle_llm_provider_errors: bool = True,
-        tool_protocol_projector: Callable[[list[dict[str, Any]], int], list[dict[str, Any]]] | None = None,
         execute_tool_async: Callable[..., Awaitable[Any]] | None = None,
         config: RuntimeConfig | None = None,
         compaction_engine: CompactionEngine | None = None,
@@ -107,20 +105,11 @@ class TurnExecutor:
         self._render_failure_feedback_text = render_failure_feedback_text
         self._should_enter_failure_flow_for_tool_result = should_enter_failure_flow_for_tool_result
         self._handle_llm_provider_errors = handle_llm_provider_errors
-        self._tool_protocol_projector = tool_protocol_projector
         self._execute_tool_async = execute_tool_async
         self._compaction_engine = compaction_engine
         self._compaction_clock_provider = (
             compaction_clock_provider or (lambda: 0)
         )
-
-        self._stream_accumulators = {
-            LLMStreamEventKind.TEXT_DELTA: self._accumulate_text_delta,
-            LLMStreamEventKind.REASONING_DELTA: self._accumulate_reasoning_delta,
-            LLMStreamEventKind.TOOL_CALL: self._accumulate_tool_call,
-            LLMStreamEventKind.ERROR: self._accumulate_error,
-            LLMStreamEventKind.DONE: self._accumulate_done,
-        }
 
     # ── public entry point ──────────────────────────────────────────────
 
@@ -143,7 +132,7 @@ class TurnExecutor:
 
     @_dispatch_effect.register(LLMPreflightEffect)
     async def _handle_llm_preflight(self, effect, continuation):
-        await self._settle_l1_working_set_async(
+        await self._ensure_l1_turn_async(
             continuation,
             effect.assembly_context,
         )
@@ -159,13 +148,7 @@ class TurnExecutor:
             llm_runtime,
             "apreflight",
             "preflight",
-            LLMPreflightRequest(
-                messages=prompt.messages,
-                max_output_tokens=prompt.max_output_tokens,
-                model_hint=prompt.model_hint,
-                tools=tools,
-                metadata=dict(prompt.metadata),
-            )
+            LLMPreflightRequest(request=prompt)
         )
         continuation.prompt_budget_snapshot = dict(getattr(advice, "breakdown", {}) or {})
         if self._is_hard_budget_overflow(advice):
@@ -194,7 +177,7 @@ class TurnExecutor:
 
     @_dispatch_effect.register(MemoryCompactEffect)
     async def _handle_memory_compact(self, effect, continuation):
-        settled = await self._settle_l1_working_set_async(
+        settled = await self._ensure_l1_turn_async(
             continuation,
             effect.assembly_context,
         )
@@ -255,10 +238,8 @@ class TurnExecutor:
             continuation.budget_failure_feedback_text = ""
             return EffectResult(
                 status=RuntimeStatus.OK,
-                payload=CanonicalLLMOutcome(
-                    text=text,
-                    reasoning_text="",
-                    tool_calls=[],
+                payload=self._generation_result_from_text(
+                    text,
                     finish_reason=LLMFinishReason.FALLBACK,
                     response_mode=LLMResponseMode.CHAT,
                 ),
@@ -271,16 +252,17 @@ class TurnExecutor:
             max_output_tokens=effect.max_output_tokens,
             tools=tools,
         )
-        request = CanonicalLLMRequest(
-            messages=list(prompt.messages),
-            max_output_tokens=prompt.max_output_tokens,
-            model_hint=prompt.model_hint,
-            temperature=(
-                prompt.temperature
-                if prompt.temperature is not None
+        request = replace(
+            prompt,
+            policy=replace(
+                prompt.policy,
+                temperature=(
+                prompt.policy.temperature
+                if prompt.policy.temperature is not None
                 else self.select_turn_temperature(continuation.last_response_mode)
+                ),
             ),
-            tools=tools,
+            tools=tuple(tool_definition_ir_from_dict(tool) for tool in tools),
             metadata=dict(prompt.metadata),
         )
         self._debug_log_prompt(continuation, request)
@@ -288,6 +270,7 @@ class TurnExecutor:
             outcome = await self.stream_llm_request_async(continuation, llm_runtime, request)
         else:
             outcome = await self._call_port_async(llm_runtime, "agenerate", "generate", request)
+            await self._upsert_l1_assistant_async(continuation, outcome.response.message)
         self._debug_log_outcome(continuation, outcome)
         preferred_endpoint_id = str(getattr(outcome, "preferred_endpoint_id", "") or "").strip() or None
         preferred_model_id = str(getattr(outcome, "preferred_model_id", "") or "").strip() or None
@@ -303,22 +286,16 @@ class TurnExecutor:
         )
         if outcome.tool_calls:
             continuation.pending_assistant_tool_text = str(outcome.text or "")
-            provider_fields = getattr(outcome, "provider_specific_fields", None)
-            continuation.pending_assistant_provider_specific_fields = (
-                dict(provider_fields) if isinstance(provider_fields, dict) else {}
-            )
             continuation.pending_tool_call_batch = [
-                self._ensure_tool_call_identity(tool_call) for tool_call in list(outcome.tool_calls)
+                tool_call for tool_call in outcome.tool_calls
             ]
             continuation.pending_tool_results = []
         if continuation.finalization_only:
             if outcome.finish_reason != LLMFinishReason.COMPACT_REQUIRED:
                 continuation.finalization_attempted = True
             if outcome.finish_reason != LLMFinishReason.COMPACT_REQUIRED and (outcome.tool_calls or not outcome.text.strip()):
-                outcome = replace(
-                    outcome,
-                    text=self.fallback_final_reply(continuation),
-                    tool_calls=[],
+                outcome = self._generation_result_from_text(
+                    self.fallback_final_reply(continuation),
                     finish_reason=LLMFinishReason.FALLBACK,
                     response_mode=LLMResponseMode.CHAT,
                 )
@@ -344,11 +321,8 @@ class TurnExecutor:
                 origin="llm_request",
                 conversation_context={"turn_id": continuation.turn_id},
             )
-            outcome = replace(
-                outcome,
-                text=self._render_failure_feedback_text(failure_result.user_feedback),
-                reasoning_text="",
-                tool_calls=[],
+            outcome = self._generation_result_from_text(
+                self._render_failure_feedback_text(failure_result.user_feedback),
                 finish_reason=LLMFinishReason.FALLBACK,
                 response_mode=LLMResponseMode.CHAT,
             )
@@ -409,7 +383,7 @@ class TurnExecutor:
                 origin="op_tool_call",
                 conversation_context={"turn_id": continuation.turn_id, "tool_name": execution_call.name},
             )
-            tool_result = CanonicalToolResult(
+            tool_result = ToolExecutionResult(
                 name=execution_call.name,
                 ok=False,
                 text=self._render_failure_feedback_text(failure_result.user_feedback),
@@ -448,9 +422,15 @@ class TurnExecutor:
         })
         if continuation.pending_tool_call_batch:
             continuation.pending_tool_results.append(tool_result)
+            await self._append_l1_tool_result_async(
+                continuation,
+                execution_call,
+                tool_result,
+            )
             if len(continuation.pending_tool_results) >= len(continuation.pending_tool_call_batch):
-                self._flush_tool_protocol_messages(continuation)
-                await self._settle_l1_protocol_async(continuation)
+                continuation.pending_assistant_tool_text = ""
+                continuation.pending_tool_call_batch = []
+                continuation.pending_tool_results = []
         return EffectResult(
             status=RuntimeStatus.OK if tool_result.ok else RuntimeStatus.ERROR,
             payload=tool_result,
@@ -466,7 +446,7 @@ class TurnExecutor:
             self._log_preview(getattr(tool_call, "args", {}), max_chars=1200),
         )
 
-    def _log_tool_call_result(self, continuation, tool_call: Any, tool_result: CanonicalToolResult) -> None:
+    def _log_tool_call_result(self, continuation, tool_call: Any, tool_result: ToolExecutionResult) -> None:
         LOGGER.debug(
             "[tool result] turn_id=%s name=%s call_id=%s ok=%s status=%s text=%s",
             getattr(continuation, "turn_id", ""),
@@ -512,15 +492,20 @@ class TurnExecutor:
         self._debug_log_reply(continuation, effect.text)
         return EffectResult(status=RuntimeStatus.QUEUED, payload={"reply_id": reply_id}, text=effect.text)
 
-    @_dispatch_effect.register(MailboxReplyStreamEffect)
+    @_dispatch_effect.register(MailboxReplyStreamUpdateEffect)
     async def _handle_mailbox_reply_stream(self, effect, continuation):
         if continuation.interrupted:
             return EffectResult(status=RuntimeStatus.SKIPPED, text="interrupted")
         output_port = self._agent_output_port()
         if output_port is None:
             return EffectResult(status=RuntimeStatus.SKIPPED)
-        event_id = await self._call_output_port_async(output_port, "queue_stream_event", effect.channel_envelope, effect.event)
-        return EffectResult(status=RuntimeStatus.QUEUED, payload={"event_id": event_id})
+        update_id = await self._call_output_port_async(
+            output_port,
+            "queue_stream_update",
+            effect.channel_envelope,
+            effect.update,
+        )
+        return EffectResult(status=RuntimeStatus.QUEUED, payload={"update_id": update_id})
 
     def _agent_output_port(self):
         return self.context.port_registry.get("agent_io:output") or self.context.port_registry.get("channel:channel")
@@ -532,148 +517,68 @@ class TurnExecutor:
             return await result
         return result
 
-    # ── stream request (table-driven accumulator) ───────────────────────
+    # ── stream request ──────────────────────────────────────────────────
 
-    async def stream_llm_request_async(self, continuation, llm_runtime, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_calls: list = []
-        state: dict[str, Any] = {
-            "finish_reason": LLMFinishReason.STOP,
-            "response_mode": None,
-            "provider_specific_fields": {},
-            "input_tokens": 0,
-            "uncached_input_tokens": 0,
-            "cached_input_tokens": 0,
-            "cache_write_input_tokens": 0,
-            "output_tokens": 0,
-            "reasoning_tokens": 0,
-            "cost": 0.0,
-            "usage_reported": False,
-            "provider_response_count": 0,
-        }
-
-        events = await self._call_port_async(llm_runtime, "agenerate_stream", "generate_stream", request)
-        for event in events:
-            self._ensure_not_interrupted(continuation)
-            if event.event_kind == LLMStreamEventKind.COMPACT_REQUIRED:
-                return CanonicalLLMOutcome(
-                    text="",
-                    reasoning_text="",
-                    tool_calls=[],
-                    finish_reason=LLMFinishReason.COMPACT_REQUIRED,
-                    target_input_budget=event.target_input_budget,
-                    reserved_output_tokens=event.reserved_output_tokens,
-                    preferred_endpoint_id=event.preferred_endpoint_id,
-                    preferred_model_id=event.preferred_model_id,
-                )
-            if event.event_kind in _FORWARD_STREAM_KINDS:
-                await self.execute_turn_effect_async(
-                    continuation,
-                    MailboxReplyStreamEffect(channel_envelope=continuation.channel_envelope, event=event),
-                )
-                self._ensure_not_interrupted(continuation)
-            acc = self._stream_accumulators.get(event.event_kind)
-            if acc is not None:
-                acc(event, text_parts, reasoning_parts, tool_calls, state)
-
-        reasoning_text = "".join(reasoning_parts)
-        provider_specific_fields = dict(state.get("provider_specific_fields") or {})
-        if reasoning_text and "reasoning_content" not in provider_specific_fields:
-            provider_specific_fields["reasoning_content"] = reasoning_text
-        return CanonicalLLMOutcome(
-            text="".join(text_parts),
-            reasoning_text=reasoning_text,
-            provider_specific_fields=provider_specific_fields,
-            tool_calls=tool_calls,
-            finish_reason=state["finish_reason"],
-            input_tokens=max(0, int(state.get("input_tokens") or 0)),
-            uncached_input_tokens=max(0, int(state.get("uncached_input_tokens") or 0)),
-            cached_input_tokens=max(0, int(state.get("cached_input_tokens") or 0)),
-            cache_write_input_tokens=max(
-                0,
-                int(state.get("cache_write_input_tokens") or 0),
-            ),
-            output_tokens=max(0, int(state.get("output_tokens") or 0)),
-            reasoning_tokens=max(0, int(state.get("reasoning_tokens") or 0)),
-            cost=max(0.0, float(state.get("cost") or 0.0)),
-            usage_reported=bool(state.get("usage_reported")),
-            provider_response_count=max(0, int(state.get("provider_response_count") or 0)),
-            response_mode=state["response_mode"],
+    async def stream_llm_request_async(
+        self,
+        continuation: Any,
+        llm_runtime: Any,
+        request: LLMRequestIR,
+    ) -> LLMGenerationResult:
+        final_response: LLMResponseIR | None = None
+        stream = getattr(llm_runtime, "astream", None)
+        if not callable(stream):
+            raise TypeError("LLM runtime does not implement the astream contract")
+        async for update in stream(request):
+            final_response = update.response
+            await self._handle_ir_stream_update(continuation, update)
+        if final_response is None:
+            return self._generation_result_from_text(
+                "LLM stream completed without a response.",
+                finish_reason=LLMFinishReason.ERROR,
+            )
+        return LLMGenerationResult(
+            response=final_response,
+            preferred_endpoint_id=str(getattr(llm_runtime, "last_endpoint_id", "") or "") or None,
+            preferred_model_id=str(getattr(llm_runtime, "last_model_id", "") or "") or None,
         )
 
-    # ── stream accumulators ─────────────────────────────────────────────
-
-    @staticmethod
-    def _accumulate_text_delta(event, text_parts, _reasoning, _tools, _state):
-        if event.text:
-            text_parts.append(event.text)
-
-    @staticmethod
-    def _accumulate_reasoning_delta(event, _text, reasoning_parts, _tools, _state):
-        if event.reasoning_text:
-            reasoning_parts.append(event.reasoning_text)
-        TurnExecutor._merge_stream_provider_specific_fields(_state, getattr(event, "provider_specific_fields", {}) or {})
-
-    @staticmethod
-    def _accumulate_tool_call(event, _text, _reasoning, tool_calls, _state):
-        if event.tool_call is not None:
-            tool_calls.append(event.tool_call)
-
-    @staticmethod
-    def _accumulate_error(event, text_parts, _reasoning, _tools, state):
-        state["finish_reason"] = event.finish_reason or LLMFinishReason.ERROR
-        if event.error_text:
-            text_parts.append(event.error_text)
-
-    @staticmethod
-    def _accumulate_done(event, _text, _reasoning, _tools, state):
-        state["finish_reason"] = event.finish_reason or state["finish_reason"]
-        state["response_mode"] = event.response_mode or state["response_mode"]
-        state["input_tokens"] = int(state.get("input_tokens") or 0) + max(
-            0, int(getattr(event, "input_tokens", 0) or 0)
-        )
-        state["uncached_input_tokens"] = int(
-            state.get("uncached_input_tokens") or 0
-        ) + max(0, int(getattr(event, "uncached_input_tokens", 0) or 0))
-        state["cached_input_tokens"] = int(
-            state.get("cached_input_tokens") or 0
-        ) + max(0, int(getattr(event, "cached_input_tokens", 0) or 0))
-        state["cache_write_input_tokens"] = int(
-            state.get("cache_write_input_tokens") or 0
-        ) + max(0, int(getattr(event, "cache_write_input_tokens", 0) or 0))
-        state["output_tokens"] = int(state.get("output_tokens") or 0) + max(
-            0, int(getattr(event, "output_tokens", 0) or 0)
-        )
-        state["reasoning_tokens"] = int(state.get("reasoning_tokens") or 0) + max(
-            0, int(getattr(event, "reasoning_tokens", 0) or 0)
-        )
-        state["cost"] = float(state.get("cost") or 0.0) + max(
-            0.0, float(getattr(event, "cost", 0.0) or 0.0)
-        )
-        state["usage_reported"] = bool(state.get("usage_reported")) or bool(
-            getattr(event, "usage_reported", False)
-        )
-        state["provider_response_count"] = int(
-            state.get("provider_response_count") or 0
-        ) + max(0, int(getattr(event, "provider_response_count", 0) or 0))
-
-    @staticmethod
-    def _merge_stream_provider_specific_fields(state: dict[str, Any], fields: dict[str, Any]) -> None:
-        if not isinstance(fields, dict) or not fields:
-            return
-        target = state.setdefault("provider_specific_fields", {})
-        if not isinstance(target, dict):
-            target = {}
-            state["provider_specific_fields"] = target
-        for key, value in fields.items():
-            normalized_key = str(key or "").strip()
-            if not normalized_key:
-                continue
-            if normalized_key == "reasoning_content" and isinstance(value, str):
-                target[normalized_key] = str(target.get(normalized_key) or "") + value
-                continue
-            target[normalized_key] = value
+    async def _handle_ir_stream_update(self, continuation: Any, update: Any) -> None:
+        self._ensure_not_interrupted(continuation)
+        await self._upsert_l1_assistant_async(continuation, update.response.message)
+        channel_update: ChannelStreamUpdate | None = None
+        if update.delta_kind == LLMResponseDeltaKind.TEXT and update.text_delta:
+            channel_update = ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.TEXT_DELTA,
+                text=update.text_delta,
+            )
+        elif update.delta_kind == LLMResponseDeltaKind.REASONING and update.text_delta:
+            channel_update = ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.REASONING_DELTA,
+                reasoning_text=update.text_delta,
+            )
+        elif update.delta_kind == LLMResponseDeltaKind.TOOL_CALL and update.tool_call is not None:
+            channel_update = ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.TOOL_CALL,
+                tool_call=update.tool_call,
+            )
+        elif update.delta_kind == LLMResponseDeltaKind.STATE:
+            channel_update = ChannelStreamUpdate(
+                kind=(
+                    ChannelStreamUpdateKind.ERROR
+                    if update.response.finish_reason == LLMFinishReason.ERROR
+                    else ChannelStreamUpdateKind.DONE
+                ),
+                finish_reason=update.response.finish_reason.value,
+            )
+        if channel_update is not None:
+            await self.execute_turn_effect_async(
+                continuation,
+                MailboxReplyStreamUpdateEffect(
+                    channel_envelope=continuation.channel_envelope,
+                    update=channel_update,
+                ),
+            )
 
     # ── prompt building ─────────────────────────────────────────────────
 
@@ -684,7 +589,7 @@ class TurnExecutor:
         *,
         max_output_tokens: int,
         tools: list[dict[str, Any]] | None = None,
-    ) -> CanonicalLLMRequest:
+    ) -> LLMRequestIR:
         from pal.shared import PromptAssemblyContext
 
         metadata = dict(assembly_context.metadata)
@@ -745,34 +650,15 @@ class TurnExecutor:
             model_hint=continuation.preferred_llm_model_id,
         )
         base_messages = list(prompt.messages)
-        prepared_tool_protocol = self.project_tool_protocol_for_prompt(continuation.tool_protocol_messages)
-        reconcile = getattr(
-            self.context.execution_runtime,
-            "reconcile_tool_context",
-            None,
-        )
-        if callable(reconcile):
-            reconcile(
-                turn_id=continuation.turn_id,
-                original_messages=continuation.tool_protocol_messages,
-                projected_messages=prepared_tool_protocol,
-                delivery_records=dict(
-                    getattr(continuation, "tool_delivery_records", {}) or {}
-                ),
-            )
-        prepared_tool_protocol = [
-            {
-                key: value
-                for key, value in message.items()
-                if not str(key).startswith("_pal_")
-            }
-            for message in prepared_tool_protocol
-        ]
-        prompt_messages = self._merge_tool_protocol_into_prompt(
-            base_messages,
-            prepared_tool_protocol,
-            primary_input=extract_text_from_payload(getattr(getattr(assembly_context, "event", None), "payload", None)).strip(),
-        )
+        active_messages: list[LLMMessageIR] = []
+        memory_service = self.context.port_registry.get("memory:memory")
+        active_turn = getattr(memory_service, "active_l1_turn", lambda _turn_id: None)(continuation.turn_id)
+        if active_turn is not None:
+            active_messages = list(active_turn.messages)
+            if active_messages and active_messages[0].role == MessageRole.USER:
+                active_messages = active_messages[1:]
+            active_messages = self._project_active_messages_for_prompt(active_messages)
+        prompt_messages = [*base_messages, *active_messages]
         metadata = dict(prompt.metadata)
         if snapshot_think_levels:
             metadata["think_levels"] = snapshot_think_levels
@@ -783,30 +669,15 @@ class TurnExecutor:
         metadata["prompt_budget_snapshot"] = self._build_prompt_budget_snapshot(
             assembly_context,
             base_messages=base_messages,
-            prepared_tool_protocol=prepared_tool_protocol,
+            active_messages=active_messages,
             tools=list(tools or []),
         )
-        prompt = CanonicalLLMRequest(
-            messages=normalize_prompt_messages(prompt_messages),
-            max_output_tokens=prompt.max_output_tokens,
-            model_hint=prompt.model_hint,
-            temperature=prompt.temperature,
-            tools=list(prompt.tools),
+        prompt = replace(
+            prompt,
+            messages=tuple(prompt_messages),
             metadata=metadata,
         )
         return prompt
-
-    def _merge_tool_protocol_into_prompt(
-        self,
-        base_messages: list[dict[str, Any]],
-        prepared_tool_protocol: list[dict[str, Any]],
-        *,
-        primary_input: str,
-    ) -> list[dict[str, Any]]:
-        _ = primary_input
-        if not prepared_tool_protocol:
-            return list(base_messages)
-        return [*base_messages, *prepared_tool_protocol]
 
     def _resolve_llm_capabilities(self, continuation) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
@@ -840,31 +711,31 @@ class TurnExecutor:
         self,
         assembly_context,
         *,
-        base_messages: list[dict[str, Any]],
-        prepared_tool_protocol: list[dict[str, Any]],
+        base_messages: list[LLMMessageIR],
+        active_messages: list[LLMMessageIR],
         tools: list[dict[str, Any]],
     ) -> dict[str, int]:
         system_chars = sum(
-            self._estimate_prompt_message_chars(message)
+            self._estimate_ir_message_chars(message)
             for message in base_messages
-            if str(message.get("role") or "").strip() == "system"
+            if message.role == MessageRole.SYSTEM
         )
         primary_input = ""
         if assembly_context.event is not None:
             primary_input = extract_text_from_payload(assembly_context.event.payload).strip()
         if not primary_input:
             for message in reversed(base_messages):
-                if str(message.get("role") or "").strip() == "user":
-                    primary_input = self._message_content_text(message.get("content")).strip()
+                if message.role == MessageRole.USER:
+                    primary_input = message.text.strip()
                     if primary_input:
                         break
         current_user_chars = len(primary_input)
         base_non_system_chars = sum(
-            self._estimate_prompt_message_chars(message)
+            self._estimate_ir_message_chars(message)
             for message in base_messages
-            if str(message.get("role") or "").strip() != "system"
+            if message.role != MessageRole.SYSTEM
         )
-        tool_protocol_chars = sum(self._estimate_prompt_message_chars(message) for message in prepared_tool_protocol)
+        tool_protocol_chars = sum(self._estimate_ir_message_chars(message) for message in active_messages)
         tools_schema_chars = self._estimate_tools_schema_chars(tools)
         conversation_chars = max(base_non_system_chars - current_user_chars, 0)
         estimated_input_chars = system_chars + current_user_chars + conversation_chars + tool_protocol_chars + tools_schema_chars
@@ -923,192 +794,79 @@ class TurnExecutor:
                     return result
         return self._config.fallback_max_output_tokens
 
-    def project_tool_protocol_for_prompt(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        projected = (
-            self._tool_protocol_projector(
-                [dict(message) for message in messages],
-                self._config.max_tool_results_per_message_chars,
-            )
-            if self._tool_protocol_projector is not None
-            else [dict(message) for message in messages]
-        )
-        return self._prepare_tool_protocol_for_prompt(projected)
-
-    def _prepare_tool_protocol_for_prompt(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        result = [
-            {
-                **message,
-                **(
-                    {
-                        "_pal_visible_source_ranges": [
-                            [0, len(str(message.get("content") or ""))]
-                        ]
-                    }
-                    if str(message.get("role") or "").strip() == "tool"
-                    else {}
-                ),
-            }
-            for message in messages
-        ]
-        total = self._tool_result_chars(result)
-        if total <= self._config.max_tool_results_per_message_chars:
-            return result
-        for batch_indices in self._tool_protocol_batches(result):
-            if total <= self._config.max_tool_results_per_message_chars:
-                break
-            for idx in batch_indices:
-                if str(result[idx].get("role") or "").strip() != "tool":
-                    continue
-                old = str(result[idx].get("content", ""))
-                preview, visible_ranges = self._render_tool_preview_with_ranges(old)
-                if preview == old:
-                    continue
-                total -= len(old) - len(preview)
-                result[idx] = {
-                    **result[idx],
-                    "content": preview,
-                    "_pal_visible_source_ranges": [
-                        list(item) for item in visible_ranges
-                    ],
-                }
-        if total <= self._config.max_tool_results_per_message_chars:
-            return result
-        for batch_indices in self._tool_protocol_batches(result):
-            if total <= self._config.max_tool_results_per_message_chars:
-                break
-            for idx in batch_indices:
-                if str(result[idx].get("role") or "").strip() != "tool":
-                    continue
-                old = str(result[idx].get("content", ""))
-                minimal = self._render_minimal_tool_observation(old)
-                if minimal == old:
-                    continue
-                total -= len(old) - len(minimal)
-                result[idx] = {
-                    **result[idx],
-                    "content": minimal,
-                    # Minimal summaries are synthetic. Conservatively revoke
-                    # file delivery rather than guessing which repeated text
-                    # survived compaction.
-                    "_pal_visible_source_ranges": [],
-                }
-        return result
-
     @staticmethod
-    def _tool_result_chars(messages: list[dict[str, Any]]) -> int:
-        return sum(
-            TurnExecutor._message_content_chars(message.get("content"))
-            for message in messages
-            if str(message.get("role") or "").strip() == "tool"
-        )
-
-    @staticmethod
-    def _estimate_prompt_message_chars(message: dict[str, Any]) -> int:
-        total = TurnExecutor._message_content_chars(message.get("content"))
-        tool_calls = message.get("tool_calls")
-        if tool_calls:
-            try:
-                total += len(json.dumps(tool_calls, ensure_ascii=False, sort_keys=True))
-            except TypeError:
-                total += len(str(tool_calls))
-        tool_call_id = str(message.get("tool_call_id", "") or "").strip()
-        if tool_call_id:
-            total += len(tool_call_id)
-        provider_specific_fields = message.get("provider_specific_fields")
-        if provider_specific_fields:
-            try:
-                total += len(json.dumps(provider_specific_fields, ensure_ascii=False, sort_keys=True))
-            except TypeError:
-                total += len(str(provider_specific_fields))
+    def _estimate_ir_message_chars(message: LLMMessageIR) -> int:
+        total = len(message.text) + len(message.reasoning_text)
+        for call in message.tool_calls:
+            total += len(call.call_id) + len(call.name)
+            total += len(json.dumps(thaw_json(call.arguments), ensure_ascii=False, sort_keys=True))
+        for part in message.parts:
+            if isinstance(part, ToolResultIR):
+                total += len(part.call_id) + len(part.name) + len(part.content)
         return total
 
-    @staticmethod
-    def _message_content_chars(content: Any) -> int:
-        return len(TurnExecutor._message_content_text(content))
+    def _project_active_messages_for_prompt(
+        self,
+        messages: list[LLMMessageIR],
+    ) -> list[LLMMessageIR]:
+        """Apply prompt-only size limits without mutating the L1 working set."""
 
-    @staticmethod
-    def _message_content_text(content: Any) -> str:
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if not isinstance(item, dict):
+        projected = list(messages)
+        result_indices = [
+            index
+            for index, message in enumerate(projected)
+            if any(isinstance(part, ToolResultIR) for part in message.parts)
+        ]
+        total = sum(
+            len(part.content)
+            for message in projected
+            for part in message.parts
+            if isinstance(part, ToolResultIR)
+        )
+        limit = self._config.max_tool_results_per_message_chars
+        for index in result_indices:
+            if total <= limit:
+                break
+            message = projected[index]
+            parts = list(message.parts)
+            for part_index, part in enumerate(parts):
+                if not isinstance(part, ToolResultIR):
                     continue
-                if str(item.get("type") or "") == "text":
-                    parts.append(str(item.get("text") or ""))
-            return "\n".join(part for part in parts if part)
-        return str(content or "")
+                rendered = self._render_tool_preview(part.content)
+                total -= len(part.content) - len(rendered)
+                parts[part_index] = replace(part, content=rendered)
+            projected[index] = replace(message, parts=tuple(parts))
+        for index in result_indices:
+            if total <= limit:
+                break
+            message = projected[index]
+            parts = list(message.parts)
+            for part_index, part in enumerate(parts):
+                if not isinstance(part, ToolResultIR):
+                    continue
+                minimal = self._render_minimal_tool_observation(part.content)
+                total -= len(part.content) - len(minimal)
+                parts[part_index] = replace(part, content=minimal)
+            projected[index] = replace(message, parts=tuple(parts))
+        return projected
 
     def _render_tool_preview(self, content: str) -> str:
-        preview, _ = self._render_tool_preview_with_ranges(content)
-        return preview
-
-    def _render_tool_preview_with_ranges(
-        self,
-        content: str,
-    ) -> tuple[str, tuple[tuple[int, int], ...]]:
         if len(content) <= self._config.active_tool_result_preview:
-            return content, ((0, len(content)),)
-        max_chars = self._config.active_tool_result_preview
+            return content
         preview, preview_size = render_head_tail_preview_for_llm(
             content,
-            max_chars=max_chars,
+            max_chars=self._config.active_tool_result_preview,
         )
-        rendered = (
+        return (
             f"{preview}\n\n"
             f"[preview only: original={len(content)} chars, kept={preview_size} chars]"
         )
-        if max_chars < 512:
-            kept = len(content[:max_chars].rstrip())
-            return rendered, ((0, kept),) if kept else ()
-        head_chars = max(256, max_chars // 2)
-        tail_chars = max_chars - head_chars
-        if tail_chars < 256:
-            tail_chars = 256
-            head_chars = max(1, max_chars - tail_chars)
-        head = content[:head_chars].rstrip()
-        raw_tail = content[-tail_chars:]
-        tail = raw_tail.lstrip()
-        tail_start = len(content) - tail_chars + (len(raw_tail) - len(tail))
-        ranges = tuple(
-            item
-            for item in (
-                (0, len(head)),
-                (tail_start, len(content)),
-            )
-            if item[1] > item[0]
-        )
-        return rendered, ranges
 
     @staticmethod
     def _render_minimal_tool_observation(content: str) -> str:
         lines = [line.strip() for line in str(content or "").splitlines() if line.strip()]
         summary = lines[0] if lines else "tool result summarized due to prompt budget pressure"
-        summary = summary[:180].rstrip()
-        artifact_line = next((line for line in lines if line.startswith("[artifact:")), "")
-        parts = [summary or "tool result summarized due to prompt budget pressure"]
-        if artifact_line:
-            parts.append(artifact_line)
-        return "\n".join(parts)
-
-    def _tool_protocol_batches(self, messages: list[dict[str, Any]]) -> list[list[int]]:
-        batches: list[list[int]] = []
-        index = 0
-        while index < len(messages):
-            message = messages[index]
-            role = str(message.get("role") or "").strip()
-            if role == "assistant" and message.get("tool_calls"):
-                batch: list[int] = [index]
-                cursor = index + 1
-                while cursor < len(messages) and str(messages[cursor].get("role") or "").strip() == "tool":
-                    batch.append(cursor)
-                    cursor += 1
-                batches.append(batch)
-                index = cursor
-                continue
-            if role == "tool":
-                batches.append([index])
-            index += 1
-        return batches
+        return summary[:180].rstrip() or "tool result summarized due to prompt budget pressure"
 
     @staticmethod
     def _is_hard_budget_overflow(advice) -> bool:
@@ -1124,67 +882,15 @@ class TurnExecutor:
             )
         return "I stopped the tool loop to avoid getting stuck and can only provide a text-only final reply."
 
-    def _ensure_tool_call_identity(self, tool_call):
-        return ensure_tool_call_identity(tool_call)
-
-    def _flush_tool_protocol_messages(self, continuation) -> None:
-        if not continuation.pending_tool_call_batch:
-            return
-        append_tool_protocol_messages(
-            continuation.tool_protocol_messages,
-            assistant_text=str(continuation.pending_assistant_tool_text or ""),
-            assistant_provider_specific_fields=dict(
-                getattr(continuation, "pending_assistant_provider_specific_fields", {}) or {}
-            ),
-            tool_calls=continuation.pending_tool_call_batch,
-            tool_results=continuation.pending_tool_results,
-            render_tool_result_content=self._render_tool_result_content,
-        )
-        result_by_call_id = {
-            str(getattr(result, "call_id", "") or ""): result
-            for result in continuation.pending_tool_results
-            if str(getattr(result, "call_id", "") or "").strip()
-        }
-        for message in reversed(continuation.tool_protocol_messages):
-            if str(message.get("role") or "").strip() != "tool":
-                if str(message.get("role") or "").strip() == "assistant":
-                    break
-                continue
-            call_id = str(message.get("tool_call_id") or "").strip()
-            result = result_by_call_id.get(call_id)
-            if result is None:
-                continue
-            invocation_result = getattr(result, "invocation_result", None)
-            effect = getattr(invocation_result, "effect", None)
-            message["_pal_result_state"] = {
-                "ok": bool(getattr(result, "ok", False)),
-                "status": str(getattr(result, "status", "") or ""),
-                "kind": str(getattr(invocation_result, "kind", "") or ""),
-                "effect": str(getattr(effect, "value", effect) or ""),
-            }
-        for result in continuation.pending_tool_results:
-            call_id = str(getattr(result, "call_id", "") or "").strip()
-            delivery = getattr(result, "context_delivery", None)
-            if call_id and isinstance(delivery, dict):
-                continuation.tool_delivery_records[call_id] = dict(delivery)
-        continuation.pending_assistant_tool_text = ""
-        continuation.pending_assistant_provider_specific_fields = {}
-        continuation.pending_tool_call_batch = []
-        continuation.pending_tool_results = []
-
     @staticmethod
-    def close_active_tool_protocol(continuation: Any) -> None:
-        """Release provider-exact protocol state after a logical turn closes."""
+    def clear_execution_cursors(continuation: Any) -> None:
+        """Release transient execution cursors after L1 has closed the turn."""
 
-        continuation.tool_protocol_messages.clear()
-        continuation.tool_delivery_records.clear()
         continuation.pending_assistant_tool_text = ""
-        continuation.pending_assistant_provider_specific_fields = {}
         continuation.pending_tool_call_batch = []
         continuation.pending_tool_results = []
-        continuation.l1_protocol_committed_count = 0
 
-    def _render_tool_result_content(self, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> str:
+    def _render_tool_result_content(self, tool_call: ToolCallIR, result: ToolExecutionResult) -> str:
         if self._is_memory_recall_tool_call(tool_call.name):
             return self._render_memory_recall_tool_observation(tool_call, result)
         if isinstance(getattr(result, "context_delivery", None), dict):
@@ -1198,7 +904,7 @@ class TurnExecutor:
         normalized = str(name or "").strip()
         return normalized in {"op_memory_recall", "recall_memory"} or normalized.endswith("_memory_recall")
 
-    def _render_memory_recall_tool_observation(self, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> str:
+    def _render_memory_recall_tool_observation(self, tool_call: ToolCallIR, result: ToolExecutionResult) -> str:
         provider_id = str(tool_call.args.get("target_id") or "").strip() or "default"
         queries = [str(value).strip() for value in list(tool_call.args.get("queries") or []) if str(value).strip()]
         topic_scope = [str(value).strip() for value in list(tool_call.args.get("topic_scope") or []) if str(value).strip()]
@@ -1223,22 +929,24 @@ class TurnExecutor:
     # ── response / temperature helpers ───────────────────────────────────
 
     @staticmethod
-    def _llm_runtime_supports_streaming(llm_runtime, request: CanonicalLLMRequest | None = None) -> bool:
+    def _llm_runtime_supports_streaming(llm_runtime, request: LLMRequestIR | None = None) -> bool:
         endpoint_facts = TurnExecutor._llm_runtime_endpoint_facts(llm_runtime, request)
         if "supports_streaming" in endpoint_facts and not bool(endpoint_facts.get("supports_streaming")):
             return False
         supports_streaming = getattr(llm_runtime, "supports_streaming", None)
         if callable(supports_streaming):
             try:
-                supports_streaming = supports_streaming()
+                supports_streaming = supports_streaming(request)
             except Exception:
                 supports_streaming = False
         if supports_streaming is not None and not bool(supports_streaming):
             return False
-        return callable(getattr(llm_runtime, "agenerate_stream", None)) or callable(getattr(llm_runtime, "generate_stream", None))
+        return (
+            callable(getattr(llm_runtime, "astream", None))
+        )
 
     @staticmethod
-    def _llm_runtime_endpoint_facts(llm_runtime, request: CanonicalLLMRequest | None) -> dict[str, Any]:
+    def _llm_runtime_endpoint_facts(llm_runtime, request: LLMRequestIR | None) -> dict[str, Any]:
         method = getattr(llm_runtime, "resolve_endpoint_facts", None)
         if not callable(method):
             return {}
@@ -1257,7 +965,7 @@ class TurnExecutor:
             return {}
         return dict(facts or {}) if isinstance(facts, dict) else {}
 
-    def infer_response_mode(self, outcome: CanonicalLLMOutcome | None, *, used_tools: bool) -> str:
+    def infer_response_mode(self, outcome: LLMGenerationResult | None, *, used_tools: bool) -> str:
         if outcome is not None:
             response_mode = str(outcome.response_mode or "").strip().lower()
             if response_mode in {
@@ -1272,6 +980,48 @@ class TurnExecutor:
                 return LLMResponseMode.CHAT
         return LLMResponseMode.OPERATIONAL if used_tools else LLMResponseMode.CHAT
 
+    @staticmethod
+    def _generation_result_from_text(
+        text: str,
+        *,
+        finish_reason: LLMFinishReason,
+        response_mode: str | None = None,
+    ) -> LLMGenerationResult:
+        return LLMGenerationResult(
+            response=LLMResponseIR(
+                message=LLMMessageIR(
+                    role=MessageRole.ASSISTANT,
+                    parts=(TextPartIR(str(text)),) if str(text) else (),
+                    state=MessageState.COMPLETE,
+                ),
+                finish_reason=finish_reason,
+                provider_response_count=0,
+            ),
+            response_mode=response_mode,
+        )
+
+    async def _upsert_l1_assistant_async(
+        self,
+        continuation: Any,
+        message: LLMMessageIR,
+    ) -> None:
+        memory_service = self.context.port_registry.get("memory:memory")
+        method = getattr(memory_service, "upsert_l1_assistant", None)
+        if not callable(method):
+            return
+        if not message.semantic_kind:
+            message = replace(
+                message,
+                semantic_kind=(
+                    L1MessageKind.ASSISTANT_TOOL_CALL
+                    if message.tool_calls
+                    else L1MessageKind.ASSISTANT_REPLY
+                ),
+            )
+        result = method(str(continuation.turn_id), message)
+        if inspect.isawaitable(result):
+            await result
+
     def select_turn_temperature(self, response_mode: str) -> float:
         base_by_mode = {
             LLMResponseMode.CHAT: 0.7,
@@ -1283,145 +1033,50 @@ class TurnExecutor:
 
     # ── L1 working-set settlement ───────────────────────────────────────
 
-    async def _settle_l1_working_set_async(
+    async def _ensure_l1_turn_async(
         self,
         continuation: Any,
         assembly_context: Any,
     ) -> bool:
-        """Commit the current input and every closed tool batch before compact."""
-
-        input_ok = await self._settle_l1_input_async(
-            continuation,
-            assembly_context,
-        )
-        protocol_ok = await self._settle_l1_protocol_async(continuation)
-        return input_ok and protocol_ok
-
-    async def _settle_l1_input_async(
-        self,
-        continuation: Any,
-        assembly_context: Any,
-    ) -> bool:
-        if bool(getattr(continuation, "l1_input_committed", False)):
-            return True
-        event = getattr(assembly_context, "event", None)
-        text = extract_text_from_payload(
-            getattr(event, "payload", None)
-        ).strip()
-        if not text:
-            text = str(
-                dict(getattr(assembly_context, "metadata", {}) or {}).get(
-                    "proactive_input"
-                )
-                or ""
-            ).strip()
-        if not text:
-            continuation.l1_input_committed = True
-            return True
-        input_id = self._active_input_id(continuation, assembly_context)
-        message = L1TranscriptMessage(
-            role="user",
-            content=text,
-            kind=L1MessageKind.USER_REQUEST,
-            payload={"_pal_input_id": input_id},
-        )
-        committed = await self._commit_l1_transcript_async(
-            continuation,
-            [message],
-            metadata={"working_set_phase": "input"},
-        )
-        if committed:
-            continuation.l1_input_committed = True
-        return committed
-
-    async def _settle_l1_protocol_async(
-        self,
-        continuation: Any,
-    ) -> bool:
-        if getattr(continuation, "pending_tool_call_batch", None):
-            return False
-        if getattr(continuation, "pending_tool_results", None):
-            return False
-        messages = list(
-            getattr(continuation, "tool_protocol_messages", ()) or ()
-        )
-        committed_count = max(
-            0,
-            int(
-                getattr(
-                    continuation,
-                    "l1_protocol_committed_count",
-                    0,
-                )
-                or 0
-            ),
-        )
-        if committed_count > len(messages):
-            return False
-        if committed_count == len(messages):
-            return True
-        suffix = [
-            dict(message)
-            for message in messages[committed_count:]
-            if isinstance(message, dict)
-        ]
-        validation_error = l1_tool_protocol_validation_error(suffix)
-        if validation_error:
-            return False
-        transcript, _ = l1_tool_protocol_transcript(suffix)
-        input_id = self._active_input_id(continuation, None)
-        tagged = [
-            L1TranscriptMessage(
-                role=message.role,
-                content=message.content,
-                kind=message.kind,
-                tool_calls=message.tool_calls,
-                tool_call_id=message.tool_call_id,
-                payload={
-                    **dict(message.payload or {}),
-                    "_pal_input_id": input_id,
-                },
-            )
-            for message in transcript
-        ]
-        if tagged and not await self._commit_l1_transcript_async(
-            continuation,
-            tagged,
-            metadata={"working_set_phase": "closed_tool_protocol"},
-        ):
-            return False
-        continuation.l1_protocol_committed_count = len(messages)
-        return True
-
-    async def _commit_l1_transcript_async(
-        self,
-        continuation: Any,
-        transcript: list[L1TranscriptMessage],
-        *,
-        metadata: dict[str, Any],
-    ) -> bool:
-        if not transcript:
-            return True
         memory_service = self.context.port_registry.get("memory:memory")
         if memory_service is None:
             return False
+        event = getattr(assembly_context, "event", None)
+        text = extract_text_from_payload(getattr(event, "payload", None)).strip()
+        if not text:
+            text = str(dict(getattr(assembly_context, "metadata", {}) or {}).get("proactive_input") or "").strip()
         try:
-            result = await self._call_port_async(
-                memory_service,
-                "acommit_l1",
-                "commit_l1",
-                MemoryCommitRequest(
-                    turn_id=str(getattr(continuation, "turn_id", "") or ""),
-                    transcript=transcript,
-                    metadata=dict(metadata),
-                ),
+            method = getattr(memory_service, "begin_l1_turn")
+            method(
+                str(continuation.turn_id),
+                user_text=text,
+                metadata={"_pal_input_id": self._active_input_id(continuation, assembly_context)},
             )
+            return True
         except Exception:
             return False
-        return getattr(result, "status", "") in {
-            RuntimeStatus.OK,
-            RuntimeStatus.SKIPPED,
-        }
+
+    async def _append_l1_tool_result_async(
+        self,
+        continuation: Any,
+        call: ToolCallIR,
+        result: ToolExecutionResult,
+    ) -> None:
+        memory_service = self.context.port_registry.get("memory:memory")
+        method = getattr(memory_service, "append_l1_tool_result", None)
+        if not callable(method):
+            return
+        method(
+            str(continuation.turn_id),
+            ToolResultIR(
+                call_id=call.call_id,
+                name=call.name,
+                content=self._render_tool_result_content(call, result),
+                ok=result.ok,
+                status=str(result.status or ("ok" if result.ok else "error")),
+                structured=dict(result.structured) if result.structured is not None else None,
+            ),
+        )
 
     @staticmethod
     def _active_input_id(
@@ -1446,24 +1101,15 @@ class TurnExecutor:
         memory_service = self.context.port_registry.get("memory:memory")
         result = None
         if memory_service is not None:
-            result = await self._call_port_async(
-                memory_service,
-                "acommit_l1",
-                "commit_l1",
-                MemoryCommitRequest(
-                    turn_id=outcome.commit_payload.turn_id,
-                    transcript=list(outcome.commit_payload.transcript),
-                    metadata={
-                        "tool_observation_count": len(outcome.commit_payload.tool_observations),
-                    },
-                )
-            )
-            if result.status != RuntimeStatus.OK:
+            try:
+                result = memory_service.settle_l1_turn(outcome.commit_payload.turn_id)
+            except Exception as exc:
                 self.state.diagnostics.append(
                     {
-                        "kind": "memory.commit.retry",
+                        "kind": "memory.turn.settle_failed",
                         "turn_id": outcome.commit_payload.turn_id,
-                        "status": result.status,
+                        "status": RuntimeStatus.ERROR,
+                        "error": str(exc),
                     }
                 )
             try:
@@ -1542,33 +1188,13 @@ class TurnExecutor:
                     failures=("pending_tool_results",),
                     clock_kind=engine.policy.clock_kind,
                 )
-            original_protocol = [
-                dict(message)
-                for message in list(
-                    getattr(
-                        continuation,
-                        "tool_protocol_messages",
-                        (),
-                    )
-                    or ()
-                )
-                if isinstance(message, dict)
-            ]
-            if int(
-                getattr(
-                    continuation,
-                    "l1_protocol_committed_count",
-                    0,
-                )
-                or 0
-            ) != len(original_protocol):
+            active_turn = getattr(memory_service, "active_l1_turn", lambda _turn_id: None)(continuation.turn_id)
+            if active_turn is not None and active_turn.pending_call_ids:
                 return CompactionRunResult(
-                    status="l1_not_settled",
-                    failures=("closed_protocol_not_committed_to_l1",),
+                    status="protocol_not_closed",
+                    failures=("l1_pending_tool_calls",),
                     clock_kind=engine.policy.clock_kind,
                 )
-        else:
-            original_protocol = []
         try:
             clock_value = max(
                 0,
@@ -1588,41 +1214,14 @@ class TurnExecutor:
                 "preferred_model_id": preferred_model_id,
             },
         )
-        reconcile = getattr(
-            self.context.execution_runtime,
-            "reconcile_tool_context",
-            None,
-        )
-
-        def retire_protocol_projection() -> None:
-            if not callable(reconcile):
-                return
-            reconcile(
-                turn_id=getattr(continuation, "turn_id", None),
-                original_messages=original_protocol,
-                projected_messages=[],
-                delivery_records=dict(
-                    getattr(
-                        continuation,
-                        "tool_delivery_records",
-                        {},
-                    )
-                    or {}
-                ),
-            )
-
         run_result = await engine.run(
             snapshot,
             llm_runtime=llm_runtime,
             memory_service=memory_service,
-            after_commit=(
-                retire_protocol_projection
-                if continuation is not None
-                else None
-            ),
+            after_commit=None,
         )
         if not run_result.success or continuation is None:
             return run_result
 
-        self.close_active_tool_protocol(continuation)
+        self.clear_execution_cursors(continuation)
         return run_result

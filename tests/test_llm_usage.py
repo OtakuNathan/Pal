@@ -11,14 +11,12 @@ from pal.llm.capabilities import (
     LLMIntrospectionProvider,
     register_with_core as register_llm_with_core,
 )
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
-from pal.llm.runtime import (
-    EndpointResolver,
-    LLMRuntime,
-    _include_openai_stream_usage,
-    _parse_openai_chat_stream_chunk,
-    _response_usage,
-)
+from pal.llm.contracts import generation_result_from_values, request_ir_from_prompt
+from pal.llm.ir import WireShape
+from pal.llm.runtime import EndpointResolver, LLMRuntime
+from pal.llm.shapes import codec_for_shape
+from pal.llm.shapes.base import ShapeContext, _JSONFrame as JSONFrame
+from pal.llm.shapes.builder import usage_from_mapping
 from pal.shared import EventKind, IntrospectionCall, SourceKind
 
 
@@ -43,23 +41,23 @@ class _Settings:
 
 
 class _UsageInvoker:
-    def __init__(self, outcome: CanonicalLLMOutcome) -> None:
+    def __init__(self, outcome: generation_result_from_values) -> None:
         self.outcome = outcome
 
-    def invoke(self, endpoint, request):
-        _ = endpoint, request
-        return self.outcome
+    def invoke(self, endpoint, request, *, stream=False, timeout_seconds=180.0):
+        _ = endpoint, request, stream, timeout_seconds
+        return self.outcome.response, ()
 
-    def invoke_stream(self, endpoint, request):
+    def invoke_updates(self, endpoint, request, *, timeout_seconds=180.0):
         raise AssertionError("streaming was not expected")
 
 
 class _FailingInvoker:
-    def invoke(self, endpoint, request):
-        _ = endpoint, request
+    def invoke(self, endpoint, request, *, stream=False, timeout_seconds=180.0):
+        _ = endpoint, request, stream, timeout_seconds
         raise RuntimeError("provider failed")
 
-    def invoke_stream(self, endpoint, request):
+    def invoke_updates(self, endpoint, request, *, timeout_seconds=180.0):
         raise AssertionError("streaming was not expected")
 
 
@@ -69,11 +67,14 @@ def _endpoint(endpoint_id: str = "primary"):
         provider="openai",
         model_id="test-model",
         display_name="Test model",
-        api_mode="openai_chat",
+        wire_shape="openai_completion",
         base_url="https://example.test/v1",
+        auth_kind="api_key_ref",
+        credential_ref="TEST_LLM_API_KEY",
         context_window=32_000,
         max_output_tokens=4_096,
-        supports_reasoning=True,
+        thinking_levels_blob=["off", "medium", "high"],
+        default_thinking_level="medium",
         supports_tools=True,
         supports_streaming=False,
         supports_vision=False,
@@ -81,27 +82,20 @@ def _endpoint(endpoint_id: str = "primary"):
         enabled=True,
         capabilities_blob={},
         input_modalities_blob=[],
+        output_modalities_blob=[],
+        notes=None,
     )
 
 
 class LLMUsageNormalizationTests(unittest.TestCase):
     def test_openai_usage_splits_cached_uncached_write_and_reasoning_tokens(self) -> None:
-        usage = _response_usage(
-            {
-                "usage": {
-                    "prompt_tokens": 1_000,
-                    "completion_tokens": 300,
-                    "prompt_tokens_details": {
-                        "cached_tokens": 800,
-                        "cache_write_tokens": 50,
-                    },
-                    "completion_tokens_details": {
-                        "reasoning_tokens": 200,
-                    },
-                    "cost": 1.25,
-                }
-            }
-        )
+        usage = usage_from_mapping({
+            "prompt_tokens": 1_000,
+            "completion_tokens": 300,
+            "prompt_tokens_details": {"cached_tokens": 800, "cache_write_tokens": 50},
+            "completion_tokens_details": {"reasoning_tokens": 200},
+            "cost": 1.25,
+        })
 
         self.assertEqual(usage.input_tokens, 1_000)
         self.assertEqual(usage.uncached_input_tokens, 150)
@@ -111,19 +105,14 @@ class LLMUsageNormalizationTests(unittest.TestCase):
         self.assertEqual(usage.reasoning_tokens, 200)
         self.assertAlmostEqual(usage.cost, 1.25)
         self.assertTrue(usage.reported)
-        self.assertAlmostEqual(usage.cache_hit_rate, 0.8)
 
     def test_anthropic_usage_combines_separate_input_categories(self) -> None:
-        usage = _response_usage(
-            {
-                "usage": {
-                    "input_tokens": 100,
-                    "cache_read_input_tokens": 800,
-                    "cache_creation_input_tokens": 100,
-                    "output_tokens": 50,
-                }
-            }
-        )
+        usage = usage_from_mapping({
+            "input_tokens": 100,
+            "cache_read_input_tokens": 800,
+            "cache_creation_input_tokens": 100,
+            "output_tokens": 50,
+        })
 
         self.assertEqual(usage.input_tokens, 1_000)
         self.assertEqual(usage.uncached_input_tokens, 100)
@@ -133,43 +122,44 @@ class LLMUsageNormalizationTests(unittest.TestCase):
         self.assertTrue(usage.reported)
 
     def test_missing_usage_is_distinguishable_from_reported_zero(self) -> None:
-        self.assertFalse(_response_usage({}).reported)
-        reported_zero = _response_usage({"usage": {}})
+        self.assertFalse(usage_from_mapping(None).reported)
+        reported_zero = usage_from_mapping({})
         self.assertTrue(reported_zero.reported)
         self.assertEqual(reported_zero.input_tokens, 0)
 
     def test_openai_terminal_stream_usage_chunk_is_normalized(self) -> None:
-        events = _parse_openai_chat_stream_chunk(
-            {
-                "choices": [],
-                "usage": {
-                    "prompt_tokens": 100,
-                    "completion_tokens": 20,
-                    "prompt_tokens_details": {"cached_tokens": 75},
-                },
-            }
-        )
-
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].event_kind, "done")
-        self.assertEqual(events[0].input_tokens, 100)
-        self.assertEqual(events[0].uncached_input_tokens, 25)
-        self.assertEqual(events[0].cached_input_tokens, 75)
-        self.assertEqual(events[0].output_tokens, 20)
-        self.assertTrue(events[0].usage_reported)
-
-    def test_stream_usage_can_be_disabled_per_endpoint(self) -> None:
-        enabled = _endpoint()
-        disabled = _endpoint()
-        disabled.capabilities_blob = {"supports_stream_usage": False}
-
-        self.assertTrue(_include_openai_stream_usage(enabled))
-        self.assertFalse(_include_openai_stream_usage(disabled))
+        codec = codec_for_shape(WireShape.OPENAI_COMPLETION)
+        updates = list(codec.decode(
+            [
+                JSONFrame(0, {
+                    "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
+                }),
+                JSONFrame(1, {
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 20,
+                        "prompt_tokens_details": {"cached_tokens": 75},
+                    },
+                }),
+            ],
+            ShapeContext(
+                wire_shape=WireShape.OPENAI_COMPLETION,
+                endpoint_id="primary",
+                model_id="test-model",
+            ),
+        ))
+        usage = updates[-1].response.usage
+        self.assertEqual(usage.input_tokens, 100)
+        self.assertEqual(usage.uncached_input_tokens, 25)
+        self.assertEqual(usage.cached_input_tokens, 75)
+        self.assertEqual(usage.output_tokens, 20)
+        self.assertTrue(usage.reported)
 
 
 class LLMUsageLedgerTests(unittest.TestCase):
     def test_runtime_ledger_and_status_expose_cache_statistics(self) -> None:
-        outcome = CanonicalLLMOutcome(
+        outcome = generation_result_from_values(
             text="ok",
             input_tokens=1_000,
             uncached_input_tokens=150,
@@ -188,7 +178,7 @@ class LLMUsageLedgerTests(unittest.TestCase):
         )
 
         result = runtime.generate(
-            CanonicalLLMRequest(
+            request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hello"}],
                 max_output_tokens=128,
             )
@@ -223,7 +213,7 @@ class LLMUsageLedgerTests(unittest.TestCase):
         )
 
         outcome = runtime.generate(
-            CanonicalLLMRequest(
+            request_ir_from_prompt(
                 messages=[{"role": "user", "content": "hello"}],
                 max_output_tokens=128,
             )
@@ -242,7 +232,7 @@ class LLMUsageLedgerTests(unittest.TestCase):
         runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(endpoints=(_endpoint(),)),
             settings_repository=_Settings(),
-            endpoint_invoker=_UsageInvoker(CanonicalLLMOutcome(text="ok")),
+            endpoint_invoker=_UsageInvoker(generation_result_from_values(text="ok")),
             endpoint_retry_attempts=1,
         )
         core = PalCore()

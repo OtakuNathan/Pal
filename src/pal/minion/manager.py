@@ -5,6 +5,7 @@ import contextlib
 import logging
 import os
 import signal
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -28,7 +29,7 @@ from pal.minion.llm_broker import (
     llm_request_from_payload,
     preflight_advice_to_payload,
     preflight_request_from_payload,
-    stream_event_to_payload,
+    stream_update_to_payload,
 )
 from pal.minion.harnesses import MinionHarnessRegistry
 from pal.minion.web_broker import web_result_to_payload
@@ -295,6 +296,9 @@ class MinionManager:
                 if str(request.get("method") or "") == "subscribe_events":
                     await self.events.handle_subscription(request, reader, writer, shutdown_event=self._shutdown_event)
                     return
+                if bool(request.get("stream")):
+                    await self._serve_llm_stream_request(request, writer, worker=False)
+                    return
                 writer.write(pack_sidecar_message(await self._dispatch(request)))
                 await writer.drain()
         except (ConnectionError, OSError, ValueError):
@@ -323,6 +327,9 @@ class MinionManager:
                     request = await read_sidecar_message(reader)
                 except asyncio.IncompleteReadError:
                     return
+                if bool(request.get("stream")):
+                    await self._serve_llm_stream_request(request, writer, worker=True)
+                    return
                 writer.write(
                     pack_sidecar_message(
                         await dispatch_sidecar_request(
@@ -349,26 +356,13 @@ class MinionManager:
         broker_handlers = {
             "llm_preflight": self.llm_broker_preflight,
             "llm_generate": self.llm_broker_generate,
-            "llm_generate_stream": self.llm_broker_generate_stream,
             "llm_resolve_max_output_tokens": self.llm_broker_resolve_max_output_tokens,
             "llm_resolve_endpoint_facts": self.llm_broker_resolve_endpoint_facts,
             "web_search": self.web_broker_search,
             "web_read": self.web_broker_read,
         }
         if method in broker_handlers:
-            payload = dict(params or {})
-            token = str(payload.pop("access_token", ""))
-            authenticated = await asyncio.to_thread(
-                self.role_gateway.authorize,
-                token,
-            )
-            run_id = str(payload.get("run_id") or "")
-            run = self.runs.get(run_id)
-            assignment = dict(authenticated.get("assignment") or {})
-            if run is None or run.minion_id != str(assignment.get("session_id") or ""):
-                raise PermissionError(
-                    "role assignment token does not own the requested broker run"
-                )
+            payload = await self._authorize_worker_broker_params(params)
             return await broker_handlers[method](payload)
         return await asyncio.to_thread(self.role_gateway.call, method, params)
 
@@ -376,9 +370,9 @@ class MinionManager:
         handlers = {
             "llm_preflight": self.llm_broker_preflight,
             "llm_generate": self.llm_broker_generate,
-            "llm_generate_stream": self.llm_broker_generate_stream,
             "llm_resolve_max_output_tokens": self.llm_broker_resolve_max_output_tokens,
             "llm_resolve_endpoint_facts": self.llm_broker_resolve_endpoint_facts,
+            "refresh_llm_endpoints": self.refresh_llm_endpoints,
             "send_decision": self.send_decision,
             "send_clarification": self.send_clarification,
             "answer_workflow_question": self.answer_workflow_question,
@@ -456,6 +450,72 @@ class MinionManager:
                 graceful=bool(params.get("graceful", True)),
             )
         raise ValueError(f"unknown Minion V2 manager method: {method}")
+
+    async def _authorize_worker_broker_params(
+        self,
+        params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        payload = dict(params or {})
+        token = str(payload.pop("access_token", ""))
+        authenticated = await asyncio.to_thread(
+            self.role_gateway.authorize,
+            token,
+        )
+        run_id = str(payload.get("run_id") or "")
+        run = self.runs.get(run_id)
+        assignment = dict(authenticated.get("assignment") or {})
+        if run is None or run.minion_id != str(assignment.get("session_id") or ""):
+            raise PermissionError(
+                "role assignment token does not own the requested broker run"
+            )
+        return payload
+
+    async def _serve_llm_stream_request(
+        self,
+        request: dict[str, Any],
+        writer: asyncio.StreamWriter,
+        *,
+        worker: bool,
+    ) -> None:
+        request_id = str(request.get("id") or "")
+        method = str(request.get("method") or "")
+        try:
+            if method != "llm_generate_stream":
+                raise ValueError(f"sidecar method is not streamable: {method}")
+            params = dict(request.get("params") or {})
+            if worker:
+                params = await self._authorize_worker_broker_params(params)
+            async for update in self.llm_broker_stream_updates(params):
+                writer.write(
+                    pack_sidecar_message(
+                        {
+                            "type": "stream_item",
+                            "id": request_id,
+                            "ok": True,
+                            "result": {"update": stream_update_to_payload(update)},
+                        }
+                    )
+                )
+                await writer.drain()
+            terminal = {
+                "type": "stream_end",
+                "id": request_id,
+                "ok": True,
+                "result": {},
+            }
+        except Exception as exc:
+            self.logger.exception("sidecar stream request failed: %s", method)
+            terminal = {
+                "type": "stream_end",
+                "id": request_id,
+                "ok": False,
+                "error": {
+                    "kind": "role_gateway" if worker else "manager",
+                    "message": f"{exc.__class__.__name__}: {exc}",
+                },
+            }
+        writer.write(pack_sidecar_message(terminal))
+        await writer.drain()
 
     async def _run_v2_outbox(self) -> None:
         while not self._shutdown_event.is_set():
@@ -781,12 +841,19 @@ class MinionManager:
             outcome = await runtime.agenerate(llm_request_from_payload(dict(params.get("request") or {})))
         return {"ok": True, "outcome": llm_outcome_to_payload(outcome)}
 
-    async def llm_broker_generate_stream(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def llm_broker_stream_updates(
+        self,
+        params: dict[str, Any],
+    ) -> AsyncIterator[Any]:
         state = self._require_broker_run(params)
         runtime = await self._llm_broker_runtime()
+        request = llm_request_from_payload(dict(params.get("request") or {}))
         with scoped_llm_event_sink(self._llm_progress_sink(state)):
-            events = await runtime.agenerate_stream(llm_request_from_payload(dict(params.get("request") or {})))
-        return {"ok": True, "events": [stream_event_to_payload(item) for item in list(events or [])]}
+            stream = getattr(runtime, "astream", None)
+            if not callable(stream):
+                raise TypeError("manager LLM runtime does not implement astream")
+            async for update in stream(request):
+                yield update
 
     async def llm_broker_resolve_max_output_tokens(self, params: dict[str, Any]) -> dict[str, Any]:
         self._require_broker_run(params)
@@ -807,6 +874,26 @@ class MinionManager:
             preferred_endpoint_source=str(params.get("preferred_endpoint_source") or "") or None,
         )
 
+    async def refresh_llm_endpoints(
+        self,
+        _params: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Refresh the cached host broker runtime at Core's explicit boundary."""
+
+        bundle = self._host_broker_bundle
+        if bundle is None:
+            return {"ok": True, "runtime_loaded": False, "refreshed": False}
+        refresh = getattr(bundle.llm_runtime, "refresh_llm_endpoints", None)
+        if not callable(refresh):
+            raise TypeError("manager host LLM runtime does not support endpoint refresh")
+        payload = await asyncio.to_thread(refresh)
+        return {
+            "ok": True,
+            "runtime_loaded": True,
+            "refreshed": True,
+            "runtime": dict(payload or {}),
+        }
+
     def _require_broker_run(self, params: Mapping[str, Any]) -> MinionRunState:
         run_id = str(params.get("run_id") or "")
         state = self.runs.get(run_id)
@@ -826,6 +913,7 @@ class MinionManager:
             self._host_broker_bundle = await asyncio.to_thread(
                 build_slim_minion_runtime,
                 self.runtime_root,
+                llm_authority="host",
             )
         return self._host_broker_bundle
 

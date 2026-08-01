@@ -296,9 +296,9 @@ First-party modules own their capability trees. Runtime plugins may publish
 capabilities through their provider boundary, but they do not mutate another
 module's forest directly.
 
-Provider-specific rendering or transport behavior belongs in the provider's own
-subsystem. For example, LLM provider wire-shape differences belong in
-`src/pal/llm/llm_adaptor/`, not in the generic capability forest.
+LLM wire rendering belongs to the three codecs in `src/pal/llm/shapes/`, not in
+the generic capability forest. Exact-model tuning belongs to runtime model
+hooks; provider identity does not select behavior.
 
 ## Invariants
 

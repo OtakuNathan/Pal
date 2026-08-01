@@ -9,6 +9,8 @@ Covers:
 
 from __future__ import annotations
 
+from pal.shared.tool_protocol import new_tool_call
+
 import os
 import shutil
 import sqlite3
@@ -25,7 +27,6 @@ from pal.wizard.prompts import (
     WizardIdentity,
     WizardLLMEndpoint,
     WizardMemoryEmbedding,
-    build_codex_wizard_endpoints,
     multiline_input,
     normalize_telegram_binding_key,
     run_llm_endpoint_preflight,
@@ -46,12 +47,13 @@ def _make_collected() -> WizardCollectedData:
             WizardLLMEndpoint(
                 endpoint_id="test-claude",
                 model_id="claude-sonnet-4-20250514",
-                api_mode="anthropic_messages",
+                wire_shape="anthropic_messages",
                 base_url="https://api.anthropic.com/v1/messages",
                 api_key="sk-test-key-123",
                 context_window=200000,
                 max_output_tokens=16384,
-                supports_reasoning=True,
+                thinking_levels=["off", "low", "medium", "high"],
+                default_thinking_level="medium",
                 supports_tools=True,
                 supports_streaming=True,
                 supports_vision=True,
@@ -144,7 +146,7 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(len(endpoints), 1)
         self.assertEqual(endpoints[0].endpoint_id, "test-claude")
         self.assertEqual(endpoints[0].model_id, "claude-sonnet-4-20250514")
-        self.assertEqual(endpoints[0].api_mode, "anthropic_messages")
+        self.assertEqual(endpoints[0].wire_shape, "anthropic_messages")
         self.assertEqual(endpoints[0].context_window, 200000)
 
     def test_seed_from_wizard_stores_api_key(self) -> None:
@@ -345,12 +347,13 @@ class TestSeedFromWizard(unittest.TestCase):
         updated.endpoints[0] = WizardLLMEndpoint(
             endpoint_id="test-claude",
             model_id="claude-opus-4-20250514",
-            api_mode="anthropic_messages",
+            wire_shape="anthropic_messages",
             base_url="https://api.anthropic.com/v1/messages",
             api_key=None,
             context_window=200000,
             max_output_tokens=16384,
-            supports_reasoning=True,
+            thinking_levels=["off", "low", "medium", "high"],
+            default_thinking_level="medium",
             supports_tools=True,
             supports_streaming=True,
             supports_vision=True,
@@ -393,12 +396,13 @@ class TestSeedFromWizard(unittest.TestCase):
             WizardLLMEndpoint(
                 endpoint_id="deepseek-fallback",
                 model_id="deepseek-chat",
-                api_mode="openai_chat",
+                wire_shape="openai_completion",
                 base_url="https://api.deepseek.com/v1/chat/completions",
                 api_key="ds-test-key",
                 context_window=64000,
                 max_output_tokens=8192,
-                supports_reasoning=False,
+                thinking_levels=["off"],
+                default_thinking_level="off",
                 supports_tools=True,
                 supports_streaming=True,
                 supports_vision=False,
@@ -412,56 +416,20 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(endpoints[0].endpoint_id, "test-claude")
         self.assertEqual(endpoints[1].endpoint_id, "deepseek-fallback")
 
-    def test_seed_from_wizard_writes_codex_cli_endpoint(self) -> None:
-        from pal.llm import LLMEndpointRepository
-
-        collected = _make_collected()
-        collected.endpoints = build_codex_wizard_endpoints(("gpt-5.5",))
-        collected.active_endpoint_id = "codex_gpt_5_5"
-        self.wizard.seed_from_wizard(self.registration, collected)
-
-        endpoint = LLMEndpointRepository().get_primary_enabled()
-        self.assertIsNotNone(endpoint)
-        self.assertEqual(endpoint.endpoint_id, "codex_gpt_5_5")
-        self.assertEqual(endpoint.provider, "codex_cli")
-        self.assertEqual(endpoint.model_id, "gpt-5.5")
-        self.assertEqual(endpoint.api_mode, "openai_chat")
-        self.assertEqual(endpoint.base_url, "codex://cli")
-        self.assertEqual(endpoint.auth_kind, "local_provider_auth")
-        self.assertEqual(endpoint.credential_ref, "")
-        self.assertTrue(endpoint.supports_reasoning)
-        self.assertTrue(endpoint.supports_tools)
-        self.assertTrue(endpoint.supports_streaming)
-        self.assertTrue(endpoint.supports_vision)
-        self.assertTrue(endpoint.capabilities_blob["official_codex_cli"])
-
-
-class TestCodexWizardEndpoints(unittest.TestCase):
-    def test_build_codex_wizard_endpoints_sanitizes_ids(self) -> None:
-        endpoints = build_codex_wizard_endpoints(("gpt-5.5", "gpt-5.3-codex-spark"))
-
-        self.assertEqual([ep.endpoint_id for ep in endpoints], ["codex_gpt_5_5", "codex_gpt_5_3_codex_spark"])
-        self.assertEqual([ep.priority for ep in endpoints], [0, 1])
-        self.assertEqual(endpoints[0].provider, "codex_cli")
-        self.assertEqual(endpoints[0].auth_kind, "local_provider_auth")
-        self.assertEqual(endpoints[0].credential_ref, "")
-        self.assertEqual(endpoints[0].base_url, "codex://cli")
-        self.assertTrue(endpoints[0].capabilities_blob["codex_cli"])
-
-
 class TestLLMPreflight(unittest.TestCase):
     def test_preflight_passes_text_and_tool_probe(self) -> None:
-        from pal.llm import CanonicalLLMOutcome, CanonicalToolCall
+        from pal.llm import generation_result_from_values
+        from pal.shared.tool_protocol import ToolCallIR
 
         class FakeInvoker:
             def __init__(self) -> None:
                 self.calls = []
 
-            def invoke(self, endpoint, request):
-                self.calls.append((endpoint, request))
+            def invoke(self, endpoint, request, *, timeout_seconds=180.0):
+                self.calls.append((endpoint, request, timeout_seconds))
                 if request.tools:
-                    return CanonicalLLMOutcome(tool_calls=[CanonicalToolCall(name="pal_preflight_probe", args={"ok": True})])
-                return CanonicalLLMOutcome(text="PAL_PREFLIGHT_OK")
+                    return generation_result_from_values(tool_calls=[new_tool_call(name="pal_preflight_probe", args={"ok": True})]).response, ()
+                return generation_result_from_values(text="PAL_PREFLIGHT_OK").response, ()
 
         invoker = FakeInvoker()
         result = run_llm_endpoint_preflight(_make_collected().endpoints[0], timeout_seconds=7, invoker=invoker)
@@ -471,12 +439,13 @@ class TestLLMPreflight(unittest.TestCase):
         self.assertTrue(result.tool_ok)
         self.assertEqual(len(invoker.calls), 2)
         self.assertEqual(invoker.calls[0][0].provider, "anthropic")
-        self.assertEqual(invoker.calls[0][1].metadata["timeout_seconds"], 7)
-        self.assertEqual(invoker.calls[1][1].tools[0]["function"]["name"], "pal_preflight_probe")
+        self.assertEqual(invoker.calls[0][2], 7)
+        self.assertEqual(invoker.calls[1][1].tools[0].name, "pal_preflight_probe")
 
     def test_preflight_errors_when_text_call_fails(self) -> None:
         class FailingInvoker:
-            def invoke(self, endpoint, request):
+            def invoke(self, endpoint, request, *, timeout_seconds=180.0):
+                _ = endpoint, request, timeout_seconds
                 raise RuntimeError("bad key")
 
         result = run_llm_endpoint_preflight(_make_collected().endpoints[0], invoker=FailingInvoker())
@@ -485,38 +454,18 @@ class TestLLMPreflight(unittest.TestCase):
         self.assertIn("bad key", result.detail)
 
     def test_preflight_warns_when_tool_probe_returns_text(self) -> None:
-        from pal.llm import CanonicalLLMOutcome
+        from pal.llm import generation_result_from_values
 
         class TextOnlyInvoker:
-            def invoke(self, endpoint, request):
-                return CanonicalLLMOutcome(text="PAL_PREFLIGHT_OK")
+            def invoke(self, endpoint, request, *, timeout_seconds=180.0):
+                _ = endpoint, request, timeout_seconds
+                return generation_result_from_values(text="PAL_PREFLIGHT_OK").response, ()
 
         result = run_llm_endpoint_preflight(_make_collected().endpoints[0], invoker=TextOnlyInvoker())
 
         self.assertEqual(result.status, "warn")
         self.assertTrue(result.text_ok)
         self.assertFalse(result.tool_ok)
-
-    def test_preflight_preserves_codex_endpoint_metadata(self) -> None:
-        from pal.llm import CanonicalLLMOutcome
-
-        class FakeInvoker:
-            def __init__(self) -> None:
-                self.endpoints = []
-
-            def invoke(self, endpoint, request):
-                self.endpoints.append(endpoint)
-                return CanonicalLLMOutcome(text="PAL_PREFLIGHT_OK")
-
-        invoker = FakeInvoker()
-        result = run_llm_endpoint_preflight(build_codex_wizard_endpoints(("gpt-5.5",))[0], invoker=invoker)
-
-        self.assertEqual(result.status, "warn")
-        self.assertEqual(invoker.endpoints[0].provider, "codex_cli")
-        self.assertEqual(invoker.endpoints[0].auth_kind, "local_provider_auth")
-        self.assertEqual(invoker.endpoints[0].credential_ref, "")
-        self.assertTrue(invoker.endpoints[0].capabilities_blob["official_codex_cli"])
-
 
 class TestServiceGeneration(unittest.TestCase):
     def test_resolve_pal_command_prefers_invoked_console_script(self) -> None:

@@ -467,7 +467,7 @@ def _format_model_endpoint(endpoint: Any) -> str:
     model_id = _endpoint_field(endpoint, "model_id")
     display_name = _endpoint_field(endpoint, "display_name")
     provider = _endpoint_field(endpoint, "provider")
-    api_mode = _endpoint_field(endpoint, "api_mode")
+    wire_shape = _endpoint_field(endpoint, "wire_shape")
     context_window = _endpoint_field(endpoint, "context_window")
     max_output_tokens = _endpoint_field(endpoint, "max_output_tokens")
     label = endpoint_id
@@ -476,8 +476,8 @@ def _format_model_endpoint(endpoint: Any) -> str:
     details: list[str] = []
     if model_id and model_id not in {endpoint_id, display_name}:
         details.append(f"model={model_id}")
-    if provider or api_mode:
-        details.append("/".join(item for item in (provider, api_mode) if item))
+    if provider or wire_shape:
+        details.append("/".join(item for item in (provider, wire_shape) if item))
     if context_window:
         details.append(f"context={context_window}")
     if max_output_tokens:

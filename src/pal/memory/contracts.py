@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolResultIR
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
+
+if False:  # pragma: no cover - typing-only names without runtime import cycles
+    from pal.llm.ir import LLMMessageIR
+    from pal.memory.turn_ir import L1TurnIR
 
 from pal.foundation import (
     DEFAULT_GHOST_TTL,
@@ -230,6 +236,24 @@ L3ProviderResolver = Callable[[str], L3ProviderPort]
 
 
 class MemoryServicePort(Protocol):
+    def begin_l1_turn(self, turn_id: str, *, user_text: str = "", metadata: dict[str, Any] | None = None) -> "L1TurnIR":
+        ...
+
+    def upsert_l1_assistant(self, turn_id: str, message: "LLMMessageIR") -> "L1TurnIR":
+        ...
+
+    def append_l1_tool_result(self, turn_id: str, result: "ToolResultIR") -> "L1TurnIR":
+        ...
+
+    def settle_l1_turn(self, turn_id: str) -> "L1TurnIR":
+        ...
+
+    def interrupt_l1_turn(self, turn_id: str, *, reason: str = "") -> "L1TurnIR":
+        ...
+
+    def abort_l1_turn(self, turn_id: str, *, reason: str = "") -> "L1TurnIR":
+        ...
+
     def compact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
         ...
 

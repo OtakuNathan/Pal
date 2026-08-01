@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import time
 import unittest
@@ -17,7 +19,6 @@ from pal.execution.tool_facade import (
     ToolExecutionSemantics,
     ToolGuidance,
 )
-from pal.llm.contracts import CanonicalToolCall
 from pal.shared import RuntimeStatus
 from tests.capability_fixture import mount_test_capability
 
@@ -57,7 +58,7 @@ class ExecutionRuntimeAsyncTests(unittest.TestCase):
             runtime = ExecutionRuntime(sync_executor_max_workers=1)
             mount_slow_sync_tool(runtime)
             try:
-                task = asyncio.create_task(runtime.execute_tool_async(CanonicalToolCall(name="slow_sync", args={})))
+                task = asyncio.create_task(runtime.execute_tool_async(new_tool_call(name="slow_sync", args={})))
                 await asyncio.sleep(0.02)
                 self.assertFalse(task.done())
                 result = await task

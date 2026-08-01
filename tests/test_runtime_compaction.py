@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR, new_tool_call
+
 import asyncio
 import json
 import unittest
@@ -27,8 +29,12 @@ from pal.core.turns import (
 )
 from pal.foundation import EventEnvelope
 from pal.llm import (
-    CanonicalLLMOutcome,
+    generation_result_from_values,
     LLMPreflightAdvice,
+)
+from pal.llm.ir import (
+    LLMMessageIR,
+    MessageRole,
 )
 from pal.llm.runtime import LLMRuntime
 from pal.memory import (
@@ -41,6 +47,7 @@ from pal.memory import (
     register_with_core as register_memory_with_core,
 )
 from pal.memory.tool_protocol import l1_tool_protocol_transcript
+from pal.memory.turn_ir import L1TurnIR
 from pal.core.pal_compaction import COMPACT_PAL_STRUCTURED_SYSTEM
 from pal.minion.compact import MinionCompactionPolicy
 from pal.shared import (
@@ -143,7 +150,7 @@ def _valid_minion_payload() -> str:
 class _ScriptedLLM:
     def __init__(
         self,
-        outcomes: list[CanonicalLLMOutcome | Exception],
+        outcomes: list[generation_result_from_values | Exception],
         *,
         preflight=None,
     ) -> None:
@@ -172,7 +179,7 @@ class _SlowLLM(_ScriptedLLM):
     async def agenerate(self, request):
         self.generate_requests.append(request)
         await asyncio.sleep(1)
-        return CanonicalLLMOutcome(text=_valid_pal_payload())
+        return generation_result_from_values(text=_valid_pal_payload())
 
 
 class _PurposeAwareLLM:
@@ -191,13 +198,13 @@ class _PurposeAwareLLM:
     def generate(self, request):
         self.requests.append(("generate", request))
         if "compaction" in str(request.metadata.get("purpose") or ""):
-            return CanonicalLLMOutcome(
+            return generation_result_from_values(
                 text=_valid_pal_payload(
                     "manual structured compact summary",
                     memory_candidates=self.memory_candidates,
                 )
             )
-        return CanonicalLLMOutcome(text="done")
+        return generation_result_from_values(text="done")
 
 
 def _memory_with_turns(count: int = 4) -> MemoryService:
@@ -325,7 +332,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
     def test_first_success_uses_standard_agenerate_and_commits_once(self) -> None:
         service = _memory_with_turns()
         llm = _ScriptedLLM(
-            [CanonicalLLMOutcome(text=_valid_pal_payload())]
+            [generation_result_from_values(text=_valid_pal_payload())]
         )
 
         result = asyncio.run(
@@ -340,8 +347,8 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertEqual(result.attempts, 1)
         self.assertEqual(len(llm.generate_requests), 1)
         request = llm.generate_requests[0]
-        self.assertEqual(request.temperature, 0.0)
-        self.assertEqual(request.tools, [])
+        self.assertEqual(request.policy.temperature, 0.0)
+        self.assertEqual(request.tools, ())
         self.assertFalse(request.metadata["max_output_recovery_enabled"])
         self.assertEqual(
             request.metadata["compaction_clock_kind"],
@@ -357,7 +364,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         service = _memory_with_turns()
         llm = _ScriptedLLM(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text=_valid_pal_payload(),
                     provider_response_count=3,
                 )
@@ -379,8 +386,8 @@ class SharedCompactionEngineTests(unittest.TestCase):
         service = _memory_with_turns()
         llm = _ScriptedLLM(
             [
-                CanonicalLLMOutcome(text="not json"),
-                CanonicalLLMOutcome(
+                generation_result_from_values(text="not json"),
+                generation_result_from_values(
                     text=json.dumps(
                         {
                             "schema": "wrong",
@@ -388,7 +395,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
                         }
                     )
                 ),
-                CanonicalLLMOutcome(text=_valid_pal_payload("third works")),
+                generation_result_from_values(text=_valid_pal_payload("third works")),
             ]
         )
 
@@ -405,7 +412,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertIn("third works", result.memory_result.summary)
         self.assertIn(
             "Previous Output Validation Error",
-            llm.generate_requests[1].messages[-1]["content"],
+            llm.generate_requests[1].messages[-1].text,
         )
 
     def test_preflight_shrinks_without_spending_model_attempts(self) -> None:
@@ -413,7 +420,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         compact_sources: list[int] = []
 
         def preflight(request):
-            source = str(request.messages[-1]["content"])
+            source = request.request.messages[-1].text
             unit_count = source.count("### memory:")
             if unit_count > 2:
                 compact_sources.append(len(source))
@@ -423,7 +430,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
             return LLMPreflightAdvice(status=LLMPreflightStatus.READY)
 
         llm = _ScriptedLLM(
-            [CanonicalLLMOutcome(text=_valid_pal_payload())],
+            [generation_result_from_values(text=_valid_pal_payload())],
             preflight=preflight,
         )
 
@@ -452,14 +459,14 @@ class SharedCompactionEngineTests(unittest.TestCase):
         service = _memory_with_turns(5)
         llm = _ScriptedLLM(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     finish_reason=LLMFinishReason.COMPACT_REQUIRED,
                     target_input_budget=512,
                     reserved_output_tokens=64,
                     preferred_endpoint_id="small-endpoint",
                     preferred_model_id="small-model",
                 ),
-                CanonicalLLMOutcome(text=_valid_pal_payload()),
+                generation_result_from_values(text=_valid_pal_payload()),
             ]
         )
 
@@ -480,13 +487,13 @@ class SharedCompactionEngineTests(unittest.TestCase):
             "small-endpoint",
         )
         self.assertEqual(retry.model_hint, "small-model")
-        self.assertEqual(retry.max_output_tokens, 64_000)
-        self.assertIn("20,000 tokens", retry.messages[0]["content"])
+        self.assertEqual(retry.policy.max_output_tokens, 64_000)
+        self.assertIn("20,000 tokens", retry.messages[0].text)
 
     def test_compactor_uses_provider_output_ceiling_for_reasoning_headroom(self) -> None:
         service = _memory_with_turns(2)
         llm = _ScriptedLLM(
-            [CanonicalLLMOutcome(text=_valid_pal_payload())]
+            [generation_result_from_values(text=_valid_pal_payload())]
         )
         llm.resolve_endpoint_facts = lambda **_kwargs: {
             "max_output_tokens": 32_000,
@@ -502,21 +509,21 @@ class SharedCompactionEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "compacted")
-        self.assertEqual(llm.generate_requests[0].max_output_tokens, 128_000)
+        self.assertEqual(llm.generate_requests[0].policy.max_output_tokens, 128_000)
         self.assertIn(
             "20,000 tokens",
-            llm.generate_requests[0].messages[0]["content"],
+            llm.generate_requests[0].messages[0].text,
         )
 
     def test_output_truncation_disables_continuation_and_shrinks_source(self) -> None:
         service = _memory_with_turns(6)
         llm = _ScriptedLLM(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text='{"schema":',
                     finish_reason="max_tokens",
                 ),
-                CanonicalLLMOutcome(text=_valid_pal_payload()),
+                generation_result_from_values(text=_valid_pal_payload()),
             ]
         )
 
@@ -542,10 +549,10 @@ class SharedCompactionEngineTests(unittest.TestCase):
         oversized["summary"]["summary"] = "界" * 20_001
         llm = _ScriptedLLM(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text=json.dumps(oversized, ensure_ascii=False)
                 ),
-                CanonicalLLMOutcome(text=_valid_pal_payload("bounded")),
+                generation_result_from_values(text=_valid_pal_payload("bounded")),
             ]
         )
         service = _memory_with_turns(2)
@@ -562,7 +569,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
         self.assertEqual(result.attempts, 2)
         self.assertIn(
             "20,000-token visible output limit",
-            llm.generate_requests[1].messages[-1]["content"],
+            llm.generate_requests[1].messages[-1].text,
         )
 
     def test_three_failures_commit_degraded_checkpoint_and_continue(self) -> None:
@@ -570,8 +577,8 @@ class SharedCompactionEngineTests(unittest.TestCase):
         llm = _ScriptedLLM(
             [
                 RuntimeError("transient"),
-                CanonicalLLMOutcome(text="bad json"),
-                CanonicalLLMOutcome(
+                generation_result_from_values(text="bad json"),
+                generation_result_from_values(
                     text="{}",
                     finish_reason=LLMFinishReason.STOP,
                 ),
@@ -604,7 +611,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
                 _snapshot(service),
                 llm_runtime=_ScriptedLLM(
                     [
-                        CanonicalLLMOutcome(
+                        generation_result_from_values(
                             text=json.dumps(initial_payload),
                         )
                     ]
@@ -670,7 +677,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
     def test_hard_context_impossible_does_not_call_model_or_mutate(self) -> None:
         service = _memory_with_turns(1)
         def preflight(request):
-            source = str(request.messages[-1]["content"])
+            source = request.request.messages[-1].text
             return LLMPreflightAdvice(
                 status=(
                     LLMPreflightStatus.COMPACT_REQUIRED
@@ -680,7 +687,7 @@ class SharedCompactionEngineTests(unittest.TestCase):
             )
 
         llm = _ScriptedLLM(
-            [CanonicalLLMOutcome(text=_valid_pal_payload())],
+            [generation_result_from_values(text=_valid_pal_payload())],
             preflight=preflight,
         )
         snapshot = _snapshot(
@@ -787,7 +794,24 @@ class SharedCompactionEngineTests(unittest.TestCase):
         )
         # Simulate corrupted restored state by bypassing the normal L1 commit
         # boundary, which rejects this transcript.
-        incomplete_service.l1_store.items.append(incomplete_protocol)
+        incomplete_service.l1_store.turns.turns.append(
+            L1TurnIR(
+                turn_id="corrupted-active-tool-call",
+                messages=(
+                    LLMMessageIR(
+                        role=MessageRole.ASSISTANT,
+                        parts=(
+                            new_tool_call(
+                                call_id="read-2",
+                                name="read_file",
+                                arguments={},
+                            ),
+                        ),
+                        semantic_kind=L1MessageKind.ASSISTANT_TOOL_CALL,
+                    ),
+                ),
+            )
+        )
         incomplete_snapshot = CompactionSnapshot.capture(
             incomplete_service,
             target_input_budget=8_192,
@@ -1081,50 +1105,42 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
             stopped.exception.value.final_reply,
         )
 
-    def test_exit_settlement_only_commits_unsettled_l1_suffix(self) -> None:
-        core = PalCore()
-        protocol = _closed_protocol("safe tail")
-        protocol[0]["content"] = "Working"
-        continuation = TurnContinuation(
-            turn_id="settled-exit",
-            channel_envelope=ChannelEnvelope(
-                event=EventEnvelope(
-                    event_kind="user.message",
-                    source_kind="channel",
-                    payload={"text": "continue"},
+    def test_abort_closes_the_same_l1_turn_without_duplicate_suffix(self) -> None:
+        service = MemoryService()
+        service.begin_l1_turn(
+            "settled-exit",
+            user_text="continue",
+            metadata={"_pal_input_id": "input-1"},
+        )
+        service.upsert_l1_assistant(
+            "settled-exit",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(
+                    new_tool_call(
+                        call_id="call-closed",
+                        name="read_file",
+                        arguments={},
+                    ),
                 ),
-                endpoint=EndpointConfig(
-                    endpoint_id="memory",
-                    channel_kind="memory",
-                    binding_key="memory",
-                ),
-                response_handle=ResponseHandle(endpoint_id="memory"),
+                semantic_kind="assistant_tool_call",
             ),
-            program=_idle_program(),
-            correlation_id="settled-exit",
-            tool_protocol_messages=deepcopy(protocol),
-            emitted_reply_texts=["Working"],
-            l1_input_committed=True,
-            l1_protocol_committed_count=len(protocol),
+        )
+        service.append_l1_tool_result(
+            "settled-exit",
+            ToolResultIR(
+                call_id="call-closed",
+                name="read_file",
+                content="safe tail",
+            ),
         )
 
-        interrupted = core.turn_manager._build_l1_interrupted_settlement_transcript(
-            continuation
-        )
-        checkpoint = core.turn_manager._build_l1_exit_checkpoint_transcript(
-            continuation,
-            kind=L1MessageKind.TURN_ABORTED,
-            status="aborted",
-            reason="test",
-        )
+        closed = service.abort_l1_turn("settled-exit", reason="test")
 
-        self.assertEqual(interrupted, [])
-        self.assertEqual(len(checkpoint), 1)
-        self.assertEqual(checkpoint[0].kind, L1MessageKind.TURN_ABORTED)
-        self.assertEqual(
-            checkpoint[0].payload["_pal_input_id"],
-            continuation.channel_envelope.event.event_id,
-        )
+        self.assertEqual(closed.state.value, "aborted")
+        self.assertEqual(closed.pending_call_ids, frozenset())
+        self.assertEqual(len(closed.messages), 3)
+        self.assertEqual(closed.metadata["_pal_input_id"], "input-1")
 
     def test_effect_commit_failure_leaves_protocol_and_memory_unchanged(self) -> None:
         core = PalCore()
@@ -1132,7 +1148,7 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         service = _memory_with_turns(2)
         register_memory_with_core(core.context, service)
         core.context.port_registry["llm:llm"] = _ScriptedLLM(
-            [CanonicalLLMOutcome(text=_valid_pal_payload())]
+            [generation_result_from_values(text=_valid_pal_payload())]
         )
         original_compact = service.compact
 
@@ -1141,113 +1157,41 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
 
         service.compact = fail_compact
         self.addCleanup(setattr, service, "compact", original_compact)
-        protocol = _closed_protocol("safe tail")
-        continuation = TurnContinuation(
-            turn_id="atomic-failure",
-            channel_envelope=ChannelEnvelope(
-                event=EventEnvelope(
-                    event_kind="user.message",
-                    source_kind="channel",
-                    payload={"text": "continue"},
-                ),
-                endpoint=EndpointConfig(
-                    endpoint_id="memory",
-                    channel_kind="memory",
-                    binding_key="memory",
-                ),
-                response_handle=ResponseHandle(endpoint_id="memory"),
-            ),
-            program=_idle_program(),
-            correlation_id="atomic-failure",
-            tool_protocol_messages=deepcopy(protocol),
-        )
+        service.l1_store.append(l1_tool_protocol_transcript(_closed_protocol("safe tail"))[0])
         before_l1 = deepcopy(service.l1_store.items)
 
         result = asyncio.run(
-            core.turn_executor.execute_turn_effect_async(
-                continuation,
-                MemoryCompactEffect(
-                    assembly_context=PromptAssemblyContext(
-                        event=continuation.channel_envelope.event
-                    ),
-                    target_input_budget=8_192,
-                    reserved_output_tokens=2_048,
-                ),
+            core.turn_executor.compact_memory_async(
+                service,
+                target_input_budget=8_192,
+                reserved_output_tokens=2_048,
             )
         )
 
-        self.assertEqual(result.status, RuntimeStatus.ERROR)
-        self.assertEqual(continuation.tool_protocol_messages, protocol)
-        self.assertEqual(service.l1_store.items[: len(before_l1)], before_l1)
-        self.assertIn("continue", str(service.l1_store.items[-2][0].content))
-        self.assertIn(
-            "safe tail",
-            "\n".join(message.content for message in service.l1_store.items[-1]),
-        )
+        self.assertEqual(result.status, "commit_failed")
+        self.assertEqual(service.l1_store.items, before_l1)
 
-    def test_projection_failure_rolls_back_memory_and_protocol(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+    def test_transactional_compaction_rolls_back_l1_when_dependent_commit_fails(self) -> None:
         service = _memory_with_turns(2)
-        register_memory_with_core(core.context, service)
-        core.context.port_registry["llm:llm"] = _ScriptedLLM(
-            [CanonicalLLMOutcome(text=_valid_pal_payload())]
-        )
-        protocol = _closed_protocol("safe tail")
-        continuation = TurnContinuation(
-            turn_id="projection-failure",
-            channel_envelope=ChannelEnvelope(
-                event=EventEnvelope(
-                    event_kind="user.message",
-                    source_kind="channel",
-                    payload={"text": "continue"},
-                ),
-                endpoint=EndpointConfig(
-                    endpoint_id="memory",
-                    channel_kind="memory",
-                    binding_key="memory",
-                ),
-                response_handle=ResponseHandle(endpoint_id="memory"),
-            ),
-            program=_idle_program(),
-            correlation_id="projection-failure",
-            tool_protocol_messages=deepcopy(protocol),
+        entry = PalCompactionPolicy().validate_checkpoint(
+            _valid_pal_payload(),
+            _snapshot(service, l1_input=""),
         )
         before_l1 = deepcopy(service.l1_store.items)
-        original_reconcile = core.context.execution_runtime.reconcile_tool_context
 
-        def fail_reconcile(**_kwargs):
+        def fail_dependent_commit():
             raise RuntimeError("logical state unavailable")
 
-        core.context.execution_runtime.reconcile_tool_context = fail_reconcile
-        self.addCleanup(
-            setattr,
-            core.context.execution_runtime,
-            "reconcile_tool_context",
-            original_reconcile,
-        )
-
-        result = asyncio.run(
-            core.turn_executor.execute_turn_effect_async(
-                continuation,
-                MemoryCompactEffect(
-                    assembly_context=PromptAssemblyContext(
-                        event=continuation.channel_envelope.event
-                    ),
+        with self.assertRaisesRegex(RuntimeError, "logical state unavailable"):
+            service.compact_transactionally(
+                MemoryCompactRequest(
                     target_input_budget=8_192,
                     reserved_output_tokens=2_048,
+                    summary_entry=entry,
                 ),
+                after_commit=fail_dependent_commit,
             )
-        )
-
-        self.assertEqual(result.status, RuntimeStatus.ERROR)
-        self.assertEqual(continuation.tool_protocol_messages, protocol)
-        self.assertEqual(service.l1_store.items[: len(before_l1)], before_l1)
-        self.assertIn("continue", str(service.l1_store.items[-2][0].content))
-        self.assertIn(
-            "safe tail",
-            "\n".join(message.content for message in service.l1_store.items[-1]),
-        )
+        self.assertEqual(service.l1_store.items, before_l1)
 
     def test_semantic_compactor_sees_protocol_before_prompt_projection(self) -> None:
         core = PalCore()
@@ -1255,58 +1199,25 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         service = _memory_with_turns(1)
         register_memory_with_core(core.context, service)
         llm = _ScriptedLLM(
-            [CanonicalLLMOutcome(text=_valid_pal_payload())]
+            [generation_result_from_values(text=_valid_pal_payload())]
         )
         core.context.port_registry["llm:llm"] = llm
-        core.turn_executor._tool_protocol_projector = (
-            lambda _messages, _max_chars: [
-                {"role": "user", "content": "bounded projection"}
-            ]
-        )
         marker = "exact-error-evidence-before-projection"
-        continuation = TurnContinuation(
-            turn_id="full-protocol",
-            channel_envelope=ChannelEnvelope(
-                event=EventEnvelope(
-                    event_kind="user.message",
-                    source_kind="channel",
-                    payload={"text": "continue"},
-                ),
-                endpoint=EndpointConfig(
-                    endpoint_id="memory",
-                    channel_kind="memory",
-                    binding_key="memory",
-                ),
-                response_handle=ResponseHandle(endpoint_id="memory"),
-            ),
-            program=_idle_program(),
-            correlation_id="full-protocol",
-            tool_protocol_messages=_closed_protocol(marker),
-        )
+        service.l1_store.append(l1_tool_protocol_transcript(_closed_protocol(marker))[0])
 
         async def run_compact():
-            assembly = PromptAssemblyContext(
-                event=continuation.channel_envelope.event
-            )
-            settled = await core.turn_executor._settle_l1_working_set_async(
-                continuation,
-                assembly,
-            )
-            self.assertTrue(settled)
             return await core.turn_executor.compact_memory_async(
                 service,
                 target_input_budget=8_192,
                 reserved_output_tokens=2_048,
-                assembly_context=assembly,
-                continuation=continuation,
             )
 
         run_result = asyncio.run(run_compact())
 
         self.assertTrue(run_result.success)
-        compaction_source = llm.generate_requests[0].messages[-1]["content"]
+        compaction_source = llm.generate_requests[0].messages[-1].text
         self.assertIn(marker, compaction_source)
-        self.assertNotIn("bounded projection", compaction_source)
+        self.assertFalse(hasattr(core.turn_executor, "_tool_protocol_projector"))
 
     def test_manual_compact_uses_same_engine_and_opens_candidate_approval(self) -> None:
         core = PalCore()

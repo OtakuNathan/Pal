@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,17 @@ class MinionManagerClient:
         except SidecarRpcError as exc:
             raise MinionManagerRpcError(str(exc), kind=exc.kind, payload=exc.payload) from exc
 
+    async def stream(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        try:
+            async for item in self._client.stream(method, params):
+                yield item
+        except SidecarRpcError as exc:
+            raise MinionManagerRpcError(str(exc), kind=exc.kind, payload=exc.payload) from exc
+
     def request_sync(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return run_blocking(self.request(method, params))
 
@@ -89,6 +101,9 @@ class MinionManagerClient:
 
     def reload_runtime_config_sync(self) -> dict[str, Any]:
         return self.request_sync("reload_runtime_config")
+
+    async def refresh_llm_endpoints(self) -> dict[str, Any]:
+        return await self.request("refresh_llm_endpoints")
 
     def replace_harness_registry_sync(
         self,
@@ -205,6 +220,18 @@ class MinionRoleGatewayClient:
         payload = {**dict(params or {}), "access_token": str(self.access_token)}
         try:
             return await self._client.request(method, payload)
+        except SidecarRpcError as exc:
+            raise MinionManagerRpcError(str(exc), kind=exc.kind, payload=exc.payload) from exc
+
+    async def stream(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        payload = {**dict(params or {}), "access_token": str(self.access_token)}
+        try:
+            async for item in self._client.stream(method, payload):
+                yield item
         except SidecarRpcError as exc:
             raise MinionManagerRpcError(str(exc), kind=exc.kind, payload=exc.payload) from exc
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, ToolResultIR
+
+from pal.shared.tool_protocol import new_tool_call
+
 import json
 import math
 from dataclasses import dataclass
@@ -7,9 +11,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pal.llm.contracts import CanonicalLLMRequest, CanonicalToolCall
+from pal.llm.conversions import message_ir_from_dict, tool_definition_ir_from_dict
+from pal.llm.ir import (
+    GenerationPolicyIR,
+    LLMMessageIR,
+    LLMRequestIR,
+    MessageRole,
+)
+from pal.llm.serde import message_to_payload
 from pal.runtime_app import open_runtime
-from pal.shared.tool_protocol import append_tool_protocol_messages, ensure_tool_call_identity
 
 
 DEFAULT_TOOLS_BENCHMARK = Path(__file__).parents[2] / "benchmarks" / "tools" / "v1.json"
@@ -131,25 +141,23 @@ async def _run_case(
     llm_runtime: Any,
     execution_runtime: Any,
 ) -> dict[str, Any]:
-    messages: list[dict[str, Any]] = [
-        {
+    messages: list[LLMMessageIR] = [
+        message_ir_from_dict({
             "role": "system",
             "content": (
                 "Complete the task with the available tools. Use exact aliases. "
                 "Indirect tools must be discovered and invoked with call_tool. "
                 "Follow retry/effect guidance and never retry an unknown non-idempotent effect."
             ),
-        },
-        {"role": "user", "content": case.prompt},
+        }),
+        message_ir_from_dict({"role": "user", "content": case.prompt}),
     ]
     calls: list[dict[str, Any]] = []
     seed_call_trace: dict[str, Any] | None = None
     if case.seed_call is not None:
-        seeded_tool_call = ensure_tool_call_identity(
-            CanonicalToolCall(
-                name=str(case.seed_call.get("name") or ""),
-                args=dict(case.seed_call.get("args") or {}),
-            )
+        seeded_tool_call = new_tool_call(
+            name=str(case.seed_call.get("name") or ""),
+            args=dict(case.seed_call.get("args") or {}),
         )
         seeded_result = await execution_runtime.execute_tool_async(
             seeded_tool_call,
@@ -169,21 +177,18 @@ async def _run_case(
             "effect": _enum_value(getattr(seeded_invocation, "effect", "")),
             "retry": _enum_value(getattr(seeded_invocation, "retry", "")),
         }
-        append_tool_protocol_messages(
-            messages,
-            assistant_text="",
-            tool_calls=[seeded_tool_call],
-            tool_results=[seeded_result],
-        )
+        messages.extend((
+            LLMMessageIR(role=MessageRole.ASSISTANT, parts=(seeded_tool_call,)),
+            _eval_tool_result_message(seeded_tool_call, seeded_result),
+        ))
     first_result_kind = ""
     for round_index in range(case.max_rounds):
         outcome = await llm_runtime.agenerate(
-            CanonicalLLMRequest(
-                messages=list(messages),
-                max_output_tokens=1024,
+            LLMRequestIR(
+                messages=tuple(messages),
+                policy=GenerationPolicyIR(max_output_tokens=1024, temperature=temperature),
                 model_hint=model,
-                temperature=temperature,
-                tools=tool_contracts,
+                tools=tuple(tool_definition_ir_from_dict(item) for item in tool_contracts),
                 metadata={
                     "eval": "tools",
                     "case_id": case.case_id,
@@ -192,9 +197,9 @@ async def _run_case(
                 },
             )
         )
-        tool_calls = [ensure_tool_call_identity(item) for item in list(outcome.tool_calls or [])]
+        tool_calls = list(outcome.tool_calls or [])
         if not tool_calls:
-            messages.append({"role": "assistant", "content": outcome.text})
+            messages.append(outcome.response.message)
             break
         results = []
         for tool_call in tool_calls:
@@ -221,13 +226,8 @@ async def _run_case(
                 }
             )
             results.append(result)
-        append_tool_protocol_messages(
-            messages,
-            assistant_text=outcome.text,
-            assistant_provider_specific_fields=outcome.provider_specific_fields,
-            tool_calls=tool_calls,
-            tool_results=results,
-        )
+        messages.append(outcome.response.message)
+        messages.extend(_eval_tool_result_message(call, result) for call, result in zip(tool_calls, results))
     effective = [item["effective_alias"] for item in calls]
     expected_positions = [index for index, alias in enumerate(effective) if alias == case.expected_alias]
     dangerous_retry = _detect_dangerous_retry(calls, forbidden_aliases=case.forbidden_aliases)
@@ -263,6 +263,26 @@ async def _run_case(
         "calls": calls,
         "transcript": _redact(messages),
     }
+
+
+def _eval_tool_result_message(call: ToolCallIR, result: Any) -> LLMMessageIR:
+    return LLMMessageIR(
+        role=MessageRole.TOOL,
+        parts=(
+            ToolResultIR(
+                call_id=call.call_id,
+                name=call.name,
+                content=str(getattr(result, "llm_text", "") or getattr(result, "text", "")),
+                ok=bool(getattr(result, "ok", False)),
+                status=str(getattr(result, "status", "") or "error"),
+                structured=(
+                    dict(result.structured)
+                    if isinstance(getattr(result, "structured", None), dict)
+                    else None
+                ),
+            ),
+        ),
+    )
 
 
 def _detect_dangerous_retry(
@@ -373,6 +393,8 @@ def _plain_json(value: Any) -> Any:
 
 
 def _redact(value: Any) -> Any:
+    if isinstance(value, LLMMessageIR):
+        return _redact(message_to_payload(value))
     if isinstance(value, dict):
         return {
             str(key): "<redacted>" if _is_sensitive_key(key) else _redact(item)

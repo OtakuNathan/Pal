@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import copy
 import shutil
 import tempfile
@@ -8,7 +10,6 @@ from pathlib import Path
 
 import yaml
 
-from pal.llm.contracts import CanonicalToolCall
 from pal.minion.turns import sanitize_runner_session_pack
 from pal.minion.v2.architecture_templates import ArchitectureTemplateCompiler
 from pal.minion.v2.contract_protocol import (
@@ -341,7 +342,7 @@ class WorkItemProtocolTests(unittest.TestCase):
 
     def test_contract_submit_requires_complete_manager_seed(self) -> None:
         premature = contract_submit_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_contract_submit",
                 args={},
                 call_id="submit-premature",
@@ -354,7 +355,7 @@ class WorkItemProtocolTests(unittest.TestCase):
         self.assertEqual(premature.invocation_result.effect.value, "not_started")
 
         updated = update_checklist_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name=UPDATE_CHECKLIST_CAPABILITY,
                 args={
                     "plan": [
@@ -374,7 +375,7 @@ class WorkItemProtocolTests(unittest.TestCase):
         )
         self.assertTrue(updated.ok)
         submitted = contract_submit_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_contract_submit",
                 args={},
                 call_id="submit-complete",
@@ -387,7 +388,7 @@ class WorkItemProtocolTests(unittest.TestCase):
 
     def test_invalid_checklist_is_a_pre_effect_rejection(self) -> None:
         invalid = update_checklist_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name=UPDATE_CHECKLIST_CAPABILITY,
                 args={
                     "plan": [
@@ -413,7 +414,7 @@ class WorkItemProtocolTests(unittest.TestCase):
     def test_reviewer_finding_identity_is_manager_generated_and_deduplicated(self) -> None:
         reviewer = self._reviewer_workspace()
         checklist = update_checklist_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name=UPDATE_CHECKLIST_CAPABILITY,
                 args={
                     "plan": [
@@ -440,7 +441,7 @@ class WorkItemProtocolTests(unittest.TestCase):
             ],
         }
         first = add_finding_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name=ADD_FINDING_CAPABILITY,
                 args=args,
                 call_id="finding-1",
@@ -448,7 +449,7 @@ class WorkItemProtocolTests(unittest.TestCase):
             reviewer,
         )
         second = add_finding_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name=ADD_FINDING_CAPABILITY,
                 args=args,
                 call_id="finding-2",
@@ -472,7 +473,7 @@ class WorkItemProtocolTests(unittest.TestCase):
             1,
         )
         result = review_submit_tool_result(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_minion_review_submit",
                 args={},
                 call_id="review-submit",

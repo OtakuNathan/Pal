@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import base64
 import shutil
@@ -14,7 +16,6 @@ from pal.artifact.repository import ArtifactRepository
 from pal.core import PalCore
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import PalV2Database
-from pal.llm import CanonicalToolCall
 from pal.web_fetch import WebScreenshotResult, WebScreenshotTool, register_with_core as register_web_fetch_with_core
 
 
@@ -137,7 +138,7 @@ class WebScreenshotToolTests(unittest.TestCase):
 
         result = asyncio.run(
             runtime.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="call_tool",
                     args={"name": "screenshot_web", "args": {"url": "https://example.com"}},
                 ),
@@ -165,7 +166,7 @@ class WebScreenshotToolTests(unittest.TestCase):
 
         result = asyncio.run(
             runtime.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="call_tool",
                     args={
                         "name": "screenshot_web",
@@ -194,7 +195,7 @@ class WebScreenshotToolTests(unittest.TestCase):
 
         result = asyncio.run(
             runtime.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="call_tool",
                     args={
                         "name": "screenshot_web",

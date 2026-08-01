@@ -89,11 +89,11 @@
 
 ## `src/pal/llm/*`
 
-- 当前职责：provider adapter、canonical request/response、fallback
-- 当前问题：旧版 canonical 语义可保留，但 transport adapter 仍偏手写；数据库里的 `llm_endpoints` 还不够完整，streaming 也尚未成为真正一等路径
+- 当前职责：provider-neutral IR、wire-shape codec、endpoint fallback
+- 当前问题：旧版 provider adapter 与 canonical DTO 已由 immutable IR 和统一 JSON-frame decoder 取代
 - 目标归属：`llm`
-- 迁移方式：保留 canonical/provider 分层语义，以 native SDK invoker 承载 OpenAI-compatible、OpenAI Responses、Anthropic Messages 等 transport；把本地 `llm_endpoints` 升级为模型路由与能力真相源；把 streaming 重写成真实流式路径
-- 是否保留语义：保留 canonical shape、fallback、native tool calling 边界；不保留“整段生成后再伪装成 delta”的假 streaming
+- 迁移方式：以 OpenAI/Anthropic SDK 承载三个固定 wire shape；本地 `llm_endpoints` 是模型路由与能力真相源；streaming 与 single-shot 均先归一化为 JSON frame
+- 是否保留语义：保留 fallback 和本地 tool execution 边界；不保留 provider 行为分支、旧 DTO 或假 streaming
 
 ## 保留
 
@@ -165,7 +165,7 @@ legacy 文档中已证明稳定、并应视为直接迁入新架构的语义还�
 - `supervisor -> pal -> worker` process model
 - `supervisor-pal` 控制面与 `pal-worker` 执行面的 IPC 分层
 - `Pal`-owned user-facing channel
-- canonical LLM shape + provider adapters
+- provider-neutral LLM IR + three wire-shape codecs + exact-model hooks
 - `skill = manual`、`tool = 唯一执行原语`
 - `L1` 作为近无损压缩 transcript，而不是 summary bucket
 

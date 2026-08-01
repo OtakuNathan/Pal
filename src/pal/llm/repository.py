@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.foundation import utc_now
+from pal.llm.endpoint_spec import merge_endpoint_spec_payload
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 
 
@@ -11,17 +12,20 @@ THINK_LEVEL_SETTING_PREFIX = "think_level:"
 
 class LLMEndpointRepository:
     def upsert(self, **payload) -> LLMEndpointModel:
-        endpoint_id = str(payload["endpoint_id"])
+        endpoint_id = str(payload["endpoint_id"] or "").strip()
+        payload = {**payload, "endpoint_id": endpoint_id}
         instance = LLMEndpointModel.get_or_none(LLMEndpointModel.endpoint_id == endpoint_id)
+        spec = merge_endpoint_spec_payload(payload, existing=instance)
+        validated_payload = spec.to_payload()
         now = utc_now()
         if instance is None:
             return LLMEndpointModel.create(
                 created_at=now,
                 updated_at=now,
-                **payload,
+                **validated_payload,
             )
 
-        for key, value in payload.items():
+        for key, value in validated_payload.items():
             setattr(instance, key, value)
         instance.updated_at = now
         instance.save()
@@ -38,6 +42,31 @@ class LLMEndpointRepository:
             .order_by(LLMEndpointModel.priority, LLMEndpointModel.endpoint_id)
         )
         return list(query)
+
+    def list_all(self) -> list[LLMEndpointModel]:
+        return list(
+            LLMEndpointModel.select().order_by(
+                LLMEndpointModel.priority,
+                LLMEndpointModel.endpoint_id,
+            )
+        )
+
+    def get(self, endpoint_id: str) -> LLMEndpointModel | None:
+        normalized = str(endpoint_id or "").strip()
+        if not normalized:
+            return None
+        return LLMEndpointModel.get_or_none(LLMEndpointModel.endpoint_id == normalized)
+
+    def delete(self, endpoint_id: str) -> bool:
+        normalized = str(endpoint_id or "").strip()
+        if not normalized:
+            raise ValueError("endpoint_id must be non-empty")
+        deleted = (
+            LLMEndpointModel.delete()
+            .where(LLMEndpointModel.endpoint_id == normalized)
+            .execute()
+        )
+        return bool(deleted)
 
     def get_primary_enabled(self) -> LLMEndpointModel | None:
         query = (
@@ -86,6 +115,12 @@ class RuntimeSettingRepository:
         if not normalized:
             raise ValueError("think_level must be non-empty")
         return self.set(_think_level_setting_key(endpoint_id), normalized)
+
+    def delete_think_level(self, endpoint_id: str) -> bool:
+        return self.delete(_think_level_setting_key(endpoint_id))
+
+    def delete_active_llm_endpoint_id(self) -> bool:
+        return self.delete(ACTIVE_LLM_ENDPOINT_SETTING_KEY)
 
     def get_legacy_think_level(self) -> str | None:
         value = str(self.get(LEGACY_THINK_LEVEL_SETTING_KEY) or "").strip()

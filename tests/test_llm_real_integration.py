@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import new_tool_call
+
 import asyncio
 import contextlib
 import json
@@ -32,9 +34,12 @@ from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import EventEnvelope, PalV2Database
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
 from pal.llm import EndpointResolver, LLMRuntime, LLMCredentialResolver
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolResult
+from pal.llm.contracts import generation_result_from_values, request_ir_from_prompt
+from pal.shared import ToolExecutionResult
 from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
-from pal.llm.runtime import OpenAIChatEndpointInvoker
+from pal.llm.ir import WireShape
+from pal.llm.shapes import codec_for_shape
+from pal.llm.shapes.base import ShapeContext, _JSONFrame
 from pal.llm.secret_store import EncryptedFileSecretStore, InMemorySecretStore, SecretRef
 from pal.minion.ipc import open_manager_connection
 from pal.minion.runner import MinionRunner, MinionRuntimeBundle, build_slim_minion_runtime
@@ -51,22 +56,20 @@ class _HTTPInvoker:
     extra_body: dict[str, Any] = field(default_factory=dict)
     timeout_seconds: float = 180.0
 
-    def invoke(self, endpoint, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        payload: dict[str, Any] = {
-            "model": endpoint.model_id,
-            "messages": list(request.messages),
-            "max_tokens": int(request.max_output_tokens),
-            **dict(self.extra_body),
-        }
-        if request.temperature is not None:
-            payload["temperature"] = request.temperature
-        if request.tools:
-            payload["tools"] = [_openai_wire_tool(tool) for tool in request.tools]
-            payload["tool_choice"] = "auto"
+    def invoke(self, endpoint, request, *, stream=False, timeout_seconds=180.0):
+        _ = stream, timeout_seconds
+        context = ShapeContext(
+            wire_shape=WireShape.OPENAI_COMPLETION,
+            endpoint_id=endpoint.endpoint_id,
+            model_id=endpoint.model_id,
+        )
+        codec = codec_for_shape(WireShape.OPENAI_COMPLETION)
+        payload = {**codec.encode(request, context).payload, **dict(self.extra_body)}
         data = self._post(endpoint.base_url, payload)
-        return OpenAIChatEndpointInvoker()._parse_openai_chat_response(_DictResponse(data))
+        updates = tuple(codec.decode((_JSONFrame(0, data),), context))
+        return updates[-1].response, updates
 
-    def invoke_stream(self, endpoint, request: CanonicalLLMRequest):
+    def invoke_updates(self, endpoint, request, *, timeout_seconds=180.0):
         _ = endpoint, request
         raise NotImplementedError("real integration tests use non-stream requests")
 
@@ -187,7 +190,7 @@ def _real_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
         endpoint_id="real-test",
         provider="openai_compatible",
         model_id=model,
-        api_mode="openai_chat",
+        wire_shape="openai_completion",
         base_url=base_url,
         credential_ref="PAL_TEST_LLM_API_KEY",
         auth_kind="api_key_ref",
@@ -195,7 +198,8 @@ def _real_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
         max_output_tokens=max_output_tokens,
         supports_streaming=False,
         supports_tools=True,
-        supports_reasoning=True,
+        thinking_levels_blob=["off", "medium", "high"],
+        default_thinking_level="medium",
         supports_vision=False,
         input_modalities_blob=[],
         capabilities_blob={},
@@ -215,13 +219,13 @@ def _real_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
     )
 
 
-def _real_openai_chat_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
+def _real_openai_completion_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
     api_key, base_url, model = _configured_real_llm()
     endpoint = SimpleNamespace(
-        endpoint_id="real-openai_chat-test",
+        endpoint_id="real-openai-completion-test",
         provider="openai_compatible",
         model_id=model,
-        api_mode="openai_chat",
+        wire_shape="openai_completion",
         base_url=base_url,
         credential_ref="PAL_TEST_LLM_API_KEY:api-key",
         auth_kind="api_key_ref",
@@ -229,7 +233,8 @@ def _real_openai_chat_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
         max_output_tokens=max_output_tokens,
         supports_streaming=False,
         supports_tools=True,
-        supports_reasoning=True,
+        thinking_levels_blob=["off", "medium", "high"],
+        default_thinking_level="medium",
         supports_vision=False,
         input_modalities_blob=[],
         capabilities_blob={},
@@ -239,9 +244,7 @@ def _real_openai_chat_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
     return LLMRuntime(
         endpoint_resolver=EndpointResolver(endpoints=(endpoint,)),
         settings_repository=_Settings(),
-        endpoint_invoker=OpenAIChatEndpointInvoker(
-            credentials=LLMCredentialResolver(secret_store=secret_store),
-        ),
+        endpoint_invoker=_HTTPInvoker(api_key=api_key),
     )
 
 
@@ -256,13 +259,14 @@ def _seed_real_endpoint(runtime_root: Path, *, endpoint_id: str = "real_e2e") ->
         provider="openai_compatible",
         model_id=model,
         display_name="Real LLM E2E",
-        api_mode="openai_chat",
+        wire_shape="openai_completion",
         base_url=base_url,
         auth_kind="api_key_ref",
         credential_ref="PAL_TEST_LLM_API_KEY:api-key",
         context_window=131072,
         max_output_tokens=2048,
-        supports_reasoning=True,
+        thinking_levels_blob=["off", "medium", "high"],
+        default_thinking_level="medium",
         supports_tools=True,
         supports_streaming=False,
         supports_vision=False,
@@ -325,7 +329,7 @@ async def _run_real_skill_tool_dialog(
     required = [str(name) for name in list(required_tool_names or [])]
     for _ in range(max_rounds):
         outcome = await runtime.agenerate(
-            CanonicalLLMRequest(
+            request_ir_from_prompt(
                 messages=list(messages),
                 max_output_tokens=2048,
                 temperature=0.0,
@@ -376,7 +380,7 @@ async def _run_real_skill_tool_dialog(
             if call.name == "call_tool" and logical_name not in allowed_aliases:
                 raise AssertionError(f"unexpected indirect tool call: {logical_name}")
             result = await execution.execute_tool_async(
-                CanonicalToolCall(name=call.name, args=dict(call.args), call_id=call_id)
+                new_tool_call(name=call.name, args=dict(call.args), call_id=call_id)
             )
             observed_results.append(result)
             messages.append(
@@ -505,7 +509,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
         runtime = _real_runtime(max_output_tokens=2048)
 
         outcome = runtime.generate(
-            CanonicalLLMRequest(
+            request_ir_from_prompt(
                 messages=[{"role": "user", "content": "Reply with one short sentence confirming you are online."}],
                 max_output_tokens=2048,
                 temperature=0.2,
@@ -517,11 +521,11 @@ class RealLLMIntegrationTests(unittest.TestCase):
         self.assertTrue((outcome.text or outcome.reasoning_text).strip())
         self.assertEqual(runtime.last_endpoint_id, "real-test")
 
-    def test_real_openai_chat_invoker_reaches_configured_model(self) -> None:
-        runtime = _real_openai_chat_runtime(max_output_tokens=1024)
+    def test_real_openai_completion_reaches_configured_model(self) -> None:
+        runtime = _real_openai_completion_runtime(max_output_tokens=1024)
 
         outcome = runtime.generate(
-            CanonicalLLMRequest(
+            request_ir_from_prompt(
                 messages=[{"role": "user", "content": "Reply exactly: PAL_ONLINE"}],
                 max_output_tokens=1024,
                 temperature=0.1,
@@ -531,7 +535,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
 
         self.assertNotEqual(outcome.finish_reason, LLMFinishReason.ERROR)
         self.assertIn("PAL_ONLINE", (outcome.text or outcome.reasoning_text))
-        self.assertEqual(runtime.last_endpoint_id, "real-openai_chat-test")
+        self.assertEqual(runtime.last_endpoint_id, "real-openai-completion-test")
 
     def test_real_llm_shared_compaction_engine_returns_valid_checkpoint(self) -> None:
         runtime = _real_runtime(max_output_tokens=4096)

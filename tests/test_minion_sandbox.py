@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import io
 import os
@@ -18,7 +20,8 @@ import msgpack
 from pal.execution.git_tool import classify_git_command
 from pal.llm import EndpointResolver, LLMRuntime
 from pal.lsp.ipc import LspManagerClient
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice, LLMPreflightRequest
+from pal.llm.contracts import generation_result_from_values, request_ir_from_prompt, LLMPreflightAdvice, LLMPreflightRequest
+from pal.shared import ToolExecutionResult
 from pal.memory import MemoryService
 from pal.minion.manager import MinionManager, MinionRunState
 from pal.minion.ipc import ROLE_GATEWAY_TOKEN_ENV, MinionRoleGatewayClient
@@ -38,6 +41,7 @@ from pal.minion.runner import (
     MinionRuntimeBundle,
     _minion_temperature,
     _resolve_minion_max_output_tokens,
+    build_slim_minion_runtime,
 )
 from pal.minion.prompt_adapter import render_minion_task_prompt
 from pal.minion.git_shim import GIT_TRAP_EXIT_CODE, _RoleGatewayClient, main as git_shim_main
@@ -69,6 +73,19 @@ def _prepare_role_endpoint(runtime_root: Path) -> Path:
 
 
 class MinionSandboxTests(unittest.TestCase):
+    def test_role_runtime_cannot_select_host_llm_authority(self) -> None:
+        with (
+            tempfile.TemporaryDirectory(prefix="pal_minion_llm_authority_") as tmp,
+            patch.dict(os.environ, {"PAL_MINION_SANDBOXED": "1"}),
+        ):
+            with self.assertRaisesRegex(PermissionError, "cannot construct a host LLM runtime"):
+                build_slim_minion_runtime(Path(tmp), run_id="role-1", llm_authority="host")
+
+    def test_manager_broker_authority_requires_run_identity(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_llm_run_id_") as tmp:
+            with self.assertRaisesRegex(ValueError, "requires run_id"):
+                build_slim_minion_runtime(Path(tmp), llm_authority="manager_broker")
+
     def test_question_waits_for_matching_user_response(self) -> None:
         async def scenario() -> None:
             events: list[dict[str, object]] = []
@@ -360,8 +377,8 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(env["NORMAL_VALUE"], "kept")
             self.assertNotIn("OPENAI_API_KEY", env)
             self.assertNotIn("PAL_TOKEN", env)
+            self.assertNotIn("PAL_MINION_LLM_BROKER", env)
             self.assertEqual(env[ROLE_GATEWAY_TOKEN_ENV], "assignment-only")
-            self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
             self.assertEqual(env["PAL_MINION_WEB_BROKER"], "1")
             self.assertEqual(env["PAL_DATABASE_READ_ONLY"], "1")
             self.assertEqual(env["PAL_MINION_SANDBOXED"], "1")
@@ -599,7 +616,6 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertNotIn("--dev-bind", argv)
             self.assertIn("--chdir", argv)
             self.assertNotIn("OPENAI_API_KEY", env)
-            self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
             self.assertEqual(env["PAL_MINION_WEB_BROKER"], "1")
             self.assertIn("PYTHONPATH", env)
 
@@ -1450,7 +1466,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                 async def execute_tool_async(self, call, **kwargs):
                     _ = kwargs
                     calls.append(str(call.args.get("cmd") or ""))
-                    return CanonicalToolResult(
+                    return ToolExecutionResult(
                         name=call.name,
                         ok=True,
                         text="shell ok",
@@ -1481,7 +1497,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             )
             result = await runner._execute_allowed_tool(
                 FakeExecution(),
-                CanonicalToolCall(name="op_exec_shell", args={"cmd": "cat README.md"}, call_id="call_shell"),
+                new_tool_call(name="op_exec_shell", args={"cmd": "cat README.md"}, call_id="call_shell"),
             )
 
             self.assertTrue(result.ok, result.text)
@@ -1506,7 +1522,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                 async def execute_tool_async(self, call, **kwargs):
                     _ = kwargs
                     calls.append(call.name)
-                    return CanonicalToolResult(
+                    return ToolExecutionResult(
                         name=call.name,
                         ok=True,
                         text="read ok",
@@ -1537,7 +1553,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
 
             result = await runner._execute_allowed_tool(
                 AliasExecution(),
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_file",
                     args={"file_path": "/pal/references/task.yaml"},
                     call_id="call_read",
@@ -1569,10 +1585,10 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
         )
 
         direct = runner._tool_call_with_minion_defaults(
-            CanonicalToolCall(name="op_lsp_definition", args={"file": "src/main.cpp", "line": 1, "character": 2})
+            new_tool_call(name="op_lsp_definition", args={"file": "src/main.cpp", "line": 1, "character": 2})
         )
         nested = runner._tool_call_with_minion_defaults(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_tool_call",
                 args={
                     "name": "op_lsp_diagnostics",
@@ -1581,13 +1597,13 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
             )
         )
         status = runner._tool_call_with_minion_defaults(
-            CanonicalToolCall(name="op_lsp_status", args={})
+            new_tool_call(name="op_lsp_status", args={})
         )
         shell = runner._tool_call_with_minion_defaults(
-            CanonicalToolCall(name="op_exec_shell", args={"cmd": "pwd"})
+            new_tool_call(name="op_exec_shell", args={"cmd": "pwd"})
         )
         explicit_shell = runner._tool_call_with_minion_defaults(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_exec_shell",
                 args={"cmd": "pwd", "cwd": str(workspace / "src")},
             )
@@ -1607,7 +1623,7 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
 
 class MinionLLMBrokerSerializationTests(unittest.TestCase):
     def test_llm_request_round_trips(self) -> None:
-        request = CanonicalLLMRequest(
+        request = request_ir_from_prompt(
             messages=[{"role": "user", "content": "hi"}],
             max_output_tokens=123,
             thinking_budget_tokens=97,
@@ -1620,18 +1636,18 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
         restored = llm_request_from_payload(llm_request_to_payload(request))
 
         self.assertEqual(restored.messages, request.messages)
-        self.assertEqual(restored.max_output_tokens, 123)
-        self.assertEqual(restored.thinking_budget_tokens, 97)
+        self.assertEqual(restored.policy.max_output_tokens, 123)
+        self.assertEqual(restored.policy.thinking_budget_tokens, 97)
         self.assertEqual(restored.model_hint, "model")
-        self.assertEqual(restored.temperature, 0.2)
+        self.assertEqual(restored.policy.temperature, 0.2)
         self.assertEqual(restored.tools, request.tools)
         self.assertEqual(restored.metadata, request.metadata)
 
-    def test_llm_outcome_round_trips_tool_calls_and_provider_fields(self) -> None:
-        outcome = CanonicalLLMOutcome(
+    def test_llm_outcome_round_trips_tool_calls_and_reasoning_ir(self) -> None:
+        outcome = generation_result_from_values(
             text="ok",
             reasoning_text="hidden",
-            tool_calls=[CanonicalToolCall(name="op_exec_shell", args={"cmd": "pwd"}, call_id="call_1")],
+            tool_calls=[new_tool_call(name="op_exec_shell", args={"cmd": "pwd"}, call_id="call_1")],
             finish_reason="tool_calls",
             input_tokens=41,
             uncached_input_tokens=11,
@@ -1642,7 +1658,6 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
             cost=0.21,
             usage_reported=True,
             provider_response_count=2,
-            provider_specific_fields={"reasoning_content": "hidden"},
         )
 
         restored = llm_outcome_from_payload(llm_outcome_to_payload(outcome))
@@ -1661,15 +1676,16 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
         self.assertEqual(restored.provider_response_count, 2)
         self.assertEqual(restored.tool_calls[0].name, "op_exec_shell")
         self.assertEqual(restored.tool_calls[0].args, {"cmd": "pwd"})
-        self.assertEqual(restored.provider_specific_fields["reasoning_content"], "hidden")
 
     def test_preflight_round_trips(self) -> None:
         request = LLMPreflightRequest(
-            messages=[{"role": "user", "content": "hi"}],
-            max_output_tokens=50,
-            model_hint="m",
-            tools=[{"name": "tool"}],
-            metadata={"preferred_endpoint_id": "e"},
+            request=request_ir_from_prompt(
+                messages=[{"role": "user", "content": "hi"}],
+                max_output_tokens=50,
+                model_hint="m",
+                tools=[{"name": "tool"}],
+                metadata={"preferred_endpoint_id": "e"},
+            ),
         )
         advice = LLMPreflightAdvice(
             status="ready",
@@ -1683,8 +1699,8 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
         restored_request = preflight_request_from_payload(preflight_request_to_payload(request))
         restored_advice = preflight_advice_from_payload(preflight_advice_to_payload(advice))
 
-        self.assertEqual(restored_request.messages, request.messages)
-        self.assertEqual(restored_request.tools, request.tools)
+        self.assertEqual(restored_request.request.messages, request.request.messages)
+        self.assertEqual(restored_request.request.tools, request.request.tools)
         self.assertEqual(restored_advice.status, "ready")
         self.assertEqual(restored_advice.active_model, "m")
         self.assertEqual(restored_advice.fallback_chain, ["f"])
@@ -1703,7 +1719,7 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
 
                     async def agenerate(self, request):
                         self.generate_request = request
-                        return CanonicalLLMOutcome(text="pong", finish_reason="stop")
+                        return generation_result_from_values(text="pong", finish_reason="stop")
 
                     def resolve_max_output_tokens(self, **kwargs):
                         self.max_kwargs = kwargs
@@ -1723,7 +1739,12 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
                     {
                         "run_id": "run_broker",
                         "request": preflight_request_to_payload(
-                            LLMPreflightRequest(messages=[{"role": "user", "content": "ping"}], max_output_tokens=10)
+                            LLMPreflightRequest(
+                                request=request_ir_from_prompt(
+                                    messages=[{"role": "user", "content": "ping"}],
+                                    max_output_tokens=10,
+                                )
+                            )
                         ),
                     }
                 )
@@ -1731,7 +1752,7 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
                     {
                         "run_id": "run_broker",
                         "request": llm_request_to_payload(
-                            CanonicalLLMRequest(messages=[{"role": "user", "content": "ping"}], max_output_tokens=10)
+                            request_ir_from_prompt(messages=[{"role": "user", "content": "ping"}], max_output_tokens=10)
                         ),
                     }
                 )
@@ -1741,7 +1762,7 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
                 facts = await manager.llm_broker_resolve_endpoint_facts({"run_id": "run_broker", "preferred_endpoint_id": "endpoint_a"})
 
                 self.assertEqual(preflight["advice"]["active_model"], "fake")
-                self.assertEqual(generated["outcome"]["text"], "pong")
+                self.assertEqual(llm_outcome_from_payload(generated["outcome"]).text, "pong")
                 self.assertEqual(max_tokens["max_output_tokens"], 123)
                 self.assertEqual(facts["endpoint_id"], "endpoint_a")
 
@@ -1760,7 +1781,7 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
                 class Settings:
                     def get_think_level(self, endpoint_id):
                         _ = endpoint_id
-                        return "balanced"
+                        return "medium"
 
                     def set_think_level(self, endpoint_id, think_level):
                         _ = endpoint_id, think_level
@@ -1772,11 +1793,11 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
                         self.active_endpoint_id = endpoint_id
 
                 class Invoker:
-                    def invoke(self, endpoint, request):
-                        _ = request
+                    def invoke(self, endpoint, request, **kwargs):
+                        _ = request, kwargs
                         if endpoint.endpoint_id == "broken":
                             raise RuntimeError("broken endpoint")
-                        return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
+                        return generation_result_from_values(text=f"ok:{endpoint.endpoint_id}").response, ()
 
                     def invoke_stream(self, endpoint, request):
                         raise NotImplementedError
@@ -1784,26 +1805,40 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
                 broken = SimpleNamespace(
                     endpoint_id="broken",
                     model_id="broken-model",
-                    provider="stub",
-                    base_url="",
+                    provider="test",
+                    wire_shape="openai_completion",
+                    base_url="https://broken.invalid/v1",
+                    auth_kind="local_provider_auth",
+                    credential_ref="",
+                    thinking_levels_blob=["medium"],
+                    default_thinking_level="medium",
                     capabilities_blob={},
+                    supports_tools=True,
                     supports_streaming=False,
                     supports_vision=False,
                     max_output_tokens=1024,
                     context_window=8192,
                     input_modalities_blob=[],
+                    output_modalities_blob=[],
                 )
                 working = SimpleNamespace(
                     endpoint_id="working",
                     model_id="working-model",
-                    provider="stub",
-                    base_url="",
+                    provider="test",
+                    wire_shape="openai_completion",
+                    base_url="https://working.invalid/v1",
+                    auth_kind="local_provider_auth",
+                    credential_ref="",
+                    thinking_levels_blob=["medium"],
+                    default_thinking_level="medium",
                     capabilities_blob={},
+                    supports_tools=True,
                     supports_streaming=False,
                     supports_vision=False,
                     max_output_tokens=1024,
                     context_window=8192,
                     input_modalities_blob=[],
+                    output_modalities_blob=[],
                 )
                 runtime = LLMRuntime(
                     endpoint_resolver=EndpointResolver(endpoints=(broken, working)),
@@ -1820,13 +1855,13 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
                     {
                         "run_id": state.run_id,
                         "request": llm_request_to_payload(
-                            CanonicalLLMRequest(messages=[{"role": "user", "content": "ping"}], max_output_tokens=10)
+                            request_ir_from_prompt(messages=[{"role": "user", "content": "ping"}], max_output_tokens=10)
                         ),
                     }
                 )
                 await asyncio.sleep(0)
 
-                self.assertEqual(generated["outcome"]["text"], "ok:working")
+                self.assertEqual(llm_outcome_from_payload(generated["outcome"]).text, "ok:working")
                 endpoint_events = [
                     event
                     for event in recorded

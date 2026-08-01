@@ -44,8 +44,6 @@ class RuntimeConfig:
 
     # memory
     keep_recent_tool_messages: int = 5
-    l1_tool_result_max_chars: int = 8_000
-    l1_tool_result_preview_chars: int = 4_000
     embedding_ollama_remote_base_urls: tuple[str, ...] = ()
     embedding_ollama_local_base_url: str = "http://127.0.0.1:11434"
     embedding_ollama_model_name: str = "bge-m3"
@@ -103,8 +101,6 @@ class RuntimeConfig:
         })
         cls._apply_section(kwargs, raw, "memory", {
             "keep_recent_tool_messages": int,
-            "l1_tool_result_max_chars": int,
-            "l1_tool_result_preview_chars": int,
             "embedding_ollama_local_base_url": str,
             "embedding_ollama_model_name": str,
             "embedding_ollama_keep_alive": str,

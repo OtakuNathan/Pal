@@ -25,7 +25,6 @@ from pal.llm import (
     build_default_endpoint_invoker,
     register_with_core as register_llm_with_core,
 )
-from pal.llm.request_hooks import MAIN_LLM_REQUEST_HOOKS
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
 from pal.minion.harnesses import MinionHarnessRegistry
@@ -103,9 +102,7 @@ def compose_runtime(
         settings_repository=runtime_settings_repository,
         endpoint_invoker=build_default_endpoint_invoker(
             credentials=credential_resolver,
-            artifact_manager=artifact_service,
             runtime_root=registration.runtime.runtime_root,
-            message_hooks=MAIN_LLM_REQUEST_HOOKS,
         ),
         config=config,
     )

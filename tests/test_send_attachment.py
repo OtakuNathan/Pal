@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import tempfile
 import unittest
@@ -12,7 +14,6 @@ from pal.channel.endpoints.socket_endpoint import SocketChannelEndpoint
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import AttachmentSpec, EventEnvelope
-from pal.llm import CanonicalToolCall
 from pal.shared import EventKind, SourceKind
 from tests.runtime_channel_providers import telegram_endpoint_module
 
@@ -117,7 +118,7 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
             path.write_text("artifact", encoding="utf-8")
 
             result = await core.context.execution_runtime.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="call_tool",
                     args={
                         "name": "send_channel_attachment",
@@ -138,7 +139,7 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self._start_turn(core, endpoint)
 
         missing_turn = await core.context.execution_runtime.execute_tool_async(
-            CanonicalToolCall(
+            new_tool_call(
                 name="call_tool",
                 args={"name": "send_channel_attachment", "args": {"path": "missing.txt"}},
             ),
@@ -239,7 +240,7 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("send_channel_attachment", names)
         search = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="search_tools", args={"query": "send attachment", "top_k": 5})
+            new_tool_call(name="search_tools", args={"query": "send attachment", "top_k": 5})
         )
         self.assertTrue(search.ok)
         self.assertEqual(search.structured["hits"][0]["alias"], "send_channel_attachment")
@@ -253,7 +254,7 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
             path.write_text("artifact", encoding="utf-8")
 
             result = await core.context.execution_runtime.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="call_tool",
                     args={
                         "name": "send_channel_attachment",
@@ -277,7 +278,7 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
             path.write_text("artifact", encoding="utf-8")
 
             result = await core.context.execution_runtime.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="call_tool",
                     args={
                         "name": "send_channel_attachment",

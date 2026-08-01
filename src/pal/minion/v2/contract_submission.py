@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 from pathlib import Path
 from typing import Any, Mapping
 
 from pal.execution.tool_facade import EmptyToolInput, rejection
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.contract_protocol import (
     ARCHITECT_FILENAME,
     read_architect_yaml,
@@ -14,7 +15,7 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftStore,
 )
 from pal.minion.v2.work_items import assert_work_items_complete
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 CONTRACT_SUBMIT_CAPABILITY = "op_minion_contract_submit"
@@ -74,9 +75,9 @@ def bind_architect_file(
 
 
 def contract_submit_tool_result(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: Mapping[str, Any],
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     try:
         if dict(call.args or {}):
             raise ValueError("contract_submit takes no arguments")
@@ -106,7 +107,7 @@ def contract_submit_tool_result(
             "architect.yaml was accepted by the Manager validator and "
             "submitted for semantic review."
         )
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=True,
             text=text,
@@ -121,7 +122,7 @@ def contract_submit_tool_result(
             text
             + " Correct only the reported contract/checklist defect and retry."
         )
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=call.name,
             ok=False,
             text=text,

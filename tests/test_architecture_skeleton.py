@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import ast
 import asyncio
 import contextlib
@@ -62,7 +64,8 @@ from pal.failure import (
 from pal.foundation import EventEnvelope, RawSQLHookRegistry
 from pal.identity import IdentityRepository, IdentityService, register_with_core as register_identity_with_core
 from pal.identity.prompt import IdentityPromptFragmentProvider
-from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
+from pal.llm import generation_result_from_values, LLMPreflightAdvice
+from pal.llm.ir import LLMResponseDeltaKind, LLMResponseUpdate
 from pal.memory import (
     L1MessageKind,
     L1TranscriptMessage,
@@ -81,9 +84,8 @@ from pal.plugins import PluginHost, register_with_core as register_plugins_with_
 from pal.plugins.l3 import MockL3Plugin, register_with_core as register_l3_with_core
 from pal.proactive import ProactiveDefinition, ProactiveManager, ProactiveRepository, ProactiveRunner, ProactiveTriggerEvent, build_proactive_trigger_input, register_with_core as register_proactive_with_core
 from pal.proactive.scheduling import compute_next_proactive_run_at_utc, utc_now_dt
-from pal.shared import EventKind, LLMStreamEventKind, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, capability_action, capability_node, default_tool_result_text
+from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, EventKind, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, capability_action, capability_node, default_tool_result_text
 from pal.shared.prompt_dates import today_for_timezone
-from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
 from pal.minion import register_with_core as register_minion_with_core
 
@@ -119,15 +121,15 @@ class StubEndpoint(ChannelEndpointQueueBase):
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         self.sent.append((response_handle.endpoint_id, text))
 
-    def send_stream_event(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
-        if event.event_kind == LLMStreamEventKind.TEXT_DELTA:
-            self.streamed.append((response_handle.endpoint_id, "text", event.text))
-        elif event.event_kind == LLMStreamEventKind.REASONING_DELTA:
-            self.streamed.append((response_handle.endpoint_id, "reasoning", event.reasoning_text))
-        elif event.event_kind == LLMStreamEventKind.TOOL_CALL and event.tool_call is not None:
-            self.streamed.append((response_handle.endpoint_id, "op_tool_call", event.tool_call.name))
+    def send_stream_update(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
+        if update.kind == ChannelStreamUpdateKind.TEXT_DELTA:
+            self.streamed.append((response_handle.endpoint_id, "text", update.text))
+        elif update.kind == ChannelStreamUpdateKind.REASONING_DELTA:
+            self.streamed.append((response_handle.endpoint_id, "reasoning", update.reasoning_text))
+        elif update.kind == ChannelStreamUpdateKind.TOOL_CALL and update.tool_call is not None:
+            self.streamed.append((response_handle.endpoint_id, "op_tool_call", update.tool_call.name))
         else:
-            self.streamed.append((response_handle.endpoint_id, str(event.event_kind), event.finish_reason or event.error_text))
+            self.streamed.append((response_handle.endpoint_id, str(update.kind), update.finish_reason or update.error_text))
 
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, object]) -> None:
         self.statuses.append((response_handle.endpoint_id, kind, dict(payload)))
@@ -269,7 +271,7 @@ def register_test_tool(runtime, tool) -> str:
 
 
 class ScriptedLLMRuntime:
-    def __init__(self, outcomes: list[CanonicalLLMOutcome]) -> None:
+    def __init__(self, outcomes: list[generation_result_from_values]) -> None:
         self.outcomes = outcomes
         self.requests = []
 
@@ -280,7 +282,7 @@ class ScriptedLLMRuntime:
             active_model="stub-model",
             fallback_chain=["stub-fallback"],
             target_input_budget=2048,
-            reserved_output_tokens=request.max_output_tokens,
+            reserved_output_tokens=request.request.policy.max_output_tokens,
         )
 
     async def apreflight(self, request) -> LLMPreflightAdvice:
@@ -290,58 +292,50 @@ class ScriptedLLMRuntime:
         self.requests.append(("generate", request))
         if self.outcomes:
             return self.outcomes.pop(0)
-        return CanonicalLLMOutcome(text="done", tool_calls=[], finish_reason="stop")
+        return generation_result_from_values(text="done", tool_calls=[], finish_reason="stop")
 
     async def agenerate(self, request):
         return self.generate(request)
 
-    def generate_stream(self, request):
-        self.requests.append(("generate_stream", request))
+    async def astream(self, request):
+        self.requests.append(("astream", request))
         if self.outcomes:
             outcome = self.outcomes.pop(0)
         else:
-            outcome = CanonicalLLMOutcome(text="done", tool_calls=[], finish_reason="stop")
-        events: list[NormalizedLLMStreamEvent] = []
+            outcome = generation_result_from_values(text="done", tool_calls=[], finish_reason="stop")
+        events: list[LLMResponseUpdate] = []
         if outcome.reasoning_text:
             events.append(
-                NormalizedLLMStreamEvent(
-                    event_kind=LLMStreamEventKind.REASONING_DELTA,
-                    reasoning_text=outcome.reasoning_text,
-                    provider_specific_fields=dict(outcome.provider_specific_fields or {}),
-                )
-            )
-        elif outcome.provider_specific_fields:
-            events.append(
-                NormalizedLLMStreamEvent(
-                    event_kind=LLMStreamEventKind.REASONING_DELTA,
-                    provider_specific_fields=dict(outcome.provider_specific_fields or {}),
+                LLMResponseUpdate(
+                    response=outcome.response,
+                    delta_kind=LLMResponseDeltaKind.REASONING,
+                    text_delta=outcome.reasoning_text,
                 )
             )
         if outcome.text:
             events.append(
-                NormalizedLLMStreamEvent(
-                    event_kind=LLMStreamEventKind.TEXT_DELTA,
-                    text=outcome.text,
+                LLMResponseUpdate(
+                    response=outcome.response,
+                    delta_kind=LLMResponseDeltaKind.TEXT,
+                    text_delta=outcome.text,
                 )
             )
         for tool_call in outcome.tool_calls:
             events.append(
-                NormalizedLLMStreamEvent(
-                    event_kind=LLMStreamEventKind.TOOL_CALL,
+                LLMResponseUpdate(
+                    response=outcome.response,
+                    delta_kind=LLMResponseDeltaKind.TOOL_CALL,
                     tool_call=tool_call,
                 )
             )
         events.append(
-            NormalizedLLMStreamEvent(
-                event_kind=LLMStreamEventKind.DONE,
-                finish_reason=outcome.finish_reason,
-                response_mode=outcome.response_mode,
+            LLMResponseUpdate(
+                response=outcome.response,
+                delta_kind=LLMResponseDeltaKind.STATE,
             )
         )
-        return events
-
-    async def agenerate_stream(self, request):
-        return self.generate_stream(request)
+        for event in events:
+            yield event
 
 
 class PalV2ArchitectureSkeletonTests(unittest.TestCase):
@@ -491,7 +485,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_domain_interaction_specs_stay_out_of_core_and_control_sources(self) -> None:
         core_runtime = (ROOT / "src/pal/core/runtime.py").read_text(encoding="utf-8")
         core_prompt = (ROOT / "src/pal/core/prompt.py").read_text(encoding="utf-8")
-        llm_request_hooks = (ROOT / "src/pal/llm/request_hooks.py").read_text(encoding="utf-8")
+        llm_model_hooks = (ROOT / "src/pal/llm/model_hooks.py").read_text(encoding="utf-8")
         minion_source = (ROOT / "src/pal/minion/source.py").read_text(encoding="utf-8")
         control_interactions = (ROOT / "src/pal/control/interactions.py").read_text(encoding="utf-8")
         minion_interactions = (ROOT / "src/pal/minion/interactions.py").read_text(encoding="utf-8")
@@ -504,9 +498,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("memory_candidate_decision", core_runtime)
         self.assertNotIn("l3_commit_args_from_memory_candidate", core_runtime)
         self.assertNotIn("op_minion", core_prompt)
-        self.assertNotIn("MINION_LLM_REQUEST_HOOKS", llm_request_hooks)
-        self.assertNotIn("MINION_BEHAVIOR_ROUTING_HOOK", llm_request_hooks)
-        self.assertNotIn("minion_behavior_routing", llm_request_hooks)
+        self.assertNotIn("MINION_LLM_REQUEST_HOOKS", llm_model_hooks)
+        self.assertNotIn("MINION_BEHAVIOR_ROUTING_HOOK", llm_model_hooks)
+        self.assertNotIn("minion_behavior_routing", llm_model_hooks)
+        self.assertFalse((ROOT / "src/pal/llm/request_hooks.py").exists())
         self.assertNotIn("InteractionMessageSpec(", minion_source)
         self.assertNotIn("InteractionButtonSpec(", minion_source)
         self.assertIn("InteractionMessageSpec(", control_interactions)
@@ -528,8 +523,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             f"src/pal/llm/{old_app_alias}.py",
         ):
             self.assertFalse((ROOT / relative_path).exists(), relative_path)
+        self.assertFalse((ROOT / "src/pal/llm/adapters.py").exists())
         for relative_path in (
-            "src/pal/llm/adapters.py",
             "src/pal/llm/runtime.py",
             "src/pal/minion/runner.py",
             "src/pal/wizard/runtime.py",
@@ -623,7 +618,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="run_shell", args={"cmd": "echo pong"})
+            new_tool_call(name="run_shell", args={"cmd": "echo pong"})
         )
 
         self.assertTrue(result.ok)
@@ -642,13 +637,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             target.write_text("line\n", encoding="utf-8")
 
             read_result = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(name="run_shell", args={"cmd": "cat sample.txt", "cwd": str(root)})
+                new_tool_call(name="run_shell", args={"cmd": "cat sample.txt", "cwd": str(root)})
             )
             stdout_tail = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(name="run_shell", args={"cmd": "printf 'line\\n' | tail -1", "cwd": str(root)})
+                new_tool_call(name="run_shell", args={"cmd": "printf 'line\\n' | tail -1", "cwd": str(root)})
             )
             delete_result = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(name="run_shell", args={"cmd": "rm sample.txt", "cwd": str(root)})
+                new_tool_call(name="run_shell", args={"cmd": "rm sample.txt", "cwd": str(root)})
             )
 
             self.assertTrue(read_result.ok, read_result.text)
@@ -663,7 +658,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="run_shell", args={"cmd": "echo pong"})
+            new_tool_call(name="run_shell", args={"cmd": "echo pong"})
         )
 
         self.assertTrue(result.ok)
@@ -762,7 +757,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_test_tool(core.context.execution_runtime, RaisingTool())
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="boom", args={"value": "x"})
+            new_tool_call(name="boom", args={"value": "x"})
         )
 
         self.assertFalse(result.ok)
@@ -790,7 +785,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="search_tools", args={"query": "run shell command", "top_k": 5})
+            new_tool_call(name="search_tools", args={"query": "run shell command", "top_k": 5})
         )
 
         self.assertTrue(result.ok)
@@ -820,7 +815,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("op_file_state", published)
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="search_tools", args={"query": "read edit write delete path file", "top_k": 10})
+            new_tool_call(name="search_tools", args={"query": "read edit write delete path file", "top_k": 10})
         )
 
         self.assertTrue(result.ok)
@@ -837,7 +832,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="search_tools", args={"query": "tree directory listing", "top_k": 10})
+            new_tool_call(name="search_tools", args={"query": "tree directory listing", "top_k": 10})
         )
 
         self.assertTrue(result.ok)
@@ -893,17 +888,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_l1_tool_result_truncation_keeps_modest_results(self) -> None:
+    def test_l1_has_no_durable_tool_result_truncation_hook(self) -> None:
         core = PalCore()
-        modest = "x" * 4_409
 
-        self.assertEqual(core.turn_manager._truncate_tool_result_for_l1(modest), modest)
-
-        small_core = PalCore(config=RuntimeConfig(l1_tool_result_max_chars=100, l1_tool_result_preview_chars=30))
-        truncated = small_core.turn_manager._truncate_tool_result_for_l1("y" * 150)
-
-        self.assertTrue(truncated.startswith("y" * 30))
-        self.assertIn("[... truncated, original: 150 chars]", truncated)
+        self.assertFalse(hasattr(core.turn_manager, "_truncate_tool_result_for_l1"))
 
     def test_tool_read_returns_llm_facing_call_contract(self) -> None:
         core = PalCore()
@@ -911,7 +899,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="read_tool", args={"name": "run_shell"})
+            new_tool_call(name="read_tool", args={"name": "run_shell"})
         )
 
         self.assertTrue(result.ok)
@@ -950,7 +938,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="read_tool", args={})
+            new_tool_call(name="read_tool", args={})
         )
 
         self.assertFalse(result.ok)
@@ -1019,7 +1007,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.publish_module_capabilities("memory")
             core.publish_module_capabilities(l3_plugin.module_id)
             register_test_tool(core.context.execution_runtime, EchoTool())
-            scripted_llm = ScriptedLLMRuntime([CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop")])
+            scripted_llm = ScriptedLLMRuntime([generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")])
             core.context.port_registry["llm:llm"] = scripted_llm
 
             core.process_channel_turn(
@@ -1030,8 +1018,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 )
             )
 
-            request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"})
-            exposed_names = [item["function"]["name"] for item in request.tools]
+            request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "astream"})
+            exposed_names = [item.name for item in request.tools]
             self.assertIn("search_tools", exposed_names)
             self.assertIn("read_tool", exposed_names)
             self.assertIn("read_tool_result", exposed_names)
@@ -1057,22 +1045,22 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("llm_active", exposed_names)
             self.assertNotIn("llm_set_active_endpoint", exposed_names)
             self.assertIn("echo", exposed_names)
-            exec_tool = next(item for item in request.tools if item["function"]["name"] == "run_shell")
-            self.assertIn("cmd", exec_tool["function"]["input_schema"]["properties"])
+            exec_tool = next(item for item in request.tools if item.name == "run_shell")
+            self.assertIn("cmd", exec_tool.input_schema["properties"])
             self.assertIn(
                 "Pal runtime, module, capability, or Minion state",
-                exec_tool["function"]["description"],
+                exec_tool.description,
             )
             self.assertIn(
                 "search for repository text search",
-                exec_tool["function"]["description"],
+                exec_tool.description,
             )
-            self.assertNotIn("op_", exec_tool["function"]["description"])
-            memory_update = next(item for item in request.tools if item["function"]["name"] == "update_memory")
-            self.assertIn("mem_ref", memory_update["function"]["input_schema"]["properties"])
-            self.assertNotIn("target_id", memory_update["function"]["input_schema"]["properties"])
-            memory_recall = next(item for item in request.tools if item["function"]["name"] == "recall_memory")
-            memory_recall_properties = memory_recall["function"]["input_schema"]["properties"]
+            self.assertNotIn("op_", exec_tool.description)
+            memory_update = next(item for item in request.tools if item.name == "update_memory")
+            self.assertIn("mem_ref", memory_update.input_schema["properties"])
+            self.assertNotIn("target_id", memory_update.input_schema["properties"])
+            memory_recall = next(item for item in request.tools if item.name == "recall_memory")
+            memory_recall_properties = memory_recall.input_schema["properties"]
             self.assertIn("task_id", memory_recall_properties)
             self.assertIn("queries", memory_recall_properties)
             self.assertIn("topic_scope", memory_recall_properties)
@@ -1081,13 +1069,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("view", memory_recall_properties)
             self.assertNotIn("level", memory_recall_properties)
             self.assertNotIn("scope", memory_recall_properties)
-            memory_write = next(item for item in request.tools if item["function"]["name"] == "remember_memory")
-            memory_write_description = memory_write["function"]["description"]
+            memory_write = next(item for item in request.tools if item.name == "remember_memory")
+            memory_write_description = memory_write.description
             self.assertIn("Before using this tool, call recall_memory", memory_write_description)
             self.assertIn("use update_memory with that", memory_write_description)
             self.assertIn("Do not write duplicate memories", memory_write_description)
             self.assertIn("fact: or case:", memory_write_description)
-            memory_write_properties = memory_write["function"]["input_schema"]["properties"]
+            memory_write_properties = memory_write.input_schema["properties"]
             self.assertIn("star", memory_write_properties)
             self.assertIn("task_id", memory_write_properties)
             self.assertNotIn("scope", memory_write_properties)
@@ -1097,7 +1085,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("task_text", memory_write_properties)
             self.assertNotIn("action_text", memory_write_properties)
             self.assertNotIn("result_text", memory_write_properties)
-            memory_update_properties = memory_update["function"]["input_schema"]["properties"]
+            memory_update_properties = memory_update.input_schema["properties"]
             self.assertIn("star", memory_update_properties)
             self.assertNotIn("payload_patch", memory_update_properties)
             self.assertNotIn("situation_text", memory_update_properties)
@@ -1198,7 +1186,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.publish_module_capabilities(module_id)
         scripted_llm = ScriptedLLMRuntime(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text='{"verification_status":"ok","reason":"Provider inventory is sufficient; maintenance index refresh stays internal."}',
                     tool_calls=[],
                     finish_reason="stop",
@@ -1228,8 +1216,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIsNotNone(outcome.repair_resolution)
         self.assertTrue(any(record.get("document_kind") == "case" for record in l3_plugin.records))
         self.assertTrue(any(entry.kind == "case" for entry in memory_service.l2_store.items.values()))
-        request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"})
-        tool_names = [tool["function"]["name"] for tool in request.tools]
+        request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "astream"})
+        tool_names = [tool.name for tool in request.tools]
         self.assertNotIn("op_memory_refresh_indexes", tool_names)
         self.assertIn("read_tool", tool_names)
         self.assertNotIn("memory_provider_inventory__mock_l3", tool_names)
@@ -1274,7 +1262,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 core.publish_module_capabilities(module_id)
             scripted_llm = ScriptedLLMRuntime(
                 [
-                    CanonicalLLMOutcome(
+                    generation_result_from_values(
                         text='{"verification_status":"degraded","reason":"Inline repair is insufficient; isolate repair is required."}',
                         tool_calls=[],
                         finish_reason="stop",
@@ -1303,8 +1291,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             self.assertEqual(outcome.verification.status, "degraded")
             self.assertIsNotNone(outcome.repair_work_order)
-            request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"})
-            tool_names = [tool["function"]["name"] for tool in request.tools]
+            request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "astream"})
+            tool_names = [tool.name for tool in request.tools]
             self.assertIn("read_tool", tool_names)
             self.assertNotIn("plugin_rescan", tool_names)
             self.assertNotIn("plugin_enable", tool_names)
@@ -1393,7 +1381,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
             self.assertEqual(
                 prompt.metadata["fragment_sections"],
-                [
+                (
                     "identity",
                     "system_map",
                     "source_of_truth",
@@ -1403,60 +1391,60 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "mutation_policy",
                     "memory_guide",
                     "knowledge_storage_boundary",
-                ],
+                ),
             )
-            self.assertEqual(prompt.metadata["reminder_sections"], ["operating_guidance", "tool_efficiency"])
+            self.assertEqual(prompt.metadata["reminder_sections"], ("operating_guidance", "tool_efficiency"))
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
-                ["l1_recent_context_0", "l1_recent_context_1", "memory_recalled_context"],
+                ("l1_recent_context_0", "l1_recent_context_1", "memory_recalled_context"),
             )
             self.assertEqual(prompt_ir.turn_kind, "chat")
-            self.assertEqual(prompt.messages[0]["role"], "system")
-            self.assertEqual(prompt.messages[-1]["role"], "user")
-            self.assertIsInstance(prompt.messages[-1]["content"], list)
-            self.assertEqual(prompt.messages[-1]["content"][-2], {"type": "text", "text": "Hello from user"})
-            self.assertIn("<runtime_reminder", prompt.messages[-1]["content"][-1]["text"])
-            self.assertIn("active system prompt", prompt.messages[-1]["content"][-1]["text"])
-            self.assertIn("behavior-routing guidance", prompt.messages[-1]["content"][-1]["text"])
-            self.assertIn("<identity>", prompt.messages[0]["content"])
-            self.assertIn("<system_map>", prompt.messages[0]["content"])
-            self.assertIn("<source_of_truth>", prompt.messages[0]["content"])
-            self.assertIn("<prompt_context_policy>", prompt.messages[0]["content"])
-            self.assertIn("<operating_rules>", prompt.messages[0]["content"])
-            self.assertIn("<priority>", prompt.messages[0]["content"])
-            self.assertNotIn("<task_flow>", prompt.messages[0]["content"])
-            self.assertNotIn("minion_task_search", prompt.messages[0]["content"])
-            self.assertNotIn("minion_dispatch_workflow", prompt.messages[0]["content"])
-            self.assertNotIn("<tool_efficiency>", prompt.messages[0]["content"])
-            self.assertIn("<mutation_policy>", prompt.messages[0]["content"])
-            self.assertIn("<memory_guide>", prompt.messages[0]["content"])
-            self.assertIn("<knowledge_storage_boundary>", prompt.messages[0]["content"])
-            self.assertNotIn("##", prompt.messages[0]["content"])
-            self.assertNotIn("<capability_guide>", prompt.messages[0]["content"])
-            self.assertIn("<recalled_memories> contains durable memory context", prompt.messages[0]["content"])
-            self.assertIn("execution/capability", prompt.messages[0]["content"])
-            self.assertNotIn("minion", prompt.messages[0]["content"].split("<source_of_truth>", 1)[0].lower())
-            self.assertIn("Memory tool descriptions", prompt.messages[0]["content"])
-            self.assertIn("prefixes such as fact: and case:", prompt.messages[0]["content"])
-            self.assertNotIn("memory_recall", prompt.messages[0]["content"])
-            self.assertNotIn("memory_write", prompt.messages[0]["content"])
-            self.assertNotIn("memory_update", prompt.messages[0]["content"])
-            self.assertNotIn("If recalled memories are already present in the prompt", prompt.messages[0]["content"])
-            self.assertNotIn("Mandatory recall", prompt.messages[0]["content"])
-            self.assertNotIn("custom Pal/project term", prompt.messages[0]["content"])
-            self.assertNotIn("op_tool_search", prompt.messages[0]["content"])
-            self.assertNotIn("op_tool_call", prompt.messages[0]["content"])
-            self.assertLess(prompt.messages[0]["content"].index("<identity>"), prompt.messages[0]["content"].index("<system_map>"))
-            self.assertLess(prompt.messages[0]["content"].index("<system_map>"), prompt.messages[0]["content"].index("<source_of_truth>"))
-            self.assertLess(prompt.messages[0]["content"].index("<source_of_truth>"), prompt.messages[0]["content"].index("<prompt_context_policy>"))
-            self.assertLess(prompt.messages[0]["content"].index("<prompt_context_policy>"), prompt.messages[0]["content"].index("<operating_rules>"))
-            self.assertLess(prompt.messages[0]["content"].index("<operating_rules>"), prompt.messages[0]["content"].index("<priority>"))
-            self.assertLess(prompt.messages[0]["content"].index("<mutation_policy>"), prompt.messages[0]["content"].index("<memory_guide>"))
-            self.assertNotIn("<runtime_overlay>", prompt.messages[0]["content"])
-            self.assertNotIn("<memory_projection>", prompt.messages[0]["content"])
-            self.assertEqual(prompt.messages[1], {"role": "user", "content": "What timezone should you use?"})
-            self.assertEqual(prompt.messages[2], {"role": "assistant", "content": "I should use Asia/Shanghai context."})
-            final_text = "\n".join(part["text"] for part in prompt.messages[-1]["content"] if part.get("type") == "text")
+            self.assertEqual(prompt.messages[0].role.value, "system")
+            self.assertEqual(prompt.messages[-1].role.value, "user")
+            self.assertIn("Hello from user", prompt.messages[-1].text)
+            self.assertIn("<runtime_reminder", prompt.messages[-1].text)
+            self.assertIn("active system prompt", prompt.messages[-1].text)
+            self.assertIn("behavior-routing guidance", prompt.messages[-1].text)
+            self.assertIn("<identity>", prompt.messages[0].text)
+            self.assertIn("<system_map>", prompt.messages[0].text)
+            self.assertIn("<source_of_truth>", prompt.messages[0].text)
+            self.assertIn("<prompt_context_policy>", prompt.messages[0].text)
+            self.assertIn("<operating_rules>", prompt.messages[0].text)
+            self.assertIn("<priority>", prompt.messages[0].text)
+            self.assertNotIn("<task_flow>", prompt.messages[0].text)
+            self.assertNotIn("minion_task_search", prompt.messages[0].text)
+            self.assertNotIn("minion_dispatch_workflow", prompt.messages[0].text)
+            self.assertNotIn("<tool_efficiency>", prompt.messages[0].text)
+            system_text = prompt.messages[0].text
+            self.assertIn("<mutation_policy>", system_text)
+            self.assertIn("<memory_guide>", system_text)
+            self.assertIn("<knowledge_storage_boundary>", system_text)
+            self.assertNotIn("##", system_text)
+            self.assertNotIn("<capability_guide>", system_text)
+            self.assertIn("<recalled_memories> contains durable memory context", system_text)
+            self.assertIn("execution/capability", system_text)
+            self.assertNotIn("minion", system_text.split("<source_of_truth>", 1)[0].lower())
+            self.assertIn("Memory tool descriptions", system_text)
+            self.assertIn("prefixes such as fact: and case:", system_text)
+            self.assertNotIn("memory_recall", system_text)
+            self.assertNotIn("memory_write", system_text)
+            self.assertNotIn("memory_update", system_text)
+            self.assertNotIn("If recalled memories are already present in the prompt", system_text)
+            self.assertNotIn("Mandatory recall", system_text)
+            self.assertNotIn("custom Pal/project term", system_text)
+            self.assertNotIn("op_tool_search", system_text)
+            self.assertNotIn("op_tool_call", system_text)
+            self.assertLess(system_text.index("<identity>"), system_text.index("<system_map>"))
+            self.assertLess(system_text.index("<system_map>"), system_text.index("<source_of_truth>"))
+            self.assertLess(system_text.index("<source_of_truth>"), system_text.index("<prompt_context_policy>"))
+            self.assertLess(system_text.index("<prompt_context_policy>"), system_text.index("<operating_rules>"))
+            self.assertLess(system_text.index("<operating_rules>"), system_text.index("<priority>"))
+            self.assertLess(system_text.index("<mutation_policy>"), system_text.index("<memory_guide>"))
+            self.assertNotIn("<runtime_overlay>", system_text)
+            self.assertNotIn("<memory_projection>", system_text)
+            self.assertEqual((prompt.messages[1].role.value, prompt.messages[1].text), ("user", "What timezone should you use?"))
+            self.assertEqual((prompt.messages[2].role.value, prompt.messages[2].text), ("assistant", "I should use Asia/Shanghai context."))
+            final_text = prompt.messages[-1].text
             self.assertNotIn("Recalled memory references are operational metadata.", final_text)
             self.assertIn("<tool_efficiency>", final_text)
             self.assertNotIn("<memory_guidance>", final_text)
@@ -1469,12 +1457,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("[summary-1]: The user prefers replies in Asia/Shanghai context.", final_text)
             self.assertNotIn("Working Memory", final_text)
             self.assertNotIn("Timezone Preference", final_text)
-            self.assertNotIn("Timezone Preference", prompt.messages[0]["content"])
-            self.assertNotIn("Issued work orders", prompt.messages[0]["content"])
-            self.assertNotIn("Registered proactive tasks", prompt.messages[0]["content"])
-            self.assertNotIn("Active L3", prompt.messages[0]["content"])
-            self.assertNotIn("Available L3", prompt.messages[0]["content"])
-            self.assertNotIn("candidate_state", prompt.messages[0]["content"])
+            self.assertNotIn("Timezone Preference", system_text)
+            self.assertNotIn("Issued work orders", system_text)
+            self.assertNotIn("Registered proactive tasks", system_text)
+            self.assertNotIn("Active L3", system_text)
+            self.assertNotIn("Available L3", system_text)
+            self.assertNotIn("candidate_state", system_text)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -1527,16 +1515,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(prompt.messages[0]["role"], "system")
-            self.assertEqual(prompt.messages[-1]["role"], "user")
-            proactive_text = "\n".join(part["text"] for part in prompt.messages[-1]["content"] if part.get("type") == "text")
+            self.assertEqual(prompt.messages[0].role.value, "system")
+            self.assertEqual(prompt.messages[-1].role.value, "user")
+            proactive_text = prompt.messages[-1].text
             self.assertIn("<proactive_trigger>", proactive_text)
             self.assertIn("</proactive_trigger>", proactive_text)
             self.assertIn("Goal: Summarize repository updates", proactive_text)
             self.assertIn("Method: Review recent changes and produce a concise digest.", proactive_text)
             self.assertEqual(len(prompt.messages), 2)
             self.assertNotIn("Remember the last digest.", proactive_text)
-            self.assertNotIn("Recent summaries", prompt.messages[0]["content"] + "\n" + proactive_text)
+            self.assertNotIn("Recent summaries", prompt.messages[0].text + "\n" + proactive_text)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -1562,7 +1550,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
             proactive_manager.register(definition)
             core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
-                [CanonicalLLMOutcome(text="Daily digest complete.", tool_calls=[], finish_reason="stop")]
+                [generation_result_from_values(text="Daily digest complete.", tool_calls=[], finish_reason="stop")]
             )
 
             proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"))
@@ -1610,7 +1598,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
             proactive_manager.register(definition)
             core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
-                [CanonicalLLMOutcome(text="Daily digest complete.", tool_calls=[], finish_reason="stop")]
+                [generation_result_from_values(text="Daily digest complete.", tool_calls=[], finish_reason="stop")]
             )
 
             proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="scheduled"))
@@ -1677,12 +1665,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             proactive_manager.register(definition)
             core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
                 [
-                    CanonicalLLMOutcome(
+                    generation_result_from_values(
                         text="Starting digest.",
-                        tool_calls=[CanonicalToolCall(name="echo", args={"value": "digest"})],
+                        tool_calls=[new_tool_call(name="echo", args={"value": "digest"})],
                         finish_reason="tool_calls",
                     ),
-                    CanonicalLLMOutcome(text="Daily digest complete.", tool_calls=[], finish_reason="stop"),
+                    generation_result_from_values(text="Daily digest complete.", tool_calls=[], finish_reason="stop"),
                 ]
             )
 
@@ -2079,7 +2067,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("tail", schema["properties"])
         self.assertEqual(schema["required"], ["result_ref"])
         read_result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="read_tool", args={"name": "read_tool_result"})
+            new_tool_call(name="read_tool", args={"name": "read_tool_result"})
         )
         self.assertTrue(read_result.ok)
         self.assertIn("result_ref", read_result.llm_text)
@@ -2090,16 +2078,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         shell = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="run_shell", args={"cmd": "echo alias-ok"})
+            new_tool_call(name="run_shell", args={"cmd": "echo alias-ok"})
         )
         search = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="search_tools", args={"query": "shell command", "top_k": 3})
+            new_tool_call(name="search_tools", args={"query": "shell command", "top_k": 3})
         )
         read = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="read_tool", args={"name": "run_shell"})
+            new_tool_call(name="read_tool", args={"name": "run_shell"})
         )
         compat = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="op_tool_read", args={"name": "op_exec_shell"})
+            new_tool_call(name="op_tool_read", args={"name": "op_exec_shell"})
         )
 
         self.assertTrue(shell.ok)
@@ -2536,7 +2524,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
         register_memory_with_core(core.context, memory_service)
         core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
-            [CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop")]
+            [generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")]
         )
 
         outcome = core.process_channel_turn(
@@ -2570,7 +2558,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
         register_memory_with_core(core.context, memory_service)
         core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
-            [CanonicalLLMOutcome(text="final answer", reasoning_text="thinking here", tool_calls=[], finish_reason="stop")]
+            [generation_result_from_values(text="final answer", reasoning_text="thinking here", tool_calls=[], finish_reason="stop")]
         )
 
         outcome = core.process_channel_turn(
@@ -2610,13 +2598,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_test_tool(core.context.execution_runtime, EchoTool())
         core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text="",
                     reasoning_text="thinking",
-                    tool_calls=[CanonicalToolCall(name="echo", args={"value": "same"})],
+                    tool_calls=[new_tool_call(name="echo", args={"value": "same"})],
                     finish_reason="tool_calls",
                 ),
-                CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop"),
+                generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop"),
             ]
         )
 
@@ -2642,13 +2630,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text="",
-                    tool_calls=[CanonicalToolCall(name="echo", args={"value": "mode"})],
+                    tool_calls=[new_tool_call(name="echo", args={"value": "mode"})],
                     finish_reason="tool_calls",
                     response_mode="review",
                 ),
-                CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop"),
+                generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop"),
             ]
         )
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -2662,9 +2650,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"}]
-        self.assertEqual(generate_requests[0].temperature, 0.7)
-        self.assertEqual(generate_requests[1].temperature, 0.1)
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
+        self.assertEqual(generate_requests[0].policy.temperature, 0.7)
+        self.assertEqual(generate_requests[1].policy.temperature, 0.2)
 
     def test_tool_results_are_returned_via_standard_assistant_and_tool_messages(self) -> None:
         core = PalCore()
@@ -2675,13 +2663,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text="",
-                    provider_specific_fields={"reasoning_content": "hidden protocol reasoning"},
-                    tool_calls=[CanonicalToolCall(name="echo", args={"value": "proto"})],
+                    reasoning_text="hidden protocol reasoning",
+                    tool_calls=[new_tool_call(name="echo", args={"value": "proto"})],
                     finish_reason="tool_calls",
                 ),
-                CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop"),
+                generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop"),
             ]
         )
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -2695,28 +2683,21 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"}]
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
         self.assertGreaterEqual(len(generate_requests), 2)
         followup_messages = generate_requests[1].messages
         assistant_tool_message = next(
-            message for message in followup_messages if message.get("role") == "assistant" and message.get("tool_calls")
+            message
+            for message in followup_messages
+            if message.role.value == "assistant" and message.tool_calls
         )
-        self.assertEqual(
-            assistant_tool_message["tool_calls"][0]["function"]["name"],
-            "echo",
-        )
-        self.assertEqual(
-            ast.literal_eval(assistant_tool_message["tool_calls"][0]["function"]["arguments"]),
-            {"value": "proto"},
-        )
-        self.assertEqual(
-            assistant_tool_message["provider_specific_fields"]["reasoning_content"],
-            "hidden protocol reasoning",
-        )
-        tool_message = next(message for message in followup_messages if message.get("role") == "tool")
-        self.assertIn("stable-result", tool_message["content"])
-        system_message = next(message for message in followup_messages if message.get("role") == "system")
-        self.assertNotIn("Tool Observation", system_message["content"])
+        self.assertEqual(assistant_tool_message.tool_calls[0].name, "echo")
+        self.assertEqual(dict(assistant_tool_message.tool_calls[0].arguments), {"value": "proto"})
+        self.assertEqual(assistant_tool_message.reasoning_text, "hidden protocol reasoning")
+        tool_message = next(message for message in followup_messages if message.role.value == "tool")
+        self.assertIn("stable-result", str(tool_message.parts[0].content))
+        system_message = next(message for message in followup_messages if message.role.value == "system")
+        self.assertNotIn("Tool Observation", system_message.text)
 
     def test_closed_turn_tool_history_is_provider_neutral_on_next_turn(self) -> None:
         core = PalCore()
@@ -2731,25 +2712,23 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text="",
-                    provider_specific_fields={
-                        "reasoning_content": "ephemeral provider reasoning"
-                    },
+                    reasoning_text="ephemeral provider reasoning",
                     tool_calls=[
-                        CanonicalToolCall(
+                        new_tool_call(
                             name="echo",
                             args={"value": "first turn"},
                         )
                     ],
                     finish_reason="tool_calls",
                 ),
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text="first final",
                     tool_calls=[],
                     finish_reason="stop",
                 ),
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text="second final",
                     tool_calls=[],
                     finish_reason="stop",
@@ -2780,37 +2759,34 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         first_followup = [
             request
             for kind, request in scripted_llm.requests
-            if kind in {"generate", "generate_stream"}
+            if kind in {"generate", "astream"}
         ][1]
         active_tool_call = next(
             message
             for message in first_followup.messages
-            if message.get("role") == "assistant" and message.get("tool_calls")
+            if message.role.value == "assistant" and message.tool_calls
         )
-        self.assertEqual(
-            active_tool_call["provider_specific_fields"]["reasoning_content"],
-            "ephemeral provider reasoning",
-        )
+        self.assertEqual(active_tool_call.reasoning_text, "ephemeral provider reasoning")
 
         run_turn("second request")
         second_request = [
             request
             for kind, request in scripted_llm.requests
-            if kind in {"generate", "generate_stream"}
+            if kind in {"generate", "astream"}
         ][2]
         self.assertFalse(
-            any(message.get("role") == "tool" for message in second_request.messages)
+            any(message.role.value == "tool" for message in second_request.messages)
         )
         self.assertFalse(
-            any(message.get("tool_calls") for message in second_request.messages)
+            any(message.tool_calls for message in second_request.messages)
         )
         closed_history = next(
             message
             for message in second_request.messages
-            if "<closed_tool_interaction>" in str(message.get("content") or "")
+            if "<closed_tool_interaction>" in message.text
         )
-        self.assertIn("first turn", closed_history["content"])
-        self.assertNotIn("ephemeral provider reasoning", closed_history["content"])
+        self.assertIn("first turn", closed_history.text)
+        self.assertNotIn("ephemeral provider reasoning", closed_history.text)
         self.assertNotIn(
             "ephemeral provider reasoning",
             json.dumps(
@@ -2832,12 +2808,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text="",
-                    tool_calls=[CanonicalToolCall(name="verbose", args={"value": "proto"})],
+                    tool_calls=[new_tool_call(name="verbose", args={"value": "proto"})],
                     finish_reason="tool_calls",
                 ),
-                CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop"),
+                generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop"),
             ]
         )
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -2851,12 +2827,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"}]
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
         self.assertGreaterEqual(len(generate_requests), 2)
         followup_messages = generate_requests[1].messages
-        tool_message = next(message for message in followup_messages if message.get("role") == "tool")
-        self.assertIn('"value": "rich"', tool_message["content"])
-        self.assertNotIn("placeholder", tool_message["content"])
+        tool_message = next(message for message in followup_messages if message.role.value == "tool")
+        self.assertIn('"value": "rich"', tool_message.text)
+        self.assertNotIn("placeholder", tool_message.text)
 
     def test_default_tool_result_text_pretty_prints_structured_fallback(self) -> None:
         result = type(
@@ -2901,11 +2877,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities(mock_l3.module_id)
         scripted_llm = ScriptedLLMRuntime(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text="",
-                    provider_specific_fields={"reasoning_content": "hidden recall reasoning"},
+                    reasoning_text="hidden recall reasoning",
                     tool_calls=[
-                        CanonicalToolCall(
+                        new_tool_call(
                             name="call_tool",
                             args={
                                 "name": "memory_provider_recall__mock_l3",
@@ -2915,7 +2891,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     ],
                     finish_reason="tool_calls",
                 ),
-                CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop"),
+                generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop"),
             ]
         )
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -2928,14 +2904,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"}]
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
         self.assertGreaterEqual(len(generate_requests), 2)
-        tool_message = next(message for message in generate_requests[1].messages if message.get("role") == "tool")
-        self.assertIn('<recalled_memories view="summary">', tool_message["content"])
-        self.assertIn("[fact:1]:", tool_message["content"])
-        self.assertIn('"kind": "complete"', tool_message["content"])
-        self.assertNotIn("legacy assistant", tool_message["content"])
-        self.assertIn("The test user built Pal and wants it to act directly.", tool_message["content"])
+        tool_message = next(message for message in generate_requests[1].messages if message.role.value == "tool")
+        self.assertIn('<recalled_memories view="summary">', tool_message.text)
+        self.assertIn("[fact:1]:", tool_message.text)
+        self.assertIn('"kind": "complete"', tool_message.text)
+        self.assertNotIn("legacy assistant", tool_message.text)
+        self.assertIn("The test user built Pal and wants it to act directly.", tool_message.text)
 
     def test_malformed_tool_result_does_not_crash_turn_runtime(self) -> None:
         core = PalCore()
@@ -2946,12 +2922,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text="",
-                    tool_calls=[CanonicalToolCall(name="malformed", args={})],
+                    tool_calls=[new_tool_call(name="malformed", args={})],
                     finish_reason="tool_calls",
                 ),
-                CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop"),
+                generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop"),
             ]
         )
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -2966,16 +2942,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
         self.assertTrue(str(outcome.final_reply or "").strip())
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"}]
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
         self.assertGreaterEqual(len(generate_requests), 2)
         tool_message = next(
             message
             for request in reversed(generate_requests)
             for message in request.messages
-            if message.get("role") == "tool"
+            if message.role.value == "tool"
         )
-        self.assertIn('{"bad": true}', tool_message["content"])
-        self.assertNotIn("memory recall", tool_message["content"])
+        self.assertIn('{"bad": true}', tool_message.parts[0].content)
+        self.assertNotIn("memory recall", tool_message.parts[0].content)
 
     def test_stagnation_guard_forces_finalization_only_and_strips_tools(self) -> None:
         core = PalCore()
@@ -2986,10 +2962,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         scripted_llm = ScriptedLLMRuntime(
             [
-                CanonicalLLMOutcome(text="", tool_calls=[CanonicalToolCall(name="echo", args={"value": "same"})], finish_reason="tool_calls"),
-                CanonicalLLMOutcome(text="", tool_calls=[CanonicalToolCall(name="echo", args={"value": "same"})], finish_reason="tool_calls"),
-                CanonicalLLMOutcome(text="", tool_calls=[CanonicalToolCall(name="echo", args={"value": "same"})], finish_reason="tool_calls"),
-                CanonicalLLMOutcome(text="", tool_calls=[CanonicalToolCall(name="echo", args={"value": "same"})], finish_reason="tool_calls"),
+                generation_result_from_values(text="", tool_calls=[new_tool_call(name="echo", args={"value": "same"})], finish_reason="tool_calls"),
+                generation_result_from_values(text="", tool_calls=[new_tool_call(name="echo", args={"value": "same"})], finish_reason="tool_calls"),
+                generation_result_from_values(text="", tool_calls=[new_tool_call(name="echo", args={"value": "same"})], finish_reason="tool_calls"),
+                generation_result_from_values(text="", tool_calls=[new_tool_call(name="echo", args={"value": "same"})], finish_reason="tool_calls"),
             ]
         )
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -3003,12 +2979,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"}]
-        self.assertEqual(generate_requests[-1].tools, [])
-        self.assertIn("Finalization Directive", generate_requests[-1].messages[0]["content"])
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "astream"}]
+        self.assertEqual(generate_requests[-1].tools, ())
+        self.assertIn("Finalization Directive", generate_requests[-1].messages[0].text)
         self.assertLess(
-            generate_requests[-1].messages[0]["content"].index("<operating_rules>"),
-            generate_requests[-1].messages[0]["content"].index("<runtime_overlay>"),
+            generate_requests[-1].messages[0].text.index("<operating_rules>"),
+            generate_requests[-1].messages[0].text.index("<runtime_overlay>"),
         )
         self.assertIn("stopped the tool loop", outcome.final_reply.lower())
 
@@ -3025,7 +3001,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     active_model="tiny-model",
                     fallback_chain=[],
                     target_input_budget=512,
-                    reserved_output_tokens=request.max_output_tokens,
+                    reserved_output_tokens=request.request.policy.max_output_tokens,
                 )
 
             def resolve_endpoint_facts(self, *, preferred_endpoint_id: str | None = None) -> dict[str, object]:
@@ -3045,12 +3021,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.requests.append(("generate", request))
                 self.generate_count += 1
                 if self.generate_count == 1:
-                    return CanonicalLLMOutcome(
+                    return generation_result_from_values(
                         text="",
-                        tool_calls=[CanonicalToolCall(name="huge", args={"value": "budget"})],
+                        tool_calls=[new_tool_call(name="huge", args={"value": "budget"})],
                         finish_reason="tool_calls",
                     )
-                return CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop")
+                return generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")
 
             async def agenerate(self, request):
                 self.requests.append(("agenerate", request))
@@ -3058,7 +3034,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     request.metadata.get("purpose") or ""
                 ):
                     return self.generate(request)
-                return CanonicalLLMOutcome(
+                return generation_result_from_values(
                     text=json.dumps(
                         {
                             "schema": "pal.compaction.pal.v2",
@@ -3109,10 +3085,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertEqual(outcome.final_reply, "final answer")
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
-        self.assertNotIn("Finalization Directive", generate_requests[-1].messages[0]["content"])
-        tool_message = next(message for message in generate_requests[-1].messages if message.get("role") == "tool")
-        self.assertIn('"kind": "paged"', tool_message["content"])
-        self.assertIn('"tool": "read_tool_result"', tool_message["content"])
+        self.assertNotIn("Finalization Directive", generate_requests[-1].messages[0].text)
+        tool_message = next(message for message in generate_requests[-1].messages if message.role.value == "tool")
+        self.assertIn('"kind": "paged"', tool_message.text)
+        self.assertIn('"tool": "read_tool_result"', tool_message.text)
 
     def test_turn_runtime_degrades_older_tool_results_when_current_turn_group_exceeds_limit(self) -> None:
         class MultiToolLLMRuntime:
@@ -3124,28 +3100,28 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.requests.append(("preflight", request))
                 return LLMPreflightAdvice(
                     status="ready",
-                    active_model=request.model_hint or "primary-model",
+                    active_model=request.request.model_hint or "primary-model",
                     fallback_chain=[],
                     target_input_budget=2048,
-                    reserved_output_tokens=request.max_output_tokens,
+                    reserved_output_tokens=request.request.policy.max_output_tokens,
                 )
 
             def generate(self, request):
                 self.requests.append(("generate", request))
                 self.generate_count += 1
                 if self.generate_count == 1:
-                    return CanonicalLLMOutcome(
+                    return generation_result_from_values(
                         text="",
-                        tool_calls=[CanonicalToolCall(name="huge_a", args={"value": "proto-a"})],
+                        tool_calls=[new_tool_call(name="huge_a", args={"value": "proto-a"})],
                         finish_reason="tool_calls",
                     )
                 if self.generate_count == 2:
-                    return CanonicalLLMOutcome(
+                    return generation_result_from_values(
                         text="",
-                        tool_calls=[CanonicalToolCall(name="huge_b", args={"value": "proto-b"})],
+                        tool_calls=[new_tool_call(name="huge_b", args={"value": "proto-b"})],
                         finish_reason="tool_calls",
                     )
-                return CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop")
+                return generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")
 
         core = PalCore(config=RuntimeConfig(
             max_tool_results_per_message_chars=20_000,
@@ -3174,10 +3150,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
         self.assertGreaterEqual(len(generate_requests), 3)
         retry_request = generate_requests[-1]
-        tool_messages = [message for message in retry_request.messages if message.get("role") == "tool"]
+        tool_messages = [message for message in retry_request.messages if message.role.value == "tool"]
         self.assertEqual(len(tool_messages), 2)
-        self.assertIn("[preview only:", tool_messages[0]["content"])
-        self.assertNotIn("[preview only:", tool_messages[1]["content"])
+        self.assertIn("[preview only:", tool_messages[0].parts[0].content)
+        self.assertNotIn("[preview only:", tool_messages[1].parts[0].content)
 
     def test_execution_runtime_pages_large_tool_results_to_ephemeral_backing_file(self) -> None:
         core = PalCore()
@@ -3185,7 +3161,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.context.execution_runtime.runtime_root = Path(tmpdir)
             register_test_tool(core.context.execution_runtime, HugeTool(size=60_000))
             result = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(name="huge", args={"value": "spill"}, call_id="call_spill"),
+                new_tool_call(name="huge", args={"value": "spill"}, call_id="call_spill"),
                 budget=ToolCallBudget(
                     max_output_chars=10_000,
                     max_output_tokens_estimate=25_000,
@@ -3210,13 +3186,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.context.execution_runtime.runtime_root = None
         register_test_tool(core.context.execution_runtime, HugeTool(size=60_000))
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="huge", args={"value": "head-tail"}),
+            new_tool_call(name="huge", args={"value": "head-tail"}),
             budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000),
         )
 
         self.assertTrue(result.ok)
         self.assertEqual(result.structured["kind"], "paged")
-        self.assertTrue(str(result.structured["result_handle"]["result_ref"]).startswith("call_"))
+        self.assertTrue(str(result.structured["result_handle"]["result_ref"]))
         self.assertIn('"kind": "paged"', result.llm_text)
 
     def test_shell_output_uses_runtime_pager_without_tool_level_truncation(self) -> None:
@@ -3226,7 +3202,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             core.context.execution_runtime.runtime_root = Path(tmpdir)
             result = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="run_shell",
                     args={
                         "cmd": (
@@ -3243,7 +3219,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
             page_count = int(result.structured["result_handle"]["page_count"])
             later = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_tool_result",
                     args={"result_ref": "call_shell_pager", "page": page_count},
                 )
@@ -3263,12 +3239,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.context.execution_runtime.runtime_root = Path(tmpdir)
             register_test_tool(core.context.execution_runtime, HeadTailHugeTool())
             result = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(name="head_tail_huge", args={}, call_id="call_head_tail"),
+                new_tool_call(name="head_tail_huge", args={}, call_id="call_head_tail"),
                 budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000, artifact_bucket_id="turn_page"),
             )
             page_count = int(result.structured["result_handle"]["page_count"])
             later = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_tool_result",
                     args={"result_ref": "call_head_tail", "page": page_count},
                 )
@@ -3291,17 +3267,17 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.context.execution_runtime.runtime_root = Path(tmpdir)
             register_test_tool(core.context.execution_runtime, HeadTailHugeTool())
             result = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(name="head_tail_huge", args={}, call_id="call_tail_anchor"),
+                new_tool_call(name="head_tail_huge", args={}, call_id="call_tail_anchor"),
                 budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000, artifact_bucket_id="turn_tail_anchor"),
             )
             tail = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_tool_result",
                     args={"result_ref": "call_tail_anchor", "anchor": "tail"},
                 )
             )
             second_from_tail = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_tool_result",
                     args={"result_ref": "call_tail_anchor", "tail": True, "page": 2},
                 )
@@ -3335,14 +3311,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             register_test_tool(core.context.execution_runtime, HugeTool(size=60_000))
             core.context.execution_runtime.begin_tool_result_turn(turn_id="turn_1", retention_user_turns=5)
             core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(name="huge", args={"value": "expire"}, call_id="call_expire"),
+                new_tool_call(name="huge", args={"value": "expire"}, call_id="call_expire"),
                 budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000, artifact_bucket_id="turn_1"),
             )
 
             for index in range(2, 7):
                 core.context.execution_runtime.begin_tool_result_turn(turn_id=f"turn_{index}", retention_user_turns=5)
             expired = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(name="read_tool_result", args={"result_ref": "call_expire", "page": 1})
+                new_tool_call(name="read_tool_result", args={"result_ref": "call_expire", "page": 1})
             )
 
         self.assertFalse(expired.ok)
@@ -3358,17 +3334,17 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.requests.append(("preflight", request))
                 return LLMPreflightAdvice(
                     status="ready",
-                    active_model=request.model_hint or "stub-model",
+                    active_model=request.request.model_hint or "stub-model",
                     fallback_chain=[],
                     target_input_budget=2048,
-                    reserved_output_tokens=request.max_output_tokens,
+                    reserved_output_tokens=request.request.policy.max_output_tokens,
                 )
 
             def generate(self, request):
                 self.requests.append(("generate", request))
                 self.generate_count += 1
                 if self.generate_count == 1:
-                    return CanonicalLLMOutcome(
+                    return generation_result_from_values(
                         text="",
                         tool_calls=[],
                         finish_reason="compact_required",
@@ -3377,7 +3353,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                         preferred_endpoint_id="fallback-small",
                         preferred_model_id="fallback-small-model",
                     )
-                return CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop")
+                return generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop")
 
             async def agenerate(self, request):
                 self.requests.append(("agenerate", request))
@@ -3385,7 +3361,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     request.metadata.get("purpose") or ""
                 ):
                     return self.generate(request)
-                return CanonicalLLMOutcome(
+                return generation_result_from_values(
                     text=json.dumps(
                         {
                             "schema": "pal.compaction.pal.v2",
@@ -3437,8 +3413,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(outcome.final_reply, "final answer")
         preflight_requests = [request for kind, request in scripted_llm.requests if kind == "preflight"]
         self.assertGreaterEqual(len(preflight_requests), 2)
-        self.assertEqual(preflight_requests[-1].metadata.get("preferred_endpoint_id"), "fallback-small")
-        self.assertEqual(preflight_requests[-1].model_hint, "fallback-small-model")
+        self.assertEqual(preflight_requests[-1].request.metadata.get("preferred_endpoint_id"), "fallback-small")
+        self.assertEqual(preflight_requests[-1].request.model_hint, "fallback-small-model")
         self.assertTrue(memory_service.l1_store.items)
 
     def test_memory_prompt_clears_old_tool_protocol_by_complete_turns(self) -> None:
@@ -3650,16 +3626,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         protocol_messages = [
             message
             for message in prompt.messages
-            if "<closed_tool_interaction>" in str(message.get("content") or "")
+            if "<closed_tool_interaction>" in message.text
         ]
 
         self.assertEqual(len(protocol_messages), 1)
-        self.assertEqual(protocol_messages[0]["role"], "assistant")
-        self.assertNotIn("tool_calls", protocol_messages[0])
-        self.assertNotIn("provider_specific_fields", protocol_messages[0])
-        self.assertIn("probe_tool", protocol_messages[0]["content"])
-        self.assertIn("probe result", protocol_messages[0]["content"])
-        self.assertNotIn("inspect the probe", protocol_messages[0]["content"])
+        self.assertEqual(protocol_messages[0].role.value, "assistant")
+        self.assertFalse(protocol_messages[0].tool_calls)
+        self.assertFalse(protocol_messages[0].replay)
+        self.assertIn("probe_tool", protocol_messages[0].text)
+        self.assertIn("probe result", protocol_messages[0].text)
+        self.assertNotIn("inspect the probe", protocol_messages[0].text)
 
     def test_memory_prompt_trusts_orphan_tool_result_history_without_revalidating(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
@@ -3816,7 +3792,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities(mock_l3.module_id)
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(
+            new_tool_call(
                 name="call_tool",
                 args={
                     "name": "memory_provider_recall__mock_l3",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import json
 import unittest
@@ -13,7 +15,7 @@ from pal.execution.tool_semantics import DIRECT_NONE
 from pal.failure import FAILURE_VERIFICATION_FAILED, FailureDraft, FailureSignal
 from pal.failure.handler import FailureEventHandler
 from pal.foundation import EventEnvelope
-from pal.llm import CanonicalLLMOutcome, CanonicalToolCall
+from pal.llm import generation_result_from_values
 from pal.shared import EventKind, RuntimeStatus, SourceKind
 from tests.capability_fixture import mount_test_capability
 
@@ -24,7 +26,7 @@ class _RecordingFailureLLM:
 
     async def agenerate(self, request):
         self.requests.append(request)
-        return CanonicalLLMOutcome(
+        return generation_result_from_values(
             text=json.dumps(
                 {
                     "verification_status": "failed",
@@ -44,12 +46,12 @@ class _ToolLoopFailureLLM:
     async def agenerate(self, request):
         self.requests.append(request)
         if len(self.requests) == 1:
-            return CanonicalLLMOutcome(
+            return generation_result_from_values(
                 text="",
-                tool_calls=[CanonicalToolCall(name="safe_probe", args={}, call_id="call_safe_probe")],
+                tool_calls=[new_tool_call(name="safe_probe", args={}, call_id="call_safe_probe")],
                 finish_reason="tool_calls",
             )
-        return CanonicalLLMOutcome(
+        return generation_result_from_values(
             text=json.dumps(
                 {
                     "verification_status": "failed",
@@ -114,8 +116,8 @@ class FailureFlowTests(unittest.TestCase):
 
         self.assertEqual(len(llm.requests), 1)
         request = llm.requests[0]
-        system_text = request.messages[0]["content"]
-        user_text = request.messages[1]["content"]
+        system_text = request.messages[0].text
+        user_text = request.messages[1].text
 
         self.assertIn("Pal Safe Mode", system_text)
         self.assertNotIn("<identity>", system_text)
@@ -197,8 +199,8 @@ class FailureFlowTests(unittest.TestCase):
         self.assertEqual(len(llm.requests), 1)
         request = llm.requests[0]
         self.assertEqual(request.metadata.get("prompt_profile"), "safe_mode")
-        self.assertIn("Pal Safe Mode", request.messages[0]["content"])
-        self.assertNotIn("SECRET USER REQUEST", request.messages[1]["content"])
+        self.assertIn("Pal Safe Mode", request.messages[0].text)
+        self.assertNotIn("SECRET USER REQUEST", request.messages[1].text)
 
     def test_failure_flow_outer_guard_catches_orchestration_exception(self) -> None:
         core = PalCore()
@@ -348,20 +350,20 @@ class FailureFlowTests(unittest.TestCase):
         self.assertEqual(len(llm.requests), 3)
         for request in llm.requests:
             self.assertEqual(request.metadata.get("prompt_profile"), "safe_mode")
-            self.assertIn("Pal Safe Mode", request.messages[0]["content"])
-            self.assertNotIn("<identity>", request.messages[0]["content"])
-            self.assertNotIn("<runtime_overlay>", request.messages[0]["content"])
-            rendered = json.dumps(request.messages, ensure_ascii=False)
+            self.assertIn("Pal Safe Mode", request.messages[0].text)
+            self.assertNotIn("<identity>", request.messages[0].text)
+            self.assertNotIn("<runtime_overlay>", request.messages[0].text)
+            rendered = json.dumps([message.text for message in request.messages], ensure_ascii=False)
             self.assertNotIn("input_schema", rendered)
             self.assertNotIn("full schema must not enter verify prompt", rendered)
 
         verify_request = llm.requests[1]
-        self.assertEqual(verify_request.tools, [])
+        self.assertEqual(verify_request.tools, ())
 
-        verify_payload = verify_request.messages[1]["content"]
+        verify_payload = verify_request.messages[1].text
         self.assertIn('"kind": "capability_contract"', verify_payload)
         self.assertIn('"name": "run_shell"', verify_payload)
-        maintain_payload = llm.requests[2].messages[1]["content"]
+        maintain_payload = llm.requests[2].messages[1].text
         self.assertIn('"stage": "maintain"', maintain_payload)
         self.assertIn('"kind": "capability_contract"', maintain_payload)
         self.assertIn('"name": "run_shell"', maintain_payload)

@@ -10,7 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
-from pal.channel.contracts import ChannelDeliveryError, EndpointConfig, ResponseHandle
+from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate, EndpointConfig, ResponseHandle
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec
 from pal.foundation import AttachmentSpec
 from pal.channel.endpoints.socket_protocol import (
@@ -18,8 +18,7 @@ from pal.channel.endpoints.socket_protocol import (
     pack_socket_message,
     read_socket_message,
 )
-from pal.shared import EventKind, LLMStreamEventKind
-from pal.stream_events import NormalizedLLMStreamEvent
+from pal.shared import EventKind, ChannelStreamUpdateKind
 
 logger = logging.getLogger(__name__)
 
@@ -37,29 +36,29 @@ class _SocketSession:
     request_ids: set[str] = field(default_factory=set)
     closed: bool = False
     writer_task: asyncio.Task[None] | None = None
-def _stream_payload(response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> dict[str, Any]:
-    payload_type = str(event.event_kind)
-    if event.event_kind == LLMStreamEventKind.DONE:
+def _stream_payload(response_handle: ResponseHandle, update: ChannelStreamUpdate) -> dict[str, Any]:
+    payload_type = str(update.kind)
+    if update.kind == ChannelStreamUpdateKind.DONE:
         payload_type = "llm_done"
-    elif event.event_kind == LLMStreamEventKind.ERROR:
+    elif update.kind == ChannelStreamUpdateKind.ERROR:
         payload_type = "llm_error"
     payload: dict[str, Any] = {
         "type": payload_type,
         "request_id": str(response_handle.reply_target.get("request_id") or ""),
     }
-    if event.text:
-        payload["text"] = event.text
-    if event.reasoning_text:
-        payload["reasoning_text"] = event.reasoning_text
-    if event.tool_call is not None:
+    if update.text:
+        payload["text"] = update.text
+    if update.reasoning_text:
+        payload["reasoning_text"] = update.reasoning_text
+    if update.tool_call is not None:
         payload["op_tool_call"] = {
-            "name": event.tool_call.name,
-            "args": dict(event.tool_call.args),
+            "name": update.tool_call.name,
+            "args": dict(update.tool_call.args),
         }
-    if event.finish_reason:
-        payload["finish_reason"] = str(event.finish_reason)
-    if event.error_text:
-        payload["error_text"] = event.error_text
+    if update.finish_reason:
+        payload["finish_reason"] = str(update.finish_reason)
+    if update.error_text:
+        payload["error_text"] = update.error_text
     return payload
 
 
@@ -357,22 +356,22 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             ),
         }
 
-    def queue_stream_event(
+    def queue_stream_update(
         self,
-        event: NormalizedLLMStreamEvent,
+        update: ChannelStreamUpdate,
         *,
         response_handle: ResponseHandle | None = None,
     ) -> str:
         handle = response_handle or self.build_response_handle()
-        self._mark_stream_event_queued(handle, event)
-        return super().queue_stream_event(event, response_handle=handle)
+        self._mark_stream_update_queued(handle, update)
+        return super().queue_stream_update(update, response_handle=handle)
 
-    def send_stream_event(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
+    def send_stream_update(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
         session = self._require_session(response_handle)
-        super().send_stream_event(response_handle, event)
-        self._mark_stream_event_queued(response_handle, event)
-        session.outbound.put_nowait(_stream_payload(response_handle, event))
-        self.mark_stream_text_delivered(response_handle, event)
+        super().send_stream_update(response_handle, update)
+        self._mark_stream_update_queued(response_handle, update)
+        session.outbound.put_nowait(_stream_payload(response_handle, update))
+        self.mark_stream_text_delivered(response_handle, update)
 
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
         session = self._require_session(response_handle)
@@ -432,10 +431,10 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             str(reply_target.get("request_id") or ""),
         )
 
-    def _mark_stream_event_queued(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
+    def _mark_stream_update_queued(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
         stream_key = self._stream_key(response_handle)
         self._stream_handle_ids_by_key[stream_key] = id(response_handle)
-        if event.text:
+        if update.text:
             self._streamed_text_handles.add(id(response_handle))
             self._streamed_text_keys.add(stream_key)
 

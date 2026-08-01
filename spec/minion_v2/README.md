@@ -35,6 +35,10 @@ the Python worker spine implements it.
   process group, Manager run registration, and exclusive worktree ownership.
   A terminal IPC receipt or leader exit cannot release ownership; replacement
   starts only after the complete process group is reaped and accounting closes.
+- `ContinuationLifecycle.tla` models checkpoint admission across the legacy
+  `l1_items` and current `l1_turns` shapes, including the historical shared-v5
+  label. It requires a real shape migration before worker start, preserves
+  structured terminal errors, and permits retries only for transient failures.
 - `ReplanReuseLifecycle.tla` models replan as a mechanical preserve/create/delete
   classification over stable Module keys. It checks that surviving Modules keep
   their worktree and logical Coder/Verifier generations, exact fingerprints
@@ -51,6 +55,9 @@ the Python worker spine implements it.
   the snapshot atomically, historical read deliveries cannot roll it back,
   external writes require a fresh read, and partial reads never authorize a
   mutation.
+- `MinionRuntimeAuthority.tla` models a logical role owning its L1/L2 working
+  memory while all LLM requests cross the Manager broker and shared L3 remains
+  read-only for the complete role lifecycle.
 
 The models intentionally abstract prompts, artifact contents, Git, and provider
 details. Those are values carried by transitions, not additional lifecycle

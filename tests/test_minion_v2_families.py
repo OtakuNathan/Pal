@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import shutil
 import tempfile
@@ -44,7 +46,7 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
 )
 from pal.shared import MinionInvocationPack, RuntimeStatus
 from tests.capability_fixture import mount_test_capability
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
+from pal.shared import ToolExecutionResult
 
 
 class MinionV2FamilyBindingTests(unittest.TestCase):
@@ -287,7 +289,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         rejected = asyncio.run(
             scoped.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="artifact_write",
                     args={
                         "relative_path": "producer_report.json",
@@ -301,7 +303,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         product = asyncio.run(
             scoped.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="artifact_write",
                     args={
                         "relative_path": "checkin.json",
@@ -516,7 +518,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         result = asyncio.run(
             scoped.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="verification_submit",
                     args={
                         "cases": [
@@ -632,7 +634,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         result = asyncio.run(
             generic_reader.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_file",
                     args={"file_path": str(bound)},
                 )
@@ -669,7 +671,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
 
         rejected = asyncio.run(
             scoped.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="write_file",
                     args={
                         "file_path": "tests/router/verifier/test_router.py",
@@ -680,7 +682,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         accepted = asyncio.run(
             scoped.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="write_file",
                     args={
                         "file_path": "src/new_router.py",
@@ -783,7 +785,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertNotIn("Role-local", description)
         result = asyncio.run(
             scoped.execute_tool_async(
-                CanonicalToolCall(
+                new_tool_call(
                     name="run_shell",
                     args={"cmd": "true"},
                     call_id="shell-default-timeout",

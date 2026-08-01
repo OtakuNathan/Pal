@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 from pal.execution.generated_tool_models import (
     MinionV2CandidateBuilderOpMinionCandidateReportArchitectureDefectInput,
     MinionV2CandidateBuilderOpMinionCandidateRequestModuleSplitInput,
@@ -16,7 +18,6 @@ from pal.execution.tool_facade import (
     ToolRejectedError,
     rejection,
 )
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.adapters import ARTIFACT_BUNDLE_ADAPTER
 from pal.minion.v2.skeleton import compiled_module_write_scopes
 from pal.minion.v2.submission_drafts import (
@@ -31,7 +32,7 @@ from pal.minion.v2.work_items import (
     submission_work_items,
 )
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 CANDIDATE_BUILDER_CAPABILITIES = (
@@ -118,10 +119,10 @@ def is_candidate_builder_capability(name: str) -> bool:
 
 
 async def candidate_builder_tool_result(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: dict[str, Any],
     produced_artifacts: list[dict[str, Any]],
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     name = str(call.name or "")
     try:
         if name == "op_minion_candidate_submit":
@@ -138,12 +139,12 @@ async def candidate_builder_tool_result(
 
 
 def _submit_candidate(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: Mapping[str, Any],
     produced_artifacts: list[dict[str, Any]],
     *,
     status: str,
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     args = dict(call.args or {})
     context = SubmissionDraftContext.from_workspace(workspace, draft_kind="candidate")
     store = SubmissionDraftStore(Path(str(workspace["runtime_root"])))
@@ -414,19 +415,19 @@ def _bound_candidate_work_view(workspace: Mapping[str, Any]) -> dict[str, Any]:
     return bound_reference_payload(workspace, "unit_work_view")
 
 
-def _ok(call: CanonicalToolCall, text: str, structured: Mapping[str, Any]) -> CanonicalToolResult:
-    return CanonicalToolResult(name=call.name, ok=True, text=text, llm_text=text, structured=dict(structured), call_id=call.call_id, status=RuntimeStatus.OK)
+def _ok(call: ToolCallIR, text: str, structured: Mapping[str, Any]) -> ToolExecutionResult:
+    return ToolExecutionResult(name=call.name, ok=True, text=text, llm_text=text, structured=dict(structured), call_id=call.call_id, status=RuntimeStatus.OK)
 
 
-def _error(call: CanonicalToolCall, exc: Exception) -> CanonicalToolResult:
+def _error(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
     text = f"{exc.__class__.__name__}: {exc}"
-    return CanonicalToolResult(name=call.name, ok=False, text=text, llm_text=text + " Correct only this issue and retry.", structured={"error": str(exc), "error_type": exc.__class__.__name__}, call_id=call.call_id, status=RuntimeStatus.INVALID)
+    return ToolExecutionResult(name=call.name, ok=False, text=text, llm_text=text + " Correct only this issue and retry.", structured={"error": str(exc), "error_type": exc.__class__.__name__}, call_id=call.call_id, status=RuntimeStatus.INVALID)
 
 
 def _rejected(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     exc: ToolRejectedError,
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     result = rejection(
         exc.error_code,
         str(exc),
@@ -434,7 +435,7 @@ def _rejected(
         affordances=list(exc.affordances),
         details=dict(exc.details),
     )
-    return CanonicalToolResult(
+    return ToolExecutionResult(
         name=call.name,
         ok=False,
         text=result.llm_text,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import unittest
 
 from pal.core import PalCore as _PalCoreBootstrap
@@ -18,7 +20,6 @@ from pal.execution.tool_facade import (
     ToolExecutionSemantics,
     ToolGuidance,
 )
-from pal.llm.contracts import CanonicalToolCall
 from pal.shared import (
     OPERATION_NAMESPACE,
     RuntimeStatus,
@@ -132,11 +133,11 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
         runtime = ExecutionRuntime()
         mount_test_capability(runtime, **echo_capability())
         try:
-            direct = runtime.execute_tool(CanonicalToolCall(name="echo", args={"value": "direct"}))
-            exact = runtime.invoke_indirect_tool(CanonicalToolCall(name="echo", args={"value": "alias"}))
-            heuristic = runtime.invoke_indirect_tool(CanonicalToolCall(name="repeat", args={"value": "legacy"}))
+            direct = runtime.execute_tool(new_tool_call(name="echo", args={"value": "direct"}))
+            exact = runtime.invoke_indirect_tool(new_tool_call(name="echo", args={"value": "alias"}))
+            heuristic = runtime.invoke_indirect_tool(new_tool_call(name="repeat", args={"value": "legacy"}))
             canonical = runtime.invoke_indirect_tool(
-                CanonicalToolCall(name="op_test_echo", args={"value": "canonical"})
+                new_tool_call(name="op_test_echo", args={"value": "canonical"})
             )
             manager = runtime.execute(CapabilityCall(name="op_test_echo", args={"value": "internal"}))
 
@@ -177,7 +178,7 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
             self.assertIsNot(runtime.registry_generation, old_generation)
             self.assertIn("echo", old_generation.indirect_aliases)
             self.assertNotIn("echo", runtime.registry_generation.indirect_aliases)
-            rejected = runtime.invoke_indirect_tool(CanonicalToolCall(name="echo", args={"value": "gone"}))
+            rejected = runtime.invoke_indirect_tool(new_tool_call(name="echo", args={"value": "gone"}))
             self.assertIsInstance(rejected, RejectedResult)
             self.assertEqual(rejected.error_code, "unknown_tool")
         finally:
@@ -216,10 +217,10 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
             )
         try:
             selected = runtime.invoke_indirect_tool(
-                CanonicalToolCall(name="echo__worker_b", args={"value": "worker_b"})
+                new_tool_call(name="echo__worker_b", args={"value": "worker_b"})
             )
             missing_base = runtime.invoke_indirect_tool(
-                CanonicalToolCall(name="echo", args={"value": "worker_b"})
+                new_tool_call(name="echo", args={"value": "worker_b"})
             )
 
             self.assertIsInstance(selected, CompleteResult)

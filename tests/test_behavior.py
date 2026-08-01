@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import shutil
 import tempfile
@@ -44,7 +46,7 @@ from pal.execution.tool_facade import EmptyToolInput, ProviderPayloadOutput, Too
 from pal.execution.tool_semantics import INDIRECT_NONE
 from pal.foundation import EventEnvelope, HeatLevel, HeatPolicy, HeatStateMachine, HeatStateRegistry, PalV2Database
 from pal.lsp.plugin import LspManagerPluginProvider
-from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
+from pal.llm import generation_result_from_values, LLMPreflightAdvice
 from pal.memory import L2Entry, MemoryPack, MemoryService, register_with_core as register_memory_with_core
 from pal.memory.models import MemoryCaseModel
 from pal.memory.prompt import MemoryPromptFragmentProvider
@@ -69,22 +71,28 @@ class _FakeHandle:
 
 
 class _ScriptedLLMRuntime:
-    def __init__(self, outcomes: list[CanonicalLLMOutcome]) -> None:
+    def __init__(self, outcomes: list[generation_result_from_values]) -> None:
         self.outcomes = outcomes
         self.requests = []
 
     def preflight(self, request) -> LLMPreflightAdvice:
         self.requests.append(("preflight", request))
-        return LLMPreflightAdvice(status="ready", active_model="stub-model", reserved_output_tokens=request.max_output_tokens)
+        return LLMPreflightAdvice(
+            status="ready",
+            active_model="stub-model",
+            reserved_output_tokens=request.request.policy.max_output_tokens,
+        )
 
     def generate(self, request):
         self.requests.append(("generate", request))
         if self.outcomes:
             return self.outcomes.pop(0)
-        return CanonicalLLMOutcome(text="done", tool_calls=[], finish_reason="stop")
+        return generation_result_from_values(text="done", tool_calls=[], finish_reason="stop")
 
 
-def _message_text(message: dict) -> str:
+def _message_text(message) -> str:
+    if hasattr(message, "text"):
+        return str(message.text)
     content = message.get("content")
     if isinstance(content, list):
         return "\n".join(str(part.get("text") or "") for part in content if isinstance(part, dict) and part.get("type") == "text")
@@ -545,8 +553,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertIsNone(self.repository.get_affordance("declared.resident"))
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
-        system = prompt.messages[0]["content"]
-        reminder = str(prompt.messages[-1]["content"])
+        system = _message_text(prompt.messages[0])
+        reminder = _message_text(prompt.messages[-1])
 
         self.assertNotIn("\n<behavior_guidance>\n", system)
         self.assertIn("<behavior_guidance>", reminder)
@@ -557,7 +565,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.service.unregister_declared_module("declared_resident_plugin")
         after_prompt = core.build_canonical_prompt(PromptAssemblyContext())
-        after = "\n".join(str(message["content"]) for message in after_prompt.messages)
+        after = "\n".join(_message_text(message) for message in after_prompt.messages)
         self.assertNotIn("Declared resident", after)
 
     def test_lsp_provider_declares_resident_code_intelligence_affordance(self) -> None:
@@ -571,8 +579,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertIsNone(self.repository.get_affordance("declared.lsp.code_intelligence"))
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
-        system = prompt.messages[0]["content"]
-        reminder = str(prompt.messages[-1]["content"])
+        system = _message_text(prompt.messages[0])
+        reminder = _message_text(prompt.messages[-1])
         guidance = reminder.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
 
         self.assertNotIn("\n<behavior_guidance>\n", system)
@@ -874,7 +882,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         runtime = core.context.execution_runtime
 
         learned = runtime.execute_tool(
-            CanonicalToolCall(
+            new_tool_call(
                 name="learn_behavior",
                 args={
                     "title": "Petra identity",
@@ -896,7 +904,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIsNotNone(self.repository.get_affordance(affordance_id))
 
         updated = runtime.execute_tool(
-            CanonicalToolCall(
+            new_tool_call(
                 name="update_behavior",
                 args={
                     "affordance": "Identify as Pal before messaging Petra.",
@@ -917,7 +925,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         )
 
         forgotten = runtime.execute_tool(
-            CanonicalToolCall(
+            new_tool_call(
                 name="forget_behavior",
                 args={
                     "affordance": "Start messages to Petra by identifying as Pal.",
@@ -963,7 +971,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("activation_threshold", learn_properties)
 
         def description(name: str) -> str:
-            result = core.context.execution_runtime.execute_tool(CanonicalToolCall(name="read_tool", args={"name": name}))
+            result = core.context.execution_runtime.execute_tool(new_tool_call(name="read_tool", args={"name": name}))
             self.assertTrue(result.ok, result.text)
             return str(result.structured["description"])
 
@@ -1229,8 +1237,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         register_behavior_with_core(core.context, self.service)
 
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
-        system = prompt.messages[0]["content"]
-        reminder = str(prompt.messages[-1]["content"])
+        system = _message_text(prompt.messages[0])
+        reminder = _message_text(prompt.messages[-1])
 
         self.assertIn("<system_map>", system)
         self.assertIn("<source_of_truth>", system)
@@ -1252,7 +1260,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertLess(system.index("<mutation_policy>"), system.index("<behavior_guidance_guide>"))
         self.assertEqual(
             prompt.metadata["fragment_sections"],
-            [
+            (
                 "system_map",
                 "source_of_truth",
                 "prompt_context_policy",
@@ -1261,9 +1269,9 @@ class BehaviorSubsystemTests(unittest.TestCase):
                 "mutation_policy",
                 "behavior_guidance_guide",
                 "knowledge_storage_boundary",
-            ],
+            ),
         )
-        self.assertEqual(prompt.metadata["reminder_sections"], ["operating_guidance", "tool_efficiency"])
+        self.assertEqual(prompt.metadata["reminder_sections"], ("operating_guidance", "tool_efficiency"))
 
         surfaces = system.split("<operating_rules>", 1)[0]
         self.assertIn("execution/capability", surfaces)
@@ -1323,12 +1331,12 @@ class BehaviorSubsystemTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         scripted_llm = _ScriptedLLMRuntime(
             [
-                CanonicalLLMOutcome(
+                generation_result_from_values(
                     text="",
-                    tool_calls=[CanonicalToolCall(name="advise_behavior", args={"scenario": "commit code"})],
+                    tool_calls=[new_tool_call(name="advise_behavior", args={"scenario": "commit code"})],
                     finish_reason="tool_calls",
                 ),
-                CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop"),
+                generation_result_from_values(text="final answer", tool_calls=[], finish_reason="stop"),
             ]
         )
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -1350,7 +1358,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
         self.assertGreaterEqual(len(generate_requests), 2)
-        followup_system = generate_requests[1].messages[0]["content"]
+        followup_system = _message_text(generate_requests[1].messages[0])
         self.assertNotIn("Active Route Guidance", followup_system)
         followup_text = "\n".join(_message_text(message) for message in generate_requests[1].messages)
         self.assertIn("Behavior advice", followup_text)
@@ -1478,7 +1486,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         register_core_with_core(core)
         register_behavior_with_core(core.context, self.service)
 
-        without_resident = core.build_canonical_prompt(PromptAssemblyContext()).messages[0]["content"]
+        without_resident = _message_text(core.build_canonical_prompt(PromptAssemblyContext()).messages[0])
         self.assertNotIn("\n<behavior_guidance>\n", without_resident)
 
         self.repository.upsert_affordance(
@@ -1495,8 +1503,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         )
 
         with_resident_prompt = core.build_canonical_prompt(PromptAssemblyContext())
-        with_resident = with_resident_prompt.messages[0]["content"]
-        reminder = str(with_resident_prompt.messages[-1]["content"])
+        with_resident = _message_text(with_resident_prompt.messages[0])
+        reminder = _message_text(with_resident_prompt.messages[-1])
 
         self.assertNotIn("\n<behavior_guidance>\n", with_resident)
         self.assertIn("<behavior_guidance>", reminder)
@@ -1504,7 +1512,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("Use the OLED expression capability sparingly", reminder)
         self.assertEqual(
             with_resident_prompt.metadata["fragment_sections"],
-            [
+            (
                 "system_map",
                 "source_of_truth",
                 "prompt_context_policy",
@@ -1513,11 +1521,11 @@ class BehaviorSubsystemTests(unittest.TestCase):
                 "mutation_policy",
                 "behavior_guidance_guide",
                 "knowledge_storage_boundary",
-            ],
+            ),
         )
         self.assertEqual(
             with_resident_prompt.metadata["reminder_sections"],
-            ["operating_guidance", "resident_affordances", "tool_efficiency"],
+            ("operating_guidance", "resident_affordances", "tool_efficiency"),
         )
 
     def test_behavior_guidance_deduplicates_headers_and_uses_canonicalized_declared_titles(self) -> None:
@@ -1555,8 +1563,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.service.register_declared_module(handle)
 
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
-        system = prompt.messages[0]["content"]
-        reminder = str(prompt.messages[-1]["content"])
+        system = _message_text(prompt.messages[0])
+        reminder = _message_text(prompt.messages[-1])
         guidance = reminder.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
 
         self.assertNotIn("\n<behavior_guidance>\n", system)

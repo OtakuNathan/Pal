@@ -36,7 +36,7 @@ from pal.shared import (
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.skill.builtin_skills import (
     PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID,
-    PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID,
+    PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_SKILL_ID,
     PAL_PLUGIN_DEVELOPMENT_SKILL_ID,
     builtin_declared_skills,
 )
@@ -100,32 +100,31 @@ if TYPE_CHECKING:
     metadata={"skill_trigger": True, "resident": False},
 )
 @affordance(
-    affordance_id="declared.skill.pal_llm_adapter_endpoint_development",
-    title="Pal LLM adapter endpoint development skill",
+    affordance_id="declared.skill.pal_llm_model_hook_endpoint_development",
+    title="Pal LLM model-hook endpoint development skill",
     scenario_text=(
-        "The user wants to add, repair, test, or validate an LLM provider adapter, OpenAI-compatible "
-        "serialization adapter, runtime-root adapter source, or matching llm_endpoints row."
+        "The user wants to add, repair, test, or validate an exact-model request hook "
+        "or matching llm_endpoints row."
     ),
     prompt_hint=(
-        "If this route is selected, inject skill `pal.llm.adapter_endpoint.development` before "
-        "creating adapter code or endpoint metadata. Do not refresh/load the running runtime unless the user explicitly asks."
+        "If this route is selected, inject skill `pal.llm.model_hook_endpoint.development` before "
+        "creating model-hook code or endpoint metadata. Do not refresh/load the running runtime unless the user explicitly asks."
     ),
     activation_terms=(
-        "llm adapter",
+        "llm model hook",
         "llm endpoint",
-        "provider adapter",
-        "endpoint adapter",
-        "runtime adapter",
-        "OpenAI-compatible adapter",
+        "model-specific instruction",
+        "endpoint hook",
+        "runtime model hook",
         "new model provider",
         "add llm provider",
-        "llm/adapters",
+        "llm/models",
         "llm_endpoints",
         "适配器",
         "模型 endpoint",
         "模型端点",
     ),
-    skill_refs=(PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID,),
+    skill_refs=(PAL_LLM_MODEL_HOOK_ENDPOINT_DEVELOPMENT_SKILL_ID,),
     priority=35,
     activation_threshold=0.2,
     metadata={"skill_trigger": True, "resident": False, "requires_user_refresh": True},

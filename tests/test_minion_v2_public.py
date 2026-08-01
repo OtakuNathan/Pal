@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import asyncio
 import contextlib
 from copy import deepcopy
@@ -90,6 +92,7 @@ from pal.memory import (
     MemoryCommitRequest,
     MemoryService,
 )
+from pal.llm.ir import LLMMessageIR, MessageRole
 from pal.shared import IntrospectionCall, LLMFinishReason, MinionInvocationPack, RuntimeStatus
 
 
@@ -2028,13 +2031,10 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         continuation = SimpleNamespace(
             pending_tool_call_batch=[],
             pending_tool_results=[],
-            tool_protocol_messages=[{"role": "assistant", "content": "inspected the boundary"}],
             tool_batch_count=6,
             preferred_llm_endpoint_id="glm",
             preferred_llm_model_id="glm-5.2",
             turn_settings_snapshot={},
-            l1_input_committed=True,
-            l1_protocol_committed_count=1,
         )
         first._persist_agent_session_checkpoint(
             first_pack.workspace,
@@ -2089,7 +2089,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertEqual(restored["llm_round_count"], 8)
         self.assertEqual(restored["tool_call_count"], 21)
         self.assertEqual(restored["response_keys"], ["effect-1"])
-        self.assertIn("inspected the boundary", json.dumps(restored["l1_items"]))
+        self.assertIn("inspected the boundary", json.dumps(restored["l1_turns"]))
         self.assertEqual(restored["scope_kind"], "module_run")
         self.assertEqual(restored["subject_key"], "node-router")
         self.assertTrue(first_output.is_file())
@@ -2183,9 +2183,6 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 SimpleNamespace(
                     pending_tool_call_batch=[object()],
                     pending_tool_results=[],
-                    l1_input_committed=True,
-                    l1_protocol_committed_count=0,
-                    tool_protocol_messages=[],
                 )
             )
         )
@@ -2194,21 +2191,31 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 SimpleNamespace(
                     pending_tool_call_batch=[],
                     pending_tool_results=[],
-                    l1_input_committed=True,
-                    l1_protocol_committed_count=2,
-                    tool_protocol_messages=[{}, {}],
                 )
             )
+        )
+        memory = MemoryService()
+        memory.begin_l1_turn("restart-pending", user_text="continue")
+        memory.upsert_l1_assistant(
+            "restart-pending",
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(
+                    new_tool_call(
+                        call_id="pending-call",
+                        name="read_file",
+                        arguments={},
+                    ),
+                ),
+            ),
         )
         self.assertFalse(
             runner._continuation_is_restart_safe(
                 SimpleNamespace(
                     pending_tool_call_batch=[],
                     pending_tool_results=[],
-                    l1_input_committed=True,
-                    l1_protocol_committed_count=0,
-                    tool_protocol_messages=[{}, {}],
-                )
+                ),
+                memory,
             )
         )
         with self.assertRaisesRegex(Exception, "reload at safe point"):
@@ -2218,9 +2225,6 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         restored = {
             "initial_instruction": "implement the bound module",
             "response_keys": ["assignment-produce"],
-            "tool_protocol_messages": [
-                {"role": "assistant", "content": "implementation is ready"},
-            ],
         }
 
         self.assertEqual(

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
+from pal.shared.tool_protocol import new_tool_call
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 CapabilityNameResolver = Callable[[object], str]
@@ -14,16 +17,16 @@ CapabilityNameResolver = Callable[[object], str]
 
 @dataclass(frozen=True)
 class MinionToolAdmission:
-    call: CanonicalToolCall
+    call: ToolCallIR
     target_name: str
     ok: bool
     reason: str = ""
     message: str = ""
     capability: str = ""
 
-    def to_result(self) -> CanonicalToolResult:
+    def to_result(self) -> ToolExecutionResult:
         message = self.message or "capability is not allowed for this minion run"
-        return CanonicalToolResult(
+        return ToolExecutionResult(
             name=self.call.name,
             ok=False,
             text=message,
@@ -35,9 +38,9 @@ class MinionToolAdmission:
 
 
 def resolve_minion_tool_call(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     resolve_name: CapabilityNameResolver,
-) -> CanonicalToolCall:
+) -> ToolCallIR:
     name = str(resolve_name(call.name) or "").strip()
     args = dict(call.args or {})
     if name == "op_tool_call":
@@ -45,24 +48,24 @@ def resolve_minion_tool_call(
             args["name"] = str(resolve_name(args["name"]) or "").strip()
     if name == call.name and args == dict(call.args or {}):
         return call
-    return CanonicalToolCall(name=name, args=args, call_id=call.call_id)
+    return new_tool_call(name=name, args=args, call_id=call.call_id)
 
 
-def effective_minion_capability_name(call: CanonicalToolCall) -> str:
+def effective_minion_capability_name(call: ToolCallIR) -> str:
     if call.name == "op_tool_call":
         args = dict(call.args or {})
         return str(args.get("name") or call.name).strip()
     return call.name
 
 
-def effective_minion_tool_args(call: CanonicalToolCall) -> dict[str, Any]:
+def effective_minion_tool_args(call: ToolCallIR) -> dict[str, Any]:
     if call.name == "op_tool_call" and isinstance((call.args or {}).get("args"), dict):
         return dict((call.args or {}).get("args") or {})
     return dict(call.args or {})
 
 
 def admit_minion_tool_call(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     allowed_capabilities: list[str] | tuple[str, ...],
     *,
     resolve_name: CapabilityNameResolver,

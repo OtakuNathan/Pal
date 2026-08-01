@@ -14,18 +14,18 @@ from pal.channel.contracts import (
     ChannelDeliveryError,
     ChannelEnvelope,
     ChannelMessageReceipt,
+    ChannelStreamUpdate,
     EndpointConfig,
     QueuedAttachment,
     QueuedReply,
     QueuedStatus,
-    QueuedStreamEvent,
+    QueuedStreamUpdate,
     ResponseHandle,
 )
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
 from pal.core.mailbox import Mailbox
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
-from pal.stream_events import NormalizedLLMStreamEvent
 
 
 INTERACTIVE_STATUS_KINDS = {"interactive_open", "interactive_update", "interactive_resolve", "interactive_expire"}
@@ -45,7 +45,7 @@ class ChannelEndpointQueueBase(ABC):
     outbox: deque[QueuedReply] = field(default_factory=deque)
     attachment_outbox: deque[QueuedAttachment] = field(default_factory=deque)
     status_outbox: deque[QueuedStatus] = field(default_factory=deque)
-    stream_outbox: deque[QueuedStreamEvent] = field(default_factory=deque)
+    stream_update_outbox: deque[QueuedStreamUpdate] = field(default_factory=deque)
     last_delivery_error: str = ""
     on_ready: Callable[[], None] | None = None
     _stream_sessions: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -296,18 +296,18 @@ class ChannelEndpointQueueBase(ABC):
         _ = attachment
         raise ChannelDeliveryError("endpoint does not support attachments", permanent=True)
 
-    def send_stream_event(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
+    def send_stream_update(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
         session = self._stream_sessions.setdefault(
             id(response_handle),
-            {"text": "", "reasoning": "", "events": [], "closed": False, "abort_reason": "", "text_delivered": False},
+            {"text": "", "reasoning": "", "updates": [], "closed": False, "abort_reason": "", "text_delivered": False},
         )
         if bool(session.get("closed")):
             return
-        session["events"].append(event.event_kind)
-        if event.text:
-            session["text"] = f'{session["text"]}{event.text}'
-        if event.reasoning_text:
-            session["reasoning"] = f'{session["reasoning"]}{event.reasoning_text}'
+        session["updates"].append(update.kind)
+        if update.text:
+            session["text"] = f'{session["text"]}{update.text}'
+        if update.reasoning_text:
+            session["reasoning"] = f'{session["reasoning"]}{update.reasoning_text}'
 
     def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
         session = self._stream_sessions.pop(id(response_handle), None)
@@ -319,28 +319,28 @@ class ChannelEndpointQueueBase(ABC):
             return None
         return text
 
-    def mark_stream_text_delivered(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
-        if not str(event.text or ""):
+    def mark_stream_text_delivered(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
+        if not str(update.text or ""):
             return
         session = self._stream_sessions.setdefault(
             id(response_handle),
-            {"text": "", "reasoning": "", "events": [], "closed": False, "abort_reason": "", "text_delivered": False},
+            {"text": "", "reasoning": "", "updates": [], "closed": False, "abort_reason": "", "text_delivered": False},
         )
         session["text_delivered"] = True
 
     def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
         session = self._stream_sessions.setdefault(
             id(response_handle),
-            {"text": "", "reasoning": "", "events": [], "closed": False, "abort_reason": "", "text_delivered": False},
+            {"text": "", "reasoning": "", "updates": [], "closed": False, "abort_reason": "", "text_delivered": False},
         )
         session["closed"] = True
         session["abort_reason"] = str(reason or "interrupted")
-        remaining: deque[QueuedStreamEvent] = deque()
-        while self.stream_outbox:
-            queued = self.stream_outbox.popleft()
+        remaining: deque[QueuedStreamUpdate] = deque()
+        while self.stream_update_outbox:
+            queued = self.stream_update_outbox.popleft()
             if id(queued.response_handle) != id(response_handle):
                 remaining.append(queued)
-        self.stream_outbox = remaining
+        self.stream_update_outbox = remaining
 
     def pair(
         self,
@@ -450,9 +450,9 @@ class ChannelEndpointQueueBase(ABC):
         self._notify_ready()
         return reply_id
 
-    def queue_stream_event(
+    def queue_stream_update(
         self,
-        event: NormalizedLLMStreamEvent,
+        update: ChannelStreamUpdate,
         *,
         response_handle: ResponseHandle | None = None,
     ) -> str:
@@ -460,17 +460,17 @@ class ChannelEndpointQueueBase(ABC):
         session = self._stream_sessions.get(id(handle))
         if session is not None and bool(session.get("closed")):
             return str(uuid4())
-        event_id = str(uuid4())
-        self.stream_outbox.append(
-            QueuedStreamEvent(
-                event_id=event_id,
+        update_id = str(uuid4())
+        self.stream_update_outbox.append(
+            QueuedStreamUpdate(
+                update_id=update_id,
                 response_handle=handle,
                 endpoint=self.endpoint,
-                event=event,
+                update=update,
             )
         )
         self._notify_ready()
-        return event_id
+        return update_id
 
     def queue_status(
         self,
@@ -520,8 +520,8 @@ class ChannelEndpointQueueBase(ABC):
     def has_queued_replies(self) -> bool:
         return bool(self.outbox)
 
-    def has_queued_stream_events(self) -> bool:
-        return bool(self.stream_outbox)
+    def has_queued_stream_updates(self) -> bool:
+        return bool(self.stream_update_outbox)
 
     def has_queued_status(self) -> bool:
         return bool(self.status_outbox)
@@ -600,25 +600,25 @@ class ChannelEndpointQueueBase(ABC):
             )
         return emitted
 
-    def flush_stream_outbox(self) -> list[EventEnvelope]:
-        if not self.stream_outbox:
+    def flush_stream_update_outbox(self) -> list[EventEnvelope]:
+        if not self.stream_update_outbox:
             return []
-        pending = list(self.stream_outbox)
-        self.stream_outbox.clear()
+        pending = list(self.stream_update_outbox)
+        self.stream_update_outbox.clear()
         emitted: list[EventEnvelope] = []
         for item in pending:
             try:
-                self.send_stream_event(item.response_handle, item.event)
+                self.send_stream_update(item.response_handle, item.update)
             except Exception as exc:
                 self.last_delivery_error = str(exc)
                 permanent = isinstance(exc, ChannelDeliveryError) and bool(getattr(exc, "permanent", False))
                 if not permanent:
-                    self.stream_outbox.append(
-                        QueuedStreamEvent(
-                            event_id=item.event_id,
+                    self.stream_update_outbox.append(
+                        QueuedStreamUpdate(
+                            update_id=item.update_id,
                             response_handle=item.response_handle,
                             endpoint=item.endpoint,
-                            event=item.event,
+                            update=item.update,
                             attempts=item.attempts + 1,
                         )
                     )
@@ -627,7 +627,7 @@ class ChannelEndpointQueueBase(ABC):
                         event_kind=EventKind.REPLY_FAILED,
                         source_kind=SourceKind.CHANNEL,
                         payload={
-                            "reply_id": item.event_id,
+                            "reply_id": item.update_id,
                             "endpoint_id": self.endpoint.endpoint_id,
                             "reason": str(exc),
                             "permanent": permanent,

@@ -164,7 +164,8 @@ Current behavior:
 
 - Linux requires `bubblewrap` (`bwrap`). Missing, disabled, or unsupported sandbox configuration fails the invocation closed before a runner process starts.
 - Network remains open so research-capable minions can use web tools and package managers when the task permits.
-- LLM credentials are not passed into the sandbox. Secret-like environment variables are scrubbed, and LLM calls go through the host minion LLM broker (`PAL_MINION_LLM_BROKER=1`).
+- LLM credentials are not passed into the sandbox. Secret-like environment variables are scrubbed, and the role runtime is constructed with `manager_broker` as its explicit LLM authority; there is no local-provider fallback.
+- A logical role owns its L1 transcript and disposable L2 heat/recall cache. Its shared SQLite-vec L3 provider and database connection are always read-only. Memory candidates are collected in the role-local in-memory sink and may reach durable L3 only through the host approval lifecycle.
 - The sandbox gives each run private `HOME`, `TMPDIR`, cache, and pycache paths under `/tmp/pal/minion/sandbox/runs/{run_id}` by default, falling back to `runtime_root/data/minion/sandbox/runs/{run_id}` when the temp scratch root is unavailable or below the free-space threshold.
 - Pal source, Python dependency paths, config, plugin data, skills, and selected runtime data are mounted read-only unless the runner needs task-owned state.
 - The assigned repo/workspace is mounted read-only by default. Coder product scopes and the Module Verifier's Manager-derived repository corpus are rebound writable only for their owning role; verifier overlays, Git metadata, and immutable inputs remain read-only.
@@ -368,7 +369,7 @@ This prevents recursive spawn/kill/list/read behavior. A task runner does not ne
 
 The runner is a thin execution entity, not a forked Pal. It starts a slim runtime with LLM, execution, artifact metadata, read-only memory recall, and allowed task tools such as file read/edit/write, shell/code execution, and web search/fetch. It does not load channel endpoints, proactive triggers, control panel, or Pal user-facing routing.
 
-If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwards it as `CanonicalLLMRequest.metadata.preferred_endpoint_id` and uses that endpoint's budget when resolving max output tokens. Without that metadata, no preferred endpoint is passed; the slim runtime reads the current active LLM endpoint from `pal.sqlite3`.
+If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwards it as `LLMRequestIR.metadata.preferred_endpoint_id` and uses that endpoint's budget when resolving max output tokens. Without that metadata, no preferred endpoint is passed; the slim runtime reads the current active LLM endpoint from `pal.sqlite3`.
 
 `TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: discovery/read/call, file tools, `delete_path`, `git`, `run_shell` (including bounded `tree`/`find` listings), `search`, artifact and semantic builder tools, web tools, memory recall, and LSP/code-intelligence tools when those capabilities are allowed. Immutable reference roots are projected read-only at stable `/pal/references/<name>` paths inside the sandbox. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
 

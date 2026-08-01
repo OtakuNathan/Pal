@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
 from pal.execution.generated_tool_models import (
     MinionV2VerificationBuilderOpMinionVerificationCheckUnavailableInput,
     MinionV2VerificationBuilderOpMinionVerificationDraftStatusInput,
@@ -16,7 +18,6 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.review_findings import (
@@ -51,7 +52,7 @@ from pal.minion.v2.verification import (
     validate_verification_case_order,
 )
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 _RUN_TO_KIND_TAG = {
@@ -557,13 +558,13 @@ def is_verification_builder_capability(name: str) -> bool:
 
 
 async def verification_builder_tool_result(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: dict[str, Any],
     produced_artifacts: list[dict[str, Any]],
     *,
     original_adapter: Any | None = None,
     turn_id: str | None = None,
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     name = str(call.name or "")
     draft_kind = _draft_kind(workspace)
     try:
@@ -615,7 +616,7 @@ async def verification_builder_tool_result(
         return _error(call, exc)
 
 
-def _scratch_write(call: CanonicalToolCall, workspace: Mapping[str, Any], *, draft_kind: str) -> CanonicalToolResult:
+def _scratch_write(call: ToolCallIR, workspace: Mapping[str, Any], *, draft_kind: str) -> ToolExecutionResult:
     args = dict(call.args or {})
     relative = PurePosixPath(str(args.get("path") or ""))
     if not str(relative) or relative.is_absolute() or ".." in relative.parts:
@@ -658,11 +659,11 @@ def _scratch_write(call: CanonicalToolCall, workspace: Mapping[str, Any], *, dra
 
 
 def _draft_status(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: Mapping[str, Any],
     *,
     draft_kind: str,
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     if dict(call.args or {}):
         raise ValueError(f"{call.name} takes no arguments")
     context, store = _store_context(workspace, draft_kind=draft_kind)
@@ -736,11 +737,11 @@ def _draft_status(
 
 
 def _remove_case(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: Mapping[str, Any],
     *,
     draft_kind: str,
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     args = dict(call.args or {})
     name = str(args.get("name") or "").strip()
     reason = str(args.get("reason") or "").strip()
@@ -766,7 +767,7 @@ def _remove_case(
     return _ok(call, f"verification case removed: {name}", result)
 
 
-def _set_summary(call: CanonicalToolCall, workspace: Mapping[str, Any], *, draft_kind: str) -> CanonicalToolResult:
+def _set_summary(call: ToolCallIR, workspace: Mapping[str, Any], *, draft_kind: str) -> ToolExecutionResult:
     args = dict(call.args or {})
     summary_text = str(args.get("summary") or "").strip()
     if not summary_text:
@@ -784,10 +785,10 @@ def _set_summary(call: CanonicalToolCall, workspace: Mapping[str, Any], *, draft
 
 
 def _submit(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     workspace: Mapping[str, Any],
     produced_artifacts: list[dict[str, Any]],
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     if dict(call.args or {}):
         raise ValueError(f"{call.name} takes no arguments")
     draft_kind = "verification"
@@ -1189,10 +1190,10 @@ def _require_adapter(adapter: Any | None) -> Any:
     return adapter
 
 
-def _ok(call: CanonicalToolCall, text: str, structured: Mapping[str, Any]) -> CanonicalToolResult:
-    return CanonicalToolResult(name=call.name, ok=True, text=text, llm_text=text, structured=dict(structured), call_id=call.call_id, status=RuntimeStatus.OK)
+def _ok(call: ToolCallIR, text: str, structured: Mapping[str, Any]) -> ToolExecutionResult:
+    return ToolExecutionResult(name=call.name, ok=True, text=text, llm_text=text, structured=dict(structured), call_id=call.call_id, status=RuntimeStatus.OK)
 
 
-def _error(call: CanonicalToolCall, exc: Exception) -> CanonicalToolResult:
+def _error(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
     text = f"{exc.__class__.__name__}: {exc}"
-    return CanonicalToolResult(name=call.name, ok=False, text=text, llm_text=text + " Correct only this local issue and retry.", structured={"error": str(exc), "error_type": exc.__class__.__name__}, call_id=call.call_id, status=RuntimeStatus.INVALID)
+    return ToolExecutionResult(name=call.name, ok=False, text=text, llm_text=text + " Correct only this local issue and retry.", structured={"error": str(exc), "error_type": exc.__class__.__name__}, call_id=call.call_id, status=RuntimeStatus.INVALID)

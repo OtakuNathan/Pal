@@ -1,72 +1,47 @@
 from __future__ import annotations
 
-import asyncio
+from pal.shared.tool_protocol import ToolCallIR
+
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pal.llm.contracts import (
-    CanonicalLLMOutcome,
-    CanonicalLLMRequest,
-    CanonicalToolCall,
+    LLMGenerationResult,
     LLMPreflightAdvice,
     LLMPreflightRequest,
 )
-from pal.stream_events import NormalizedLLMStreamEvent
+from pal.llm.ir import (
+    LLMFinishReason,
+    LLMMessageIR,
+    LLMRequestIR,
+    LLMResponseDeltaKind,
+    LLMResponseIR,
+    LLMResponseUpdate,
+    MessageRole,
+    MessageState,
+    ReasoningPartIR,
+    TextPartIR,
+)
+from pal.llm.serde import (
+    generation_result_from_payload,
+    generation_result_to_payload,
+    preflight_request_from_payload,
+    preflight_request_to_payload,
+    part_from_payload,
+    part_to_payload,
+    request_from_payload as llm_request_from_payload,
+    request_to_payload as llm_request_to_payload,
+    response_from_payload,
+    response_to_payload,
+)
 from pal.minion.ipc import (
     ROLE_GATEWAY_TOKEN_ENV,
     MinionManagerClient,
     MinionRoleGatewayClient,
 )
-
-
-def llm_request_to_payload(request: CanonicalLLMRequest) -> dict[str, Any]:
-    return {
-        "messages": list(request.messages or []),
-        "max_output_tokens": int(request.max_output_tokens or 0),
-        "thinking_budget_tokens": request.thinking_budget_tokens,
-        "model_hint": request.model_hint,
-        "temperature": request.temperature,
-        "tools": list(request.tools or []),
-        "metadata": dict(request.metadata or {}),
-    }
-
-
-def llm_request_from_payload(payload: dict[str, Any]) -> CanonicalLLMRequest:
-    return CanonicalLLMRequest(
-        messages=[dict(item) for item in list(payload.get("messages") or []) if isinstance(item, dict)],
-        max_output_tokens=int(payload.get("max_output_tokens") or 0),
-        thinking_budget_tokens=(
-            int(payload["thinking_budget_tokens"])
-            if payload.get("thinking_budget_tokens") is not None
-            else None
-        ),
-        model_hint=str(payload.get("model_hint") or "") or None,
-        temperature=payload.get("temperature"),
-        tools=[dict(item) for item in list(payload.get("tools") or []) if isinstance(item, dict)],
-        metadata=dict(payload.get("metadata") or {}),
-    )
-
-
-def preflight_request_to_payload(request: LLMPreflightRequest) -> dict[str, Any]:
-    return {
-        "messages": list(request.messages or []),
-        "max_output_tokens": int(request.max_output_tokens or 0),
-        "model_hint": request.model_hint,
-        "tools": list(request.tools or []),
-        "metadata": dict(request.metadata or {}),
-    }
-
-
-def preflight_request_from_payload(payload: dict[str, Any]) -> LLMPreflightRequest:
-    return LLMPreflightRequest(
-        messages=[dict(item) for item in list(payload.get("messages") or []) if isinstance(item, dict)],
-        max_output_tokens=int(payload.get("max_output_tokens") or 0),
-        model_hint=str(payload.get("model_hint") or "") or None,
-        tools=[dict(item) for item in list(payload.get("tools") or []) if isinstance(item, dict)],
-        metadata=dict(payload.get("metadata") or {}),
-    )
 
 
 def preflight_advice_to_payload(advice: LLMPreflightAdvice) -> dict[str, Any]:
@@ -91,139 +66,131 @@ def preflight_advice_from_payload(payload: dict[str, Any]) -> LLMPreflightAdvice
     )
 
 
-def llm_outcome_to_payload(outcome: CanonicalLLMOutcome) -> dict[str, Any]:
-    return {
-        "text": outcome.text,
-        "reasoning_text": outcome.reasoning_text,
-        "tool_calls": [
-            {"name": call.name, "args": dict(call.args or {}), "call_id": call.call_id}
-            for call in list(outcome.tool_calls or [])
-        ],
-        "finish_reason": outcome.finish_reason,
-        "input_tokens": int(outcome.input_tokens or 0),
-        "uncached_input_tokens": int(outcome.uncached_input_tokens or 0),
-        "cached_input_tokens": int(outcome.cached_input_tokens or 0),
-        "cache_write_input_tokens": int(outcome.cache_write_input_tokens or 0),
-        "output_tokens": int(outcome.output_tokens or 0),
-        "reasoning_tokens": int(outcome.reasoning_tokens or 0),
-        "cost": float(outcome.cost or 0.0),
-        "usage_reported": bool(outcome.usage_reported),
-        "provider_response_count": int(outcome.provider_response_count or 0),
-        "response_mode": outcome.response_mode,
-        "target_input_budget": int(outcome.target_input_budget or 0),
-        "reserved_output_tokens": int(outcome.reserved_output_tokens or 0),
-        "preferred_endpoint_id": outcome.preferred_endpoint_id,
-        "preferred_model_id": outcome.preferred_model_id,
-        "provider_specific_fields": dict(outcome.provider_specific_fields or {}),
+llm_outcome_to_payload = generation_result_to_payload
+llm_outcome_from_payload = generation_result_from_payload
+
+
+def stream_update_to_payload(update: LLMResponseUpdate) -> dict[str, Any]:
+    """Encode a broker stream event without copying the accumulated prefix.
+
+    Delta frames carry only their new semantic part. The terminal state frame
+    carries the one authoritative complete response.
+    """
+
+    payload: dict[str, Any] = {
+        "delta_kind": update.delta_kind.value,
+        "message_id": update.response.message.message_id,
     }
+    if update.delta_kind == LLMResponseDeltaKind.STATE:
+        payload["response"] = response_to_payload(update.response)
+        return payload
+    if update.delta_kind in {
+        LLMResponseDeltaKind.TEXT,
+        LLMResponseDeltaKind.REASONING,
+    }:
+        payload["text_delta"] = update.text_delta
+    if update.delta_kind == LLMResponseDeltaKind.REASONING:
+        payload["redacted"] = _reasoning_delta_is_redacted(update)
+    if update.delta_kind == LLMResponseDeltaKind.TOOL_CALL:
+        if update.tool_call is None:
+            raise ValueError("tool-call stream event has no tool call")
+        payload["tool_call"] = part_to_payload(update.tool_call)
+    return payload
 
 
-def llm_outcome_from_payload(payload: dict[str, Any]) -> CanonicalLLMOutcome:
-    return CanonicalLLMOutcome(
-        text=str(payload.get("text") or ""),
-        reasoning_text=str(payload.get("reasoning_text") or ""),
-        tool_calls=[
-            CanonicalToolCall(
-                name=str(item.get("name") or ""),
-                args=dict(item.get("args") or {}),
-                call_id=str(item.get("call_id") or "") or None,
-            )
-            for item in list(payload.get("tool_calls") or [])
-            if isinstance(item, dict)
-        ],
-        finish_reason=str(payload.get("finish_reason") or "stop"),
-        input_tokens=max(0, int(payload.get("input_tokens") or 0)),
-        uncached_input_tokens=max(0, int(payload.get("uncached_input_tokens") or 0)),
-        cached_input_tokens=max(0, int(payload.get("cached_input_tokens") or 0)),
-        cache_write_input_tokens=max(
-            0,
-            int(payload.get("cache_write_input_tokens") or 0),
-        ),
-        output_tokens=max(0, int(payload.get("output_tokens") or 0)),
-        reasoning_tokens=max(0, int(payload.get("reasoning_tokens") or 0)),
-        cost=max(0.0, float(payload.get("cost") or 0.0)),
-        usage_reported=bool(payload.get("usage_reported")),
-        provider_response_count=max(
-            0,
-            int(payload.get("provider_response_count") or 0),
-        ),
-        response_mode=str(payload.get("response_mode") or "") or None,
-        target_input_budget=int(payload.get("target_input_budget") or 0),
-        reserved_output_tokens=int(payload.get("reserved_output_tokens") or 0),
-        preferred_endpoint_id=str(payload.get("preferred_endpoint_id") or "") or None,
-        preferred_model_id=str(payload.get("preferred_model_id") or "") or None,
-        provider_specific_fields=dict(payload.get("provider_specific_fields") or {}),
-    )
+class BrokerStreamDecoder:
+    """Rebuild body-equivalent response snapshots from delta-only IPC frames."""
 
+    def __init__(self) -> None:
+        self.message_id = ""
+        self.parts: list[Any] = []
+        self.terminal_seen = False
 
-def stream_event_to_payload(event: NormalizedLLMStreamEvent) -> dict[str, Any]:
-    tool_call = event.tool_call
-    return {
-        "event_kind": event.event_kind,
-        "text": event.text,
-        "reasoning_text": event.reasoning_text,
-        "provider_specific_fields": dict(event.provider_specific_fields or {}),
-        "tool_call": (
-            {"name": tool_call.name, "args": dict(tool_call.args or {}), "call_id": tool_call.call_id}
-            if tool_call is not None
-            else None
-        ),
-        "finish_reason": event.finish_reason,
-        "input_tokens": int(event.input_tokens or 0),
-        "uncached_input_tokens": int(event.uncached_input_tokens or 0),
-        "cached_input_tokens": int(event.cached_input_tokens or 0),
-        "cache_write_input_tokens": int(event.cache_write_input_tokens or 0),
-        "output_tokens": int(event.output_tokens or 0),
-        "reasoning_tokens": int(event.reasoning_tokens or 0),
-        "cost": float(event.cost or 0.0),
-        "usage_reported": bool(event.usage_reported),
-        "provider_response_count": int(event.provider_response_count or 0),
-        "response_mode": event.response_mode,
-        "error_text": event.error_text,
-        "target_input_budget": int(event.target_input_budget or 0),
-        "reserved_output_tokens": int(event.reserved_output_tokens or 0),
-        "preferred_endpoint_id": event.preferred_endpoint_id,
-        "preferred_model_id": event.preferred_model_id,
-    }
+    def feed(self, payload: dict[str, Any]) -> LLMResponseUpdate:
+        if self.terminal_seen:
+            raise ValueError("broker stream emitted data after its terminal response")
+        kind = LLMResponseDeltaKind(str(payload.get("delta_kind") or ""))
+        message_id = str(payload.get("message_id") or "").strip()
+        if not message_id:
+            raise ValueError("broker stream event has no message_id")
+        if self.message_id and message_id != self.message_id:
+            raise ValueError("broker stream changed message_id")
+        self.message_id = message_id
 
+        if kind == LLMResponseDeltaKind.STATE:
+            response_payload = payload.get("response")
+            if not isinstance(response_payload, dict):
+                raise ValueError("terminal broker stream event has no response")
+            response = response_from_payload(response_payload)
+            if response.message.message_id != self.message_id:
+                raise ValueError("terminal broker response changed message_id")
+            self.terminal_seen = True
+            return LLMResponseUpdate(response, delta_kind=kind)
 
-def stream_event_from_payload(payload: dict[str, Any]) -> NormalizedLLMStreamEvent:
-    tool_call_payload = payload.get("tool_call")
-    tool_call = None
-    if isinstance(tool_call_payload, dict):
-        tool_call = CanonicalToolCall(
-            name=str(tool_call_payload.get("name") or ""),
-            args=dict(tool_call_payload.get("args") or {}),
-            call_id=str(tool_call_payload.get("call_id") or "") or None,
+        text_delta = str(payload.get("text_delta") or "")
+        tool_call: ToolCallIR | None = None
+        if kind == LLMResponseDeltaKind.TEXT:
+            if not text_delta:
+                raise ValueError("text broker stream event has an empty delta")
+            self._append_text(text_delta)
+        elif kind == LLMResponseDeltaKind.REASONING:
+            redacted = bool(payload.get("redacted"))
+            if not text_delta and not redacted:
+                raise ValueError("reasoning broker stream event has an empty delta")
+            self._append_reasoning(text_delta, redacted=redacted)
+        elif kind == LLMResponseDeltaKind.TOOL_CALL:
+            call_payload = payload.get("tool_call")
+            if not isinstance(call_payload, dict):
+                raise ValueError("tool-call broker stream event has no tool call")
+            parsed = part_from_payload(call_payload)
+            if not isinstance(parsed, ToolCallIR):
+                raise ValueError("broker stream tool_call is not a tool call")
+            tool_call = parsed
+            self.parts.append(tool_call)
+
+        response = LLMResponseIR(
+            message=LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=tuple(self.parts),
+                message_id=self.message_id,
+                state=MessageState.IN_PROGRESS,
+            ),
+            finish_reason=(
+                LLMFinishReason.TOOL_CALLS
+                if any(isinstance(part, ToolCallIR) for part in self.parts)
+                else LLMFinishReason.STOP
+            ),
         )
-    return NormalizedLLMStreamEvent(
-        event_kind=str(payload.get("event_kind") or "text_delta"),
-        text=str(payload.get("text") or ""),
-        reasoning_text=str(payload.get("reasoning_text") or ""),
-        provider_specific_fields=dict(payload.get("provider_specific_fields") or {}),
-        tool_call=tool_call,
-        finish_reason=str(payload.get("finish_reason") or "") or None,
-        input_tokens=max(0, int(payload.get("input_tokens") or 0)),
-        uncached_input_tokens=max(0, int(payload.get("uncached_input_tokens") or 0)),
-        cached_input_tokens=max(0, int(payload.get("cached_input_tokens") or 0)),
-        cache_write_input_tokens=max(
-            0,
-            int(payload.get("cache_write_input_tokens") or 0),
-        ),
-        output_tokens=max(0, int(payload.get("output_tokens") or 0)),
-        reasoning_tokens=max(0, int(payload.get("reasoning_tokens") or 0)),
-        cost=max(0.0, float(payload.get("cost") or 0.0)),
-        usage_reported=bool(payload.get("usage_reported")),
-        provider_response_count=max(
-            0,
-            int(payload.get("provider_response_count") or 0),
-        ),
-        response_mode=str(payload.get("response_mode") or "") or None,
-        error_text=str(payload.get("error_text") or ""),
-        target_input_budget=int(payload.get("target_input_budget") or 0),
-        reserved_output_tokens=int(payload.get("reserved_output_tokens") or 0),
-        preferred_endpoint_id=str(payload.get("preferred_endpoint_id") or "") or None,
-        preferred_model_id=str(payload.get("preferred_model_id") or "") or None,
+        return LLMResponseUpdate(
+            response,
+            delta_kind=kind,
+            text_delta=text_delta,
+            tool_call=tool_call,
+        )
+
+    def _append_text(self, value: str) -> None:
+        if self.parts and isinstance(self.parts[-1], TextPartIR):
+            self.parts[-1] = TextPartIR(self.parts[-1].text + value)
+        else:
+            self.parts.append(TextPartIR(value))
+
+    def _append_reasoning(self, value: str, *, redacted: bool) -> None:
+        if (
+            self.parts
+            and isinstance(self.parts[-1], ReasoningPartIR)
+            and self.parts[-1].redacted == redacted
+        ):
+            previous = self.parts[-1]
+            self.parts[-1] = ReasoningPartIR(previous.text + value, redacted=redacted)
+        else:
+            self.parts.append(ReasoningPartIR(value, redacted=redacted))
+
+
+def _reasoning_delta_is_redacted(update: LLMResponseUpdate) -> bool:
+    return bool(
+        update.response.message.parts
+        and isinstance(update.response.message.parts[-1], ReasoningPartIR)
+        and update.response.message.parts[-1].redacted
     )
 
 
@@ -294,30 +261,29 @@ class MinionBrokerLLMRuntime:
         )
         return preflight_advice_from_payload(dict(result.get("advice") or {}))
 
-    def generate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
+    def generate(self, request: LLMRequestIR) -> LLMGenerationResult:
         result = self._client.request_sync(
             "llm_generate",
             {"run_id": self.run_id, "request": llm_request_to_payload(request)},
         )
         return llm_outcome_from_payload(dict(result.get("outcome") or {}))
 
-    async def agenerate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
+    async def agenerate(self, request: LLMRequestIR) -> LLMGenerationResult:
         result = await self._client.request(
             "llm_generate",
             {"run_id": self.run_id, "request": llm_request_to_payload(request)},
         )
         return llm_outcome_from_payload(dict(result.get("outcome") or {}))
 
-    def generate_stream(self, request: CanonicalLLMRequest) -> list[Any]:
-        result = self._client.request_sync(
+    async def astream(self, request: LLMRequestIR) -> AsyncIterator[LLMResponseUpdate]:
+        decoder = BrokerStreamDecoder()
+        async for item in self._client.stream(
             "llm_generate_stream",
             {"run_id": self.run_id, "request": llm_request_to_payload(request)},
-        )
-        return [stream_event_from_payload(dict(item)) for item in list(result.get("events") or []) if isinstance(item, dict)]
-
-    async def agenerate_stream(self, request: CanonicalLLMRequest) -> list[Any]:
-        result = await self._client.request(
-            "llm_generate_stream",
-            {"run_id": self.run_id, "request": llm_request_to_payload(request)},
-        )
-        return [stream_event_from_payload(dict(item)) for item in list(result.get("events") or []) if isinstance(item, dict)]
+        ):
+            update = item.get("update")
+            if not isinstance(update, dict):
+                raise ValueError("LLM broker stream frame has no update")
+            yield decoder.feed(update)
+        if not decoder.terminal_seen:
+            raise RuntimeError("LLM broker stream ended without a terminal response")

@@ -1,127 +1,84 @@
-from pal.llm.contracts import (
-    CanonicalLLMOutcome,
-    CanonicalLLMRequest,
-    LLMPreflightAdvice,
-    LLMPreflightRequest,
-    CanonicalToolCall,
-    CanonicalToolResult,
-    LLMRuntimePort,
-    ThinkingChoice,
-    ThinkingContract,
-)
-from pal.llm.codex_auth_protocol import (
-    CodexAuthMessages,
-    CodexClientInfo,
-    is_chatgpt_auth_tokens_refresh_request,
-    redact_codex_auth_message,
-)
-from pal.llm.codex_openai_bridge import CodexCliBridge, CodexCompletion, CodexBridgeError, CodexToolCall
-from pal.llm.adapters import (
-    LEGACY_RUNTIME_PROVIDER_ADAPTER_DIR,
-    LLM_PROVIDER_ADAPTER_ENTRY_POINT_GROUP,
-    LLMProviderAdapter,
-    LLMProviderRegistry,
-    OpenAIChatCompletionDraft,
-    RUNTIME_PROVIDER_ADAPTER_DIR,
-    build_default_provider_registry,
-    build_runtime_provider_registry,
-    register_llm_provider_adapter,
-    resolve_endpoint_adapter,
-    unregister_llm_provider_adapter,
-)
-from pal.llm.credentials import LLMCredentialResolver, ResolvedLLMAuth, default_env_var_for_endpoint
-from pal.llm.capabilities import (
-    LLMActiveModelSnapshot,
-    LLMIntrospectionProvider,
-    LLMModelListItem,
-    LLMModelSnapshot,
-    LLMThinkLevelSnapshot,
-    inspect_llm,
-    llm_status_payload,
-    render_llm_status,
-    register_with_core,
-)
-from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
-from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
-from pal.llm.secret_store import EncryptedFileSecretStore, InMemorySecretStore, KeyringSecretStore, SecretRef, SecretStorePort
-from pal.llm.runtime import (
-    AnthropicMessagesEndpointInvoker,
-    CodexCliEndpointInvoker,
-    EndpointResolver,
-    LLMEndpointInvocationError,
-    LLMEndpointInvokerPort,
-    OpenAIChatEndpointInvoker,
-    LLMRuntime,
-    OpenAIResponsesEndpointInvoker,
-    RoutingLLMEndpointInvoker,
-    ZaiAnthropicMessagesEndpointInvoker,
-    build_default_endpoint_invoker,
-)
-from pal.llm.usage import LLMUsage, LLMUsageLedger
-from pal.stream_events import NormalizedLLMStreamEvent
+"""Lazy public facade for Pal's LLM subsystem.
 
-__all__ = [
-    "CanonicalLLMOutcome",
-    "CanonicalLLMRequest",
-    "CanonicalToolCall",
-    "CanonicalToolResult",
-    "AnthropicMessagesEndpointInvoker",
-    "CodexAuthMessages",
-    "CodexClientInfo",
-    "CodexCliBridge",
-    "CodexCliEndpointInvoker",
-    "CodexCompletion",
-    "CodexBridgeError",
-    "CodexToolCall",
-    "EndpointResolver",
-    "LEGACY_RUNTIME_PROVIDER_ADAPTER_DIR",
-    "LLM_PROVIDER_ADAPTER_ENTRY_POINT_GROUP",
-    "RUNTIME_PROVIDER_ADAPTER_DIR",
-    "LLMCredentialResolver",
-    "ResolvedLLMAuth",
-    "default_env_var_for_endpoint",
-    "EncryptedFileSecretStore",
-    "InMemorySecretStore",
-    "KeyringSecretStore",
-    "LLMEndpointInvocationError",
-    "LLMEndpointInvokerPort",
-    "OpenAIChatEndpointInvoker",
-    "OpenAIResponsesEndpointInvoker",
-    "RoutingLLMEndpointInvoker",
-    "ZaiAnthropicMessagesEndpointInvoker",
-    "LLMProviderAdapter",
-    "LLMProviderRegistry",
-    "OpenAIChatCompletionDraft",
-    "LLMActiveModelSnapshot",
-    "LLMPreflightAdvice",
-    "LLMPreflightRequest",
-    "LLMIntrospectionProvider",
-    "LLMEndpointModel",
-    "LLMEndpointRepository",
-    "LLMModelListItem",
-    "LLMModelSnapshot",
-    "LLMRuntime",
-    "LLMRuntimePort",
-    "ThinkingChoice",
-    "ThinkingContract",
-    "NormalizedLLMStreamEvent",
-    "LLMThinkLevelSnapshot",
-    "LLMUsage",
-    "LLMUsageLedger",
-    "PalRuntimeSettingModel",
-    "RuntimeSettingRepository",
-    "SecretRef",
-    "SecretStorePort",
-    "register_llm_provider_adapter",
-    "build_default_provider_registry",
-    "build_default_endpoint_invoker",
-    "build_runtime_provider_registry",
-    "inspect_llm",
-    "llm_status_payload",
-    "render_llm_status",
-    "is_chatgpt_auth_tokens_refresh_request",
-    "redact_codex_auth_message",
-    "register_with_core",
-    "resolve_endpoint_adapter",
-    "unregister_llm_provider_adapter",
-]
+Importing a low-level module such as :mod:`pal.llm.ir` must not load Core,
+Execution, database models, SDK transports, or the resident runtime.
+"""
+
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
+
+
+_EXPORTS: dict[str, tuple[str, str]] = {
+    "LLMActiveModelSnapshot": ("pal.llm.capabilities", "LLMActiveModelSnapshot"),
+    "LLMIntrospectionProvider": ("pal.llm.capabilities", "LLMIntrospectionProvider"),
+    "LLMModelListItem": ("pal.llm.capabilities", "LLMModelListItem"),
+    "LLMModelSnapshot": ("pal.llm.capabilities", "LLMModelSnapshot"),
+    "LLMThinkLevelSnapshot": ("pal.llm.capabilities", "LLMThinkLevelSnapshot"),
+    "inspect_llm": ("pal.llm.capabilities", "inspect_llm"),
+    "llm_status_payload": ("pal.llm.capabilities", "llm_status_payload"),
+    "register_with_core": ("pal.llm.capabilities", "register_with_core"),
+    "render_llm_status": ("pal.llm.capabilities", "render_llm_status"),
+    "LLMGenerationResult": ("pal.llm.contracts", "LLMGenerationResult"),
+    "LLMPreflightAdvice": ("pal.llm.contracts", "LLMPreflightAdvice"),
+    "LLMPreflightRequest": ("pal.llm.contracts", "LLMPreflightRequest"),
+    "LLMRuntimePort": ("pal.llm.contracts", "LLMRuntimePort"),
+    "ThinkingChoice": ("pal.llm.contracts", "ThinkingChoice"),
+    "ThinkingContract": ("pal.llm.contracts", "ThinkingContract"),
+    "generation_result_from_values": ("pal.llm.contracts", "generation_result_from_values"),
+    "request_ir_from_prompt": ("pal.llm.contracts", "request_ir_from_prompt"),
+    "LLMCredentialResolver": ("pal.llm.credentials", "LLMCredentialResolver"),
+    "LLMCredentialUnavailableError": ("pal.llm.credentials", "LLMCredentialUnavailableError"),
+    "ResolvedLLMAuth": ("pal.llm.credentials", "ResolvedLLMAuth"),
+    "ShapeEndpointInvoker": ("pal.llm.endpoint", "ShapeEndpointInvoker"),
+    "LLMEndpointSpec": ("pal.llm.endpoint_spec", "LLMEndpointSpec"),
+    "LLMEndpointSpecError": ("pal.llm.endpoint_spec", "LLMEndpointSpecError"),
+    "GenerationPolicyIR": ("pal.llm.ir", "GenerationPolicyIR"),
+    "ImagePartIR": ("pal.llm.ir", "ImagePartIR"),
+    "LLMFinishReason": ("pal.llm.ir", "LLMFinishReason"),
+    "LLMMessageIR": ("pal.llm.ir", "LLMMessageIR"),
+    "LLMRequestIR": ("pal.llm.ir", "LLMRequestIR"),
+    "LLMResponseIR": ("pal.llm.ir", "LLMResponseIR"),
+    "LLMResponseUpdate": ("pal.llm.ir", "LLMResponseUpdate"),
+    "LLMUsageIR": ("pal.llm.ir", "LLMUsageIR"),
+    "MessageRole": ("pal.llm.ir", "MessageRole"),
+    "MessageState": ("pal.llm.ir", "MessageState"),
+    "ReasoningPartIR": ("pal.llm.ir", "ReasoningPartIR"),
+    "ReplayEnvelope": ("pal.llm.ir", "ReplayEnvelope"),
+    "TextPartIR": ("pal.llm.ir", "TextPartIR"),
+    "ThinkingLevel": ("pal.llm.ir", "ThinkingLevel"),
+    "WireShape": ("pal.llm.ir", "WireShape"),
+    "ModelHook": ("pal.llm.model_hooks", "ModelHook"),
+    "ModelHookError": ("pal.llm.model_hooks", "ModelHookError"),
+    "ModelHookRegistry": ("pal.llm.model_hooks", "ModelHookRegistry"),
+    "LLMEndpointModel": ("pal.llm.models", "LLMEndpointModel"),
+    "PalRuntimeSettingModel": ("pal.llm.models", "PalRuntimeSettingModel"),
+    "LLMEndpointRepository": ("pal.llm.repository", "LLMEndpointRepository"),
+    "RuntimeSettingRepository": ("pal.llm.repository", "RuntimeSettingRepository"),
+    "EndpointResolver": ("pal.llm.runtime", "EndpointResolver"),
+    "LLMEndpointInvocationError": ("pal.llm.runtime", "LLMEndpointInvocationError"),
+    "LLMEndpointInvokerPort": ("pal.llm.runtime", "LLMEndpointInvokerPort"),
+    "LLMRuntime": ("pal.llm.runtime", "LLMRuntime"),
+    "PreparedLLMRequest": ("pal.llm.runtime", "PreparedLLMRequest"),
+    "build_default_endpoint_invoker": ("pal.llm.runtime", "build_default_endpoint_invoker"),
+    "scoped_llm_event_sink": ("pal.llm.runtime", "scoped_llm_event_sink"),
+    "EncryptedFileSecretStore": ("pal.llm.secret_store", "EncryptedFileSecretStore"),
+    "InMemorySecretStore": ("pal.llm.secret_store", "InMemorySecretStore"),
+    "KeyringSecretStore": ("pal.llm.secret_store", "KeyringSecretStore"),
+    "SecretRef": ("pal.llm.secret_store", "SecretRef"),
+    "SecretStorePort": ("pal.llm.secret_store", "SecretStorePort"),
+    "LLMUsageLedger": ("pal.llm.usage", "LLMUsageLedger"),
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    target = _EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute = target
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value

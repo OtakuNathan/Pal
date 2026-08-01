@@ -5,7 +5,23 @@ from typing import Any, Literal, Protocol
 
 from pal.foundation import EventEnvelope
 from pal.foundation.attachment import AttachmentSpec
-from pal.stream_events import NormalizedLLMStreamEvent
+from pal.shared.enums import ChannelStreamUpdateKind
+from pal.shared.tool_protocol import ToolCallIR
+
+
+@dataclass(frozen=True)
+class ChannelStreamUpdate:
+    """Provider-neutral partial reply projected from LLM IR to a channel."""
+
+    kind: ChannelStreamUpdateKind = ChannelStreamUpdateKind.TEXT_DELTA
+    text: str = ""
+    reasoning_text: str = ""
+    tool_call: ToolCallIR | None = None
+    finish_reason: str | None = None
+    error_text: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", ChannelStreamUpdateKind(self.kind))
 
 
 @dataclass(frozen=True)
@@ -46,11 +62,11 @@ class QueuedReply:
 
 
 @dataclass(frozen=True)
-class QueuedStreamEvent:
-    event_id: str
+class QueuedStreamUpdate:
+    update_id: str
     response_handle: ResponseHandle
     endpoint: EndpointConfig
-    event: NormalizedLLMStreamEvent
+    update: ChannelStreamUpdate
     attempts: int = 0
 
 
@@ -102,7 +118,7 @@ class AgentOutputPort(Protocol):
     def queue_reply(self, envelope: ChannelEnvelope, text: str) -> Any:
         ...
 
-    def queue_stream_event(self, envelope: ChannelEnvelope, event: NormalizedLLMStreamEvent) -> Any:
+    def queue_stream_update(self, envelope: ChannelEnvelope, update: ChannelStreamUpdate) -> Any:
         ...
 
     def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:

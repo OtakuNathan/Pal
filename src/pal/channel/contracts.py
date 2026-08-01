@@ -8,11 +8,12 @@ from pal.shared.agent_io import (
     ChannelMessageReceipt,
     ChannelNormalizer,
     ChannelRuntimePort,
+    ChannelStreamUpdate,
     EndpointConfig,
     QueuedAttachment,
     QueuedReply,
     QueuedStatus,
-    QueuedStreamEvent,
+    QueuedStreamUpdate,
     ResponseHandle,
 )
 
@@ -24,10 +25,11 @@ __all__ = [
     "ChannelMessageReceipt",
     "ChannelNormalizer",
     "ChannelRuntimePort",
+    "ChannelStreamUpdate",
     "EndpointConfig",
     "QueuedAttachment",
     "QueuedReply",
     "QueuedStatus",
-    "QueuedStreamEvent",
+    "QueuedStreamUpdate",
     "ResponseHandle",
 ]

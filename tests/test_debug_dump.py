@@ -28,7 +28,7 @@ class _Endpoint:
     outbox = [object()]
     attachment_outbox = []
     status_outbox = [object()]
-    stream_outbox = []
+    stream_update_outbox = []
     last_delivery_error = ""
 
     def inspect_health(self) -> dict[str, object]:
@@ -87,7 +87,7 @@ class DebugDumpTests(unittest.TestCase):
             outbox=[],
             attachment_outbox=[],
             status_outbox=[],
-            stream_outbox=[],
+            stream_update_outbox=[],
             list_endpoints=lambda: (_Endpoint(),),
         )
         proactive_manager = SimpleNamespace(

@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Any
 
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
+from pal.llm.contracts import LLMGenerationResult
+from pal.llm.ir import ImagePartIR, LLMRequestIR
+from pal.llm.serde import message_to_payload
 
 
-def render_prompt_debug_log(request: CanonicalLLMRequest, *, context: dict[str, Any] | None = None) -> str:
+def render_prompt_debug_log(request: LLMRequestIR, *, context: dict[str, Any] | None = None) -> str:
     return "\n".join(
         [
             "=== PAL PROMPT DEBUG ===",
             *_render_context_lines(context),
             "--- request.messages ---",
-            str(request.messages),
+            json.dumps(
+                [message_to_payload(message) for message in request.messages],
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
             "--- request.multimodal ---",
             summarize_multimodal_prompt(request.messages),
             "--- request.tools ---",
@@ -23,7 +30,7 @@ def render_prompt_debug_log(request: CanonicalLLMRequest, *, context: dict[str, 
 
 
 def render_llm_outcome_debug_log(
-    outcome: CanonicalLLMOutcome,
+    outcome: LLMGenerationResult,
     *,
     provider_payload: str = "",
     context: dict[str, Any] | None = None,
@@ -61,35 +68,19 @@ def append_prompt_debug_log(path: Path, text: str) -> None:
         handle.write(text.rstrip() + "\n")
 
 
-def summarize_multimodal_prompt(messages: list[dict[str, Any]]) -> str:
+def summarize_multimodal_prompt(messages: tuple[Any, ...]) -> str:
     items: list[dict[str, Any]] = []
     for index, message in enumerate(messages):
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            part_type = str(part.get("type") or "")
-            if part_type == "artifact_image":
+        for part in message.parts:
+            if isinstance(part, ImagePartIR):
+                url = part.source
                 items.append(
                     {
                         "message_index": index,
-                        "type": "artifact_image",
-                        "artifact_id": part.get("artifact_id"),
-                        "representation_id": part.get("representation_id"),
-                        "mime_type": part.get("mime_type"),
-                        "bytes": "omitted",
-                    }
-                )
-            elif part_type == "image_url":
-                url = str((part.get("image_url") or {}).get("url") or "")
-                items.append(
-                    {
-                        "message_index": index,
-                        "type": "image_url",
+                        "type": "image",
                         "url_prefix": url[:32],
                         "url_length": len(url),
+                        "media_type": part.media_type,
                         "bytes": "omitted",
                     }
                 )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+
 import unittest
 import tempfile
 from pathlib import Path
@@ -14,7 +16,6 @@ from pal.execution.session_state import (
 )
 from pal.minion.scoped_execution import MinionScopedExecutionRuntime
 from pal.minion.v2.execution_state import _apply_delivery as _apply_manager_delivery
-from pal.llm.contracts import CanonicalToolCall
 
 
 class LogicalExecutionStateTests(unittest.TestCase):
@@ -496,7 +497,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             path = Path(temp_dir) / "input.txt"
             path.write_text("alpha\nbeta\n", encoding="utf-8")
             read = runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_file",
                     args={"file_path": str(path)},
                     call_id="read-1",
@@ -504,7 +505,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 turn_id="turn-1",
             )
             before_delivery = runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="edit_file",
                     args={
                         "file_path": str(path),
@@ -529,7 +530,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 delivery_records={"read-1": dict(read.context_delivery or {})},
             )
             after_delivery = runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="edit_file",
                     args={
                         "file_path": str(path),
@@ -563,7 +564,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             path = Path(temp_dir) / "input.txt"
             path.write_text("alpha\nbeta\n", encoding="utf-8")
             read = runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_file",
                     args={"file_path": str(path)},
                     call_id="read-1",
@@ -583,7 +584,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 delivery_records=delivery,
             )
             first = runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="edit_file",
                     args={
                         "file_path": str(path),
@@ -605,7 +606,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 delivery_records=delivery,
             )
             second = runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="edit_file",
                     args={
                         "file_path": str(path),
@@ -636,7 +637,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             path = Path(temp_dir) / "compact.txt"
             path.write_text("same\nsame\nsame\n", encoding="utf-8")
             read = runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_file",
                     args={"file_path": str(path)},
                     call_id="read-compact",
@@ -716,7 +717,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
             path = Path(temp_dir) / "pager-compact.txt"
             path.write_text("alpha\nbeta\n", encoding="utf-8")
             read = runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_file",
                     args={"file_path": str(path)},
                     call_id="read-pager-compact",
@@ -773,7 +774,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 context.current_user_turn + 5,
             )
             reread = runtime.execute_tool(
-                CanonicalToolCall(
+                new_tool_call(
                     name="read_file",
                     args={"file_path": str(path)},
                     call_id="read-after-compact",

@@ -9,9 +9,10 @@ from enum import StrEnum
 from typing import Any, Callable, Protocol, Sequence
 
 from pal.llm.contracts import (
-    CanonicalLLMRequest,
     LLMPreflightRequest,
 )
+from pal.llm.conversions import request_ir_from_prompt
+from pal.llm.ir import LLMRequestIR
 from pal.memory.contracts import (
     L1MessageKind,
     L1TranscriptMessage,
@@ -403,7 +404,7 @@ class CompactionEngine:
         source: str,
         *,
         attempt: int,
-    ) -> CanonicalLLMRequest:
+    ) -> LLMRequestIR:
         max_output = max(
             1,
             int(
@@ -431,7 +432,7 @@ class CompactionEngine:
             for key, value in metadata.items()
             if value is not None
         }
-        return CanonicalLLMRequest(
+        return request_ir_from_prompt(
             messages=[
                 {
                     "role": "system",
@@ -452,7 +453,7 @@ class CompactionEngine:
     async def _generate(
         self,
         llm_runtime: Any,
-        request: CanonicalLLMRequest,
+        request: LLMRequestIR,
     ) -> Any:
         method = getattr(llm_runtime, "agenerate", None)
         if callable(method):
@@ -670,15 +671,9 @@ def _estimate_visible_tokens(text: str) -> int:
 
 async def _preflight(
     llm_runtime: Any,
-    request: CanonicalLLMRequest,
+    request: LLMRequestIR,
 ) -> Any | None:
-    preflight_request = LLMPreflightRequest(
-        messages=list(request.messages),
-        max_output_tokens=request.max_output_tokens,
-        model_hint=request.model_hint,
-        tools=[],
-        metadata=dict(request.metadata),
-    )
+    preflight_request = LLMPreflightRequest(request=request)
     method = getattr(llm_runtime, "apreflight", None)
     if callable(method):
         try:

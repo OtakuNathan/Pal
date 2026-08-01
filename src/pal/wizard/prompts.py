@@ -7,10 +7,11 @@ persists through repositories.
 
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolDefinitionIR
+
 import getpass
 import json
 import re
-import shutil
 import sys
 import time
 import urllib.error
@@ -50,14 +51,6 @@ _KNOWN_ANTHROPIC_MODELS: dict[str, dict[str, Any]] = {
     },
 }
 
-DEFAULT_CODEX_WIZARD_MODELS = (
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
-)
-DEFAULT_CODEX_CONTEXT_WINDOW = 200_000
-DEFAULT_CODEX_MAX_OUTPUT_TOKENS = 32_768
 WIZARD_STEP_TOTAL = 5
 
 
@@ -75,9 +68,9 @@ def query_model_metadata(
     base_url: str,
     model_id: str,
     api_key: str,
-    api_mode: str,
+    wire_shape: str,
 ) -> dict[str, Any] | None:
-    if api_mode == "anthropic_messages":
+    if wire_shape == "anthropic_messages":
         return _KNOWN_ANTHROPIC_MODELS.get(model_id)
 
     url = _models_url_from_base(base_url, model_id)
@@ -191,12 +184,13 @@ class WizardIdentity:
 class WizardLLMEndpoint:
     endpoint_id: str
     model_id: str
-    api_mode: str
+    wire_shape: str
     base_url: str
     api_key: str | None
     context_window: int | None
     max_output_tokens: int | None
-    supports_reasoning: bool
+    thinking_levels: list[str]
+    default_thinking_level: str
     supports_tools: bool
     supports_streaming: bool
     supports_vision: bool
@@ -283,6 +277,28 @@ def _prompt_int(prompt: str, default: int | None, fallback: int | None = None) -
         return fallback
 
 
+def _prompt_thinking_levels(
+    current_levels: list[str],
+    current_default: str,
+) -> tuple[list[str], str]:
+    allowed = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
+    raw = ask("  Thinking levels (comma-separated enum values)", ",".join(current_levels or ["off"]))
+    levels = [
+        value
+        for value in dict.fromkeys(item.strip().lower() for item in raw.split(","))
+        if value in allowed
+    ]
+    if not levels:
+        levels = ["off"]
+    default = ask(
+        "  Default thinking level",
+        current_default if current_default in levels else levels[0],
+    ).strip().lower()
+    if default not in levels:
+        default = levels[0]
+    return levels, default
+
+
 def prompt_runtime_home() -> Path:
     default = str(Path.home() / ".pal")
     raw = ask("Where should Pal live?", default)
@@ -321,13 +337,23 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
     if not label:
         return None
 
-    current_mode_choice = "2" if current and current.api_mode == "anthropic_messages" else "1"
-    mode_choice = ask("  API mode: 1) openai_chat  2) anthropic_messages", current_mode_choice)
-    api_mode = "openai_chat" if mode_choice.strip() != "2" else "anthropic_messages"
+    current_shape_choice = {
+        "openai_completion": "1",
+        "openai_response": "2",
+        "anthropic_messages": "3",
+    }.get(current.wire_shape if current else "", "1")
+    shape_choice = ask(
+        "  Wire shape: 1) openai_completion  2) openai_response  3) anthropic_messages",
+        current_shape_choice,
+    )
+    wire_shape = {
+        "2": "openai_response",
+        "3": "anthropic_messages",
+    }.get(shape_choice.strip(), "openai_completion")
 
     model_id = ask("  Model ID", current.model_id if current else label)
 
-    if api_mode == "openai_chat":
+    if wire_shape in {"openai_completion", "openai_response"}:
         default_url = "https://api.openai.com/v1"
     else:
         default_url = "https://api.anthropic.com/v1"
@@ -338,11 +364,12 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
     capabilities: dict[str, Any] | None = None
     if api_key:
         print("  Querying model metadata...")
-        capabilities = query_model_metadata(base_url, model_id, api_key, api_mode)
+        capabilities = query_model_metadata(base_url, model_id, api_key, wire_shape)
 
     context_window: int | None = current.context_window if current else None
     max_output_tokens: int | None = current.max_output_tokens if current else None
-    supports_reasoning = current.supports_reasoning if current else False
+    thinking_levels = list(current.thinking_levels) if current else ["off"]
+    default_thinking_level = current.default_thinking_level if current else "off"
     supports_tools = current.supports_tools if current else True
     supports_streaming = current.supports_streaming if current else True
     supports_vision = current.supports_vision if current else False
@@ -350,14 +377,19 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
     if capabilities:
         context_window = capabilities.get("context_length")
         max_output_tokens = capabilities.get("max_output_tokens")
-        supports_reasoning = bool(capabilities.get("supports_thinking"))
+        if bool(capabilities.get("supports_thinking")):
+            thinking_levels = ["off", "low", "medium", "high"]
+            default_thinking_level = "medium"
+        else:
+            thinking_levels = ["off"]
+            default_thinking_level = "off"
         supports_vision = bool(capabilities.get("supports_vision"))
         supports_tools = capabilities.get("supports_tools", True)
 
         print(f"    Context window: {context_window or '?'} tokens")
         if max_output_tokens:
             print(f"    Max output: {max_output_tokens} tokens")
-        print(f"    Reasoning: {'yes' if supports_reasoning else 'no'} | Vision: {'yes' if supports_vision else 'no'} | Tools: {'yes' if supports_tools else 'no'}")
+        print(f"    Thinking: {', '.join(thinking_levels)} | Vision: {'yes' if supports_vision else 'no'} | Tools: {'yes' if supports_tools else 'no'}")
 
         if not capabilities.get("context_length"):
             ctx = ask("  Context window size", "32768")
@@ -370,7 +402,10 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
         if ask_yes_no("  Update model capability metadata", False):
             context_window = _prompt_int("  Context window size", context_window, context_window)
             max_output_tokens = _prompt_int("  Max output tokens (blank for current/default)", max_output_tokens, max_output_tokens)
-            supports_reasoning = ask_yes_no("  Supports reasoning / thinking", supports_reasoning)
+            thinking_levels, default_thinking_level = _prompt_thinking_levels(
+                thinking_levels,
+                default_thinking_level,
+            )
             supports_vision = ask_yes_no("  Supports vision (image input)", supports_vision)
             supports_tools = ask_yes_no("  Supports tool calling", supports_tools)
             supports_streaming = ask_yes_no("  Supports streaming", supports_streaming)
@@ -378,7 +413,7 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
         print("  Could not query metadata. Enter manually.")
         context_window = _prompt_int("  Context window size", 32768, 32768)
         max_output_tokens = _prompt_int("  Max output tokens (blank for default)", None, None)
-        supports_reasoning = ask_yes_no("  Supports reasoning / thinking", False)
+        thinking_levels, default_thinking_level = _prompt_thinking_levels(["off"], "off")
         supports_vision = ask_yes_no("  Supports vision (image input)", False)
         supports_tools = ask_yes_no("  Supports tool calling", True)
         supports_streaming = ask_yes_no("  Supports streaming", True)
@@ -387,7 +422,7 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
     credential_ref = None
     capabilities_blob: dict[str, Any] = {}
     notes = None
-    if current is not None and label == current.endpoint_id and base_url == current.base_url and api_mode == current.api_mode:
+    if current is not None and label == current.endpoint_id and base_url == current.base_url and wire_shape == current.wire_shape:
         provider = current.provider
         credential_ref = current.credential_ref
         capabilities_blob = dict(current.capabilities_blob or {})
@@ -396,12 +431,13 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
     endpoint = WizardLLMEndpoint(
         endpoint_id=label,
         model_id=model_id,
-        api_mode=api_mode,
+        wire_shape=wire_shape,
         base_url=base_url,
         api_key=api_key,
         context_window=context_window,
         max_output_tokens=max_output_tokens,
-        supports_reasoning=supports_reasoning,
+        thinking_levels=thinking_levels,
+        default_thinking_level=default_thinking_level,
         supports_tools=supports_tools,
         supports_streaming=supports_streaming,
         supports_vision=supports_vision,
@@ -425,86 +461,6 @@ def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -
     return endpoint
 
 
-def _parse_codex_model_list(raw: str) -> tuple[str, ...]:
-    items: list[str] = []
-    seen: set[str] = set()
-    for chunk in str(raw or "").replace("\n", ",").split(","):
-        model = chunk.strip()
-        if not model or model in seen:
-            continue
-        seen.add(model)
-        items.append(model)
-    return tuple(items)
-
-
-def _codex_endpoint_id(model_id: str) -> str:
-    suffix = re.sub(r"[^a-zA-Z0-9]+", "_", str(model_id or "").strip()).strip("_").lower()
-    return f"codex_{suffix or 'model'}"
-
-
-def build_codex_wizard_endpoints(
-    model_ids: tuple[str, ...] = DEFAULT_CODEX_WIZARD_MODELS,
-) -> list[WizardLLMEndpoint]:
-    endpoints: list[WizardLLMEndpoint] = []
-    for priority, model_id in enumerate(model_ids):
-        endpoints.append(
-            WizardLLMEndpoint(
-                endpoint_id=_codex_endpoint_id(model_id),
-                model_id=model_id,
-                api_mode="openai_chat",
-                base_url="codex://cli",
-                api_key=None,
-                context_window=DEFAULT_CODEX_CONTEXT_WINDOW,
-                max_output_tokens=DEFAULT_CODEX_MAX_OUTPUT_TOKENS,
-                supports_reasoning=True,
-                supports_tools=True,
-                supports_streaming=True,
-                supports_vision=True,
-                priority=priority,
-                provider="codex_cli",
-                auth_kind="local_provider_auth",
-                credential_ref="",
-                capabilities_blob={
-                    "official_codex_cli": True,
-                    "codex_cli": True,
-                    "native_tool_bridge": True,
-                },
-                notes="Configured by setup wizard. Uses local Codex CLI authentication.",
-            )
-        )
-    return endpoints
-
-
-def _prompt_codex_endpoints(index: int) -> list[WizardLLMEndpoint]:
-    print(f"\n  Codex endpoint group #{index}:")
-    codex_bin = shutil.which("codex")
-    if codex_bin:
-        print(f"  Codex CLI: {codex_bin}")
-    else:
-        print("  Codex CLI: not found on PATH; Pal will still try the usual nvm codex location at runtime.")
-
-    default_models = ",".join(DEFAULT_CODEX_WIZARD_MODELS)
-    raw_models = ask("  Models", default_models)
-    model_ids = _parse_codex_model_list(raw_models) or DEFAULT_CODEX_WIZARD_MODELS
-    endpoints = build_codex_wizard_endpoints(model_ids)
-
-    print("  Will configure:")
-    for endpoint in endpoints:
-        print(f"    {endpoint.endpoint_id}: {endpoint.model_id}")
-
-    if ask_yes_no("  Run live Codex preflight now (starts Codex app-server)", False):
-        result = run_llm_endpoint_preflight(endpoints[0], timeout_seconds=60)
-        _print_llm_preflight_result(result)
-        if result.status == "error":
-            if not ask_yes_no("  Keep these endpoints anyway", False):
-                return []
-        elif result.status == "warn":
-            if not ask_yes_no("  Keep these endpoints with warnings", True):
-                return []
-
-    return endpoints
-
-
 def _print_llm_preflight_result(result: WizardLLMPreflightResult) -> None:
     marker = {"ok": "OK", "warn": "WARN", "error": "ERR"}.get(result.status, result.status.upper())
     print(f"  [{marker}] LLM preflight: {result.detail}")
@@ -517,7 +473,15 @@ def run_llm_endpoint_preflight(
     invoker: object | None = None,
 ) -> WizardLLMPreflightResult:
     try:
-        from pal.llm import CanonicalLLMRequest, LLMCredentialResolver, build_default_endpoint_invoker
+        from pal.llm.credentials import LLMCredentialResolver
+        from pal.llm.endpoint import ShapeEndpointInvoker
+        from pal.llm.ir import (
+            GenerationPolicyIR,
+            LLMMessageIR,
+            LLMRequestIR,
+            MessageRole,
+            TextPartIR,
+        )
         from pal.llm.models import LLMEndpointModel
         from pal.llm.secret_store import InMemorySecretStore, SecretRef
     except Exception as exc:
@@ -532,13 +496,14 @@ def run_llm_endpoint_preflight(
         provider=_infer_endpoint_provider(endpoint),
         model_id=endpoint.model_id,
         display_name=endpoint.endpoint_id,
-        api_mode=endpoint.api_mode,
+        wire_shape=endpoint.wire_shape,
         base_url=endpoint.base_url,
         auth_kind=endpoint.auth_kind,
         credential_ref=credential_ref,
         context_window=endpoint.context_window,
         max_output_tokens=endpoint.max_output_tokens,
-        supports_reasoning=endpoint.supports_reasoning,
+        thinking_levels_blob=list(endpoint.thinking_levels),
+        default_thinking_level=endpoint.default_thinking_level,
         supports_tools=endpoint.supports_tools,
         supports_streaming=endpoint.supports_streaming,
         supports_vision=endpoint.supports_vision,
@@ -549,27 +514,30 @@ def run_llm_endpoint_preflight(
         capabilities_blob=dict(endpoint.capabilities_blob or {}),
         notes="Setup preflight endpoint.",
     )
-    active_invoker = invoker or build_default_endpoint_invoker(credentials=LLMCredentialResolver(secret_store=secret_store))
-    metadata = {"timeout_seconds": timeout_seconds}
+    credentials = LLMCredentialResolver(secret_store=secret_store)
+    active_invoker = invoker or ShapeEndpointInvoker(
+        credential_resolver=lambda candidate: str(credentials.resolve_api_key(candidate) or "")
+    )
 
     try:
         text_outcome = active_invoker.invoke(
             model,
-            CanonicalLLMRequest(
-                messages=[
-                    {"role": "system", "content": "You validate Pal LLM endpoint setup."},
-                    {"role": "user", "content": "Reply with exactly PAL_PREFLIGHT_OK."},
-                ],
-                max_output_tokens=16,
-                temperature=0,
-                metadata=metadata,
+            LLMRequestIR(
+                messages=(
+                    LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("You validate Pal LLM endpoint setup."),)),
+                    LLMMessageIR(MessageRole.USER, (TextPartIR("Reply with exactly PAL_PREFLIGHT_OK."),)),
+                ),
+                tools=(),
+                policy=GenerationPolicyIR(max_output_tokens=16, temperature=0),
             ),
+            timeout_seconds=timeout_seconds,
         )
     except Exception as exc:
         return WizardLLMPreflightResult(status="error", detail=f"text call failed: {exc}")
 
-    text = str(getattr(text_outcome, "text", "") or "").strip()
-    if not text and not getattr(text_outcome, "tool_calls", None):
+    text_response = text_outcome[0] if isinstance(text_outcome, tuple) else text_outcome
+    text = str(getattr(getattr(text_response, "message", None), "text", "") or "").strip()
+    if not text and not getattr(getattr(text_response, "message", None), "tool_calls", None):
         return WizardLLMPreflightResult(status="error", detail="text call returned no content")
 
     if not endpoint.supports_tools:
@@ -579,38 +547,38 @@ def run_llm_endpoint_preflight(
             text_ok=True,
         )
 
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "pal_preflight_probe",
-                "description": "Validate that this endpoint can emit a tool call.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"ok": {"type": "boolean"}},
-                    "required": ["ok"],
-                },
+    tools = (
+        ToolDefinitionIR(
+            name="pal_preflight_probe",
+            description="Validate that this endpoint can emit a tool call.",
+            input_schema={
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
             },
-        }
-    ]
+        ),
+    )
     try:
         tool_outcome = active_invoker.invoke(
             model,
-            CanonicalLLMRequest(
-                messages=[
-                    {"role": "system", "content": "You validate Pal LLM tool calling setup."},
-                    {"role": "user", "content": "Call pal_preflight_probe with ok=true. Do not answer in prose."},
-                ],
-                max_output_tokens=64,
-                temperature=0,
+            LLMRequestIR(
+                messages=(
+                    LLMMessageIR(MessageRole.SYSTEM, (TextPartIR("You validate Pal LLM tool calling setup."),)),
+                    LLMMessageIR(MessageRole.USER, (TextPartIR("Call pal_preflight_probe with ok=true. Do not answer in prose."),)),
+                ),
                 tools=tools,
-                metadata=metadata,
+                policy=GenerationPolicyIR(max_output_tokens=64, temperature=0),
             ),
+            timeout_seconds=timeout_seconds,
         )
     except Exception as exc:
         return WizardLLMPreflightResult(status="warn", detail=f"text call succeeded, tool probe failed: {exc}", text_ok=True)
 
-    tool_ok = any(str(call.name) == "pal_preflight_probe" for call in list(getattr(tool_outcome, "tool_calls", None) or []))
+    tool_response = tool_outcome[0] if isinstance(tool_outcome, tuple) else tool_outcome
+    tool_ok = any(
+        str(call.name) == "pal_preflight_probe"
+        for call in getattr(getattr(tool_response, "message", None), "tool_calls", ())
+    )
     if not tool_ok:
         return WizardLLMPreflightResult(
             status="warn",
@@ -623,11 +591,9 @@ def run_llm_endpoint_preflight(
 def _infer_endpoint_provider(endpoint: WizardLLMEndpoint) -> str:
     if endpoint.provider:
         return endpoint.provider
-    if str(endpoint.base_url or "").strip().lower().startswith("codex://"):
-        return "codex_cli"
-    if "anthropic" in endpoint.api_mode:
+    if endpoint.wire_shape == "anthropic_messages":
         return "anthropic"
-    if "openai" in endpoint.api_mode or endpoint.api_mode == "openai_chat":
+    if endpoint.wire_shape in {"openai_completion", "openai_response"}:
         base_url = endpoint.base_url.lower()
         if "deepseek" in base_url:
             return "deepseek"
@@ -644,36 +610,26 @@ def _append_prompted_endpoints(endpoints: list[WizardLLMEndpoint], *, start_inde
     if start_index > 1:
         idx = start_index
     while True:
-        default_choice = "1" if not endpoints else "3"
+        default_choice = "1" if not endpoints else "2"
         source_choice = ask(
             "  Endpoint source:\n"
-            "    1) Codex CLI subscription\n"
-            "    2) API-compatible endpoint\n"
-            "    3) Done",
+            "    1) API endpoint\n"
+            "    2) Done",
             default_choice,
         ).strip()
-        if source_choice == "3":
+        if source_choice == "2":
             if not endpoints:
                 print("  At least one endpoint is required.")
                 continue
             break
-        if source_choice == "1":
-            codex_endpoints = _prompt_codex_endpoints(idx)
-            if not codex_endpoints:
-                if not endpoints:
-                    print("  At least one endpoint is required.")
-                    continue
-            endpoints.extend(codex_endpoints)
-            idx += 1
-        else:
-            ep = _prompt_one_endpoint(idx)
-            if ep is None:
-                if not endpoints:
-                    print("  At least one endpoint is required.")
-                    continue
-                break
-            endpoints.append(ep)
-            idx += 1
+        ep = _prompt_one_endpoint(idx)
+        if ep is None:
+            if not endpoints:
+                print("  At least one endpoint is required.")
+                continue
+            break
+        endpoints.append(ep)
+        idx += 1
         if not ask_yes_no("  Add another endpoint?", True):
             break
 
@@ -687,8 +643,7 @@ def prompt_llm_endpoints_with_current(
     current_active_endpoint_id: str | None = None,
 ) -> tuple[list[WizardLLMEndpoint], str]:
     _print_step(2, WIZARD_STEP_TOTAL, "LLM Endpoints")
-    print("(Codex uses your local Codex CLI subscription login.)")
-    print("(OpenAI and Anthropic are API formats; compatible providers also work.)\n")
+    print("(OpenAI Completion, OpenAI Responses, and Anthropic Messages wire shapes are supported.)\n")
 
     endpoints: list[WizardLLMEndpoint] = []
     current_endpoints = list(current_endpoints or [])
@@ -696,7 +651,7 @@ def prompt_llm_endpoints_with_current(
         print("  Existing endpoints:")
         for current in current_endpoints:
             active_marker = " [active]" if current.endpoint_id == current_active_endpoint_id else ""
-            print(f"    {current.endpoint_id}: {current.model_id} ({current.provider or current.api_mode}){active_marker}")
+            print(f"    {current.endpoint_id}: {current.model_id} ({current.wire_shape}){active_marker}")
         for current in current_endpoints:
             if not ask_yes_no(f"  Keep endpoint {current.endpoint_id}", True):
                 continue
@@ -861,10 +816,10 @@ def prompt_review(data: WizardCollectedData, runtime_root: Path) -> bool:
     print()
     for i, ep in enumerate(data.endpoints, 1):
         active_marker = " [active]" if ep.endpoint_id == data.active_endpoint_id else ""
-        provider_label = ep.provider or ep.api_mode
+        provider_label = ep.provider or ep.wire_shape
         print(f"  Endpoint {i}: {ep.endpoint_id} ({ep.model_id}, {provider_label}){active_marker}")
         print(f"    URL: {ep.base_url}")
-        print(f"    Context: {ep.context_window or '?'} | Reasoning: {'yes' if ep.supports_reasoning else 'no'} | Vision: {'yes' if ep.supports_vision else 'no'}")
+        print(f"    Context: {ep.context_window or '?'} | Thinking: {', '.join(ep.thinking_levels)} | Vision: {'yes' if ep.supports_vision else 'no'}")
 
     print()
     ch = data.channel

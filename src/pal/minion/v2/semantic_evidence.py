@@ -1,20 +1,23 @@
 from __future__ import annotations
 
+from pal.shared.tool_protocol import ToolCallIR
+
+from pal.shared.tool_protocol import new_tool_call
+
 import json
 import hashlib
 import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 async def run_shell_evidence(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     *,
     workspace: Mapping[str, Any],
     original_adapter: Any,
@@ -22,7 +25,7 @@ async def run_shell_evidence(
     case_kind: str,
     obligation_tag: str,
     turn_id: str | None = None,
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     try:
         args = dict(call.args or {})
         name = _required_text(args, "name")
@@ -71,7 +74,7 @@ async def run_shell_evidence(
             )
         cwd = str(workspace.get("repo_path") or "").strip() or None
         result = await original_adapter.execute_tool_async(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_exec_shell",
                 args={
                     "cmd": command,
@@ -150,14 +153,14 @@ async def run_shell_evidence(
 
 
 async def run_lsp_evidence(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     *,
     workspace: Mapping[str, Any],
     original_adapter: Any,
     draft_kind: str,
     obligation_tag: str = "lsp",
     turn_id: str | None = None,
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     try:
         args = dict(call.args or {})
         name = _required_text(args, "name")
@@ -202,7 +205,7 @@ async def run_lsp_evidence(
                 ),
             )
         result = await original_adapter.execute_tool_async(
-            CanonicalToolCall(
+            new_tool_call(
                 name="op_lsp_diagnostics",
                 args={
                     "file": file_path,
@@ -297,11 +300,11 @@ async def run_lsp_evidence(
 
 
 def record_unavailable_evidence(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     *,
     workspace: Mapping[str, Any],
     draft_kind: str,
-) -> CanonicalToolResult:
+) -> ToolExecutionResult:
     try:
         args = dict(call.args or {})
         name = _required_text(args, "name")
@@ -589,7 +592,7 @@ def _fingerprint_payload(context: SubmissionDraftContext, value: Mapping[str, An
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _operation_key(call: CanonicalToolCall, fallback: str) -> str:
+def _operation_key(call: ToolCallIR, fallback: str) -> str:
     return str(call.call_id or "").strip() or f"semantic:{call.name}:{fallback}"
 
 
@@ -670,13 +673,13 @@ def _lsp_execution_text(
 
 
 def _success_result(
-    call: CanonicalToolCall,
+    call: ToolCallIR,
     text: str,
     structured: Mapping[str, Any],
     *,
     llm_text: str | None = None,
-) -> CanonicalToolResult:
-    return CanonicalToolResult(
+) -> ToolExecutionResult:
+    return ToolExecutionResult(
         name=call.name,
         ok=True,
         text=text,
@@ -687,9 +690,9 @@ def _success_result(
     )
 
 
-def _error_result(call: CanonicalToolCall, exc: Exception) -> CanonicalToolResult:
+def _error_result(call: ToolCallIR, exc: Exception) -> ToolExecutionResult:
     text = f"{exc.__class__.__name__}: {exc}"
-    return CanonicalToolResult(
+    return ToolExecutionResult(
         name=call.name,
         ok=False,
         text=text,
