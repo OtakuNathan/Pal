@@ -39,7 +39,6 @@ from pal.minion.v2.sessions import (
     coder_session_id,
     module_verifier_session_id,
     node_role_generation,
-    system_verifier_session_id,
 )
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
@@ -324,22 +323,46 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         prompt = store.put_json({"prompt": "initial"}, artifact_type="RolePromptPackArtifact")
         continuation = store.put_json(
             {
-                "schema_version": "5",
+                "schema_version": "6",
                 "session_id": "inv-session",
                 "llm_round_count": 7,
-                "l1_items": [
-                    [
+                "l1_turns": [
+                    {
+                        "turn_id": "turn-1",
+                        "state": "settled",
+                        "revision": 1,
+                        "metadata": {},
+                        "messages": [
                         {
                             "role": "user",
-                            "content": "inspect the current candidate",
-                            "kind": "user_request",
+                            "parts": [
+                                {
+                                    "kind": "text",
+                                    "text": "inspect the current candidate",
+                                }
+                            ],
+                            "message_id": "message-user-1",
+                            "state": "complete",
+                            "semantic_kind": "user_request",
+                            "replay": None,
+                            "metadata": {},
                         },
                         {
                             "role": "assistant",
-                            "content": "candidate inspected",
-                            "kind": "assistant_reply",
+                            "parts": [
+                                {
+                                    "kind": "text",
+                                    "text": "candidate inspected",
+                                }
+                            ],
+                            "message_id": "message-assistant-1",
+                            "state": "complete",
+                            "semantic_kind": "assistant_reply",
+                            "replay": None,
+                            "metadata": {},
                         },
-                    ]
+                        ],
+                    }
                 ],
             },
             artifact_type="AgentSessionContinuationArtifact",
@@ -408,7 +431,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         )
         self.assertIsNotNone(restore_path)
         restored = json.loads(Path(restore_path).read_text(encoding="utf-8"))
-        self.assertEqual(restored["schema_version"], "5")
+        self.assertEqual(restored["schema_version"], "6")
         self.assertNotIn("l1_items", restored)
         self.assertEqual(len(restored["l1_turns"]), 1)
         self.assertEqual(restored["l1_turns"][0]["state"], "settled")
@@ -587,16 +610,8 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             module_verifier_session_id("wf-1", "router"),
         )
         self.assertEqual(
-            system_verifier_session_id("wf-1"),
-            system_verifier_session_id("wf-1"),
-        )
-        self.assertEqual(
             module_verifier_session_id("wf-1", "router"),
             module_verifier_session_id("wf-1", "router"),
-        )
-        self.assertEqual(
-            system_verifier_session_id("wf-1"),
-            system_verifier_session_id("wf-1"),
         )
         self.assertNotEqual(
             module_verifier_session_id("wf-1", "router"),
@@ -618,7 +633,6 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             (AggregateType.DAG_NODE_RUN, DagNodeRunState.PRODUCING),
             (AggregateType.DAG_NODE_RUN, DagNodeRunState.REVIEWING),
             (AggregateType.DAG_NODE_RUN, DagNodeRunState.REPAIRING),
-            (AggregateType.DAG_NODE_RUN, DagNodeRunState.VERIFYING),
             (
                 AggregateType.ARCHITECTURE_REVISION,
                 ArchitectureRevisionState.ARCHITECT_RUNNING,
@@ -872,7 +886,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     "candidate_ref": {"sha256": "candidate"},
                     "candidate_digest": "candidate",
                     "verification_artifact_ref": {"sha256": "verification"},
-                    "module_revision_fingerprint": "fingerprint",
+                    "graph_contract_hash": "graph-contract",
                     "null_execution": True,
                 },
             ),
@@ -1095,7 +1109,6 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             DagNodeRunState.SNAPSHOTTING: "REBIND_SNAPSHOTTER",
             DagNodeRunState.REVIEWING: "REBIND_REVIEWER",
             DagNodeRunState.REPAIRING: "REBIND_REPAIRER",
-            DagNodeRunState.VERIFYING: "REBIND_SYSTEM_VERIFIER",
         }
         for state, action_type in node_cases.items():
             with self.subTest(state=state):
@@ -1299,24 +1312,6 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 },
             ),
             (
-                DagNodeRunState.VERIFY_SNAPSHOTTING,
-                "VERIFICATION_PASSED",
-                DagNodeRunState.ACCEPTED,
-                {
-                    "verification_artifact_ref": "artifact:verification",
-                    "system_fingerprint": "system",
-                },
-            ),
-            (
-                DagNodeRunState.VERIFY_SNAPSHOTTING,
-                "MODULE_DEFECT",
-                DagNodeRunState.STALE,
-                {
-                    "repair_bill_ref": "artifact:repair",
-                    "repair_target_node_id": "module",
-                },
-            ),
-            (
                 DagNodeRunState.PRODUCING,
                 "PRODUCER_ARCHITECTURE_DEFECT",
                 DagNodeRunState.STALE,
@@ -1332,9 +1327,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     state=source_state,
                     version=6,
                     payload={
-                        "node_kind": "system_verification"
-                        if source_state == DagNodeRunState.VERIFY_SNAPSHOTTING
-                        else "unit",
+                        "node_kind": "unit",
                         "active_worker_id": "finished-worker",
                         "fencing_token": 7,
                         "lease_resource_key": "finished-lease",
@@ -1570,41 +1563,6 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertEqual(reviewed.snapshot.state, ArchitectureRevisionState.REVIEW_QUEUED)
         self.assertEqual(reviewed.snapshot.payload["architecture_submission_cycle"], 1)
         self.assertEqual(reviewed.effects[0].effect_type, "run_reviewer_role")
-
-    def test_system_verification_preparation_starts_a_new_verifier_cycle(self) -> None:
-        preparing = AggregateSnapshot(
-            aggregate_type=AggregateType.DAG_NODE_RUN,
-            aggregate_id="system-verification",
-            workflow_id="wf_test",
-            state=DagNodeRunState.VERIFY_PREPARING,
-            version=3,
-            payload={
-                "node_kind": "system_verification",
-                "system_verification_cycle": 4,
-            },
-            created_at="2026-01-01T00:00:00+00:00",
-            updated_at="2026-01-01T00:00:00+00:00",
-        )
-
-        prepared = self.engine.transition(
-            preparing,
-            self.action(
-                "VERIFICATION_PREPARED",
-                AggregateType.DAG_NODE_RUN,
-                "system-verification",
-                payload={
-                    "system_fingerprint": "union-b",
-                    "system_integration_ref": {"sha256": "union-ref"},
-                    "system_commit_sha": "commit-b",
-                    "verification_workspace_fingerprint": "workspace-b",
-                },
-                expected_version=3,
-            ),
-        )
-
-        self.assertEqual(prepared.snapshot.state, DagNodeRunState.QUEUED)
-        self.assertEqual(prepared.snapshot.payload["system_verification_cycle"], 5)
-        self.assertEqual(prepared.effects[0].effect_type, "admit_verifier_role")
 
     def test_start_architect_clears_stale_quiesce_state(self) -> None:
         queued = AggregateSnapshot(

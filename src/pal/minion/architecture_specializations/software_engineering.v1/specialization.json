@@ -140,7 +140,10 @@
     }
   },
   "example": {
-    "schema_version": "1",
+    "schema_version": "2",
+    "graph": {
+      "sink": "delivery"
+    },
     "context": {"language": "C++20", "external_dependencies": []},
     "requirements": {
       "decode_frames": {
@@ -213,14 +216,62 @@
             "reference_only": []
           }
         }
+      },
+      "delivery": {
+        "responsibility": "Assemble the decoder into the delivered consumer entrypoint.",
+        "execution": "produce",
+        "provides": ["application"],
+        "dependencies": {
+          "decoder": {
+            "consumes": ["decoded_frames"],
+            "purpose": "Expose decoded frames through the delivered entrypoint.",
+            "handoff": "Consume Decoder only through its public contract and surface process-level failures."
+          }
+        },
+        "definition": {
+          "behavior_kind": "adapter",
+          "contract": {
+            "inputs": {
+              "encoded_stream": {
+                "interface": "run_application",
+                "semantics": "Encoded bytes supplied by the external consumer."
+              }
+            },
+            "outputs": {
+              "application": {
+                "interface": "run_application",
+                "semantics": "The delivered consumer entrypoint and its observable result."
+              }
+            },
+            "errors": ["decoder failures are surfaced to the consumer"],
+            "invariants": ["assembly uses only the decoder public contract"]
+          },
+          "ownership": ["The delivery module owns process-level assembly only."],
+          "lifecycle": {
+            "creation": "The consumer entrypoint constructs its dependencies.",
+            "operation": "The entrypoint passes input through declared contracts.",
+            "shutdown": "The entrypoint joins and releases owned resources.",
+            "failure": "Dependency failures terminate at the consumer boundary.",
+            "cleanup": "All process-level resources are released before exit."
+          },
+          "state_machine": null,
+          "paths": {
+            "contract_mode": "review_guarded",
+            "contract_paths": ["include/application.hpp"],
+            "implementation_scopes": [
+              {"kind": "file", "path": "src/main.cpp"}
+            ],
+            "reference_only": []
+          }
+        }
       }
     },
     "scenarios": {
       "decode_one_frame": {
-        "modules": ["decoder"],
+        "modules": ["decoder", "delivery"],
         "requirement_refs": ["decode_frames"],
-        "entrypoint": {"module": "decoder", "surface": "Decoder::feed"},
-        "contract_flow": ["bytes -> decoder -> decoded_frames"],
+        "entrypoint": {"module": "delivery", "surface": "run_application"},
+        "contract_flow": ["bytes -> decoder -> decoded_frames -> delivery -> application"],
         "observable_behavior": "A complete frame is emitted once.",
         "failure_behavior": "Malformed input produces the declared error.",
         "environment": "Focused project test process."

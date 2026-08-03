@@ -3,11 +3,27 @@
 These specifications model the domain-independent orchestration contract before
 the Python worker spine implements it.
 
+The executable layering is deliberately small: Family-authored YAML is
+compiled to immutable `GraphIR`; `WorkflowCoordinator` owns one `PlanCycle`
+and one `GraphExecution`; each graph node owns a producer/checker `NodeCycle`;
+and `RoleProcessShell` is only the RAII process incarnation of a durable role
+session. Aggregate/outbox machines below remain process and effect projections,
+not a second DAG scheduler or semantic lifecycle owner.
+
 - `ModuleLifecycle.tla` models one durable module with Coder and Verifier
   sessions that survive immutable Candidates, repairs, and replans for the
   Module's lifetime; this single-Module model closes them when the workflow
   terminates. A role may yield only after Manager records and settles its
   result receipt. Module deletion is composed in `ReplanReuseLifecycle.tla`.
+- `ProduceCheckCycle.tla` models the shared producer/checker protocol used by
+  both planning and graph nodes, including generation-bound products and
+  verdicts, human review, and triage resumption at an assignment boundary.
+- `GraphExecutionLifecycle.tla` models an authored terminal sink, parallel
+  non-sink work, checker acceptance, dependency-finding reverse propagation,
+  repair barriers, and publication only from the accepted sink.
+- `ProcessCapacityLifecycle.tla` proves that capacity counts only materialized
+  OS-process incarnations. Durable logical sessions consume no slot, and a
+  permit cannot be released before process-group reap and checkpoint closure.
 - `DagLifecycle.tla` models dependency readiness, graph-wide pause/cancel, and
   architecture-defect freeze/replan propagation.
 - `ArchitectureLifecycle.tla` models Architect/Reviewer sessions that survive
@@ -16,13 +32,9 @@ the Python worker spine implements it.
 - `StandaloneReviewLifecycle.tla` models review-only execution, report
   publication, pause/cancel, and triage recovery.
 - `OrchestrationLifecycle.tla` composes Workflow, Execution Epoch, parallel
-  module nodes, and one workflow-level System Verifier join. It checks
+  module nodes, and the authored terminal sink. It checks
   hierarchical control ownership, replan freeze, stale propagation, and
   completion safety.
-- `SystemVerificationLifecycle.tla` proves that one workflow-level verifier
-  session and durable harness corpus survive module repairs, while PASS remains
-  impossible without real delivery-surface evidence for the complete Candidate
-  Union.
 - `DurableEffects.tla` models Action deduplication, atomic event/outbox writes,
   at-least-once effects, receipts, leases, fencing, worker settlement, and
   manager crashes.
@@ -35,16 +47,15 @@ the Python worker spine implements it.
   process group, Manager run registration, and exclusive worktree ownership.
   A terminal IPC receipt or leader exit cannot release ownership; replacement
   starts only after the complete process group is reaped and accounting closes.
-- `ContinuationLifecycle.tla` models checkpoint admission across the legacy
-  `l1_items` and current `l1_turns` shapes, including the historical shared-v5
-  label. It requires a real shape migration before worker start, preserves
-  structured terminal errors, and permits retries only for transient failures.
-- `ReplanReuseLifecycle.tla` models replan as a mechanical preserve/create/delete
-  classification over stable Module keys. It checks that surviving Modules keep
-  their worktree and logical Coder/Verifier generations, exact fingerprints
-  skip new admissions, changed contracts retain assets, deleted Modules retire,
-  re-added Modules receive a fresh generation, and native attempt recovery does
-  not replace ownership.
+- `ContinuationLifecycle.tla` models fresh-v27 checkpoint admission. Only a v6
+  `l1_turns` payload may start a worker; v5 and malformed checkpoints are
+  rejected with visible deterministic errors, while only transient worker
+  failures may consume retry budget.
+- `ReplanReuseLifecycle.tla` models replan as a mechanical
+  preserve/create/delete classification over stable node identities. Unchanged
+  responsibility preserves the worktree, sessions, and corpus; acceptance is
+  carried only when contract and incoming edges are unchanged. Replaced and
+  re-added nodes receive fresh identities, and only the authored sink publishes.
 - `ImplementationTopology.tla` is generated from the executable Python
   `MachineSpec` graph. It explores the same concrete source/action/target
   relation used by `TransitionEngine` and checks exhaustive classification,

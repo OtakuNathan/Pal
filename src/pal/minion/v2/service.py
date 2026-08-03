@@ -24,6 +24,8 @@ from pal.minion.v2.contract_protocol import (
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
 from pal.minion.v2.machines import LIVENESS_REQUIRED_STATES
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.cycle_protocol import CycleAction
+from pal.minion.v2.workflow_runtime import WorkflowCoordinator
 from pal.minion.v2.paths import inferred_project_name
 from pal.minion.v2.replan import compile_architecture_finding_markdown
 from pal.minion.v2.role_contracts import (
@@ -1034,6 +1036,11 @@ class MinionV2WorkflowService:
                 payload={"reason": reason},
             )
         )
+        coordinator = WorkflowCoordinator(self.repository)
+        if normalized == "pause":
+            coordinator.request_workflow_pause(workflow_id=workflow_id)
+        else:
+            coordinator.request_workflow_cancel(workflow_id=workflow_id)
         return {"status": "accepted", "workflow_id": workflow_id, "state": result.snapshot.state}
 
     def restart_execution_from_architecture(
@@ -1123,6 +1130,9 @@ class MinionV2WorkflowService:
                     idempotency_key=f"resume:{workflow_id}:{workflow.version}",
                 )
             )
+            WorkflowCoordinator(self.repository).resume_workflow(
+                workflow_id=workflow_id
+            )
             return {"status": "resumed", "workflow_id": workflow_id, "state": result.snapshot.state}
         self.triage_orphaned_work_aggregates(
             workflow_id=workflow_id,
@@ -1205,6 +1215,21 @@ class MinionV2WorkflowService:
                 payload=resolution_payload,
             )
         )
+        coordinator = WorkflowCoordinator(self.repository)
+        if selected.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+            coordinator.resolve_triage(
+                workflow_id=workflow_id,
+                plan=True,
+            )
+        elif selected.aggregate_type == AggregateType.DAG_NODE_RUN:
+            coordinator.resolve_triage(
+                workflow_id=workflow_id,
+                node_name=str(
+                    selected.payload.get("module_name")
+                    or selected.payload.get("unit_id")
+                    or ""
+                ),
+            )
         return {
             "status": "triage_resolved",
             "workflow_id": workflow_id,
@@ -1278,6 +1303,18 @@ class MinionV2WorkflowService:
                     },
                 )
             )
+            coordinator = WorkflowCoordinator(self.repository)
+            if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+                coordinator.require_plan_triage(workflow_id=workflow_id)
+            elif item.aggregate_type == AggregateType.DAG_NODE_RUN:
+                coordinator.require_node_triage(
+                    workflow_id=workflow_id,
+                    node_name=str(
+                        item.payload.get("module_name")
+                        or item.payload.get("unit_id")
+                        or ""
+                    ),
+                )
             normalized.append(
                 {
                     "aggregate_type": result.snapshot.aggregate_type.value,
@@ -1350,6 +1387,16 @@ class MinionV2WorkflowService:
                 idempotency_key=f"human-decision:{token}",
                 payload=payload,
             )
+        )
+        WorkflowCoordinator(self.repository).transition_plan(
+            workflow_id=workflow_id,
+            action=(
+                CycleAction.HUMAN_ACCEPTED
+                if decision == "accept"
+                else CycleAction.HUMAN_EDITED
+                if decision == "edit"
+                else CycleAction.HUMAN_REJECTED
+            ),
         )
         return {
             "status": "accepted",
@@ -1599,12 +1646,18 @@ class MinionV2WorkflowService:
         template_payload = self.artifacts.read_json(
             dict(architecture_binding.get("template_ref") or {})
         )
+        satellite_template_payload = self.artifacts.read_json(
+            dict(architecture_binding.get("satellite_template_ref") or {})
+        )
         definition = compiled_architecture_definition_from_mapping(
             {
                 **architecture_binding,
                 "schema": dict(schema_payload),
                 "template": str(
                     dict(template_payload).get("template") or ""
+                ),
+                "graph_satellite_template": str(
+                    dict(satellite_template_payload).get("template") or ""
                 ),
                 "example": {},
             }

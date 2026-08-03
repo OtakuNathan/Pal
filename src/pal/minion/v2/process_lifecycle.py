@@ -6,6 +6,10 @@ from pathlib import Path
 from typing import Awaitable, Callable, Mapping
 
 from pal.minion.v2.execution import WorkspaceLockRegistry, terminate_process_group
+from pal.minion.v2.coroutine_runtime import (
+    CoroutineRunPermit,
+    CoroutineRunSemaphore,
+)
 
 
 class WorkerProcessReapError(RuntimeError):
@@ -52,6 +56,21 @@ class WorkerProcessOwner:
     @property
     def lock_key(self) -> str:
         return f"worker:{self.invocation_id}"
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def resources_released(self) -> bool:
+        return (
+            self._closed
+            and not self._registered
+            and (
+                self.process is None
+                or self.process_group_reaped
+            )
+        )
 
     async def __aenter__(self) -> "WorkerProcessOwner":
         if self.process is not None:
@@ -178,3 +197,57 @@ class WorkerProcessOwner:
         except (BrokenPipeError, ConnectionError):
             return False
         return True
+
+
+@dataclass
+class RoleProcessShell:
+    """Bind one materialized worker to exactly one coroutine-run permit.
+
+    The permit is deliberately outside ``WorkerProcessOwner``: process
+    ownership proves OS cleanup, while the semaphore accounts logical worker
+    incarnations.  Release is legal only after the owner proves its process
+    group, broker registration, heartbeats, and workspace lock are closed.
+    """
+
+    owner: WorkerProcessOwner
+    semaphore: CoroutineRunSemaphore
+    run_id: str
+    _permit: CoroutineRunPermit | None = field(default=None, init=False)
+    _entered: bool = field(default=False, init=False)
+
+    async def __aenter__(self) -> WorkerProcessOwner:
+        if self._entered:
+            raise RuntimeError("role process shell cannot be entered twice")
+        self._permit = await self.semaphore.acquire(self.run_id)
+        try:
+            result = await self.owner.__aenter__()
+        except BaseException:
+            if self.owner.resources_released:
+                await self._release_permit()
+            raise
+        self._entered = True
+        return result
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        try:
+            await self.owner.__aexit__(exc_type, exc, traceback)
+        finally:
+            # A failed reap intentionally keeps the permit occupied. Manager
+            # must finish cleanup before it may advertise capacity again.
+            if self.owner.resources_released:
+                await self._release_permit()
+
+    async def close(self) -> None:
+        await self.owner.close()
+        if not self.owner.resources_released:
+            raise WorkerProcessReapError(
+                "role process shell cannot release capacity before cleanup"
+            )
+        await self._release_permit()
+
+    async def _release_permit(self) -> None:
+        permit = self._permit
+        if permit is None:
+            return
+        self._permit = None
+        await permit.release()

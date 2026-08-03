@@ -28,13 +28,15 @@ from pal.minion.v2 import (
     MinionV2Repository,
 )
 from pal.minion.v2.contracts import AggregateSnapshot, SubmissionInvariantError
-from pal.minion.v2.integration import (
-    DeliveryService,
-    IntegrationOwnershipDefect,
-    IntegrationService,
-)
+from pal.minion.v2.delivery import DeliveryService
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.service import MinionV2WorkflowService
+from pal.minion.v2.cycle_protocol import (
+    AssignmentKind,
+    CycleAction,
+    CycleSlot,
+)
+from pal.minion.v2.workflow_runtime import WorkflowCoordinator
 from pal.minion.v2.review_findings import ADD_FINDING_CAPABILITY, add_finding_tool_result
 from pal.minion.v2.verification import (
     DefectKind,
@@ -46,7 +48,6 @@ from pal.minion.v2.verification import (
     VerificationCaseSpec,
     VerificationService,
     VerificationStatus,
-    module_revision_fingerprint,
     finding_fingerprint,
     no_progress_detected,
     repair_bill_semantic_view,
@@ -85,13 +86,10 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     _reject_manager_identity_fields,
     _routable_verification_findings,
     _resolve_dependency_node_id,
-    _resolve_verification_defect_targets,
-    _seed_durable_verification_scratch,
     _module_verifier_git_diff_refs,
     _validate_skeleton_coder_report,
     _verifier_reference_refs,
     _verification_case_specs,
-    _verification_corpus_path_owners,
     _verification_findings,
     _verification_repair_path_owners,
     _verification_workspace_changed_paths,
@@ -256,183 +254,6 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertIn("representative workload", performance_guidance)
         self.assertIn("concrete impact", performance_guidance)
         self.assertIn("exact hot path", performance_guidance)
-
-    def test_scenario_module_repair_derives_target_from_finding_location(self) -> None:
-        workspace = self._bind_workspace(
-            {
-                "artifact_dir": str(self.runtime_root / "scenario-artifacts"),
-                "artifact_stage_dir": str(self.runtime_root / "scenario-stage"),
-                "system_verification": True,
-                "verification_scratch_only": True,
-                "review_tool_evidence_refs": [
-                    {
-                        "kind": "command",
-                        "tool_name": "op_exec_shell",
-                        "ok": False,
-                        "args": {"cmd": "python tests/streaming_decoder/repro.py"},
-                        "output_sha256": "failed-reproducer",
-                    }
-                ],
-            },
-            role="verifier",
-            mode="system",
-        )
-        scratch = Path(str(workspace["review_scratch_dir"]))
-        (scratch / "streaming_decoder_repro.py").write_text(
-            "raise AssertionError('broken corpus')\n",
-            encoding="utf-8",
-        )
-        contract = compile_swe_verification_tool_contract(
-            {
-                "verification_name": "streaming_round_trip",
-                "scenario": {"modules": ["encoder", "streaming_decoder"]},
-                "modules": {
-                    "encoder": {
-                        "paths": {
-                            "contract_paths": ["include/framepipe/encoder.hpp"],
-                            "implementation_scopes": [
-                                {"kind": "file", "path": "src/encoder.cpp"}
-                            ],
-                        }
-                    },
-                    "streaming_decoder": {
-                        "paths": {
-                            "contract_paths": ["include/framepipe/decoder.hpp"],
-                            "implementation_scopes": [
-                                {"kind": "file", "path": "src/decoder.cpp"}
-                            ],
-                        }
-                    },
-                },
-            }
-        )
-        binding = dict(workspace["minion_v2"])
-        binding["swe_verification_tool_contract"] = contract
-        workspace["minion_v2"] = binding
-
-        finding = add_finding_tool_result(
-            new_tool_call(
-                name=ADD_FINDING_CAPABILITY,
-                args={
-                    "finding_kind": "module_defect",
-                    "priority": "p1",
-                    "summary": "The decoder developer corpus does not compile.",
-                    "locations": [
-                        {
-                            "scope": "workspace",
-                            "file": "tests/streaming_decoder/developer/test_decoder.cpp",
-                            "line": 17,
-                        }
-                    ],
-                },
-                call_id="scenario-finding",
-            ),
-            workspace,
-        )
-        self.assertTrue(finding.ok, finding.text)
-
-        result = swe_verification_tool_result(
-            new_tool_call(
-                name="op_minion_verification_request_module_repair",
-                args={},
-                call_id="scenario-repair",
-            ),
-            workspace,
-            [],
-        )
-
-        self.assertTrue(result.ok, result.text)
-        submission = json.loads(
-            (self.runtime_root / "scenario-stage" / "verification_submission.json").read_text()
-        )
-        self.assertEqual(submission["outcome"], "module_repair")
-        self.assertEqual(submission["target_modules"], ["streaming_decoder"])
-
-    def test_scenario_corpus_repair_routes_only_to_the_owning_verifier(self) -> None:
-        workspace = self._bind_workspace(
-            {
-                "artifact_dir": str(self.runtime_root / "corpus-repair-artifacts"),
-                "artifact_stage_dir": str(self.runtime_root / "corpus-repair-stage"),
-                "system_verification": True,
-                "verification_scratch_only": True,
-                "review_tool_evidence_refs": [
-                    {
-                        "kind": "command",
-                        "tool_name": "op_exec_shell",
-                        "ok": False,
-                        "args": {"cmd": "false"},
-                        "output_sha256": "bad-double",
-                    }
-                ],
-            },
-            role="verifier",
-            mode="system",
-        )
-        scratch = Path(str(workspace["review_scratch_dir"]))
-        (scratch / "corpus_repro.cpp").write_text(
-            "int main() { return 1; }\n",
-            encoding="utf-8",
-        )
-        contract = compile_swe_verification_tool_contract(
-            {
-                "verification_name": "streaming_round_trip",
-                "modules": {
-                    "streaming_decoder": {
-                        "paths": {
-                            "implementation_scopes": [
-                                {"kind": "file", "path": "src/decoder.cpp"}
-                            ],
-                            "verification_corpus": {
-                                "kind": "directory",
-                                "path": "tests/streaming_decoder/verifier",
-                            },
-                        }
-                    }
-                },
-            }
-        )
-        binding = dict(workspace["minion_v2"])
-        binding["swe_verification_tool_contract"] = contract
-        workspace["minion_v2"] = binding
-        finding = add_finding_tool_result(
-            new_tool_call(
-                name=ADD_FINDING_CAPABILITY,
-                args={
-                    "finding_kind": "verification_defect",
-                    "priority": "p1",
-                    "summary": "The isolation double asserts an output forbidden by the module contract.",
-                    "locations": [
-                        {
-                            "scope": "workspace",
-                            "file": "tests/streaming_decoder/verifier/test_double.cpp",
-                            "line": 22,
-                        }
-                    ],
-                },
-            ),
-            workspace,
-        )
-        self.assertTrue(finding.ok, finding.llm_text)
-
-        result = swe_verification_tool_result(
-            new_tool_call(
-                name="op_minion_verification_request_corpus_repair",
-                args={},
-            ),
-            workspace,
-            [],
-        )
-
-        self.assertTrue(result.ok, result.llm_text)
-        submission = json.loads(
-            (
-                self.runtime_root
-                / "corpus-repair-stage"
-                / "verification_submission.json"
-            ).read_text()
-        )
-        self.assertEqual(submission["outcome"], "verification_repairs")
-        self.assertEqual(submission["target_modules"], ["streaming_decoder"])
 
     def test_swe_verifier_reuses_an_unchanged_durable_corpus(self) -> None:
         repo, _digest = self._git_repo("unchanged-verifier-corpus")
@@ -850,7 +671,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             result = worker._complete_semantic_verifier(
                 effect={"effect_key": "verify-effect"},
                 node=node,
-                system_mode=False,
                 invocation_id="verifier-attempt",
                 lease_resource="node:router:review",
                 fencing_token=1,
@@ -2773,15 +2593,14 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertIn("exact hot path", performance_guidance)
         self.assertIn("bounded contract-preserving direction", performance_guidance)
 
-        system = compile_verification_invocation_tool_contract(
+        sink = compile_verification_invocation_tool_contract(
             work_view={
                 **work_view,
-                "verification_name": "system_delivery",
-                "kind": "system_and_delivery",
+                "graph_sink": True,
             },
             verification_policy=policy,
         )
-        scratch_guidance = system["guidance_overrides"][
+        scratch_guidance = sink["guidance_overrides"][
             "op_minion_verification_scratch_write"
         ]
         self.assertIn("returned scratch_path", scratch_guidance["use_when"])
@@ -2847,11 +2666,11 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("outside the bound node contract", result.llm_text)
 
-    def test_system_tool_contract_exposes_delivery_usage_mode(self) -> None:
+    def test_sink_tool_contract_exposes_delivery_usage_mode(self) -> None:
         dogfood = compile_verification_invocation_tool_contract(
             work_view={
                 "verification_name": "window_text_rendering",
-                "kind": "system_and_delivery",
+                "graph_sink": True,
                 "requirements": [
                     {"section": "Rendering", "requirement": "Render a frame."}
                 ],
@@ -2870,7 +2689,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         platform = compile_verification_invocation_tool_contract(
             work_view={
                 "verification_name": "native_font_probe",
-                "kind": "system_and_delivery",
+                "graph_sink": True,
                 "requirements": [
                     {"section": "Fonts", "requirement": "Measure native text."}
                 ],
@@ -3405,28 +3224,6 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(self.store.read_bytes(result.stdout_ref), b"pass-output")
         self.assertTrue(self.repository.artifact_is_durable(str(result.stderr_ref["sha256"])))
 
-    def test_durable_verification_scratch_recovers_latest_attempt_once(self) -> None:
-        attempts = self.runtime_root / "attempts"
-        older = attempts / "fence-1" / "review-scratch"
-        newer = attempts / "fence-2" / "review-scratch"
-        older.mkdir(parents=True)
-        newer.mkdir(parents=True)
-        (older / "probe.py").write_text("older", encoding="utf-8")
-        (newer / "probe.py").write_text("newer", encoding="utf-8")
-        os.utime(older.parent, (1, 1))
-        os.utime(newer.parent, (2, 2))
-        durable = self.runtime_root / "durable-scratch"
-
-        _seed_durable_verification_scratch(attempts, durable)
-        self.assertEqual((durable / "probe.py").read_text(encoding="utf-8"), "newer")
-
-        latest = attempts / "fence-3" / "review-scratch"
-        latest.mkdir(parents=True)
-        (latest / "probe.py").write_text("must not replace durable state", encoding="utf-8")
-        os.utime(latest.parent, (3, 3))
-        _seed_durable_verification_scratch(attempts, durable)
-        self.assertEqual((durable / "probe.py").read_text(encoding="utf-8"), "newer")
-
     def test_verifier_uses_semantic_names_and_manager_generates_case_keys(self) -> None:
         plan = {
             "cases": [
@@ -3934,443 +3731,6 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual([item["case_id"] for item in findings], ["case_fail"])
         self.assertEqual(findings[0]["severity"], "major")
 
-    def test_module_defect_on_module_node_does_not_resolve_current_module_as_dependency(self) -> None:
-        node = self._reviewing_node("node_local_module_defect")
-
-        dependency_node_id, module_node_id = _resolve_verification_defect_targets(
-            self.repository,
-            node,
-            plan={"affected_module": str(node.payload.get("module_name") or "router")},
-            status=VerificationStatus.FAIL,
-            defect_kind=DefectKind.MODULE,
-            system_mode=False,
-        )
-
-        self.assertEqual(dependency_node_id, "")
-        self.assertEqual(module_node_id, "")
-
-    def test_scenario_repair_targets_do_not_replace_dependency_graph(self) -> None:
-        node_id = "node_scenario_repair_route"
-        dependency_ids = ("node_encoder", "node_streaming_decoder")
-        system_fingerprint = "scenario-repair-fingerprint"
-        contract = self.store.put_json(
-            {"verification_name": "streaming_round_trip"},
-            artifact_type="VerificationScenarioContractArtifact",
-        )
-        union = self.store.put_json(
-            {"scenario": "streaming_round_trip"},
-            artifact_type="IntegrationCandidateArtifact",
-        )
-        actions = [
-            (
-                "CREATE_NODE_RUN",
-                {
-                    "unit_contract_ref": contract.to_dict(),
-                    "epoch_id": "epoch",
-                    "node_kind": "system_verification",
-                    "dependency_node_ids": list(dependency_ids),
-                },
-            ),
-            (
-                "VERIFICATION_DEPENDENCIES_ACCEPTED",
-                {
-                    "accepted_dependency_node_ids": list(dependency_ids),
-                    "epoch_frozen": False,
-                },
-            ),
-            (
-                "VERIFICATION_PREPARED",
-                {
-                    "system_fingerprint": system_fingerprint,
-                    "system_integration_ref": union.to_dict(),
-                    "system_commit_sha": "scenario-commit",
-                    "verification_workspace_fingerprint": "scenario-tree",
-                },
-            ),
-            ("START_SYSTEM_VERIFICATION", {"fencing_token": 1}),
-            (
-                "SUBMIT_SEMANTIC_VERIFICATION",
-                {"pending_verification_ref": {"sha256": "pending-scenario"}},
-            ),
-            (
-                "VERIFIER_QUIESCED",
-                {
-                    "fencing_token": 1,
-                    "process_group_reaped": True,
-                    "exclusive_workspace_lock": True,
-                    "workspace_fingerprint": "verification-tree",
-                },
-            ),
-        ]
-        for action_type, payload in actions:
-            snapshot = self.repository.read_snapshot(
-                AggregateType.DAG_NODE_RUN,
-                node_id,
-            )
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type=action_type,
-                    workflow_id="wf_verify",
-                    aggregate_type=AggregateType.DAG_NODE_RUN,
-                    aggregate_id=node_id,
-                    actor="test",
-                    expected_version=snapshot.version if snapshot else 0,
-                    idempotency_key=f"{node_id}:{action_type}",
-                    payload=payload,
-                )
-            )
-        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
-        assert node is not None
-        verification_ref = self.store.put_json(
-            {"status": "FAIL", "system_fingerprint": system_fingerprint},
-            artifact_type="VerificationArtifact",
-        )
-        repair_ref = self.store.put_json(
-            {"finding": "decoder corpus is broken"},
-            artifact_type="RepairPacketArtifact",
-        )
-
-        failed = self.verification.submit_verdict(
-            node=node,
-            verification_ref=verification_ref,
-            status=VerificationStatus.FAIL,
-            actor="verifier",
-            repair_bill_ref=repair_ref,
-            finding_fingerprint_value="decoder-corpus-finding",
-            defect_kind=DefectKind.MODULE,
-            module_node_ids=("node_streaming_decoder",),
-            system_fingerprint=system_fingerprint,
-        ).snapshot
-
-        self.assertEqual(failed.state, "STALE")
-        self.assertEqual(
-            failed.payload["dependency_node_ids"],
-            list(dependency_ids),
-        )
-        self.assertEqual(
-            failed.payload["repair_target_node_ids"],
-            ["node_streaming_decoder"],
-        )
-        self.assertEqual(
-            failed.payload["repair_target_node_id"],
-            "node_streaming_decoder",
-        )
-
-    def test_scenario_verification_defect_reopens_verifier_not_coder(self) -> None:
-        node_id = "node_scenario_verifier_repair"
-        system_fingerprint = "scenario-verifier-repair-fingerprint"
-        contract = self.store.put_json(
-            {"verification_name": "streaming_round_trip"},
-            artifact_type="VerificationScenarioContractArtifact",
-        )
-        union = self.store.put_json(
-            {"scenario": "streaming_round_trip"},
-            artifact_type="IntegrationCandidateArtifact",
-        )
-        actions = [
-            (
-                "CREATE_NODE_RUN",
-                {
-                    "unit_contract_ref": contract.to_dict(),
-                    "epoch_id": "epoch",
-                    "node_kind": "system_verification",
-                    "dependency_node_ids": ["node_streaming_decoder"],
-                },
-            ),
-            (
-                "VERIFICATION_DEPENDENCIES_ACCEPTED",
-                {
-                    "accepted_dependency_node_ids": ["node_streaming_decoder"],
-                    "epoch_frozen": False,
-                },
-            ),
-            (
-                "VERIFICATION_PREPARED",
-                {
-                    "system_fingerprint": system_fingerprint,
-                    "system_integration_ref": union.to_dict(),
-                    "system_commit_sha": "scenario-commit",
-                    "verification_workspace_fingerprint": "scenario-tree",
-                },
-            ),
-            ("START_SYSTEM_VERIFICATION", {"fencing_token": 1}),
-            (
-                "SUBMIT_SEMANTIC_VERIFICATION",
-                {"pending_verification_ref": {"sha256": "pending-verification"}},
-            ),
-            (
-                "VERIFIER_QUIESCED",
-                {
-                    "fencing_token": 1,
-                    "process_group_reaped": True,
-                    "exclusive_workspace_lock": True,
-                    "workspace_fingerprint": "verification-tree",
-                },
-            ),
-        ]
-        for action_type, payload in actions:
-            snapshot = self.repository.read_snapshot(
-                AggregateType.DAG_NODE_RUN,
-                node_id,
-            )
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type=action_type,
-                    workflow_id="wf_verify",
-                    aggregate_type=AggregateType.DAG_NODE_RUN,
-                    aggregate_id=node_id,
-                    actor="test",
-                    expected_version=snapshot.version if snapshot else 0,
-                    idempotency_key=f"{node_id}:{action_type}",
-                    payload=payload,
-                )
-            )
-        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
-        assert node is not None
-        verification_ref = self.store.put_json(
-            {"status": "FAIL", "system_fingerprint": system_fingerprint},
-            artifact_type="VerificationArtifact",
-        )
-        repair_ref = self.store.put_json(
-            {"finding": "verifier corpus is broken"},
-            artifact_type="RepairPacketArtifact",
-        )
-
-        verdict = self.verification.submit_verdict(
-            node=node,
-            verification_ref=verification_ref,
-            status=VerificationStatus.FAIL,
-            actor="verifier",
-            repair_bill_ref=repair_ref,
-            finding_fingerprint_value="verifier-corpus-finding",
-            defect_kind=DefectKind.VERIFICATION,
-            module_node_ids=("node_streaming_decoder",),
-            system_fingerprint=system_fingerprint,
-        )
-        failed = verdict.snapshot
-
-        self.assertEqual(failed.state, "STALE")
-        pending_effects = self.repository.claim_outbox(
-            "verification-defect-test",
-            limit=100,
-        )
-        self.assertIn(
-            "reopen_verifier_and_stale_descendants",
-            {str(item.get("effect_type") or "") for item in pending_effects},
-        )
-
-    def test_manager_resolves_scenario_repair_owner_from_immutable_path_policy(self) -> None:
-        contract = self.store.put_json(
-            {"contract": "framepipe"},
-            artifact_type="UnitContractArtifact",
-        )
-        for node_id, module_name, source_path in (
-            ("node_encoder", "encoder", "src/encoder.cpp"),
-            ("node_streaming_decoder", "streaming_decoder", "src/decoder.cpp"),
-        ):
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="CREATE_NODE_RUN",
-                    workflow_id="wf_verify",
-                    aggregate_type=AggregateType.DAG_NODE_RUN,
-                    aggregate_id=node_id,
-                    actor="test",
-                    expected_version=0,
-                    idempotency_key=f"create:{node_id}",
-                    payload={
-                        "epoch_id": "epoch",
-                        "node_kind": "unit",
-                        "module_name": module_name,
-                        "unit_id": module_name,
-                        "unit_contract_ref": contract.to_dict(),
-                        "dependency_node_ids": [],
-                        "contract_dependency_node_ids": [],
-                        "path_policy": {
-                            "contract_paths": [
-                                f"include/framepipe/{module_name}.hpp"
-                            ],
-                            "implementation_scopes": [
-                                {"kind": "file", "path": source_path}
-                            ],
-                            "developer_tests": {
-                                "kind": "directory",
-                                "path": f"tests/{module_name}/developer",
-                            },
-                            "verification_corpus": {
-                                "kind": "directory",
-                                "path": f"tests/{module_name}/verifier",
-                            },
-                        },
-                    },
-                )
-            )
-        scenario_id = "node_streaming_scenario"
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_NODE_RUN",
-                workflow_id="wf_verify",
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=scenario_id,
-                actor="test",
-                expected_version=0,
-                idempotency_key=f"create:{scenario_id}",
-                payload={
-                    "epoch_id": "epoch",
-                    "node_kind": "system_verification",
-                    "module_name": "streaming_round_trip",
-                    "unit_contract_ref": contract.to_dict(),
-                    "dependency_node_ids": [
-                        "node_encoder",
-                        "node_streaming_decoder",
-                    ],
-                },
-            )
-        )
-        scenario = self.repository.read_snapshot(
-            AggregateType.DAG_NODE_RUN,
-            scenario_id,
-        )
-        assert scenario is not None
-
-        owners = _verification_repair_path_owners(self.repository, scenario)
-        corpus_owners = _verification_corpus_path_owners(
-            self.repository,
-            scenario,
-        )
-        targets = infer_repair_target_modules(
-            [
-                {
-                    "locations": [
-                        {
-                            "scope": "workspace",
-                            "file": "tests/streaming_decoder/developer/test_decoder.cpp",
-                            "line": 17,
-                        }
-                    ],
-                }
-            ],
-            owners,
-        )
-
-        self.assertEqual(targets, ["streaming_decoder"])
-        with self.assertRaisesRegex(ValueError, "cannot derive a repair owner"):
-            infer_repair_target_modules(
-                [
-                    {
-                        "locations": [
-                            {
-                                "scope": "workspace",
-                                "file": "tests/streaming_decoder/verifier/test_double.cpp",
-                                "line": 8,
-                            }
-                        ],
-                    }
-                ],
-                owners,
-            )
-        self.assertEqual(
-            infer_repair_target_modules(
-                [
-                    {
-                        "locations": [
-                            {
-                                "scope": "workspace",
-                                "file": "tests/streaming_decoder/verifier/test_double.cpp",
-                                "line": 8,
-                            }
-                        ],
-                    }
-                ],
-                corpus_owners,
-            ),
-            ["streaming_decoder"],
-        )
-        self.assertEqual(
-            _resolve_dependency_node_id(
-                self.repository,
-                scenario,
-                dependency_module=targets[0],
-            ),
-            "node_streaming_decoder",
-        )
-
-    def test_repair_effect_reopens_only_explicit_manager_targets(self) -> None:
-        repair_ref = self.store.put_json(
-            {"finding": "decoder corpus is broken"},
-            artifact_type="RepairPacketArtifact",
-        )
-        node = AggregateSnapshot(
-            aggregate_type=AggregateType.DAG_NODE_RUN,
-            aggregate_id="node_streaming_scenario",
-            workflow_id="wf_verify",
-            state="STALE",
-            version=7,
-            created_at="2026-07-23T00:00:00+00:00",
-            updated_at="2026-07-23T00:00:00+00:00",
-            payload={
-                "epoch_id": "epoch",
-                "dependency_node_ids": [
-                    "node_encoder",
-                    "node_streaming_decoder",
-                    "node_cli",
-                ],
-                "repair_target_node_id": "node_streaming_decoder",
-                "repair_target_node_ids": ["node_streaming_decoder"],
-                "repair_bill_ref": repair_ref.to_dict(),
-            },
-        )
-        processor = MinionV2OutboxProcessor(
-            MinionV2WorkflowService(self.runtime_root)
-        )
-
-        with (
-            patch.object(processor, "_effect_snapshot", return_value=node),
-            patch.object(
-                DefectPropagationService,
-                "propagate_dependency_defect",
-                return_value=(),
-            ) as propagate,
-        ):
-            asyncio.run(
-                processor._execute_mechanical(
-                    {
-                        "effect_type": "reopen_dependency_and_stale_descendants",
-                        "effect_key": "repair-route",
-                    }
-                )
-            )
-
-        self.assertEqual(propagate.call_count, 1)
-        self.assertEqual(
-            propagate.call_args.kwargs["dependency_node_id"],
-            "node_streaming_decoder",
-        )
-        self.assertEqual(
-            propagate.call_args.kwargs["reopen_action"],
-            "REOPEN_DEPENDENCY",
-        )
-
-        with (
-            patch.object(processor, "_effect_snapshot", return_value=node),
-            patch.object(
-                DefectPropagationService,
-                "propagate_dependency_defect",
-                return_value=(),
-            ) as reopen_verifier,
-        ):
-            asyncio.run(
-                processor._execute_mechanical(
-                    {
-                        "effect_type": "reopen_verifier_and_stale_descendants",
-                        "effect_key": "verifier-repair-route",
-                    }
-                )
-            )
-        self.assertEqual(
-            reopen_verifier.call_args.kwargs["reopen_action"],
-            "REOPEN_VERIFICATION",
-        )
-
     def test_verification_defect_reopens_accepted_module_at_verifier_queue(self) -> None:
         node = self._reviewing_node("node_reopen_verifier")
         verification_ref = self.store.put_json(
@@ -4435,25 +3795,6 @@ class MinionV2VerificationTests(unittest.TestCase):
         ]
         self.assertTrue(no_progress_detected(history))
         self.assertFalse(no_progress_detected([{**item, "candidate_tree_hash": str(index)} for index, item in enumerate(history)]))
-
-    def test_module_revision_fingerprint_requires_all_inputs(self) -> None:
-        values = {
-            "unit_contract_hash": "1",
-            "relevant_requirements_hash": "2",
-            "relevant_evidence_hash": "3",
-            "global_constraint_hash": "4",
-            "owned_area_hash": "5",
-            "dependency_set_hash": "6",
-            "dependency_interface_hash": "7",
-            "dependency_output_hash": "8",
-            "integration_contract_subset_hash": "9",
-            "environment_policy_hash": "10",
-        }
-        first = module_revision_fingerprint(**values)
-        second = module_revision_fingerprint(**values)
-        self.assertEqual(first, second)
-        with self.assertRaises(ValueError):
-            module_revision_fingerprint(**{**values, "relevant_evidence_hash": ""})
 
     def test_verdicts_drive_pass_fail_unknown_and_not_applicable_states(self) -> None:
         verification_ref = self.store.put_json({"status": "test"}, artifact_type="VerificationArtifact")
@@ -4652,6 +3993,32 @@ class MinionV2VerificationTests(unittest.TestCase):
                 )
             )
 
+        coordinator = WorkflowCoordinator(self.repository)
+        coordinator.start_plan_assignment(
+            workflow_id=workflow_id,
+            slot=CycleSlot.PRODUCER,
+            kind=AssignmentKind.INITIAL,
+            input_fingerprint="initial-plan",
+        )
+        coordinator.submit_plan_product(
+            workflow_id=workflow_id,
+            product_ref=manifest_ref.sha256,
+        )
+        coordinator.start_plan_assignment(
+            workflow_id=workflow_id,
+            slot=CycleSlot.CHECKER,
+            kind=AssignmentKind.RECHECK,
+            input_fingerprint=manifest_ref.sha256,
+        )
+        coordinator.submit_plan_verdict(
+            workflow_id=workflow_id,
+            accepted=True,
+        )
+        coordinator.transition_plan(
+            workflow_id=workflow_id,
+            action=CycleAction.HUMAN_ACCEPTED,
+        )
+
         processor = MinionV2OutboxProcessor(service)
         processor._request_epoch_replan(
             {
@@ -4748,60 +4115,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             "STALE",
         )
 
-    def test_dependency_defect_stales_only_system_verifications_in_its_actual_closure(self) -> None:
-        verification_ref = self.store.put_json(
-            {"status": "PASS", "system_fingerprint": "scenario-a"},
-            artifact_type="VerificationArtifact",
-        )
-        other_verification_ref = self.store.put_json(
-            {"status": "PASS", "system_fingerprint": "scenario-b"},
-            artifact_type="VerificationArtifact",
-        )
-        repair_ref = self.store.put_json(
-            {"finding": "dependency"}, artifact_type="RepairBillArtifact"
-        )
-        module_a = self.verification.submit_verdict(
-            node=self._reviewing_node("node_module_a"),
-            verification_ref=verification_ref,
-            status=VerificationStatus.PASS,
-            actor="reviewer",
-        ).snapshot
-        module_b = self.verification.submit_verdict(
-            node=self._reviewing_node("node_module_b"),
-            verification_ref=other_verification_ref,
-            status=VerificationStatus.PASS,
-            actor="reviewer",
-        ).snapshot
-        scenario_a = self._accepted_scenario(
-            "node_scenario_a",
-            dependency_node_ids=(module_a.aggregate_id,),
-            system_fingerprint="scenario-a",
-            verification_ref=verification_ref,
-        )
-        scenario_b = self._accepted_scenario(
-            "node_scenario_b",
-            dependency_node_ids=(module_b.aggregate_id,),
-            system_fingerprint="scenario-b",
-            verification_ref=other_verification_ref,
-        )
-
-        affected = DefectPropagationService(self.repository).propagate_dependency_defect(
-            workflow_id=module_a.workflow_id,
-            epoch_id="epoch",
-            dependency_node_id=module_a.aggregate_id,
-            repair_bill_ref=repair_ref,
-        )
-
-        self.assertEqual(affected, (scenario_a.aggregate_id,))
-        self.assertEqual(
-            self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, scenario_a.aggregate_id).state,
-            "STALE",
-        )
-        self.assertEqual(
-            self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, scenario_b.aggregate_id).state,
-            "ACCEPTED",
-        )
-
     def _reviewing_node(
         self,
         node_id: str,
@@ -4860,91 +4173,9 @@ class MinionV2VerificationTests(unittest.TestCase):
             )
         return self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
 
-    def _accepted_scenario(
-        self,
-        node_id: str,
-        *,
-        dependency_node_ids: tuple[str, ...],
-        system_fingerprint: str,
-        verification_ref,
-    ) -> AggregateSnapshot:
-        contract = self.store.put_json(
-            {"verification_name": node_id},
-            artifact_type="VerificationScenarioContractArtifact",
-        )
-        union = self.store.put_json(
-            {"scenario": node_id}, artifact_type="IntegrationCandidateArtifact"
-        )
-        actions = [
-            (
-                "CREATE_NODE_RUN",
-                {
-                    "unit_contract_ref": contract.to_dict(),
-                    "epoch_id": "epoch",
-                    "node_kind": "system_verification",
-                    "dependency_node_ids": list(dependency_node_ids),
-                },
-            ),
-            (
-                "VERIFICATION_DEPENDENCIES_ACCEPTED",
-                {
-                    "accepted_dependency_node_ids": list(dependency_node_ids),
-                    "epoch_frozen": False,
-                },
-            ),
-            (
-                "VERIFICATION_PREPARED",
-                {
-                    "system_fingerprint": system_fingerprint,
-                    "system_integration_ref": union.to_dict(),
-                    "system_commit_sha": f"commit-{node_id}",
-                    "verification_workspace_fingerprint": f"tree-{node_id}",
-                },
-            ),
-            ("START_SYSTEM_VERIFICATION", {"fencing_token": 1}),
-            (
-                "SUBMIT_SEMANTIC_VERIFICATION",
-                {"pending_verification_ref": {"sha256": f"pending-{node_id}"}},
-            ),
-            (
-                "VERIFIER_QUIESCED",
-                {
-                    "fencing_token": 1,
-                    "process_group_reaped": True,
-                    "exclusive_workspace_lock": True,
-                    "workspace_fingerprint": f"verification-tree-{node_id}",
-                },
-            ),
-            (
-                "VERIFICATION_PASSED",
-                {
-                    "verification_artifact_ref": verification_ref.to_dict(),
-                    "system_fingerprint": system_fingerprint,
-                },
-            ),
-        ]
-        for action_type, payload in actions:
-            snapshot = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type=action_type,
-                    workflow_id="wf_verify",
-                    aggregate_type=AggregateType.DAG_NODE_RUN,
-                    aggregate_id=node_id,
-                    actor="test",
-                    expected_version=snapshot.version if snapshot else 0,
-                    idempotency_key=f"{node_id}:{action_type}",
-                    payload=payload,
-                )
-            )
-        snapshot = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
-        assert snapshot is not None
-        return snapshot
-
-
-class MinionV2IntegrationTests(unittest.TestCase):
+class MinionV2DeliveryTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_minion_v2_integration_"))
+        self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_minion_v2_delivery_"))
         self.repository = MinionV2Repository(self.runtime_root)
         self.store = ContentAddressedArtifactStore(self.runtime_root, self.repository)
         self.repo = self.runtime_root / "repo"
@@ -4959,23 +4190,6 @@ class MinionV2IntegrationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
-
-    def test_integration_merges_candidates_in_declared_order(self) -> None:
-        sha_a = self._candidate("candidate-a", "a.txt", "a\n")
-        sha_b = self._candidate("candidate-b", "b.txt", "b\n")
-        self._git("checkout", "-q", "--detach", self.base)
-        ref, integration_sha = IntegrationService(self.store).integrate_candidates(
-            integration_worktree=self.repo,
-            ordered_candidates=[
-                {"node_run_id": "a", "candidate_digest": sha_a},
-                {"node_run_id": "b", "candidate_digest": sha_b},
-            ],
-            architecture_manifest_sha="manifest",
-        )
-        self.assertEqual(self._git("rev-parse", "HEAD").strip(), integration_sha)
-        self.assertEqual([item["node_run_id"] for item in self.store.read_json(ref)["merged_candidates"]], ["a", "b"])
-        self.assertTrue((self.repo / "a.txt").is_file())
-        self.assertTrue((self.repo / "b.txt").is_file())
 
     def test_local_delivery_is_an_independent_checkout_with_a_receipt(self) -> None:
         (self.repo / "delivered.txt").write_text("ready\n", encoding="utf-8")
@@ -5015,6 +4229,39 @@ class MinionV2IntegrationTests(unittest.TestCase):
         self.assertEqual(
             (delivery / "delivered.txt").read_text(encoding="utf-8"),
             "ready\n",
+        )
+
+    def test_local_delivery_bounds_user_title_directory_name(self) -> None:
+        (self.repo / "delivered.txt").write_text("ready\n", encoding="utf-8")
+        self._git("add", "delivered.txt")
+        self._git("commit", "-qm", "verified delivery")
+        commit_sha = self._git("rev-parse", "HEAD").strip()
+        verification_ref = self.store.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+
+        receipt_ref = DeliveryService(
+            self.runtime_root,
+            self.store,
+        ).publish(
+            workflow_id="wf-long-title",
+            workflow_key="long-title-workflow",
+            task_title=("Implement and verify " + "a very long task title " * 40),
+            repository=self.repo,
+            commit_sha=commit_sha,
+            source_snapshot={"delivery_mode": "local_only"},
+            verification_ref=verification_ref,
+        )
+
+        delivery = Path(self.store.read_json(receipt_ref)["local_path"])
+        self.assertLess(len(delivery.name), 255)
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(delivery), "rev-parse", "HEAD"],
+                text=True,
+            ).strip(),
+            commit_sha,
         )
 
     def test_clean_git_delivery_pushes_verified_head_and_creates_pull_request(self) -> None:
@@ -5079,34 +4326,6 @@ class MinionV2IntegrationTests(unittest.TestCase):
             text=True,
         ).split()[0]
         self.assertEqual(remote_sha, commit_sha)
-
-    def test_integration_conflict_is_an_ownership_defect(self) -> None:
-        sha_a = self._candidate("conflict-a", "base.txt", "from a\n")
-        sha_b = self._candidate("conflict-b", "base.txt", "from b\n")
-        self._git("checkout", "-q", "--detach", self.base)
-
-        with self.assertRaises(IntegrationOwnershipDefect):
-            IntegrationService(self.store).integrate_candidates(
-                integration_worktree=self.repo,
-                ordered_candidates=[
-                    {"node_run_id": "a", "candidate_digest": sha_a},
-                    {"node_run_id": "b", "candidate_digest": sha_b},
-                ],
-                architecture_manifest_sha="manifest",
-            )
-
-        self.assertEqual(
-            self._git("rev-parse", "HEAD^{tree}").strip(),
-            self._git("rev-parse", f"{sha_a}^{{tree}}").strip(),
-        )
-        self.assertEqual((self.repo / "base.txt").read_text(encoding="utf-8"), "from a\n")
-
-    def _candidate(self, branch: str, filename: str, content: str) -> str:
-        self._git("checkout", "-q", "-B", branch, self.base)
-        (self.repo / filename).write_text(content, encoding="utf-8")
-        self._git("add", filename)
-        self._git("commit", "-qm", branch)
-        return self._git("rev-parse", "HEAD").strip()
 
     def _git(self, *args: str) -> str:
         return subprocess.check_output(["git", *args], cwd=self.repo, text=True)

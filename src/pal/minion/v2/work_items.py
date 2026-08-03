@@ -29,7 +29,7 @@ FINDING_KINDS = frozenset(
         "dependency_defect",
         "contract_defect",
         "architecture_defect",
-        "integration_defect",
+        "sink_defect",
         "verification_defect",
     }
 )
@@ -61,7 +61,7 @@ class MinionAddFindingInput(StrictToolModel):
         "dependency_defect",
         "contract_defect",
         "architecture_defect",
-        "integration_defect",
+        "sink_defect",
         "verification_defect",
     ]
     priority: Literal["p0", "p1", "p2"]

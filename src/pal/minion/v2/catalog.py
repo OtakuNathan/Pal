@@ -58,7 +58,7 @@ class ResolvedFamilyBinding:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "6",
+            "schema_version": "7",
             "family_id": self.family_id,
             "display_name": self.display_name,
             "domain": self.domain,
@@ -197,6 +197,19 @@ class MinionV2Catalog:
                 "generation_hash": architecture_definition.generation_hash,
             },
         )
+        satellite_template_ref = self.artifacts.put_json(
+            {
+                "specialization_id": architecture_definition.specialization_id,
+                "generation_hash": architecture_definition.generation_hash,
+                "template": architecture_definition.graph_satellite_template,
+            },
+            artifact_type="GraphSatelliteTemplateArtifact",
+            schema_version="1",
+            provenance={
+                "specialization_id": architecture_definition.specialization_id,
+                "generation_hash": architecture_definition.generation_hash,
+            },
+        )
         execution_adapter = family_execution_adapter(
             family.execution_adapter
         )
@@ -220,6 +233,7 @@ class MinionV2Catalog:
                 "generation_hash": architecture_definition.generation_hash,
                 "schema_ref": schema_ref.to_dict(),
                 "template_ref": template_ref.to_dict(),
+                "satellite_template_ref": satellite_template_ref.to_dict(),
             },
             role_bindings=resolved_roles,
             execution_adapter=execution_adapter,
@@ -233,7 +247,7 @@ class MinionV2Catalog:
         return self.artifacts.put_json(
             binding.to_dict(),
             artifact_type="FamilyBindingArtifact",
-            schema_version="6",
+            schema_version="7",
             provenance={
                 "family_id": family.family_id,
                 "primary_profile": primary_profile.canonical_profile_id,
@@ -241,5 +255,6 @@ class MinionV2Catalog:
             child_refs=(
                 (schema_ref.sha256, "architecture_schema"),
                 (template_ref.sha256, "architect_template"),
+                (satellite_template_ref.sha256, "graph_satellite_template"),
             ),
         )

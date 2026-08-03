@@ -82,14 +82,6 @@ def requirement_refs_from_view(view: Mapping[str, Any]) -> set[RequirementRef]:
             if isinstance(item, Mapping)
         }
         allowed = {(section, requirement) for section, requirement in allowed if section and requirement}
-    integration = dict(view.get("integration_contract") or {})
-    allowed.update(
-        (str(item.get("section") or ""), str(item.get("requirement") or ""))
-        for item in list(integration.get("covers") or [])
-        if isinstance(item, Mapping)
-        and str(item.get("section") or "").strip()
-        and str(item.get("requirement") or "").strip()
-    )
     return allowed
 
 

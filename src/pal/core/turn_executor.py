@@ -270,7 +270,12 @@ class TurnExecutor:
             outcome = await self.stream_llm_request_async(continuation, llm_runtime, request)
         else:
             outcome = await self._call_port_async(llm_runtime, "agenerate", "generate", request)
-            await self._upsert_l1_assistant_async(continuation, outcome.response.message)
+            # An endpoint error is transport/recovery state, not an assistant
+            # message.  Persisting it into L1 makes a later retry replay a
+            # synthetic assistant turn and, for strict providers such as
+            # Anthropic thinking mode, can produce an ill-formed protocol.
+            if outcome.response.finish_reason != LLMFinishReason.ERROR:
+                await self._upsert_l1_assistant_async(continuation, outcome.response.message)
         self._debug_log_outcome(continuation, outcome)
         preferred_endpoint_id = str(getattr(outcome, "preferred_endpoint_id", "") or "").strip() or None
         preferred_model_id = str(getattr(outcome, "preferred_model_id", "") or "").strip() or None
@@ -545,7 +550,15 @@ class TurnExecutor:
 
     async def _handle_ir_stream_update(self, continuation: Any, update: Any) -> None:
         self._ensure_not_interrupted(continuation)
-        await self._upsert_l1_assistant_async(continuation, update.response.message)
+        # A terminal ERROR update is not a semantic assistant message.  The
+        # non-terminal deltas have already preserved any valid partial wire
+        # replay; the error itself must stay outside the L1 conversation so a
+        # retry can resend the same logical request.
+        if not (
+            update.delta_kind == LLMResponseDeltaKind.STATE
+            and update.response.finish_reason == LLMFinishReason.ERROR
+        ):
+            await self._upsert_l1_assistant_async(continuation, update.response.message)
         channel_update: ChannelStreamUpdate | None = None
         if update.delta_kind == LLMResponseDeltaKind.TEXT and update.text_delta:
             channel_update = ChannelStreamUpdate(
@@ -1066,17 +1079,39 @@ class TurnExecutor:
         method = getattr(memory_service, "append_l1_tool_result", None)
         if not callable(method):
             return
+        content = self._render_tool_result_content(call, result)
         method(
             str(continuation.turn_id),
             ToolResultIR(
                 call_id=call.call_id,
                 name=call.name,
-                content=self._render_tool_result_content(call, result),
+                content=content,
                 ok=result.ok,
                 status=str(result.status or ("ok" if result.ok else "error")),
                 structured=dict(result.structured) if result.structured is not None else None,
             ),
         )
+        delivery = getattr(result, "context_delivery", None)
+        commit = getattr(
+            getattr(self.context, "execution_runtime", None),
+            "commit_tool_delivery",
+            None,
+        )
+        if isinstance(delivery, dict) and callable(commit):
+            try:
+                commit(
+                    turn_id=str(continuation.turn_id),
+                    context_delivery=dict(delivery),
+                )
+            except Exception:
+                # L1 already contains the result; a retired logical session
+                # must not turn an otherwise completed tool call into failure.
+                LOGGER.warning(
+                    "tool delivery commit failed after L1 append: turn_id=%s tool=%s",
+                    continuation.turn_id,
+                    call.name,
+                    exc_info=True,
+                )
 
     @staticmethod
     def _active_input_id(

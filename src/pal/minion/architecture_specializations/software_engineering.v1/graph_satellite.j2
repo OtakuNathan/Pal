@@ -1,0 +1,6 @@
+# Family-owned GraphIR satellite data. The shared graph layer persists and
+# compares this mapping but never interprets its fields.
+satellite_data:
+  family_id: software_engineering
+  architecture: {{ document | tojson }}
+workspace_policy: {{ node.definition.paths | tojson }}

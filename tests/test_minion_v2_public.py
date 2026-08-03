@@ -32,6 +32,9 @@ from pal.minion.v2.ask_question import ASK_QUESTION_CAPABILITY
 from pal.minion.v2.architecture_templates import ArchitectureTemplateCompiler
 from pal.minion.v2.contract_submission import CONTRACT_SUBMIT_CAPABILITY
 from pal.minion.v2.execution import WorkspaceProcessHolder
+from pal.minion.v2.cycle_protocol import AssignmentKind, CycleSlot
+from pal.minion.v2.graph_protocol import GraphIR, NodeSpec, RoleBinding
+from pal.minion.v2.workflow_runtime import WorkflowCoordinator
 from pal.minion.v2.orchestration import (
     MinionV2OutboxProcessor,
     _execution_epoch_id,
@@ -1070,7 +1073,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         self.assertIsNone(reusable)
 
-    def test_background_worker_supervisor_enforces_global_slot_limit(self) -> None:
+    def test_background_worker_supervisor_does_not_limit_logical_coroutines(self) -> None:
         async def scenario() -> None:
             worker = SemanticOrchestrator(
                 MinionV2WorkflowService(self.runtime_root),
@@ -1088,14 +1091,15 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 return {"status": "completed"}
 
             await worker._launch_background_worker(first_effect, first_runner)
-            with self.assertRaisesRegex(DeferredEffectError, "no available execution slot"):
-                await worker._launch_background_worker(
-                    {
-                        "effect_id": "effect-slot-two",
-                        "effect_key": "effect-key-slot-two",
-                    },
-                    first_runner,
-                )
+            await worker._launch_background_worker(
+                {
+                    "effect_id": "effect-slot-two",
+                    "effect_key": "effect-key-slot-two",
+                },
+                first_runner,
+            )
+            self.assertEqual(worker.active_background_count, 2)
+            self.assertEqual(worker.active_process_count, 0)
             release.set()
             await asyncio.gather(*tuple(worker._background_workers.values()))
 
@@ -1973,9 +1977,13 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         processor.repository.dispatch = lambda action: actions.append(action)
         processor._link_workflow = lambda *_args: None
 
-        processor._create_revision({"effect_key": "event-edit:0"})
+        with patch(
+            "pal.minion.v2.orchestration.WorkflowCoordinator.begin_plan_revision"
+        ) as begin_revision:
+            processor._create_revision({"effect_key": "event-edit:0"})
 
         self.assertEqual(completed, [])
+        begin_revision.assert_called_once_with(workflow_id="wf-edit")
         self.assertEqual([action.action_type for action in actions], ["CREATE_ARCHITECTURE_REVISION"])
         self.assertEqual(actions[0].payload["parent_revision_id"], previous.aggregate_id)
         self.assertEqual(
@@ -2550,7 +2558,11 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         result = asyncio.run(
             worker._run_architecture_stage(
-                {"effect_id": "eff-duplicate", "payload": {"stage": "architect"}}
+                {
+                    "effect_id": "eff-duplicate",
+                    "effect_key": "architecture:duplicate",
+                    "payload": {"stage": "architect"},
+                }
             )
         )
 
@@ -2634,16 +2646,17 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         worker._effect_snapshot = lambda _effect: next(snapshots)
 
-        worker._admit_node_worker(
-            {"effect_key": "producer"},
-            action_type="START_PRODUCING",
-            activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
-        )
-        worker._admit_node_worker(
-            {"effect_key": "repair"},
-            action_type="START_REPAIR",
-            activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR),
-        )
+        with patch.object(worker, "_start_graph_cycle_assignment"):
+            worker._admit_node_worker(
+                {"effect_key": "producer"},
+                action_type="START_PRODUCING",
+                activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.PRODUCE),
+            )
+            worker._admit_node_worker(
+                {"effect_key": "repair"},
+                action_type="START_REPAIR",
+                activation=RoleActivation(OrchestrationRole.IMPLEMENTATION, RoleMode.REPAIR),
+            )
 
         expected = coder_session_id("wf-coder-session", "router")
         self.assertEqual(claims, [expected, expected])
@@ -2688,16 +2701,17 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         worker._effect_snapshot = lambda _effect: next(snapshots)
 
-        worker._admit_node_worker(
-            {"effect_key": "review-first"},
-            action_type="START_REVIEW",
-            activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
-        )
-        worker._admit_node_worker(
-            {"effect_key": "review-after-repair"},
-            action_type="START_REVIEW",
-            activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
-        )
+        with patch.object(worker, "_start_graph_cycle_assignment"):
+            worker._admit_node_worker(
+                {"effect_key": "review-first"},
+                action_type="START_REVIEW",
+                activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
+            )
+            worker._admit_node_worker(
+                {"effect_key": "review-after-repair"},
+                action_type="START_REVIEW",
+                activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
+            )
 
         verifier_id = module_verifier_session_id(
             "wf-verifier-session",
@@ -3467,7 +3481,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             return pack
 
         binding = {
-            "schema_version": "6",
+            "schema_version": "7",
             "family_id": "software_engineering",
             "execution_adapter": "software_git.v2",
             "architecture_definition": {
@@ -3476,6 +3490,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "generation_hash": "a" * 64,
                 "schema_ref": {"sha256": "schema"},
                 "template_ref": {"sha256": "template"},
+                "satellite_template_ref": {"sha256": "satellite"},
             },
             "policies": {},
             "role_bindings": {
@@ -5049,6 +5064,39 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         contract_ref = service.artifacts.put_json(
             {"module_name": "drawing"},
             artifact_type="ModuleContractArtifact",
+        )
+        graph = GraphIR(
+            graph_id="wf_orphaned_node",
+            generation=1,
+            nodes={
+                "drawing": NodeSpec(
+                    name="drawing",
+                    responsibility="render one drawing",
+                    satellite_data={"test": True},
+                    producer_binding=RoleBinding("profile", "coder"),
+                    checker_binding=RoleBinding("profile", "verifier"),
+                    execution_adapter="software_git.v2",
+                    workspace_policy={},
+                    output_contract=("drawing",),
+                    is_sink=True,
+                )
+            },
+            edges=(),
+            sink="drawing",
+            source_ref="architect.yaml",
+            source_map_ref="source-map",
+        )
+        coordinator = WorkflowCoordinator(service.repository)
+        coordinator.install_graph(
+            workflow_id="wf_orphaned_node",
+            graph=graph,
+        )
+        coordinator.start_assignment(
+            workflow_id="wf_orphaned_node",
+            node_name="drawing",
+            slot=CycleSlot.PRODUCER,
+            kind=AssignmentKind.INITIAL,
+            input_fingerprint="orphaned-producer",
         )
         node_id = "epoch_orphaned:node:drawing"
         service.repository.dispatch(

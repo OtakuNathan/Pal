@@ -13,10 +13,6 @@ from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.paths import minion_data_root
 
 
-class IntegrationOwnershipDefect(RuntimeError):
-    pass
-
-
 class DeliveryReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -48,7 +44,7 @@ class DeliveryService:
         verification_ref: ArtifactRef,
     ) -> ArtifactRef:
         if _git(repository, "rev-parse", f"{commit_sha}^{{commit}}").strip() != commit_sha:
-            raise ValueError("delivery commit is unavailable in the Integration repository")
+            raise ValueError("delivery commit is unavailable in the sink module repository")
         branch_name = f"pal/minion/{_ref_slug(workflow_key or workflow_id)}"
         base_branch = str(source_snapshot.get("source_branch") or "").strip()
         fallback_reason = ""
@@ -263,59 +259,8 @@ class DeliveryService:
             receipt.model_dump(mode="json"),
             artifact_type="DeliveryReceiptArtifact",
             provenance={"owner": "manager", "kind": receipt.kind},
-            child_refs=((verification_ref.sha256, "system_verification"),),
+            child_refs=((verification_ref.sha256, "sink_verification"),),
         )
-
-@dataclass
-class IntegrationService:
-    artifacts: ContentAddressedArtifactStore
-
-    def integrate_candidates(
-        self,
-        *,
-        integration_worktree: Path,
-        ordered_candidates: Sequence[Mapping[str, Any]],
-        architecture_manifest_sha: str,
-    ) -> tuple[ArtifactRef, str]:
-        merged: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for candidate in ordered_candidates:
-            candidate_digest = str(candidate.get("candidate_digest") or "")
-            node_run_id = str(candidate.get("node_run_id") or "")
-            if not candidate_digest or not node_run_id:
-                raise ValueError("integration candidate requires node_run_id and candidate_digest")
-            if candidate_digest in seen or _is_ancestor(
-                integration_worktree, candidate_digest, "HEAD"
-            ):
-                continue
-            try:
-                _git(
-                    integration_worktree,
-                    "-c",
-                    "user.name=Pal Minion",
-                    "-c",
-                    "user.email=minion@localhost",
-                    "merge",
-                    "--no-ff",
-                    "--no-edit",
-                    candidate_digest,
-                )
-            except subprocess.CalledProcessError as exc:
-                _git_no_check(integration_worktree, "merge", "--abort")
-                raise IntegrationOwnershipDefect(
-                    f"module {node_run_id} conflicted during Git integration"
-                ) from exc
-            seen.add(candidate_digest)
-            merged.append({"node_run_id": node_run_id, "candidate_digest": candidate_digest})
-        integration_sha = _git(integration_worktree, "rev-parse", "HEAD").strip()
-        payload = {
-            "schema_version": "1",
-            "architecture_manifest_sha": architecture_manifest_sha,
-            "integration_candidate_digest": integration_sha,
-            "merged_candidates": merged,
-        }
-        ref = self.artifacts.put_json(payload, artifact_type="IntegrationCandidateArtifact")
-        return ref, integration_sha
 
 def _is_ancestor(repository: Path, ancestor: str, descendant: str) -> bool:
     result = subprocess.run(
@@ -339,23 +284,19 @@ def _git(repository: Path, *args: str) -> str:
     ).stdout
 
 
-def _git_no_check(repository: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", *args],
-        cwd=repository,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-
-
 def _ref_slug(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._/-]+", "-", value.strip())
     normalized = re.sub(r"/+", "/", normalized).strip("./-")
     return normalized or "workflow"
 
 
-def _path_slug(value: str) -> str:
+def _path_slug(value: str, *, max_length: int = 120) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
     normalized = normalized.strip(".-")
+    if not normalized:
+        return "workflow"
+    # A task title is user-controlled and can be arbitrarily long.  This
+    # component is used as one directory name, so keep it comfortably below
+    # NAME_MAX even after the workflow-id suffix is appended by the caller.
+    normalized = normalized[:max(1, int(max_length))].rstrip(".-")
     return normalized or "workflow"

@@ -3,10 +3,10 @@ EXTENDS Naturals, TLC
 
 CONSTANT MaxRetries
 
-Schemas == {"legacy", "v5"}
+Schemas == {"v5", "v6", "other"}
 Shapes == {"items", "turns", "invalid"}
 Phases == {
-    "Stored", "Migrating", "Ready", "Running", "Failed", "Rejected",
+    "Stored", "Ready", "Running", "Failed", "Rejected",
     "Completed", "Terminal"
 }
 ErrorClasses == {"none", "transient", "deterministic"}
@@ -15,24 +15,19 @@ VARIABLES
     phase,
     schema,
     shape,
-    originShape,
-    migrationApplied,
     workerStarted,
     errorClass,
     errorVisible,
     retries
 
 vars == <<
-    phase, schema, shape, originShape, migrationApplied, workerStarted,
-    errorClass, errorVisible, retries
+    phase, schema, shape, workerStarted, errorClass, errorVisible, retries
 >>
 
 Init ==
     /\ phase = "Stored"
     /\ schema \in Schemas
     /\ shape \in Shapes
-    /\ originShape = shape
-    /\ migrationApplied = FALSE
     /\ workerStarted = FALSE
     /\ errorClass = "none"
     /\ errorVisible = FALSE
@@ -40,70 +35,47 @@ Init ==
 
 AdmitCurrent ==
     /\ phase = "Stored"
-    /\ schema = "v5"
+    /\ schema = "v6"
     /\ shape = "turns"
     /\ phase' = "Ready"
-    /\ UNCHANGED <<schema, shape, originShape, migrationApplied,
-        workerStarted, errorClass, errorVisible, retries>>
-
-BeginLegacyMigration ==
-    /\ phase = "Stored"
-    \* The old and current payloads accidentally shared the v5 label, so
-    \* admission must inspect shape instead of trusting the label alone.
-    /\ shape = "items"
-    /\ phase' = "Migrating"
-    /\ UNCHANGED <<schema, shape, originShape, migrationApplied,
-        workerStarted, errorClass, errorVisible, retries>>
-
-CompleteLegacyMigration ==
-    /\ phase = "Migrating"
-    /\ phase' = "Ready"
-    /\ schema' = "v5"
-    /\ shape' = "turns"
-    /\ migrationApplied' = TRUE
-    /\ UNCHANGED <<originShape, workerStarted, errorClass, errorVisible,
-        retries>>
+    /\ UNCHANGED <<schema, shape, workerStarted, errorClass,
+                    errorVisible, retries>>
 
 RejectUnsupported ==
     /\ phase = "Stored"
-    /\ shape # "items"
-    /\ ~(schema = "v5" /\ shape = "turns")
+    /\ ~(schema = "v6" /\ shape = "turns")
     /\ phase' = "Rejected"
     /\ errorClass' = "deterministic"
     /\ errorVisible' = TRUE
-    /\ UNCHANGED <<schema, shape, originShape, migrationApplied,
-        workerStarted, retries>>
+    /\ UNCHANGED <<schema, shape, workerStarted, retries>>
 
 StartWorker ==
     /\ phase = "Ready"
-    /\ schema = "v5"
+    /\ schema = "v6"
     /\ shape = "turns"
     /\ phase' = "Running"
     /\ workerStarted' = TRUE
-    /\ UNCHANGED <<schema, shape, originShape, migrationApplied,
-        errorClass, errorVisible, retries>>
+    /\ UNCHANGED <<schema, shape, errorClass, errorVisible, retries>>
 
 WorkerSucceeds ==
     /\ phase = "Running"
     /\ phase' = "Completed"
-    /\ UNCHANGED <<schema, shape, originShape, migrationApplied,
-        workerStarted, errorClass, errorVisible, retries>>
+    /\ UNCHANGED <<schema, shape, workerStarted, errorClass,
+                    errorVisible, retries>>
 
 WorkerFailsTransiently ==
     /\ phase = "Running"
     /\ phase' = "Failed"
     /\ errorClass' = "transient"
     /\ errorVisible' = TRUE
-    /\ UNCHANGED <<schema, shape, originShape, migrationApplied,
-        workerStarted, retries>>
+    /\ UNCHANGED <<schema, shape, workerStarted, retries>>
 
 WorkerFailsDeterministically ==
     /\ phase = "Running"
     /\ phase' = "Failed"
     /\ errorClass' = "deterministic"
     /\ errorVisible' = TRUE
-    /\ UNCHANGED <<schema, shape, originShape, migrationApplied,
-        workerStarted, retries>>
+    /\ UNCHANGED <<schema, shape, workerStarted, retries>>
 
 RetryTransientFailure ==
     /\ phase = "Failed"
@@ -113,14 +85,13 @@ RetryTransientFailure ==
     /\ errorClass' = "none"
     /\ errorVisible' = FALSE
     /\ retries' = retries + 1
-    /\ UNCHANGED <<schema, shape, originShape, migrationApplied,
-        workerStarted>>
+    /\ UNCHANGED <<schema, shape, workerStarted>>
 
 Settle ==
     /\ phase \in {"Completed", "Failed", "Rejected"}
     /\ phase' = "Terminal"
-    /\ UNCHANGED <<schema, shape, originShape, migrationApplied,
-        workerStarted, errorClass, errorVisible, retries>>
+    /\ UNCHANGED <<schema, shape, workerStarted, errorClass,
+                    errorVisible, retries>>
 
 Terminal ==
     /\ phase = "Terminal"
@@ -128,8 +99,6 @@ Terminal ==
 
 Next ==
     \/ AdmitCurrent
-    \/ BeginLegacyMigration
-    \/ CompleteLegacyMigration
     \/ RejectUnsupported
     \/ StartWorker
     \/ WorkerSucceeds
@@ -145,19 +114,16 @@ TypeOK ==
     /\ phase \in Phases
     /\ schema \in Schemas
     /\ shape \in Shapes
-    /\ originShape \in Shapes
-    /\ migrationApplied \in BOOLEAN
     /\ workerStarted \in BOOLEAN
     /\ errorClass \in ErrorClasses
     /\ errorVisible \in BOOLEAN
     /\ retries \in 0..MaxRetries
 
 WorkerStartsOnlyWithCurrentL1 ==
-    workerStarted => schema = "v5" /\ shape = "turns"
+    workerStarted => schema = "v6" /\ shape = "turns"
 
-LegacyShapeRequiresRealMigration ==
-    originShape = "items" /\ phase \in {"Ready", "Running", "Failed", "Completed", "Terminal"}
-    => migrationApplied
+LegacyCheckpointNeverBecomesReady ==
+    schema = "v5" => phase \notin {"Ready", "Running", "Completed"}
 
 FailureRemainsVisible ==
     errorClass # "none" => errorVisible

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, Mapping
 
 from pal.minion.v2 import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, MinionV2Repository
 from pal.minion.v2.contract_runtime import ContractArtifactAccess
@@ -34,6 +35,11 @@ from pal.minion.v2.execution import (
     _validate_skeleton_candidate_paths,
 )
 from pal.minion.v2.task_ledger import TaskLedgerService
+from pal.minion.v2.graph_compiler import GraphCompileBindings, GraphCompiler
+from pal.minion.v2.graph_protocol import RoleBinding
+from pal.minion.v2.graph_satellites import FamilyNodeProjection
+from pal.minion.v2.cycle_protocol import AssignmentKind, CycleSlot
+from pal.minion.v2.workflow_runtime import WorkflowCoordinator
 
 
 def _lock_candidate_workspace(
@@ -77,6 +83,37 @@ def _contract(unit_id: str, owned_area: str) -> dict:
         "complexity_budget": _budget(),
         "split_conditions": [],
     }
+
+
+class _SelectiveTestFamilyProjector:
+    """A Family projection whose node semantics include only its providers."""
+
+    def project(
+        self,
+        *,
+        document: Mapping[str, Any],
+        node_name: str,
+        node: Mapping[str, Any],
+    ) -> FamilyNodeProjection:
+        modules = dict(document.get("modules") or {})
+        dependencies = dict(node.get("dependencies") or {})
+        return FamilyNodeProjection(
+            satellite_data={
+                "node_name": node_name,
+                "node": dict(node),
+                "context": dict(document.get("context") or {}),
+                "requirements": {
+                    name: dict(value or {})
+                    for name, value in dict(document.get("requirements") or {}).items()
+                    if str(dict(value or {}).get("owner") or "") == node_name
+                },
+                "provider_semantics": {
+                    provider: dict(modules.get(provider) or {})
+                    for provider in sorted(dependencies)
+                },
+            },
+            workspace_policy={},
+        )
 
 
 class MinionV2ExecutionTests(unittest.TestCase):
@@ -173,7 +210,8 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 "requirements_ref": requirements.to_dict(),
                 "contract_schema": "general.v1",
                 "contract": {
-                    "schema_version": "1",
+                    "schema_version": "2",
+                    "graph": {"sink": "delivery"},
                     "context": {
                         "goal": "Implement A, then B using A.",
                         "constraints": [],
@@ -212,13 +250,31 @@ class MinionV2ExecutionTests(unittest.TestCase):
                             },
                             "definition": {"deliverables": ["b_output"]},
                         },
+                        "delivery": {
+                            "responsibility": "Deliver the composed result.",
+                            "execution": "produce",
+                            "provides": ["result"],
+                            "dependencies": {
+                                "a": {
+                                    "consumes": ["a_output"],
+                                    "purpose": "Include A in the delivery.",
+                                    "handoff": "A output is assembled into the result.",
+                                },
+                                "b": {
+                                    "consumes": ["b_output"],
+                                    "purpose": "Include B in the delivery.",
+                                    "handoff": "B output is assembled into the result.",
+                                },
+                            },
+                            "definition": {"deliverables": ["result"]},
+                        },
                     },
                     "scenarios": {
                         "compose": {
-                            "modules": ["a", "b"],
+                            "modules": ["a", "b", "delivery"],
                             "requirement_refs": ["a_output", "b_output"],
-                            "entrypoint": {"module": "b", "surface": "b_output"},
-                            "contract_flow": ["a_output -> b -> b_output"],
+                            "entrypoint": {"module": "delivery", "surface": "result"},
+                            "contract_flow": ["a_output -> b -> b_output -> delivery"],
                             "observable_behavior": "B is produced from A.",
                             "failure_behavior": "Rejected A prevents B.",
                             "environment": "Artifact workspace.",
@@ -261,6 +317,27 @@ class MinionV2ExecutionTests(unittest.TestCase):
         source_epoch_id: str = "",
     ):
         self._bind_workflow(workflow_id)
+        artifact = dict(self.store.read_json(manifest_ref))
+        contract = dict(artifact["contract"])
+        latest_graph = self.repository.read_graph_generation(
+            graph_id=workflow_id
+        )
+        graph = GraphCompiler().compile(
+            contract,
+            graph_id=workflow_id,
+            generation=(latest_graph.generation + 1 if latest_graph else 1),
+            bindings=GraphCompileBindings(
+                producer=RoleBinding("profile", "generic"),
+                checker=RoleBinding("profile", "general.verifier"),
+                execution_adapter=ARTIFACT_BUNDLE_ADAPTER,
+            ),
+            satellite_projector=_SelectiveTestFamilyProjector(),
+            source_ref="architect.yaml",
+        )
+        manifest_ref = self.store.put_json(
+            {**artifact, "graph_ir": graph.to_dict()},
+            artifact_type="ContractArtifact",
+        )
         return ExecutionCompiler(self.repository, self.contracts).compile_epoch(
             workflow_id=workflow_id,
             epoch_id=epoch_id,
@@ -276,11 +353,11 @@ class MinionV2ExecutionTests(unittest.TestCase):
             manifest_ref=manifest,
         )
         scheduler = DagScheduler(self.repository)
-        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1", max_new_nodes=3), (compilation.unit_node_ids["a"],))
+        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1"), (compilation.unit_node_ids["a"],))
         self._accept_node(compilation.unit_node_ids["a"])
-        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1", max_new_nodes=3), (compilation.unit_node_ids["b"],))
+        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1"), (compilation.unit_node_ids["b"],))
         self._accept_node(compilation.unit_node_ids["b"])
-        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1", max_new_nodes=3), (compilation.integration_node_id,))
+        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1"), (compilation.sink_node_id,))
 
     def test_family_binding_not_contract_schema_selects_execution_strategy(
         self,
@@ -560,12 +637,17 @@ class MinionV2ExecutionTests(unittest.TestCase):
         queued = DagScheduler(self.repository).schedule_ready_nodes(
             workflow_id="wf_parallel",
             epoch_id=compilation.epoch_id,
-            max_new_nodes=2,
         )
 
-        self.assertEqual(set(queued), set(compilation.unit_node_ids.values()))
+        self.assertEqual(
+            set(queued),
+            {
+                compilation.unit_node_ids["a"],
+                compilation.unit_node_ids["b"],
+            },
+        )
 
-    def test_integration_dependencies_preserve_topological_merge_order(self) -> None:
+    def test_authored_sink_uses_declared_execution_dependencies(self) -> None:
         manifest = self._manifest()
         payload = self.store.read_json(manifest)
         contract = dict(payload["contract"])
@@ -593,13 +675,16 @@ class MinionV2ExecutionTests(unittest.TestCase):
             epoch_id="epoch_topological_merge",
             manifest_ref=reordered,
         )
-        integration = self.repository.read_snapshot(
-            AggregateType.DAG_NODE_RUN, compilation.integration_node_id
+        sink = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN, compilation.sink_node_id
         )
-        assert integration is not None
+        assert sink is not None
         self.assertEqual(
-            integration.payload["dependency_node_ids"],
-            [compilation.unit_node_ids["b"], compilation.unit_node_ids["a"]],
+            set(sink.payload["dependency_node_ids"]),
+            {
+                compilation.unit_node_ids["a"],
+                compilation.unit_node_ids["b"],
+            },
         )
 
     def test_replan_reuses_only_exactly_matching_accepted_candidates(self) -> None:
@@ -610,9 +695,9 @@ class MinionV2ExecutionTests(unittest.TestCase):
             manifest_ref=manifest,
         )
         scheduler = DagScheduler(self.repository)
-        scheduler.schedule_ready_nodes(workflow_id="wf_reuse", epoch_id=first.epoch_id, max_new_nodes=2)
+        scheduler.schedule_ready_nodes(workflow_id="wf_reuse", epoch_id=first.epoch_id)
         self._accept_node(first.unit_node_ids["a"])
-        scheduler.schedule_ready_nodes(workflow_id="wf_reuse", epoch_id=first.epoch_id, max_new_nodes=2)
+        scheduler.schedule_ready_nodes(workflow_id="wf_reuse", epoch_id=first.epoch_id)
         self._accept_node(first.unit_node_ids["b"])
 
         second = self._compile_epoch(
@@ -658,6 +743,115 @@ class MinionV2ExecutionTests(unittest.TestCase):
             "BLOCKED_BY_DEPS",
         )
 
+    def test_replan_contract_only_dependency_change_requeues_consumer(self) -> None:
+        """A GraphDiff stale decision must beat an unchanged node projection.
+
+        ``catalog`` has no executable node, so the aggregate projection for
+        ``b`` cannot observe it through dependency node ids.  Its changed
+        contract is nevertheless part of ``b``'s GraphIR product boundary.
+        Replan must preserve B's workspace but re-run B rather than carrying
+        an accepted candidate that was verified against the old catalog.
+        """
+
+        original = self._manifest()
+        original_payload = dict(self.store.read_json(original))
+        original_contract = dict(original_payload["contract"])
+        original_modules = {
+            name: dict(module)
+            for name, module in dict(original_contract["modules"]).items()
+        }
+        original_modules["catalog"] = {
+            "responsibility": "Define the protocol catalog.",
+            "execution": "contract_only",
+            "provides": ["catalog_rules"],
+            "dependencies": {},
+            "definition": {"protocol_version": "v1"},
+        }
+        original_modules["b"] = {
+            **original_modules["b"],
+            "dependencies": {
+                **dict(original_modules["b"]["dependencies"]),
+                "catalog": {
+                    "consumes": ["catalog_rules"],
+                    "purpose": "Use the declared protocol catalog.",
+                    "handoff": "Catalog rules constrain B.",
+                },
+            },
+        }
+        first_manifest = self.store.put_json(
+            {
+                **original_payload,
+                "contract": {
+                    **original_contract,
+                    "modules": original_modules,
+                },
+            },
+            artifact_type="ContractArtifact",
+        )
+        first = self._compile_epoch(
+            workflow_id="wf_contract_only_replan",
+            epoch_id="epoch_contract_only_1",
+            manifest_ref=first_manifest,
+        )
+        scheduler = DagScheduler(self.repository)
+        scheduler.schedule_ready_nodes(
+            workflow_id="wf_contract_only_replan",
+            epoch_id=first.epoch_id,
+        )
+        self._accept_node(first.unit_node_ids["a"])
+        scheduler.schedule_ready_nodes(
+            workflow_id="wf_contract_only_replan",
+            epoch_id=first.epoch_id,
+        )
+        self._accept_node(first.unit_node_ids["b"])
+
+        revised_payload = dict(self.store.read_json(first_manifest))
+        revised_contract = dict(revised_payload["contract"])
+        revised_modules = {
+            name: dict(module)
+            for name, module in dict(revised_contract["modules"]).items()
+        }
+        revised_modules["catalog"] = {
+            **revised_modules["catalog"],
+            "definition": {"protocol_version": "v2"},
+        }
+        revised_manifest = self.store.put_json(
+            {
+                **revised_payload,
+                "contract": {
+                    **revised_contract,
+                    "modules": revised_modules,
+                },
+            },
+            artifact_type="ContractArtifact",
+        )
+        replanned = self._compile_epoch(
+            workflow_id="wf_contract_only_replan",
+            epoch_id="epoch_contract_only_2",
+            manifest_ref=revised_manifest,
+            source_epoch_id=first.epoch_id,
+        )
+
+        carried_a = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            replanned.unit_node_ids["a"],
+        )
+        stale_b = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            replanned.unit_node_ids["b"],
+        )
+        assert carried_a is not None
+        assert stale_b is not None
+        self.assertEqual(carried_a.state, "ACCEPTED")
+        self.assertEqual(stale_b.state, "BLOCKED_BY_DEPS")
+        self.assertEqual(
+            scheduler.schedule_ready_nodes(
+                workflow_id="wf_contract_only_replan",
+                epoch_id=replanned.epoch_id,
+            ),
+            (replanned.unit_node_ids["b"],),
+        )
+
     def test_unit_work_view_contains_only_module_local_semantics(self) -> None:
         manifest = self._manifest()
         compilation = self._compile_epoch(
@@ -672,7 +866,79 @@ class MinionV2ExecutionTests(unittest.TestCase):
         self.assertEqual(view["module_name"], "a")
         self.assertEqual(view["module"]["responsibility"], "Implement a.")
         self.assertEqual(set(view["requirements"]), {"a_output", "b_output"})
+        self.assertEqual(set(view["scenarios"]), {"compose"})
+        self.assertEqual(
+            view["entrypoints"],
+            [{"module": "delivery", "surface": "result"}],
+        )
         self.assertEqual(view["context"]["constraints"], [])
+
+        consumer = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            compilation.unit_node_ids["b"],
+        )
+        assert consumer is not None
+        consumer_view = self.store.read_json(
+            UnitWorkViewBuilder(self.contracts).build(consumer)
+        )
+        self.assertEqual(
+            consumer_view["dependency_contracts"]["a"]["handoff"]["handoff"],
+            "A output becomes B input.",
+        )
+
+    def test_work_view_entrypoint_accepts_string_projection(self) -> None:
+        # SWE's compact skeleton projection stores scenario entrypoints as
+        # strings; the richer contract form remains a structured mapping.
+        self.assertEqual(
+            UnitWorkViewBuilder._entrypoint_view("framepipe decode"),
+            {"target": "framepipe decode"},
+        )
+        self.assertEqual(
+            UnitWorkViewBuilder._entrypoint_view(
+                {"module": "framepipe_app", "surface": "decode"}
+            ),
+            {"module": "framepipe_app", "surface": "decode"},
+        )
+
+    def test_sink_work_view_receives_the_complete_scenario_graph(self) -> None:
+        manifest = self._manifest()
+        artifact = self.store.read_json(manifest)
+        contract = dict(artifact["contract"])
+        contract["scenarios"] = {
+            **dict(contract["scenarios"]),
+            "library_flow": {
+                "modules": ["a", "b"],
+                "requirement_refs": ["a_output", "b_output"],
+                "entrypoint": {"module": "b", "surface": "b_output"},
+                "contract_flow": ["a_output -> b -> b_output"],
+                "observable_behavior": "Library consumers obtain B from A.",
+                "failure_behavior": "Rejected A prevents B.",
+                "environment": "Library consumer process.",
+            },
+        }
+        manifest = self.store.put_json(
+            {**artifact, "contract": contract},
+            artifact_type="ContractArtifact",
+        )
+        compilation = self._compile_epoch(
+            workflow_id="wf_sink_view",
+            epoch_id="epoch_sink_view",
+            manifest_ref=manifest,
+        )
+        sink = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            compilation.sink_node_id,
+        )
+        assert sink is not None
+        view = self.store.read_json(
+            UnitWorkViewBuilder(self.contracts).build(sink)
+        )
+        self.assertEqual(set(view["requirements"]), {"a_output", "b_output"})
+        self.assertEqual(set(view["scenarios"]), {"compose", "library_flow"})
+        self.assertIn(
+            {"module": "b", "surface": "b_output"},
+            view["entrypoints"],
+        )
 
     def test_journal_is_mutable_but_lease_fenced(self) -> None:
         lease = self.repository.claim_lease("node:journal", "worker_journal", ttl_seconds=60)
@@ -1033,6 +1299,23 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 self.assertFalse(locks.is_held(node_id))
 
     def _accept_node(self, node_id: str) -> None:
+        initial = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            node_id,
+        )
+        module_name = str(
+            initial.payload.get("module_name")
+            or initial.payload.get("unit_id")
+            or ""
+        )
+        coordinator = WorkflowCoordinator(self.repository)
+        coordinator.start_assignment(
+            workflow_id=initial.workflow_id,
+            node_name=module_name,
+            slot=CycleSlot.PRODUCER,
+            kind=AssignmentKind.INITIAL,
+            input_fingerprint=f"{node_id}:producer",
+        )
         dummy = self.store.put_json({"node_id": node_id}, artifact_type="TestArtifact")
         initial = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
         worktree = Path(str(initial.payload["workspace_path"]))
@@ -1137,6 +1420,26 @@ class MinionV2ExecutionTests(unittest.TestCase):
                     idempotency_key=f"{node_id}:{action_type}:{snapshot.version}",
                 )
             )
+            if action_type == "CANDIDATE_SNAPSHOTTED":
+                coordinator.producer_submitted(
+                    workflow_id=snapshot.workflow_id,
+                    node_name=module_name,
+                    product_ref=candidate_ref.sha256,
+                )
+            elif action_type == "START_REVIEW":
+                coordinator.start_assignment(
+                    workflow_id=snapshot.workflow_id,
+                    node_name=module_name,
+                    slot=CycleSlot.CHECKER,
+                    kind=AssignmentKind.INITIAL,
+                    input_fingerprint=f"{node_id}:checker",
+                )
+            elif action_type == "REVIEW_PASSED":
+                coordinator.checker_verdict(
+                    workflow_id=snapshot.workflow_id,
+                    node_name=module_name,
+                    accepted=True,
+                )
 
 
 if __name__ == "__main__":

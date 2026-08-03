@@ -12,8 +12,9 @@ from types import SimpleNamespace
 
 from pal.minion.manager import MinionManager, MinionRunState
 from pal.minion.v2.contracts import LeaseConflict
+from pal.minion.v2.coroutine_runtime import CoroutineRunSemaphore
 from pal.minion.v2.execution import WorkspaceLockRegistry
-from pal.minion.v2.process_lifecycle import WorkerProcessOwner
+from pal.minion.v2.process_lifecycle import RoleProcessShell, WorkerProcessOwner
 from pal.shared import MinionInvocationPack
 
 
@@ -143,6 +144,30 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
             await owner.__aenter__()
         self.assertTrue(owner.process_group_reaped)
         self.assertFalse(self.locks.is_held(owner.lock_key))
+
+    async def test_role_shell_releases_capacity_only_after_owner_cleanup(self) -> None:
+        events: list[str] = []
+        owner = self.owner(
+            invocation_id="shell",
+            script="pass",
+            events=events,
+        )
+        semaphore = CoroutineRunSemaphore(1)
+        shell = RoleProcessShell(
+            owner=owner,
+            semaphore=semaphore,
+            run_id="run-shell",
+        )
+
+        async with shell as running:
+            self.assertEqual(semaphore.active_run_ids, frozenset({"run-shell"}))
+            process = running.process
+            self.assertIsNotNone(process)
+            await process.wait()
+
+        self.assertTrue(owner.resources_released)
+        self.assertEqual(semaphore.active_count, 0)
+        self.assertEqual(events, ["started", "registered", "unregistered"])
 
 
 class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):

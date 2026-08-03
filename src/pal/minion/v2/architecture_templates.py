@@ -23,6 +23,7 @@ class FamilyArchitectureSpecialization:
     preamble: str
     context_template: str
     module_definition_template: str
+    graph_satellite_template: str
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class CompiledArchitectureDefinition:
     family_id: str
     schema: Mapping[str, Any]
     template: str
+    graph_satellite_template: str
     example: Mapping[str, Any]
     generation_hash: str
 
@@ -40,6 +42,7 @@ class CompiledArchitectureDefinition:
             "family_id": self.family_id,
             "schema": copy.deepcopy(dict(self.schema)),
             "template": self.template,
+            "graph_satellite_template": self.graph_satellite_template,
             "example": copy.deepcopy(dict(self.example)),
             "generation_hash": self.generation_hash,
         }
@@ -173,6 +176,7 @@ class ArchitectureTemplateCompiler:
             )
         if set(rendered) != {
             "schema_version",
+            "graph",
             "context",
             "requirements",
             "modules",
@@ -188,6 +192,9 @@ class ArchitectureTemplateCompiler:
                 "family_id": specialization.family_id,
                 "schema": schema,
                 "template": template,
+                "graph_satellite_template": (
+                    specialization.graph_satellite_template
+                ),
             }
         )
         return CompiledArchitectureDefinition(
@@ -195,6 +202,7 @@ class ArchitectureTemplateCompiler:
             family_id=specialization.family_id,
             schema=schema,
             template=template,
+            graph_satellite_template=specialization.graph_satellite_template,
             example=copy.deepcopy(dict(specialization.example)),
             generation_hash=generation_hash,
         )
@@ -227,6 +235,9 @@ class ArchitectureTemplateCompiler:
                     "module_definition_template": directory.joinpath(
                         "module_definition.j2"
                     ).read_text(encoding="utf-8"),
+                    "graph_satellite_template": directory.joinpath(
+                        "graph_satellite.j2"
+                    ).read_text(encoding="utf-8"),
                 }
             )
             item = _specialization_from_mapping(payload)
@@ -246,6 +257,9 @@ def compiled_architecture_definition_from_mapping(
         family_id=str(payload.get("family_id") or "").strip(),
         schema=dict(payload.get("schema") or {}),
         template=str(payload.get("template") or ""),
+        graph_satellite_template=str(
+            payload.get("graph_satellite_template") or ""
+        ),
         example=dict(payload.get("example") or {}),
         generation_hash=str(payload.get("generation_hash") or "").strip(),
     )
@@ -260,6 +274,7 @@ def compiled_architecture_definition_from_mapping(
             "family_id": definition.family_id,
             "schema": dict(definition.schema),
             "template": definition.template,
+            "graph_satellite_template": definition.graph_satellite_template,
         }
     )
     if not definition.generation_hash or definition.generation_hash != expected_hash:
@@ -286,6 +301,9 @@ def _specialization_from_mapping(
         context_template=str(payload.get("context_template") or ""),
         module_definition_template=str(
             payload.get("module_definition_template") or ""
+        ),
+        graph_satellite_template=str(
+            payload.get("graph_satellite_template") or ""
         ),
     )
 
@@ -314,6 +332,7 @@ def _validate_specialization(
         ("preamble", value.preamble),
         ("context template", value.context_template),
         ("module definition template", value.module_definition_template),
+        ("graph satellite template", value.graph_satellite_template),
     ):
         if not str(text).strip():
             raise ValueError(

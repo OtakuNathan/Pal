@@ -24,13 +24,11 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def test_candidate_integration_and_publish_without_git(self) -> None:
+    def test_declared_sink_composes_and_publishes_without_hidden_workspace(self) -> None:
         workspaces = provision_artifact_workspaces(self.root, epoch_id="epoch-1", unit_ids=["facts", "report"])
         facts = Path(workspaces["facts"]["workspace_path"])
         report = Path(workspaces["report"]["workspace_path"])
         (facts / "facts.json").write_text(json.dumps({"protein_g": 120}), encoding="utf-8")
-        (report / "checkin.json").write_text(json.dumps({"status": "on_track"}), encoding="utf-8")
-
         facts_ref, facts_digest = self.adapter.snapshot_candidate(
             workspace=facts,
             reference_only_paths=[],
@@ -38,6 +36,11 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
             dependency_output_hashes={},
             environment_fingerprint="test",
         )
+        # The graph executor materializes accepted provider output into the
+        # authored sink workspace; there is no Manager-created integration
+        # workspace or integration worker.
+        self.adapter.materialize_candidate(facts_ref, report)
+        (report / "checkin.json").write_text(json.dumps({"status": "on_track"}), encoding="utf-8")
         report_ref, report_digest = self.adapter.snapshot_candidate(
             workspace=report,
             reference_only_paths=[],
@@ -48,19 +51,11 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
         self.assertEqual(facts_digest, facts_ref.sha256)
         self.assertEqual(report_digest, report_ref.sha256)
 
-        integration_ref, integration_digest = self.adapter.integrate_candidates(
-            integration_workspace=Path(workspaces["integration"]["workspace_path"]),
-            ordered_candidates=[
-                {"node_run_id": "facts", "candidate_ref": facts_ref.to_dict()},
-                {"node_run_id": "report", "candidate_ref": report_ref.to_dict()},
-            ],
-            architecture_manifest_sha="manifest",
-        )
-        self.assertEqual(integration_digest, integration_ref.sha256)
+        self.assertNotIn("integration", workspaces)
         verification_ref = self.store.put_json({"status": "PASS"}, artifact_type="VerificationArtifact")
         published_ref = self.adapter.publish_deliverable(
             workflow_id="workflow-1",
-            candidate_ref=integration_ref.to_dict(),
+            candidate_ref=report_ref.to_dict(),
             verification_ref=verification_ref,
         )
         published = self.store.read_json(published_ref)

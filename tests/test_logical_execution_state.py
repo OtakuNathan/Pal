@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
+import asyncio
 import unittest
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 from pal.core import PalCore
+from pal.core.turn_executor import TurnExecutor
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.session_state import (
     FileDeliveryManifest,
@@ -16,6 +19,9 @@ from pal.execution.session_state import (
 )
 from pal.minion.scoped_execution import MinionScopedExecutionRuntime
 from pal.minion.v2.execution_state import _apply_delivery as _apply_manager_delivery
+from pal.llm.ir import LLMMessageIR, MessageRole
+from pal.memory import MemoryService, register_with_core as register_memory_with_core
+from pal.memory.contracts import L1MessageKind
 
 
 class LogicalExecutionStateTests(unittest.TestCase):
@@ -547,6 +553,99 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 path.read_text(encoding="utf-8"),
                 "omega\nbeta\n",
             )
+
+    def test_turn_executor_commits_delivery_after_l1_tool_result_append(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        memory = MemoryService()
+        register_memory_with_core(core.context, memory)
+        runtime = core.context.execution_runtime
+        turn_id = "turn-l1-delivery"
+        runtime.begin_tool_result_turn(
+            turn_id=turn_id,
+            scope_key="logical-file-session",
+            input_id="assignment-1",
+        )
+        memory.begin_l1_turn(turn_id, user_text="read then edit")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "input.txt"
+            path.write_text("alpha\nbeta\n", encoding="utf-8")
+            read_call = new_tool_call(
+                name="read_file",
+                args={"file_path": str(path)},
+                call_id="read-l1",
+            )
+            memory.upsert_l1_assistant(
+                turn_id,
+                LLMMessageIR(
+                    role=MessageRole.ASSISTANT,
+                    parts=(read_call,),
+                    semantic_kind=L1MessageKind.ASSISTANT_TOOL_CALL,
+                ),
+            )
+            read = runtime.execute_tool(read_call, turn_id=turn_id)
+            self.assertIsNotNone(read.context_delivery)
+
+            executor = TurnExecutor(
+                core.context,
+                SimpleNamespace(),
+                SimpleNamespace(),
+                call_port_async=lambda *args, **kwargs: None,
+                build_canonical_prompt=lambda *args, **kwargs: None,
+                debug_log_prompt=lambda *args, **kwargs: None,
+                debug_log_outcome=lambda *args, **kwargs: None,
+                debug_log_reply=lambda *args, **kwargs: None,
+                build_llm_tool_contracts=lambda: [],
+                handle_failure_async=lambda *args, **kwargs: None,
+                render_failure_feedback_text=lambda value: str(value),
+                should_enter_failure_flow_for_tool_result=lambda value: False,
+            )
+            asyncio.run(
+                executor._append_l1_tool_result_async(
+                    SimpleNamespace(turn_id=turn_id),
+                    read_call,
+                    read,
+                )
+            )
+
+            state_result = runtime.invoke_indirect_tool(
+                new_tool_call(
+                    name="file_state",
+                    args={"file_path": str(path)},
+                    call_id="state-after-l1",
+                ),
+                turn_id=turn_id,
+            )
+            self.assertTrue(state_result.output["cached"])
+            self.assertTrue(state_result.output["valid"])
+            self.assertTrue(state_result.output["full_view"])
+
+            repeated_read = runtime.execute_tool(
+                new_tool_call(
+                    name="read_file",
+                    args={"file_path": str(path)},
+                    call_id="read-after-l1",
+                ),
+                turn_id=turn_id,
+            )
+            self.assertTrue(repeated_read.structured["unchanged"])
+
+            edit = runtime.execute_tool(
+                new_tool_call(
+                    name="edit_file",
+                    args={
+                        "file_path": str(path),
+                        "old_string": "alpha",
+                        "new_string": "omega",
+                    },
+                    call_id="edit-after-l1",
+                ),
+                turn_id=turn_id,
+            )
+            self.assertTrue(edit.ok, edit.llm_text)
+            self.assertEqual(path.read_text(encoding="utf-8"), "omega\nbeta\n")
 
     def test_historical_read_delivery_cannot_roll_back_self_mutation_snapshot(
         self,

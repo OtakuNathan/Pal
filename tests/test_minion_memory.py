@@ -31,6 +31,7 @@ from pal.minion.compact import (
 )
 from pal.minion.runner import (
     MinionAgentLoopState,
+    MinionLLMRetryableError,
     MinionRunner,
     _minion_llm_request_metadata,
     _restore_minion_memory_state,
@@ -408,6 +409,50 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(state.llm_round_count, 2)
 
+    def test_retryable_llm_error_does_not_become_a_blocked_completion(self) -> None:
+        runner = self._runner()
+        service, _provider = self._memory_service()
+        state = MinionAgentLoopState(
+            execution_runtime=SimpleNamespace(),
+            memory_service=service,
+            memory_candidate_sink=SimpleNamespace(),
+            llm_round_count=1,
+        )
+
+        with self.assertRaises(MinionLLMRetryableError):
+            asyncio.run(
+                runner._postprocess_minion_llm_round(
+                    state,
+                    EffectResult(
+                        status=RuntimeStatus.OK,
+                        payload=generation_result_from_values(
+                            text="endpoint failed",
+                            finish_reason=LLMFinishReason.ERROR,
+                        ),
+                    ),
+                )
+            )
+        self.assertEqual(runner.blocked_summary, "")
+        self.assertEqual(state.llm_round_count, 0)
+
+    def test_closed_checkpoint_reopens_a_distinct_active_l1_turn(self) -> None:
+        runner = self._runner()
+        service, _provider = self._memory_service()
+        service.begin_l1_turn("run:invocation:input", user_text="work")
+        service.settle_l1_turn("run:invocation:input")
+
+        recovered = runner._resume_or_reopen_l1_turn(
+            service,
+            run_id="run",
+            active_input_id="input",
+            user_text="work",
+            fencing_token=2,
+        )
+
+        self.assertEqual(recovered, "run:invocation:input:recovery:2")
+        self.assertIsNotNone(service.active_l1_turn(recovered))
+        self.assertIsNotNone(service.l1_store.turns.get("run:invocation:input"))
+
     def test_checkpoint_atomically_restores_complete_l1(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_minion_compact_checkpoint_"))
         self.addCleanup(shutil.rmtree, root, True)
@@ -517,7 +562,7 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         )
 
         payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], "5")
+        self.assertEqual(payload["schema_version"], "6")
         self.assertEqual(payload["llm_round_count"], 6)
         self.assertEqual(payload["active_input_id"], "checkpoint-active-input")
         self.assertNotIn("active_tool_protocol_messages", payload)

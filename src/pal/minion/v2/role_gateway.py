@@ -16,10 +16,18 @@ from pal.minion.v2.contract_protocol import (
     ARCHITECT_FILENAME,
     validate_contract_payload,
 )
+from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.execution_state import (
     ManagerLogicalExecutionState,
     pager_read_to_dict,
 )
+from pal.minion.v2.graph_compiler import (
+    GraphCompileBindings,
+    GraphCompiler,
+    build_yaml_source_map,
+)
+from pal.minion.v2.graph_satellites import FamilyGraphSatelliteProjector
+from pal.minion.v2.graph_protocol import GraphSourceMap, RoleBinding
 from pal.minion.v2.role_contracts import validate_family_binding_payload
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import (
@@ -53,6 +61,29 @@ def role_gateway_client_from_env(runtime_root: Path) -> MinionRoleGatewayClient 
     if not token:
         return None
     return MinionRoleGatewayClient(Path(runtime_root), token)
+
+
+def _graph_role_binding(value: Mapping[str, Any]) -> RoleBinding:
+    binding = dict(value or {})
+    participant = str(binding.get("participant") or "")
+    profile = dict(binding.get("role_profile") or {})
+    return RoleBinding(
+        participant=participant,
+        profile_id=(
+            str(
+                profile.get("canonical_profile_id")
+                or profile.get("minion_profile")
+                or ""
+            ).strip()
+            if participant == "profile"
+            else ""
+        ),
+        reason=(
+            str(binding.get("reason") or "").strip()
+            if participant == "null"
+            else ""
+        ),
+    )
 
 
 @dataclass
@@ -143,6 +174,14 @@ class RoleAssignmentGateway:
                         for item in list(payload.get("deliveries") or ())
                         if isinstance(item, Mapping)
                     ),
+                ).to_dict()
+            }
+        if method == "execution_record_delivery":
+            return {
+                "context": self._execution_state(
+                    authenticated, payload
+                ).record_delivery(
+                    delivery=dict(payload.get("delivery") or {}),
                 ).to_dict()
             }
         if method == "execution_store_pager":
@@ -396,10 +435,24 @@ class RoleAssignmentGateway:
         template_payload = self.service.artifacts.read_json(
             dict(architecture_binding.get("template_ref") or {})
         )
+        satellite_template_payload = self.service.artifacts.read_json(
+            dict(architecture_binding.get("satellite_template_ref") or {})
+        )
         if not isinstance(schema_payload, Mapping):
             raise ValueError("pinned architecture schema artifact is malformed")
         if not isinstance(template_payload, Mapping):
             raise ValueError("pinned architect template artifact is malformed")
+        if not isinstance(satellite_template_payload, Mapping):
+            raise ValueError("pinned graph satellite template artifact is malformed")
+        if (
+            str(satellite_template_payload.get("specialization_id") or "")
+            != str(architecture_binding.get("specialization_id") or "")
+            or str(satellite_template_payload.get("generation_hash") or "")
+            != str(architecture_binding.get("generation_hash") or "")
+        ):
+            raise ValueError(
+                "pinned graph satellite template does not match its Family binding"
+            )
         definition = compiled_architecture_definition_from_mapping(
             {
                 "specialization_id": architecture_binding["specialization_id"],
@@ -407,6 +460,9 @@ class RoleAssignmentGateway:
                 "generation_hash": architecture_binding["generation_hash"],
                 "schema": dict(schema_payload),
                 "template": str(template_payload.get("template") or ""),
+                "graph_satellite_template": str(
+                    satellite_template_payload.get("template") or ""
+                ),
                 "example": {},
             }
         )
@@ -423,11 +479,64 @@ class RoleAssignmentGateway:
                 dict(prompt_pack.get("metadata") or {}).get("minion_v2") or {}
             ),
         }
+        aggregate = self.repository.read_snapshot(
+            AggregateType(str(assignment["aggregate_type"])),
+            str(assignment["aggregate_id"]),
+        )
+        graph_generation = max(
+            1,
+            int(dict((aggregate or {}).payload if aggregate else {}).get(
+                "revision_number"
+            ) or 1),
+        )
+        source_map = (
+            build_yaml_source_map(
+                Path(str(workspace["architect_path"]))
+            )
+            if str(workspace.get("architect_path") or "").strip()
+            else GraphSourceMap(
+                source_ref=ARCHITECT_FILENAME,
+                locations={},
+            )
+        )
+        source_map_ref = self.service.artifacts.put_json(
+            source_map.to_dict(),
+            artifact_type="GraphSourceMapArtifact",
+            provenance={
+                "workflow_id": str(assignment["workflow_id"]),
+                "architecture_assignment_id": str(
+                    assignment["assignment_id"]
+                ),
+            },
+        )
+        graph_ir = GraphCompiler().compile(
+            document,
+            graph_id=str(assignment["workflow_id"]),
+            generation=graph_generation,
+            bindings=GraphCompileBindings(
+                producer=_graph_role_binding(
+                    dict(binding["role_bindings"])["implementation"]
+                ),
+                checker=_graph_role_binding(
+                    dict(binding["role_bindings"])["verifier"]
+                ),
+                execution_adapter=str(binding["execution_adapter"]),
+            ),
+            satellite_projector=FamilyGraphSatelliteProjector(
+                specialization_id=definition.specialization_id,
+                template=definition.graph_satellite_template,
+            ),
+            source_ref=ARCHITECT_FILENAME,
+            source_map=source_map,
+            source_map_ref=source_map_ref.sha256,
+        )
         work_items = assert_work_items_complete(workspace)
         return {
-            "schema_version": "1",
+            "schema_version": "2",
             "contract_schema": definition.specialization_id,
             "contract": document.model_dump(mode="python"),
+            "graph_ir": graph_ir.to_dict(),
+            "graph_source_map_ref": source_map_ref.to_dict(),
             "source": ARCHITECT_FILENAME,
             "work_items": submission_work_items(work_items.get("items")),
         }

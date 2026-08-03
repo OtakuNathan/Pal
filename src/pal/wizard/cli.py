@@ -452,14 +452,14 @@ def run_setup_wizard(*, runtime_root: Path | None = None) -> int:
     service.create_database(registration)
     service.provision_builtin_plugins(registration)
     service.seed_from_wizard(registration, collected)
-    from pal.minion.cutover import cutover_minion_runtime_v26
+    from pal.minion.cutover import cutover_minion_runtime_v27
 
-    minion_cutover = cutover_minion_runtime_v26(runtime_root)
+    minion_cutover = cutover_minion_runtime_v27(runtime_root)
 
     print(f"\n  Database configured at {db_path}")
     if minion_cutover.status == "archived_and_initialized":
         print(
-            "  Minion runtime archived and initialized at schema v26 "
+            "  Minion runtime archived and initialized at schema v27 "
             f"(archive: {minion_cutover.archive_root})"
         )
 
@@ -496,14 +496,14 @@ def run_setup_upgrade(*, runtime_root: Path) -> int:
             f"{db_path}"
         )
         return 2
-    from pal.minion.cutover import cutover_minion_runtime_v26
+    from pal.minion.cutover import cutover_minion_runtime_v27
     from pal.llm.schema import migrate_llm_endpoint_schema
 
     llm_result = migrate_llm_endpoint_schema(db_path)
-    result = cutover_minion_runtime_v26(resolved_root)
+    result = cutover_minion_runtime_v27(resolved_root)
     print(f"  Pal runtime upgrade complete: {resolved_root}")
     print(f"  LLM endpoint schema: {llm_result.status}")
-    print(f"  Minion schema: v26 ({result.status})")
+    print(f"  Minion schema: v27 ({result.status})")
     if result.archive_root is not None:
         print(f"  Previous Minion runtime archive: {result.archive_root}")
     return 0

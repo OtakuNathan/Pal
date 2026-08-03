@@ -48,7 +48,10 @@
     }
   },
   "example": {
-    "schema_version": "1",
+    "schema_version": "2",
+    "graph": {
+      "sink": "monday"
+    },
     "context": {
       "goal": "Provide a feasible weekly plan.",
       "hard_restrictions": ["non-medical guidance"],

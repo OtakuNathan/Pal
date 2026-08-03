@@ -25,14 +25,13 @@ class RoleMode(StrEnum):
     PRODUCE = "produce"
     REPAIR = "repair"
     MODULE = "module"
-    SYSTEM = "system"
 
 
 ROLE_MODES: Mapping[OrchestrationRole, frozenset[RoleMode]] = {
     OrchestrationRole.ARCHITECT: frozenset({RoleMode.AUTHOR, RoleMode.REVISION}),
     OrchestrationRole.REVIEWER: frozenset({RoleMode.ARCHITECTURE, RoleMode.STANDALONE}),
     OrchestrationRole.IMPLEMENTATION: frozenset({RoleMode.PRODUCE, RoleMode.REPAIR}),
-    OrchestrationRole.VERIFIER: frozenset({RoleMode.MODULE, RoleMode.SYSTEM}),
+    OrchestrationRole.VERIFIER: frozenset({RoleMode.MODULE}),
 }
 
 
@@ -64,7 +63,7 @@ class RoleActivation:
 
 
 REQUIRED_ORCHESTRATION_ROLES = frozenset(role.value for role in OrchestrationRole)
-FAMILY_BINDING_SCHEMA_VERSION = "6"
+FAMILY_BINDING_SCHEMA_VERSION = "7"
 
 
 def family_execution_adapter(value: Any) -> str:
@@ -140,6 +139,7 @@ def validate_family_binding_payload(
         "generation_hash",
         "schema_ref",
         "template_ref",
+        "satellite_template_ref",
     ):
         value = architecture_definition.get(field)
         if not value:
@@ -165,7 +165,7 @@ def validate_family_binding_payload(
         raise ValueError(
             "FamilyBindingArtifact architecture generation hash is invalid"
         )
-    for field in ("schema_ref", "template_ref"):
+    for field in ("schema_ref", "template_ref", "satellite_template_ref"):
         ref = architecture_definition.get(field)
         if not isinstance(ref, Mapping) or not str(
             ref.get("sha256") or ""

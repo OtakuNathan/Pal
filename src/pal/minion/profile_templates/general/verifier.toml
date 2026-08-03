@@ -37,7 +37,7 @@ allowed_output_types = ["SemanticVerificationSubmissionArtifact"]
 [role]
 protocol_id = "module_verification.v1"
 kind = "verifier"
-modes = ["module", "system"]
+modes = ["module"]
 truth_sources = [
   { source = "workspace_contracts", authority = "normative", note = "The verified module's owned code, public contract, and comments." },
   { source = "module_work_view", authority = "derived", note = "Manager-compiled local scope and dependency contracts." },

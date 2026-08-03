@@ -18,6 +18,7 @@ from pal.llm.ir import (
     LLMRequestIR,
     LLMResponseDeltaKind,
     MessageRole,
+    ReasoningPartIR,
     TextPartIR,
     WireShape,
 )
@@ -425,6 +426,29 @@ class LLMIRShapeTests(unittest.TestCase):
         self.assertEqual(complete.message.tool_calls, streamed.message.tool_calls)
         self.assertEqual(complete.finish_reason, streamed.finish_reason)
         self.assertEqual(complete.usage, streamed.usage)
+
+    def test_anthropic_fallback_replays_reasoning_when_envelope_is_missing(self) -> None:
+        codec = codec_for_shape(WireShape.ANTHROPIC_MESSAGES)
+        message = LLMMessageIR(
+            MessageRole.ASSISTANT,
+            (
+                ReasoningPartIR("inspect"),
+                new_tool_call("call-1", "read", {"path": "a"}),
+            ),
+        )
+        request = LLMRequestIR(
+            messages=(message,),
+            tools=(),
+            policy=GenerationPolicyIR(
+                max_output_tokens=100,
+                thinking_level="high",
+            ),
+        )
+
+        encoded = codec.encode(request, _context(WireShape.ANTHROPIC_MESSAGES)).payload
+        blocks = encoded["messages"][0]["content"]
+        self.assertEqual(blocks[0], {"type": "thinking", "thinking": "inspect"})
+        self.assertEqual(blocks[1]["type"], "tool_use")
 
     def test_fragmented_invalid_tool_json_never_becomes_executable(self) -> None:
         shape = WireShape.OPENAI_COMPLETION

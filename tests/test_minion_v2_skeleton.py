@@ -57,6 +57,10 @@ class SoftwareContractAdapterTests(unittest.TestCase):
             _DECODER_CONTRACT,
             encoding="utf-8",
         )
+        (self.repo / "include" / "application.hpp").write_text(
+            "int run_application();\n",
+            encoding="utf-8",
+        )
         (self.repo / "src" / "decoder.cpp").write_text(
             "// implementation placeholder\n",
             encoding="utf-8",

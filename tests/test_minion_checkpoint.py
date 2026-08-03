@@ -12,56 +12,18 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
 
 
 class MinionCheckpointTests(unittest.TestCase):
-    def test_schema_five_legacy_l1_is_migrated_by_shape(self) -> None:
-        migrated = normalize_agent_session_checkpoint(
-            {
-                "schema_version": "5",
-                "session_id": "session-1",
-                "active_tool_protocol_messages": [],
-                "tool_delivery_records": {},
-                "l1_items": [
-                    [
-                        {
-                            "role": "user",
-                            "content": "inspect",
-                            "kind": "user_request",
-                        }
-                    ],
-                    [
-                        {
-                            "role": "assistant",
-                            "content": "",
-                            "kind": "assistant_tool_call",
-                            "tool_calls": [
-                                {
-                                    "id": "call-1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "read_file",
-                                        "arguments": '{"file_path":"a.cpp"}',
-                                    },
-                                }
-                            ],
-                        },
-                        {
-                            "role": "tool",
-                            "content": "source",
-                            "kind": "tool_result",
-                            "tool_call_id": "call-1",
-                        },
-                    ],
-                ],
-            }
-        )
-
-        self.assertEqual(migrated["schema_version"], "5")
-        self.assertEqual(len(migrated["l1_turns"]), 2)
-        self.assertTrue(
-            all(turn["state"] == "settled" for turn in migrated["l1_turns"])
-        )
-        self.assertNotIn("l1_items", migrated)
-        self.assertNotIn("active_tool_protocol_messages", migrated)
-        self.assertNotIn("tool_delivery_records", migrated)
+    def test_v27_rejects_legacy_l1_instead_of_migrating_it_in_place(self) -> None:
+        with self.assertRaisesRegex(
+            AgentSessionCheckpointError,
+            "unsupported checkpoint schema",
+        ):
+            normalize_agent_session_checkpoint(
+                {
+                    "schema_version": "5",
+                    "session_id": "session-1",
+                    "l1_items": [],
+                }
+            )
 
     def test_current_l1_requires_current_schema(self) -> None:
         with self.assertRaisesRegex(
@@ -86,10 +48,10 @@ class MinionCheckpointTests(unittest.TestCase):
     def test_checkpoint_without_an_l1_truth_source_is_rejected(self) -> None:
         with self.assertRaisesRegex(
             AgentSessionCheckpointError,
-            "neither current nor migratable L1",
+            "no L1 truth source",
         ):
             normalize_agent_session_checkpoint(
-                {"schema_version": "5", "session_id": "session-1"}
+                {"schema_version": "6", "session_id": "session-1"}
             )
 
     def test_worker_terminal_error_is_not_hidden_by_empty_stderr(self) -> None:

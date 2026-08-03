@@ -13,18 +13,19 @@ fi
 
 models=(
     ModuleLifecycle
+    ProduceCheckCycle
+    GraphExecutionLifecycle
+    ProcessCapacityLifecycle
     DagLifecycle
     ArchitectureLifecycle
     StandaloneReviewLifecycle
     OrchestrationLifecycle
-    SystemVerificationLifecycle
     DurableEffects
     RoleAssignmentRecovery
     WorkerProcessLifecycle
     ContinuationLifecycle
     ReplanReuseLifecycle
     ImplementationTopology
-    CanonicalWorktreeLifecycle
     FileMutationAuthorization
     ContractWorkItemLifecycle
     HarnessGenerationLifecycle

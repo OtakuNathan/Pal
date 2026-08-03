@@ -61,8 +61,13 @@ class ContractScenario(_StrictModel):
     environment: str = Field(min_length=1)
 
 
+class ContractGraph(_StrictModel):
+    sink: str = Field(min_length=1)
+
+
 class ContractDocument(_StrictModel):
     schema_version: str
+    graph: ContractGraph
     context: dict[str, Any]
     requirements: dict[str, ContractRequirement]
     modules: dict[str, ContractModule]
@@ -89,8 +94,8 @@ def validate_contract_payload(
             + "; ".join(rendered)
         )
     document = ContractDocument.model_validate(value, strict=True)
-    if document.schema_version != "1":
-        raise ValueError("architect.yaml schema_version must be 1")
+    if document.schema_version != "2":
+        raise ValueError("architect.yaml schema_version must be 2")
     _validate_contract_graph(
         document,
         specialization_id=definition.specialization_id,
@@ -151,7 +156,7 @@ def _assert_string_mapping_keys(value: Any, *, path: str = "$") -> None:
 def software_contract_projection(
     contract: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Compile a software contract into the legacy-neutral skeleton view.
+    """Compile a software contract into the adapter-neutral skeleton view.
 
     ``architect.yaml`` remains the only authored truth source. This projection
     exists only to feed the Git/worktree compiler that already understands the
@@ -184,6 +189,7 @@ def software_contract_projection(
         }
     return {
         "schema_version": 5,
+        "graph": dict(contract.get("graph") or {}),
         "requirements": {
             str(name): dict(value or {})
             for name, value in dict(contract.get("requirements") or {}).items()
@@ -235,6 +241,7 @@ def compile_contract_markdown(
         f"- Modules: {len(modules)}",
         f"- Requirements: {len(requirements)}",
         f"- Scenarios: {len(scenarios)}",
+        f"- Graph sink: `{dict(contract.get('graph') or {}).get('sink') or ''}`",
         "",
         "## Family context",
         "",
@@ -371,6 +378,12 @@ def _validate_contract_graph(
         raise ValueError("contract requires at least one scenario")
     module_names = set(document.modules)
     requirement_names = set(document.requirements)
+    if document.graph.sink not in module_names:
+        raise ValueError(
+            f"graph sink is unknown: {document.graph.sink}"
+        )
+    if document.modules[document.graph.sink].execution != "produce":
+        raise ValueError("graph sink must be a produced module")
     for collection_name, names in (
         ("requirement", requirement_names),
         ("module", module_names),

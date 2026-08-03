@@ -198,7 +198,7 @@ VERIFICATION_TOOL_CAPABILITIES = VERIFICATION_BUILDER_CAPABILITIES
 _DEFECT_PRECEDENCE = {
     "verification_defect": -1,
     "module_defect": 0,
-    "integration_defect": 1,
+    "sink_defect": 1,
     "dependency_defect": 2,
     "contract_defect": 3,
     "architecture_defect": 4,
@@ -335,13 +335,13 @@ def effective_verification_policy(
     """Compile family defaults into obligations owned by one verifier node."""
 
     source = dict(verification_policy or {})
-    system = str(work_view.get("kind") or "") == "system_and_delivery"
-    mode = "system" if system else "module"
+    sink = bool(work_view.get("graph_sink"))
+    mode = "sink" if sink else "module"
     entrypoints = [dict(item) for item in list(work_view.get("entrypoints") or []) if isinstance(item, Mapping)]
     entrypoint_kinds = {str(item.get("kind") or "").strip() for item in entrypoints}
     require_consumer_probe = False
-    require_dogfood = system
-    require_platform_probe = system and "platform_probe" in entrypoint_kinds
+    require_dogfood = sink
+    require_platform_probe = sink and "platform_probe" in entrypoint_kinds
     historical_regressions = historical_repair_checklist_items(work_view)
 
     allowed_obligations = {
@@ -469,18 +469,18 @@ def compile_verification_invocation_tool_contract(
         "required_historical_regressions": historical_regressions,
     }
     overrides: dict[str, dict[str, str]] = {}
-    if policy["mode"] == "system":
+    if policy["mode"] == "sink":
         overrides["op_minion_verification_scratch_write"] = {
             "use_when": (
                 "Create or replace a complete executable verifier probe in the bound durable review scratch. "
                 "Use the returned scratch_path directly in a dedicated verification run command and set that run "
                 "tool's probe_path to the same relative path. To correct the probe, call verification_scratch_write "
                 "again with the same relative path and complete replacement content; do not use read_file, "
-                "edit_file, or write_file on system-verification scratch."
+                "edit_file, or write_file in the sink node's verifier corpus."
             ),
             "do_not_use_when": (
                 "Do not use this for product source, module developer/verification corpora, or any path outside "
-                "the bound system-verification scratch."
+                "the bound sink verifier corpus."
             ),
         }
     overrides["op_minion_verification_draft_status"] = {
@@ -525,7 +525,7 @@ def compile_verification_invocation_tool_contract(
         "Use verification_defect for an incorrect Verifier-owned probe or corpus, module_defect "
         "for the current implementation, dependency_defect for upstream code, contract_defect "
         "for a frozen boundary, architecture_defect for ownership/topology, requirements_defect "
-        "for a conflicting task ledger, and integration_defect for cross-module behavior. "
+        "for a conflicting task ledger, and sink_defect for the authored composition or delivery module. "
         "Performance findings require a representative workload, measured or derived impact, "
         "an exact hot path, and a bounded contract-preserving direction, not speculative "
         "micro-optimization. Bound semantic modules: "
@@ -1180,7 +1180,7 @@ def _assert_tool_contract_allows(
     if obligation and allowed_obligations and obligation not in allowed_obligations:
         raise ValueError(
             f"verification obligation {obligation!r} is outside the bound node contract; "
-            "use only the declared module or system-delivery entrypoints"
+            "use only the declared module or sink-delivery entrypoints"
         )
 
 

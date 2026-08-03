@@ -41,6 +41,14 @@ from pal.minion.v2.role_protocol import (
     role_session_target,
 )
 from pal.minion.v2.role_contracts import RoleActivation
+from pal.minion.v2.cycle_protocol import (
+    NodeCycle,
+    PlanCycle,
+    node_cycle_from_mapping,
+    plan_cycle_from_mapping,
+)
+from pal.minion.v2.graph_executor import GraphExecution
+from pal.minion.v2.graph_protocol import GraphIR, graph_ir_from_mapping
 from pal.shared.text_search import compile_jieba_fts_queries, jieba_fts_text
 
 
@@ -1936,14 +1944,6 @@ class MinionV2Repository:
             if str(snapshot.payload.get("module_name") or "") != subject_key:
                 raise ValueError("role assignment is outside its module")
             return
-        if scope_kind == "system_delivery":
-            if snapshot.aggregate_type != AggregateType.DAG_NODE_RUN:
-                raise ValueError("system session may only activate on a DAG node run")
-            if subject_key != request.workflow_id or str(
-                snapshot.payload.get("node_kind") or ""
-            ) != "system_verification":
-                raise ValueError("role assignment is outside system verification")
-            return
         if scope_kind != request.aggregate_type or subject_key != request.aggregate_id:
             raise ValueError("role assignment is outside its aggregate-bound session")
 
@@ -3115,12 +3115,6 @@ class MinionV2Repository:
                     "cannot complete before that Module is deleted"
                 )
             return
-        if scope_kind == "system_delivery":
-            if not workflow_terminal:
-                raise ValueError(
-                    f"{scope_kind} role session lives for the workflow and cannot complete early"
-                )
-            return
         if scope_kind == "architecture_cycle":
             if role == "reviewer":
                 return
@@ -3682,9 +3676,6 @@ class MinionV2Repository:
                         "REVIEWING",
                         "REVIEW_QUIESCING",
                         "REVIEW_SNAPSHOTTING",
-                        "VERIFYING",
-                        "VERIFY_QUIESCING",
-                        "VERIFY_SNAPSHOTTING",
                     }
                     and str(item.payload.get("active_worker_id") or "")
                 ),
@@ -3880,6 +3871,338 @@ class MinionV2Repository:
             raise StaleFencingToken("worker fencing token is stale")
         if now is not None and _parse_datetime(str(row["expires_at"])) <= now:
             raise StaleFencingToken("worker lease has expired")
+
+    def store_graph_generation(
+        self,
+        *,
+        workflow_id: str,
+        graph: GraphIR,
+        status: str = "compiled",
+    ) -> GraphIR:
+        """Persist one immutable compiled GraphIR generation idempotently."""
+
+        self.ensure_schema()
+        now = utc_now()
+        payload = graph.to_dict()
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT graph_ir_json, workflow_id FROM minion_v2_graph_generations "
+                "WHERE graph_id = ? AND generation = ?",
+                (graph.graph_id, graph.generation),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["workflow_id"]) != workflow_id
+                    or json.loads(str(existing["graph_ir_json"])) != payload
+                ):
+                    raise ValueError(
+                        "GraphIR generation identity is already bound to other content"
+                    )
+                return graph_ir_from_mapping(
+                    json.loads(str(existing["graph_ir_json"]))
+                )
+            latest = connection.execute(
+                "SELECT MAX(generation) AS generation "
+                "FROM minion_v2_graph_generations WHERE graph_id = ?",
+                (graph.graph_id,),
+            ).fetchone()
+            latest_generation = int((latest or {})["generation"] or 0)
+            if graph.generation != latest_generation + 1:
+                raise ValueError(
+                    "GraphIR generations must be appended without gaps"
+                )
+            connection.execute(
+                """
+                INSERT INTO minion_v2_graph_generations(
+                    graph_id, generation, workflow_id, generation_hash,
+                    graph_ir_json, source_ref, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    graph.graph_id,
+                    graph.generation,
+                    workflow_id,
+                    graph.generation_hash,
+                    _json(payload),
+                    graph.source_ref,
+                    str(status),
+                    now,
+                ),
+            )
+        return graph
+
+    def read_graph_generation(
+        self,
+        *,
+        graph_id: str,
+        generation: int | None = None,
+    ) -> GraphIR | None:
+        self.ensure_schema()
+        with self._connect() as connection:
+            if generation is None:
+                row = connection.execute(
+                    "SELECT graph_ir_json FROM minion_v2_graph_generations "
+                    "WHERE graph_id = ? ORDER BY generation DESC LIMIT 1",
+                    (graph_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT graph_ir_json FROM minion_v2_graph_generations "
+                    "WHERE graph_id = ? AND generation = ?",
+                    (graph_id, int(generation)),
+                ).fetchone()
+        if row is None:
+            return None
+        return graph_ir_from_mapping(json.loads(str(row["graph_ir_json"])))
+
+    def store_plan_cycle(
+        self,
+        *,
+        workflow_id: str,
+        cycle: PlanCycle,
+    ) -> None:
+        self.ensure_schema()
+        now = utc_now()
+        payload = _cycle_payload(cycle)
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO minion_v2_plan_cycles(
+                    cycle_id, workflow_id, generation, state, payload_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id) DO UPDATE SET
+                    generation = excluded.generation,
+                    state = excluded.state,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    cycle.cycle_id,
+                    workflow_id,
+                    cycle.generation,
+                    cycle.state.value,
+                    _json(payload),
+                    now,
+                    now,
+                ),
+            )
+
+    def read_plan_cycle(self, *, workflow_id: str) -> PlanCycle | None:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM minion_v2_plan_cycles "
+                "WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return plan_cycle_from_mapping(
+            json.loads(str(row["payload_json"]))
+        )
+
+    def store_node_cycle(
+        self,
+        *,
+        workflow_id: str,
+        graph: GraphIR,
+        cycle: NodeCycle,
+    ) -> None:
+        if cycle.node_name not in graph.nodes:
+            raise ValueError("node cycle does not belong to GraphIR")
+        self.ensure_schema()
+        now = utc_now()
+        payload = _cycle_payload(cycle)
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO minion_v2_node_cycles(
+                    cycle_id, workflow_id, graph_id, graph_generation,
+                    node_name, state, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cycle_id) DO UPDATE SET
+                    graph_generation = excluded.graph_generation,
+                    state = excluded.state,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    cycle.cycle_id,
+                    workflow_id,
+                    graph.graph_id,
+                    graph.generation,
+                    cycle.node_name,
+                    cycle.state.value,
+                    _json(payload),
+                    now,
+                    now,
+                ),
+            )
+
+    def read_node_cycles(
+        self,
+        *,
+        workflow_id: str,
+        graph_generation: int | None = None,
+    ) -> dict[str, NodeCycle]:
+        self.ensure_schema()
+        with self._connect() as connection:
+            if graph_generation is None:
+                graph = connection.execute(
+                    "SELECT MAX(graph_generation) AS generation "
+                    "FROM minion_v2_node_cycles WHERE workflow_id = ?",
+                    (workflow_id,),
+                ).fetchone()
+                graph_generation = int((graph or {})["generation"] or 0)
+            rows = connection.execute(
+                "SELECT payload_json FROM minion_v2_node_cycles "
+                "WHERE workflow_id = ? AND graph_generation = ? "
+                "ORDER BY node_name",
+                (workflow_id, int(graph_generation)),
+            ).fetchall()
+        cycles = [
+            node_cycle_from_mapping(json.loads(str(row["payload_json"])))
+            for row in rows
+        ]
+        return {cycle.node_name: cycle for cycle in cycles}
+
+    def store_graph_execution(
+        self,
+        *,
+        workflow_id: str,
+        execution: GraphExecution,
+    ) -> None:
+        """Atomically replace every cycle projection for one graph generation."""
+
+        self.ensure_schema()
+        now = utc_now()
+        with self._transaction() as connection:
+            graph_row = connection.execute(
+                "SELECT workflow_id, generation_hash "
+                "FROM minion_v2_graph_generations "
+                "WHERE graph_id = ? AND generation = ?",
+                (execution.graph.graph_id, execution.graph.generation),
+            ).fetchone()
+            if graph_row is None:
+                raise ValueError("GraphExecution requires a stored GraphIR generation")
+            if (
+                str(graph_row["workflow_id"]) != workflow_id
+                or str(graph_row["generation_hash"])
+                != execution.graph.generation_hash
+            ):
+                raise ValueError("GraphExecution is bound to another workflow generation")
+            for cycle in execution.cycles.values():
+                payload = _cycle_payload(cycle)
+                connection.execute(
+                    """
+                    INSERT INTO minion_v2_node_cycles(
+                        cycle_id, workflow_id, graph_id, graph_generation,
+                        node_name, state, payload_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(cycle_id) DO UPDATE SET
+                        graph_generation = excluded.graph_generation,
+                        state = excluded.state,
+                        payload_json = excluded.payload_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        cycle.cycle_id,
+                        workflow_id,
+                        execution.graph.graph_id,
+                        execution.graph.generation,
+                        cycle.node_name,
+                        cycle.state.value,
+                        _json(payload),
+                        now,
+                        now,
+                    ),
+                )
+            connection.execute(
+                "UPDATE minion_v2_graph_generations "
+                "SET status = ?, execution_json = ? "
+                "WHERE graph_id = ? AND generation = ?",
+                (
+                    execution.state.value.lower(),
+                    _json(
+                        {
+                            "state": execution.state.value,
+                            "published_sink_ref": execution.published_sink_ref,
+                            "repair_barriers": {
+                                name: list(providers)
+                                for name, providers in execution.repair_barriers.items()
+                            },
+                        }
+                    ),
+                    execution.graph.graph_id,
+                    execution.graph.generation,
+                ),
+            )
+
+    def read_graph_execution(
+        self,
+        *,
+        workflow_id: str,
+        generation: int | None = None,
+    ) -> GraphExecution | None:
+        self.ensure_schema()
+        with self._connect() as connection:
+            if generation is None:
+                row = connection.execute(
+                    "SELECT graph_ir_json, status, execution_json "
+                    "FROM minion_v2_graph_generations "
+                    "WHERE workflow_id = ? ORDER BY generation DESC LIMIT 1",
+                    (workflow_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT graph_ir_json, status, execution_json "
+                    "FROM minion_v2_graph_generations "
+                    "WHERE workflow_id = ? AND generation = ?",
+                    (workflow_id, int(generation)),
+                ).fetchone()
+        if row is None:
+            return None
+        graph = graph_ir_from_mapping(json.loads(str(row["graph_ir_json"])))
+        cycles = self.read_node_cycles(
+            workflow_id=workflow_id,
+            graph_generation=graph.generation,
+        )
+        if not cycles:
+            return None
+        from pal.minion.v2.graph_executor import GraphExecutionState
+
+        runtime = json.loads(str(row["execution_json"] or "{}"))
+        raw_status = str(
+            runtime.get("state") or row["status"] or ""
+        ).upper()
+        state = (
+            GraphExecutionState.COMPLETED
+            if cycles[graph.sink].state.value == "ACCEPTED"
+            and all(cycle.state.value == "ACCEPTED" for cycle in cycles.values())
+            else GraphExecutionState(raw_status)
+            if raw_status in GraphExecutionState._value2member_map_
+            else GraphExecutionState.RUNNING
+        )
+        return GraphExecution(
+            graph=graph,
+            state=state,
+            cycles=cycles,
+            published_sink_ref=(
+                str(runtime.get("published_sink_ref") or "")
+                or (
+                    cycles[graph.sink].accepted_product_ref
+                    if state == GraphExecutionState.COMPLETED
+                    else ""
+                )
+            ),
+            repair_barriers={
+                str(name): tuple(str(item) for item in list(providers or []))
+                for name, providers in dict(
+                    runtime.get("repair_barriers") or {}
+                ).items()
+            },
+        )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -4209,6 +4532,48 @@ def _decode_json_columns(row: sqlite3.Row, columns: Mapping[str, str]) -> dict[s
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _cycle_payload(cycle: PlanCycle | NodeCycle) -> dict[str, Any]:
+    assignment = cycle.active_assignment
+    verdict = cycle.last_verdict
+    return {
+        "cycle_id": cycle.cycle_id,
+        "kind": cycle.kind.value,
+        "generation": cycle.generation,
+        "state": cycle.state.value,
+        **(
+            {"node_name": cycle.node_name}
+            if isinstance(cycle, NodeCycle)
+            else {}
+        ),
+        "active_assignment": (
+            {
+                "slot": assignment.slot.value,
+                "kind": assignment.kind.value,
+                "generation": assignment.generation,
+                "input_fingerprint": assignment.input_fingerprint,
+            }
+            if assignment is not None
+            else None
+        ),
+        "product_ref": cycle.product_ref,
+        "accepted_product_ref": cycle.accepted_product_ref,
+        "last_verdict": (
+            {
+                "accepted": verdict.accepted,
+                "generation": verdict.generation,
+                "finding_refs": list(verdict.finding_refs),
+            }
+            if verdict is not None
+            else None
+        ),
+        "resume_state": (
+            cycle.resume_state.value
+            if cycle.resume_state is not None
+            else None
+        ),
+    }
 
 
 def _stable_hash(value: Any) -> str:

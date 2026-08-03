@@ -76,6 +76,29 @@ class ManagerLogicalExecutionState:
             self.logical_session_id, mutate
         )
 
+    def record_delivery(
+        self,
+        *,
+        logical_session_id: str | None = None,
+        delivery: dict[str, Any],
+    ) -> LogicalExecutionContext:
+        """Commit one delivered tool result without changing projection."""
+
+        requested = str(logical_session_id or self.logical_session_id)
+        if requested != self.logical_session_id:
+            raise ValueError("logical execution state does not match the role session")
+
+        def mutate(
+            state: dict[str, Any],
+        ) -> tuple[dict[str, Any], LogicalExecutionContext]:
+            _ensure_active(state)
+            _apply_delivery(state, dict(delivery))
+            return state, _context(self.logical_session_id, "", state)
+
+        return self.repository.mutate_role_execution_state(
+            self.logical_session_id, mutate
+        )
+
     def store_pager(
         self, manifest: PagerHandleManifest
     ) -> PagerHandleManifest:
@@ -346,6 +369,21 @@ class RoleGatewayLogicalExecutionState:
                 "logical_session_id": str(logical_session_id),
                 "projection": list(projection),
                 "deliveries": [dict(item) for item in deliveries],
+            },
+        )
+        return LogicalExecutionContext.from_dict(dict(value.get("context") or {}))
+
+    def record_delivery(
+        self,
+        *,
+        logical_session_id: str,
+        delivery: dict[str, Any],
+    ) -> LogicalExecutionContext:
+        value = self.client.request_sync(
+            "execution_record_delivery",
+            {
+                "logical_session_id": str(logical_session_id),
+                "delivery": dict(delivery),
             },
         )
         return LogicalExecutionContext.from_dict(dict(value.get("context") or {}))

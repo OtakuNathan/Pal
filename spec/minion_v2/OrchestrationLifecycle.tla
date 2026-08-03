@@ -1,21 +1,21 @@
 --------------------- MODULE OrchestrationLifecycle ---------------------
 EXTENDS Naturals, TLC
 
-CONSTANT Foundation, Drawing, Input, System, MaxGeneration
+CONSTANT Foundation, Drawing, Input, Sink, MaxGeneration
 
-Nodes == {Foundation, Drawing, Input, System}
+Nodes == {Foundation, Drawing, Input, Sink}
 
 Deps == [n \in Nodes |->
     CASE n = Foundation -> {}
       [] n = Drawing -> {Foundation}
       [] n = Input -> {Foundation}
-      [] n = System -> {Foundation, Drawing, Input}]
+      [] n = Sink -> {Foundation, Drawing, Input}]
 
 Affected == [n \in Nodes |->
     CASE n = Foundation -> Nodes
-      [] n = Drawing -> {Drawing, System}
-      [] n = Input -> {Input, System}
-      [] n = System -> {System}]
+      [] n = Drawing -> {Drawing, Sink}
+      [] n = Input -> {Input, Sink}
+      [] n = Sink -> {Sink}]
 
 WorkflowStates == {
     "Active", "PauseRequested", "Paused", "CancelRequested",
@@ -378,9 +378,9 @@ CompletionSafety ==
     /\ epochState = "Completed" => \A n \in Nodes : nodeState[n] = "Accepted"
     /\ workflowState = "Completed" => epochState = "Completed"
 
-SystemStartsAfterAllModules ==
-    nodeState[System] \in {"Active", "Accepted"} =>
-        \A n \in Nodes \ {System} : nodeState[n] = "Accepted"
+SinkStartsAfterAllModules ==
+    nodeState[Sink] \in {"Active", "Accepted"} =>
+        \A n \in Nodes \ {Sink} : nodeState[n] = "Accepted"
 
 PauseControlAlignment ==
     workflowState = "Paused" => epochState = "Paused" /\ desiredControl = "Pause"

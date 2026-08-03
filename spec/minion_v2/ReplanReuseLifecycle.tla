@@ -1,383 +1,178 @@
 --------------------- MODULE ReplanReuseLifecycle ---------------------
-EXTENDS Naturals, TLC
+EXTENDS Naturals
 
-\* A workflow owns stable Module identities.  Execution epochs are audit and
-\* scheduling projections only: replanning classifies old/new architecture map
-\* identities as preserve, replace, create, or delete. A surviving name keeps
-\* its worktree and logical Coder/Verifier coroutine only while its declared
-\* responsibility is unchanged.
+CONSTANTS Protocol, Endpoint, Provider, Sidecar, Bridge, Core, Sink
 
-CONSTANT
-    Protocol,
-    Endpoint,
-    Provider,
-    Sidecar,
-    Bridge,
-    MaxCandidate,
-    MaxAdmissions
-
-Modules == {Protocol, Endpoint, Provider, Sidecar, Bridge}
-SourceModules == {Protocol, Endpoint, Provider, Bridge}
-TargetModules == {Protocol, Endpoint, Sidecar, Bridge}
+AuthoredModules == {Protocol, Endpoint, Provider, Sidecar, Bridge, Core, Sink}
+SourceExecutableModules == {Endpoint, Provider, Bridge, Core, Sink}
+TargetExecutableModules == {Endpoint, Sidecar, Bridge, Core, Sink}
+ContractOnlyModules == {Protocol}
+ExactExecutableModules == {Core}
+ChangedPreservedModules == {Endpoint, Sink}
 ReplacedModules == {Bridge}
-PreservedModules == (SourceModules \intersect TargetModules) \ ReplacedModules
-AddedModules == TargetModules \ SourceModules
-DeletedModules == SourceModules \ TargetModules
+AddedModules == {Sidecar}
+DeletedModules == {Provider}
+PreservedExecutableModules ==
+    ExactExecutableModules \union ChangedPreservedModules
 
-\* Protocol's complete effective fingerprint is unchanged. Endpoint remains
-\* the same Module but its contract changed, so its assets survive. Bridge
-\* keeps its name but changes responsibility, so it is a replacement. Sidecar
-\* models a historical identity that was deleted before this source plan and
-\* is now re-added.
-ExactModules == {Protocol}
-ChangedPreservedModules == PreservedModules \ ExactModules
-
-WorkflowStates == {"Running", "Completed"}
-Phases == {
-    "SourceRunning",
-    "ReplanRequired",
-    "TargetRunning",
-    "SystemVerifying",
-    "Completed"
+States == {"Absent", "Ready", "Accepted", "Retired"}
+Decisions == {
+    "Undecided", "ContractChanged", "ReuseAccepted", "ReuseStale",
+    "Create", "Retire"
 }
-ModuleStates == {
-    "Absent",
-    "Ready",
-    "Coding",
-    "VerifierReady",
-    "Verifying",
-    "Accepted",
-    "Retired"
-}
-SessionStates == {"Absent", "Suspended", "Active", "Retired", "Completed"}
-ActiveRoles == {"None", "Coder", "Verifier"}
-SystemStates == {"Blocked", "Active", "Accepted"}
 
-VARIABLES
-    workflowState,
-    phase,
-    moduleState,
-    worktreeIdentity,
-    roleGeneration,
-    candidate,
-    corpus,
-    coderSession,
-    verifierSession,
-    activeRole,
-    admissionCount,
-    systemState,
-    managerUp
+VARIABLES phase, nodeState, workspaceIdentity, sessionGeneration,
+          corpusIdentity, contractVersion, graphDecision,
+          projectionDecision, targetStartState, published
 
-vars == <<
-    workflowState,
-    phase,
-    moduleState,
-    worktreeIdentity,
-    roleGeneration,
-    candidate,
-    corpus,
-    coderSession,
-    verifierSession,
-    activeRole,
-    admissionCount,
-    systemState,
-    managerUp
->>
-
-AllTargetModulesAccepted ==
-    \A m \in TargetModules : moduleState[m] = "Accepted"
+vars == <<phase, nodeState, workspaceIdentity, sessionGeneration,
+          corpusIdentity, contractVersion, graphDecision,
+          projectionDecision, targetStartState, published>>
 
 Init ==
-    /\ workflowState = "Running"
-    /\ phase = "SourceRunning"
-    /\ moduleState = [m \in Modules |->
-        IF m \in SourceModules THEN "Accepted" ELSE "Absent"]
-    /\ worktreeIdentity = [m \in Modules |->
-        IF m \in SourceModules THEN 1 ELSE 0]
-    \* Sidecar has one retired historical identity; re-adding it must allocate
-    \* generation two instead of resurrecting that coroutine.
-    /\ roleGeneration = [m \in Modules |->
-        IF m = Sidecar THEN 1 ELSE IF m \in SourceModules THEN 1 ELSE 0]
-    /\ candidate = [m \in Modules |->
-        IF m \in SourceModules THEN 1 ELSE 0]
-    /\ corpus = [m \in Modules |->
-        IF m \in SourceModules THEN 1 ELSE 0]
-    /\ coderSession = [m \in Modules |->
-        IF m \in SourceModules THEN "Suspended"
-        ELSE IF m = Sidecar THEN "Retired"
-        ELSE "Absent"]
-    /\ verifierSession = [m \in Modules |->
-        IF m \in SourceModules THEN "Suspended"
-        ELSE IF m = Sidecar THEN "Retired"
-        ELSE "Absent"]
-    /\ activeRole = [m \in Modules |-> "None"]
-    /\ admissionCount = [m \in Modules |-> 0]
-    /\ systemState = "Blocked"
-    /\ managerUp = TRUE
+    /\ phase = "SourceAccepted"
+    /\ nodeState = [m \in AuthoredModules |->
+        IF m \in SourceExecutableModules THEN "Accepted" ELSE "Absent"]
+    /\ workspaceIdentity = [m \in AuthoredModules |->
+        IF m \in SourceExecutableModules THEN 1 ELSE 0]
+    /\ sessionGeneration = [m \in AuthoredModules |->
+        IF m = Sidecar THEN 1
+        ELSE IF m \in SourceExecutableModules THEN 1 ELSE 0]
+    /\ corpusIdentity = [m \in AuthoredModules |->
+        IF m \in SourceExecutableModules THEN 1 ELSE 0]
+    /\ contractVersion = [m \in AuthoredModules |-> 1]
+    /\ graphDecision = [m \in AuthoredModules |-> "Undecided"]
+    /\ projectionDecision = [m \in AuthoredModules |-> "Undecided"]
+    /\ targetStartState = [m \in AuthoredModules |-> "Absent"]
+    /\ published = FALSE
 
-DetectArchitectureDefect ==
-    /\ managerUp
-    /\ workflowState = "Running"
-    /\ phase = "SourceRunning"
+RequestReplan ==
+    /\ phase = "SourceAccepted"
     /\ phase' = "ReplanRequired"
-    /\ UNCHANGED <<workflowState, moduleState, worktreeIdentity,
-        roleGeneration, candidate, corpus, coderSession, verifierSession,
-        activeRole, admissionCount, systemState, managerUp>>
+    /\ UNCHANGED <<nodeState, workspaceIdentity, sessionGeneration,
+                    corpusIdentity, contractVersion, graphDecision,
+                    projectionDecision, targetStartState, published>>
 
-CompileTargetPlan ==
-    /\ managerUp
-    /\ workflowState = "Running"
+TargetReuseDecision == [m \in AuthoredModules |->
+    IF m \in ContractOnlyModules THEN "ContractChanged"
+    ELSE IF m \in ExactExecutableModules THEN "ReuseAccepted"
+    ELSE IF m \in ChangedPreservedModules THEN "ReuseStale"
+    ELSE IF m \in ReplacedModules \union AddedModules THEN "Create"
+    ELSE IF m \in DeletedModules THEN "Retire"
+    ELSE "Undecided"]
+
+TargetNodeState == [m \in AuthoredModules |->
+    IF m \in DeletedModules THEN "Retired"
+    ELSE IF m \in ExactExecutableModules THEN "Accepted"
+    ELSE IF m \in TargetExecutableModules THEN "Ready"
+    ELSE "Absent"]
+
+CompileTarget ==
     /\ phase = "ReplanRequired"
     /\ phase' = "TargetRunning"
-    /\ moduleState' = [m \in Modules |->
-        IF m \in DeletedModules THEN "Retired"
-        ELSE IF m \in ExactModules THEN "Accepted"
-        ELSE IF m \in TargetModules THEN "Ready"
-        ELSE "Absent"]
-    /\ worktreeIdentity' = [m \in Modules |->
-        IF m \in PreservedModules THEN worktreeIdentity[m]
+    /\ nodeState' = TargetNodeState
+    /\ workspaceIdentity' = [m \in AuthoredModules |->
+        IF m \in PreservedExecutableModules THEN workspaceIdentity[m]
         ELSE IF m \in AddedModules \union ReplacedModules THEN 2
         ELSE 0]
-    /\ roleGeneration' = [m \in Modules |->
-        IF m \in PreservedModules THEN roleGeneration[m]
-        ELSE IF m \in AddedModules \union ReplacedModules THEN roleGeneration[m] + 1
-        ELSE roleGeneration[m]]
-    /\ candidate' = [m \in Modules |->
-        IF m \in PreservedModules THEN candidate[m]
+    /\ sessionGeneration' = [m \in AuthoredModules |->
+        IF m \in PreservedExecutableModules THEN sessionGeneration[m]
+        ELSE IF m \in AddedModules \union ReplacedModules
+            THEN sessionGeneration[m] + 1
+        ELSE sessionGeneration[m]]
+    /\ corpusIdentity' = [m \in AuthoredModules |->
+        IF m \in PreservedExecutableModules THEN corpusIdentity[m]
+        ELSE IF m \in AddedModules \union ReplacedModules THEN 2
         ELSE 0]
-    /\ corpus' = [m \in Modules |->
-        IF m \in PreservedModules THEN corpus[m]
-        ELSE 0]
-    /\ coderSession' = [m \in Modules |->
-        IF m \in DeletedModules THEN "Retired"
-        ELSE IF m \in PreservedModules THEN coderSession[m]
-        ELSE IF m \in AddedModules \union ReplacedModules THEN "Suspended"
-        ELSE "Absent"]
-    /\ verifierSession' = [m \in Modules |->
-        IF m \in DeletedModules THEN "Retired"
-        ELSE IF m \in PreservedModules THEN verifierSession[m]
-        ELSE IF m \in AddedModules \union ReplacedModules THEN "Suspended"
-        ELSE "Absent"]
-    /\ UNCHANGED <<workflowState, activeRole, admissionCount,
-        systemState, managerUp>>
+    /\ contractVersion' = [contractVersion EXCEPT ![Protocol] = 2]
+    /\ graphDecision' = TargetReuseDecision
+    /\ projectionDecision' = TargetReuseDecision
+    /\ targetStartState' = TargetNodeState
+    /\ published' = FALSE
 
-StartCoder(m) ==
-    /\ managerUp
-    /\ workflowState = "Running"
+AcceptTargetNode(m) ==
     /\ phase = "TargetRunning"
-    /\ m \in TargetModules \ ExactModules
-    /\ moduleState[m] = "Ready"
-    /\ activeRole[m] = "None"
-    /\ coderSession[m] = "Suspended"
-    /\ admissionCount[m] < MaxAdmissions
-    /\ moduleState' = [moduleState EXCEPT ![m] = "Coding"]
-    /\ coderSession' = [coderSession EXCEPT ![m] = "Active"]
-    /\ activeRole' = [activeRole EXCEPT ![m] = "Coder"]
-    /\ admissionCount' = [admissionCount EXCEPT ![m] = @ + 1]
-    /\ UNCHANGED <<workflowState, phase, worktreeIdentity, roleGeneration,
-        candidate, corpus, verifierSession, systemState, managerUp>>
+    /\ m \in TargetExecutableModules
+    /\ nodeState[m] = "Ready"
+    /\ nodeState' = [nodeState EXCEPT ![m] = "Accepted"]
+    /\ UNCHANGED <<phase, workspaceIdentity, sessionGeneration,
+                    corpusIdentity, contractVersion, graphDecision,
+                    projectionDecision, targetStartState, published>>
 
-SubmitCandidate(m) ==
-    /\ managerUp
-    /\ moduleState[m] = "Coding"
-    /\ activeRole[m] = "Coder"
-    /\ coderSession[m] = "Active"
-    /\ candidate[m] < MaxCandidate
-    /\ moduleState' = [moduleState EXCEPT ![m] = "VerifierReady"]
-    /\ candidate' = [candidate EXCEPT ![m] = @ + 1]
-    /\ coderSession' = [coderSession EXCEPT ![m] = "Suspended"]
-    /\ activeRole' = [activeRole EXCEPT ![m] = "None"]
-    /\ UNCHANGED <<workflowState, phase, worktreeIdentity, roleGeneration,
-        corpus, verifierSession, admissionCount, systemState, managerUp>>
-
-StartVerifier(m) ==
-    /\ managerUp
-    /\ moduleState[m] = "VerifierReady"
-    /\ activeRole[m] = "None"
-    /\ verifierSession[m] = "Suspended"
-    /\ moduleState' = [moduleState EXCEPT ![m] = "Verifying"]
-    /\ verifierSession' = [verifierSession EXCEPT ![m] = "Active"]
-    /\ activeRole' = [activeRole EXCEPT ![m] = "Verifier"]
-    /\ UNCHANGED <<workflowState, phase, worktreeIdentity, roleGeneration,
-        candidate, corpus, coderSession, admissionCount, systemState, managerUp>>
-
-VerifierPass(m) ==
-    /\ managerUp
-    /\ moduleState[m] = "Verifying"
-    /\ activeRole[m] = "Verifier"
-    /\ verifierSession[m] = "Active"
-    /\ moduleState' = [moduleState EXCEPT ![m] = "Accepted"]
-    /\ corpus' = [corpus EXCEPT ![m] = IF @ < 2 THEN @ + 1 ELSE @]
-    /\ verifierSession' = [verifierSession EXCEPT ![m] = "Suspended"]
-    /\ activeRole' = [activeRole EXCEPT ![m] = "None"]
-    /\ UNCHANGED <<workflowState, phase, worktreeIdentity, roleGeneration,
-        candidate, coderSession, admissionCount, systemState, managerUp>>
-
-VerifierFail(m) ==
-    /\ managerUp
-    /\ moduleState[m] = "Verifying"
-    /\ activeRole[m] = "Verifier"
-    /\ verifierSession[m] = "Active"
-    /\ admissionCount[m] < MaxAdmissions
-    /\ moduleState' = [moduleState EXCEPT ![m] = "Ready"]
-    /\ corpus' = [corpus EXCEPT ![m] = IF @ < 2 THEN @ + 1 ELSE @]
-    /\ verifierSession' = [verifierSession EXCEPT ![m] = "Suspended"]
-    /\ activeRole' = [activeRole EXCEPT ![m] = "None"]
-    /\ UNCHANGED <<workflowState, phase, worktreeIdentity, roleGeneration,
-        candidate, coderSession, admissionCount, systemState, managerUp>>
-
-StartSystemVerification ==
-    /\ managerUp
+PublishSink ==
     /\ phase = "TargetRunning"
-    /\ AllTargetModulesAccepted
-    /\ systemState = "Blocked"
-    /\ phase' = "SystemVerifying"
-    /\ systemState' = "Active"
-    /\ UNCHANGED <<workflowState, moduleState, worktreeIdentity,
-        roleGeneration, candidate, corpus, coderSession, verifierSession,
-        activeRole, admissionCount, managerUp>>
-
-PassSystemVerification ==
-    /\ managerUp
-    /\ phase = "SystemVerifying"
-    /\ systemState = "Active"
-    /\ systemState' = "Accepted"
-    /\ UNCHANGED <<workflowState, phase, moduleState, worktreeIdentity,
-        roleGeneration, candidate, corpus, coderSession, verifierSession,
-        activeRole, admissionCount, managerUp>>
-
-CompleteWorkflow ==
-    /\ managerUp
-    /\ phase = "SystemVerifying"
-    /\ systemState = "Accepted"
-    /\ workflowState' = "Completed"
+    /\ \A m \in TargetExecutableModules : nodeState[m] = "Accepted"
+    /\ nodeState[Sink] = "Accepted"
     /\ phase' = "Completed"
-    /\ coderSession' = [m \in Modules |->
-        IF m \in TargetModules THEN "Completed" ELSE coderSession[m]]
-    /\ verifierSession' = [m \in Modules |->
-        IF m \in TargetModules THEN "Completed" ELSE verifierSession[m]]
-    /\ UNCHANGED <<moduleState, worktreeIdentity, roleGeneration,
-        candidate, corpus, activeRole, admissionCount, systemState, managerUp>>
-
-CrashManager ==
-    /\ managerUp
-    /\ managerUp' = FALSE
-    /\ moduleState' = [m \in Modules |->
-        IF moduleState[m] = "Coding" THEN "Ready"
-        ELSE IF moduleState[m] = "Verifying" THEN "VerifierReady"
-        ELSE moduleState[m]]
-    /\ coderSession' = [m \in Modules |->
-        IF coderSession[m] = "Active" THEN "Suspended" ELSE coderSession[m]]
-    /\ verifierSession' = [m \in Modules |->
-        IF verifierSession[m] = "Active" THEN "Suspended" ELSE verifierSession[m]]
-    /\ activeRole' = [m \in Modules |-> "None"]
-    /\ UNCHANGED <<workflowState, phase, worktreeIdentity, roleGeneration,
-        candidate, corpus, admissionCount, systemState>>
-
-RestartManager ==
-    /\ ~managerUp
-    /\ managerUp' = TRUE
-    /\ UNCHANGED <<workflowState, phase, moduleState, worktreeIdentity,
-        roleGeneration, candidate, corpus, coderSession, verifierSession,
-        activeRole, admissionCount, systemState>>
+    /\ published' = TRUE
+    /\ UNCHANGED <<nodeState, workspaceIdentity, sessionGeneration,
+                    corpusIdentity, contractVersion, graphDecision,
+                    projectionDecision, targetStartState>>
 
 Next ==
-    \/ DetectArchitectureDefect
-    \/ CompileTargetPlan
-    \/ \E m \in Modules : StartCoder(m)
-    \/ \E m \in Modules : SubmitCandidate(m)
-    \/ \E m \in Modules : StartVerifier(m)
-    \/ \E m \in Modules : VerifierPass(m)
-    \/ \E m \in Modules : VerifierFail(m)
-    \/ StartSystemVerification
-    \/ PassSystemVerification
-    \/ CompleteWorkflow
-    \/ CrashManager
-    \/ RestartManager
+    \/ RequestReplan
+    \/ CompileTarget
+    \/ \E m \in TargetExecutableModules : AcceptTargetNode(m)
+    \/ PublishSink
 
-Spec ==
-    /\ Init
-    /\ [][Next]_vars
-    /\ WF_vars(RestartManager)
-    /\ SF_vars(CompileTargetPlan)
+Spec == Init /\ [][Next]_vars
 
 TypeOK ==
-    /\ workflowState \in WorkflowStates
-    /\ phase \in Phases
-    /\ moduleState \in [Modules -> ModuleStates]
-    /\ worktreeIdentity \in [Modules -> 0..2]
-    /\ roleGeneration \in [Modules -> 0..2]
-    /\ candidate \in [Modules -> 0..MaxCandidate]
-    /\ corpus \in [Modules -> 0..2]
-    /\ coderSession \in [Modules -> SessionStates]
-    /\ verifierSession \in [Modules -> SessionStates]
-    /\ activeRole \in [Modules -> ActiveRoles]
-    /\ admissionCount \in [Modules -> 0..MaxAdmissions]
-    /\ systemState \in SystemStates
-    /\ managerUp \in BOOLEAN
+    /\ phase \in {"SourceAccepted", "ReplanRequired", "TargetRunning", "Completed"}
+    /\ nodeState \in [AuthoredModules -> States]
+    /\ workspaceIdentity \in [AuthoredModules -> 0..2]
+    /\ sessionGeneration \in [AuthoredModules -> 0..2]
+    /\ corpusIdentity \in [AuthoredModules -> 0..2]
+    /\ contractVersion \in [AuthoredModules -> 1..2]
+    /\ graphDecision \in [AuthoredModules -> Decisions]
+    /\ projectionDecision \in [AuthoredModules -> Decisions]
+    /\ targetStartState \in [AuthoredModules -> States]
+    /\ published \in BOOLEAN
 
-ModuleIdentityClassification ==
-    phase \in {"TargetRunning", "SystemVerifying", "Completed"} =>
-        /\ \A m \in PreservedModules :
-            /\ worktreeIdentity[m] = 1
-            /\ roleGeneration[m] = 1
-        /\ \A m \in AddedModules :
-            /\ worktreeIdentity[m] = 2
-            /\ roleGeneration[m] = 2
-        /\ \A m \in ReplacedModules :
-            /\ worktreeIdentity[m] = 2
-            /\ roleGeneration[m] = 2
-        /\ \A m \in DeletedModules :
-            /\ worktreeIdentity[m] = 0
-            /\ moduleState[m] = "Retired"
-            /\ coderSession[m] = "Retired"
-            /\ verifierSession[m] = "Retired"
+ProjectionConsumesGraphDecision ==
+    phase \in {"TargetRunning", "Completed"} =>
+        projectionDecision = graphDecision
 
-ExactCarryForwardSkipsActors ==
-    phase \in {"TargetRunning", "SystemVerifying", "Completed"} =>
-        \A m \in ExactModules :
-            /\ moduleState[m] = "Accepted"
-            /\ candidate[m] = 1
-            /\ admissionCount[m] = 0
+ContractOnlyChangeRequeuesConsumers ==
+    phase \in {"TargetRunning", "Completed"} =>
+        /\ contractVersion[Protocol] = 2
+        /\ graphDecision[Protocol] = "ContractChanged"
+        /\ \A m \in ChangedPreservedModules :
+            /\ graphDecision[m] = "ReuseStale"
+            /\ projectionDecision[m] = "ReuseStale"
+            /\ targetStartState[m] = "Ready"
 
-ChangedModuleKeepsAssetsAndActors ==
-    phase \in {"TargetRunning", "SystemVerifying", "Completed"} =>
-        \A m \in ChangedPreservedModules :
-            /\ candidate[m] >= 1
-            /\ corpus[m] >= 1
-            /\ coderSession[m] # "Absent"
-            /\ verifierSession[m] # "Absent"
+PreservedResponsibilityReusesAssets ==
+    phase \in {"TargetRunning", "Completed"} =>
+        \A m \in PreservedExecutableModules :
+            /\ workspaceIdentity[m] = 1
+            /\ sessionGeneration[m] = 1
+            /\ corpusIdentity[m] = 1
 
-ReplacementStartsFresh ==
-    phase \in {"TargetRunning", "SystemVerifying", "Completed"} =>
-        \A m \in ReplacedModules :
-            admissionCount[m] = 0 =>
-                /\ candidate[m] = 0
-                /\ corpus[m] = 0
+OnlyExactNodesKeepAcceptance ==
+    phase \in {"TargetRunning", "Completed"} =>
+        /\ \A m \in ExactExecutableModules : targetStartState[m] = "Accepted"
+        /\ \A m \in ChangedPreservedModules \union AddedModules \union ReplacedModules :
+            targetStartState[m] = "Ready"
 
-OneRoleOwnsEachModuleWorktree ==
-    \A m \in Modules :
-        /\ activeRole[m] = "Coder" =>
-            /\ moduleState[m] = "Coding"
-            /\ coderSession[m] = "Active"
-            /\ verifierSession[m] # "Active"
-        /\ activeRole[m] = "Verifier" =>
-            /\ moduleState[m] = "Verifying"
-            /\ verifierSession[m] = "Active"
-            /\ coderSession[m] # "Active"
+DeletedNodesRetire ==
+    phase \in {"TargetRunning", "Completed"} =>
+        \A m \in DeletedModules : nodeState[m] = "Retired"
 
-RetryDoesNotReplaceIdentity ==
-    \A m \in TargetModules :
-        admissionCount[m] > 0 =>
-            /\ worktreeIdentity[m] =
-                IF m \in PreservedModules THEN 1 ELSE 2
-            /\ roleGeneration[m] =
-                IF m \in PreservedModules THEN 1 ELSE 2
+ContractOnlyNodesNeverBecomeRunnable ==
+    \A m \in ContractOnlyModules : nodeState[m] = "Absent"
 
-SystemJoinUsesCompleteTarget ==
-    systemState \in {"Active", "Accepted"} => AllTargetModulesAccepted
+ReplacedAndAddedGetFreshIdentity ==
+    phase \in {"TargetRunning", "Completed"} =>
+        \A m \in ReplacedModules \union AddedModules :
+            /\ workspaceIdentity[m] = 2
+            /\ sessionGeneration[m] = 2
+            /\ corpusIdentity[m] = 2
 
-ReplanEventuallyCompiles ==
-    phase = "ReplanRequired" ~> phase = "TargetRunning"
+PublishedOnlyAfterCompleteSink ==
+    published =>
+        /\ phase = "Completed"
+        /\ nodeState[Sink] = "Accepted"
+        /\ \A m \in TargetExecutableModules : nodeState[m] = "Accepted"
 
-=============================================================================
+=======================================================================

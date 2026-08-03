@@ -107,19 +107,6 @@ def module_verifier_session_id(
     )
 
 
-def system_verifier_session_id(
-    workflow_id: str,
-    generation: int = 0,
-) -> str:
-    return _scoped_role_session_id(
-        "system-verifier",
-        workflow_id,
-        "system_delivery",
-        workflow_id,
-        generation,
-    )
-
-
 def node_role_generation(payload: Mapping[str, Any]) -> int:
     """Explicit operator reset generation, never a Candidate/retry counter."""
 

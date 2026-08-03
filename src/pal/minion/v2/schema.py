@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 26
+MINION_V2_SCHEMA_VERSION = 27
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -19,7 +19,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
     if previous_version not in {0, MINION_V2_SCHEMA_VERSION}:
         raise RuntimeError(
             "legacy Minion runtime schema is not migrated in place; "
-            "archive the old runtime and initialize a fresh v26 runtime"
+            "archive the old runtime and initialize a fresh v27 runtime"
         )
     connection.executescript(
         """
@@ -430,6 +430,49 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             blocker_json TEXT NOT NULL DEFAULT '{}',
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_graph_generations (
+            graph_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            workflow_id TEXT NOT NULL,
+            generation_hash TEXT NOT NULL,
+            graph_ir_json TEXT NOT NULL,
+            execution_json TEXT NOT NULL DEFAULT '{}',
+            source_ref TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'compiled',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(graph_id, generation),
+            UNIQUE(workflow_id, generation),
+            UNIQUE(generation_hash)
+        );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_plan_cycles (
+            cycle_id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL UNIQUE,
+            generation INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_node_cycles (
+            cycle_id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            graph_id TEXT NOT NULL,
+            graph_generation INTEGER NOT NULL,
+            node_name TEXT NOT NULL,
+            state TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(workflow_id, graph_generation, node_name),
+            FOREIGN KEY(graph_id, graph_generation)
+                REFERENCES minion_v2_graph_generations(graph_id, generation)
+        );
+
+        CREATE INDEX IF NOT EXISTS minion_v2_node_cycles_ready
+        ON minion_v2_node_cycles(workflow_id, graph_generation, state, node_name);
         """
     )
     connection.execute(

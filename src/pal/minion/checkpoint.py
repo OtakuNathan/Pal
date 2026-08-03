@@ -2,24 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from pal.llm.serde import message_from_payload, message_to_payload
-from pal.memory.compact import normalize_l1_transcript
-from pal.memory.service import InMemoryL1Store
+from pal.llm.serde import message_from_payload
 from pal.memory.turn_ir import L1TurnIR, L1TurnState
 from pal.minion.v2.contracts import PermanentEffectError
 
 
-AGENT_SESSION_CHECKPOINT_SCHEMA_VERSION = "5"
-
-_LEGACY_L1_FIELDS = frozenset(
-    {
-        "active_tool_protocol_messages",
-        "l1_items",
-        "l1_protocol_committed_count",
-        "request_snapshot",
-        "tool_delivery_records",
-    }
-)
+AGENT_SESSION_CHECKPOINT_SCHEMA_VERSION = "6"
 
 
 class AgentSessionCheckpointError(PermanentEffectError):
@@ -29,53 +17,24 @@ class AgentSessionCheckpointError(PermanentEffectError):
 def normalize_agent_session_checkpoint(
     checkpoint: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Validate the current checkpoint shape or migrate the legacy L1 shape.
+    """Validate the v27 logical-coroutine checkpoint envelope.
 
-    The pre-IR and IR checkpoints accidentally shared schema version ``5``.
-    Shape therefore has to participate in admission: a checkpoint containing
-    ``l1_items`` is migrated, never relabelled, and an admitted current
-    checkpoint must contain ``l1_turns``.
+    Fresh runtime cutover makes old continuations intentionally unreachable.
+    L1 is the only conversational truth source; Manager treats the remaining
+    role payload as opaque and never reconstructs a second transcript.
     """
 
     value = dict(checkpoint)
-    raw_turns = value.get("l1_turns")
-    if isinstance(raw_turns, list):
-        if str(value.get("schema_version") or "") != AGENT_SESSION_CHECKPOINT_SCHEMA_VERSION:
-            raise AgentSessionCheckpointError(
-                "manager-selected agent continuation uses an unsupported checkpoint schema"
-            )
-        _validate_l1_turn_payloads(raw_turns)
-        for field in _LEGACY_L1_FIELDS:
-            value.pop(field, None)
-        return value
-
-    raw_items = value.get("l1_items")
-    if not isinstance(raw_items, list):
+    if str(value.get("schema_version") or "") != AGENT_SESSION_CHECKPOINT_SCHEMA_VERSION:
         raise AgentSessionCheckpointError(
-            "manager-selected agent continuation contains neither current nor migratable L1"
+            "manager-selected agent continuation uses an unsupported checkpoint schema"
         )
-
-    store = InMemoryL1Store()
-    try:
-        store.items = [normalize_l1_transcript(item) for item in raw_items]
-    except (TypeError, ValueError, RuntimeError) as exc:
+    raw_turns = value.get("l1_turns")
+    if not isinstance(raw_turns, list):
         raise AgentSessionCheckpointError(
-            "manager-selected agent continuation contains invalid legacy L1"
-        ) from exc
-
-    value["schema_version"] = AGENT_SESSION_CHECKPOINT_SCHEMA_VERSION
-    value["l1_turns"] = [
-        {
-            "turn_id": turn.turn_id,
-            "state": turn.state.value,
-            "revision": turn.revision,
-            "metadata": dict(turn.metadata),
-            "messages": [message_to_payload(message) for message in turn.messages],
-        }
-        for turn in store.turns.turns
-    ]
-    for field in _LEGACY_L1_FIELDS:
-        value.pop(field, None)
+            "manager-selected agent continuation contains no L1 truth source"
+        )
+    _validate_l1_turn_payloads(raw_turns)
     return value
 
 

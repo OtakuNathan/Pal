@@ -181,7 +181,6 @@ class MinionManager:
         self.v2_outbox = MinionV2OutboxProcessor(
             self.v2_service,
             semantic_effects=self.v2_semantic_orchestrator,
-            max_parallel_nodes=self.max_parallel_modules,
         )
 
     @property
@@ -1022,7 +1021,6 @@ class MinionManager:
             1,
             int(config.get("max_parallel_llm_nodes", config.get("max_parallel_modules", self.max_parallel_modules)) or self.max_parallel_modules),
         )
-        self.v2_outbox.max_parallel_nodes = self.max_parallel_modules
         self.v2_semantic_orchestrator.max_parallel_workers = self.max_parallel_modules
         self._v2_wake_event.set()
         return {"ok": True, "status": "ok", "config": config, "max_parallel_llm_nodes": self.max_parallel_modules}

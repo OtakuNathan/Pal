@@ -129,14 +129,6 @@ class ProjectGitLayout:
             f"{_ref_component(module_name, fallback='module')}"
         )
 
-    @property
-    def integration_worktree(self) -> Path:
-        return self.workflow_worktree_root / "integration"
-
-    @property
-    def integration_branch(self) -> str:
-        return f"{self.branch_namespace}/integration"
-
     def to_artifact_dict(self) -> dict[str, str]:
         return {
             "project_name": self.project_name,

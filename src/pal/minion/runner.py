@@ -68,7 +68,6 @@ from pal.memory import (
     L1TranscriptMessage,
     L2Entry,
     L3ProviderSelector,
-    MemoryCommitRequest,
     MemoryService,
     build_ollama_embedding_provider_from_config,
     register_with_core as register_memory_with_core,
@@ -165,6 +164,10 @@ class _MinionCooperativeRestart(Exception):
     def __init__(self, payload: dict[str, Any]) -> None:
         super().__init__(str(payload.get("summary") or "minion suspended for manager restart"))
         self.payload = dict(payload)
+
+
+class MinionLLMRetryableError(RuntimeError):
+    """Endpoint failure that must leave the logical role session resumable."""
 
 
 class _MinionLLMRuntimeAdapter:
@@ -671,6 +674,16 @@ class MinionRunner:
             metadata = {"retry_note": retry_note}
             return _minion_prompt_context(self.pack, event=state.channel_envelope.event, metadata=metadata)
 
+        active_input_id = str(getattr(state.channel_envelope.event, "event_id", "") or "input")
+        turn_id = self._resume_or_reopen_l1_turn(
+            state.memory_service,
+            run_id=self.run_id,
+            active_input_id=active_input_id,
+            user_text=_minion_primary_input(current_channel_envelope),
+            fencing_token=int(session_metadata.get("fencing_token") or 0),
+        )
+        self._abort_stale_l1_turns(state.memory_service, active_turn_id=turn_id)
+
         def build_commit_payload(final_reply: str, observations: list[Any], reply_texts: list[str]) -> L1CommitPayload:
             _ = reply_texts
             transcript = [
@@ -690,10 +703,11 @@ class MinionRunner:
                     },
                 ),
             ]
-            return L1CommitPayload(turn_id=self.run_id, transcript=transcript, tool_observations=list(observations))
+            # The IR turn is opened by TurnExecutor with this invocation-scoped
+            # id.  Keep the payload on that same identity so terminal settlement
+            # closes the active turn instead of creating a second legacy turn.
+            return L1CommitPayload(turn_id=turn_id, transcript=transcript, tool_observations=list(observations))
 
-        active_input_id = str(getattr(state.channel_envelope.event, "event_id", "") or "input")
-        turn_id = f"{self.run_id}:invocation:{active_input_id}"
         program = agent_turn_program(
             turn_id=turn_id,
             build_assembly_context=build_context,
@@ -737,11 +751,25 @@ class MinionRunner:
                 outcome = completed.value
                 if not isinstance(outcome, TurnOutcome):
                     raise RuntimeError("minion agent loop ended without a turn outcome")
-                settled = await executor._settle_l1_working_set_async(
-                    continuation,
-                    build_context(AgentLoopFrame()),
-                )
-                if not settled:
+                active_l1_turn = state.memory_service.active_l1_turn(continuation.turn_id)
+                if (
+                    active_l1_turn is not None
+                    and not active_l1_turn.semantic_delta_seen
+                    and str(outcome.final_reply or "").strip()
+                ):
+                    # The completion gate can finish without issuing a real
+                    # LLMRequestEffect. Preserve that final reply in the same
+                    # invocation-scoped L1 turn before closing it.
+                    state.memory_service.upsert_l1_assistant(
+                        continuation.turn_id,
+                        LLMMessageIR(
+                            role=MessageRole.ASSISTANT,
+                            parts=(TextPartIR(str(outcome.final_reply)),),
+                            semantic_kind="assistant_reply",
+                        ),
+                    )
+                settled = await executor.schedule_post_turn_commit_async(outcome)
+                if str(getattr(settled, "state", "")) != "settled":
                     raise RuntimeError(
                         "Minion L1 working-set settlement failed; refusing to "
                         "checkpoint a false completion"
@@ -752,10 +780,6 @@ class MinionRunner:
                         round=state.llm_round_count,
                         tool_call_count=state.tool_call_count,
                     )
-                await self._commit_minion_l1(
-                    state,
-                    outcome.commit_payload.transcript,
-                )
                 executor.clear_execution_cursors(continuation)
                 self._sync_minion_state_from_continuation(state, continuation)
                 self.memory_candidates = _memory_candidates_from_sink(state.memory_candidate_sink)
@@ -791,6 +815,82 @@ class MinionRunner:
             await self._raise_if_cancel_requested()
             if self._continuation_is_restart_safe(continuation, state.memory_service):
                 await self._raise_if_restart_requested()
+
+    @staticmethod
+    def _resume_or_reopen_l1_turn(
+        memory_service: MemoryService,
+        *,
+        run_id: str,
+        active_input_id: str,
+        user_text: str,
+        fencing_token: int,
+    ) -> str:
+        """Return the resumable turn, reopening a closed retry checkpoint.
+
+        A failed native worker may have persisted a terminal checkpoint just
+        before the manager observed its process failure.  Reusing that closed
+        turn id would make the next worker's first LLM delta a late update.
+        Keep the closed turn as history and create one deterministic active
+        recovery turn for the new fenced attempt instead.
+        """
+        prefix = f"{run_id}:invocation:"
+        active = [
+            turn
+            for turn in memory_service.l1_store.turns.turns
+            if turn.state == L1TurnState.ACTIVE and turn.turn_id.startswith(prefix)
+        ]
+        if active:
+            return max(active, key=lambda turn: int(turn.revision)).turn_id
+
+        base = f"{run_id}:invocation:{active_input_id}"
+        existing = memory_service.l1_store.turns.get(base)
+        if existing is None or existing.state == L1TurnState.ACTIVE:
+            return base
+
+        token = max(1, int(fencing_token or 0))
+        suffix = 0
+        while True:
+            recovery_id = f"{base}:recovery:{token}" if suffix == 0 else f"{base}:recovery:{token}:{suffix}"
+            if memory_service.l1_store.turns.get(recovery_id) is None:
+                memory_service.begin_l1_turn(
+                    recovery_id,
+                    user_text=str(user_text or ""),
+                    metadata={
+                        "_pal_input_id": active_input_id,
+                        "recovery_of": base,
+                    },
+                )
+                return recovery_id
+            suffix += 1
+
+    @staticmethod
+    def _abort_stale_l1_turns(
+        memory_service: MemoryService,
+        *,
+        active_turn_id: str,
+    ) -> None:
+        """Close orphaned active turns left by a failed native worker attempt.
+
+        A logical Minion session may restore one active L1 turn.  A second
+        active turn is necessarily a stale process-owned turn (for example a
+        worker that crashed after all tool results were recorded but before
+        terminal settlement).  Abort it before starting/resuming the current
+        turn so checkpoint recovery cannot accumulate parallel active L1
+        protocols.
+        """
+        for turn in tuple(memory_service.l1_store.turns.turns):
+            if str(turn.state) != L1TurnState.ACTIVE or turn.turn_id == active_turn_id:
+                continue
+            try:
+                memory_service.abort_l1_turn(
+                    turn.turn_id,
+                    reason="stale active turn recovered before a new Minion attempt",
+                )
+            except Exception:
+                # The current turn remains authoritative; a malformed stale
+                # record must not prevent the worker from reaching its own
+                # durable protocol boundary.
+                continue
 
     @staticmethod
     def _continuation_is_restart_safe(
@@ -1193,7 +1293,13 @@ class MinionRunner:
                 finish_reason = str(LLMFinishReason.STOP)
                 result = EffectResult(status=RuntimeStatus.OK, payload=outcome)
             elif finish_reason == LLMFinishReason.ERROR:
-                self.blocked_summary = str(getattr(outcome, "text", "") or "LLM generation failed")
+                # Do not turn an endpoint error into a completed/blocked role
+                # turn.  The manager must retry this same logical session
+                # from its last safe checkpoint; settling L1 here would make
+                # the next worker's first update a late write to a closed turn.
+                raise MinionLLMRetryableError(
+                    str(getattr(outcome, "text", "") or "LLM generation failed")
+                )
         elif truncated:
             partial_text = str(getattr(outcome, "text", "") or "").strip()
             if partial_text:
@@ -1264,28 +1370,6 @@ class MinionRunner:
             return result
         sync_method = getattr(port, sync_name)
         return await asyncio.to_thread(sync_method, *args, **kwargs)
-
-    async def _commit_minion_l1(
-        self,
-        state: MinionAgentLoopState,
-        transcript: list[L1TranscriptMessage],
-    ) -> None:
-        if not transcript:
-            return
-        result = state.memory_service.commit_l1(
-            MemoryCommitRequest(
-                turn_id=self.run_id,
-                transcript=transcript,
-            )
-        )
-        if result.status not in {
-            RuntimeStatus.OK,
-            RuntimeStatus.SKIPPED,
-        }:
-            raise RuntimeError(
-                "Minion final L1 settlement failed; refusing to checkpoint a "
-                "false completion"
-            )
 
     def _render_durable_role_context(self) -> str:
         binding = dict((self.pack.metadata or {}).get("minion_v2") or {})

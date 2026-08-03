@@ -3,13 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from pal.minion.v2.artifacts import ArtifactRef
-from pal.minion.v2.contract_protocol import software_contract_projection
 from pal.minion.v2.contracts import (
     ActionEnvelope,
     AggregateSnapshot,
@@ -17,8 +14,7 @@ from pal.minion.v2.contracts import (
     DeferredEffectError,
     PermanentEffectError,
 )
-from pal.minion.v2.execution import DagScheduler, ExecutionCompiler, workspace_content_fingerprint
-from pal.minion.v2.integration import IntegrationOwnershipDefect, IntegrationService
+from pal.minion.v2.execution import DagScheduler, ExecutionCompiler
 from pal.minion.v2.machine_dsl import ControlDisposition, ControlIntent
 from pal.minion.v2.machines import machine_spec_for
 from pal.minion.v2.paths import cleanup_workflow_worktrees
@@ -29,6 +25,7 @@ from pal.minion.v2.sessions import (
     architect_session_id_for_revision,
 )
 from pal.minion.v2.verification import DefectPropagationService
+from pal.minion.v2.workflow_runtime import WorkflowCoordinator
 
 
 class SemanticEffectPort(Protocol):
@@ -48,7 +45,6 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "create_architecture_revision",
     "schedule_ready_nodes",
     "notify_node_accepted",
-    "prepare_system_verification",
     "publish_accepted_memory_candidate",
     "propagate_pause",
     "propagate_resume",
@@ -59,7 +55,6 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "freeze_epoch_nodes",
     "suspend_stale_node_assignments",
     "reopen_dependency_and_stale_descendants",
-    "reopen_verifier_and_stale_descendants",
     "request_epoch_replan",
     "freeze_epoch_for_replan",
     "create_replan_revision",
@@ -112,7 +107,6 @@ class MinionV2OutboxProcessor:
     semantic_effects: SemanticEffectPort = field(default_factory=RejectingSemanticEffectPort)
     worker_id: str = "minion-v2-outbox"
     effect_lease_seconds: int = 120
-    max_parallel_nodes: int = 5
     _background_tasks: set[asyncio.Task[str]] = field(default_factory=set, init=False, repr=False)
 
     @property
@@ -225,6 +219,7 @@ class MinionV2OutboxProcessor:
                     error=error,
                     triage_action=triage_action,
                 )
+                self._sync_cycle_triage(triage_action)
             else:
                 triage_action = None
                 if int(effect.get("attempt_count") or 0) >= int(effect.get("max_attempts") or 1):
@@ -236,6 +231,7 @@ class MinionV2OutboxProcessor:
                     retry_after_seconds=5,
                     triage_action=triage_action,
                 )
+                self._sync_cycle_triage(triage_action)
             self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
             self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
             return "failed"
@@ -245,6 +241,33 @@ class MinionV2OutboxProcessor:
                 await heartbeat
             except asyncio.CancelledError:
                 pass
+
+    def _sync_cycle_triage(
+        self,
+        action: ActionEnvelope | None,
+    ) -> None:
+        if action is None:
+            return
+        coordinator = WorkflowCoordinator(self.repository)
+        if action.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+            coordinator.require_plan_triage(workflow_id=action.workflow_id)
+            return
+        if action.aggregate_type != AggregateType.DAG_NODE_RUN:
+            return
+        node = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            action.aggregate_id,
+        )
+        if node is None:
+            return
+        coordinator.require_node_triage(
+            workflow_id=action.workflow_id,
+            node_name=str(
+                node.payload.get("module_name")
+                or node.payload.get("unit_id")
+                or ""
+            ),
+        )
 
     async def _heartbeat(self, effect_id: str) -> None:
         interval = max(1.0, self.effect_lease_seconds / 3)
@@ -271,13 +294,10 @@ class MinionV2OutboxProcessor:
             DagScheduler(self.repository).schedule_ready_nodes(
                 workflow_id=snapshot.workflow_id,
                 epoch_id=epoch_id,
-                max_new_nodes=self.max_parallel_nodes,
             )
             return {}
         if effect_type == "notify_node_accepted":
             return self._node_accepted(effect)
-        if effect_type == "prepare_system_verification":
-            return self._prepare_system_verification(effect)
         if effect_type == "publish_accepted_memory_candidate":
             return self._publish_accepted_memory_candidate(effect)
         if effect_type in {
@@ -302,10 +322,7 @@ class MinionV2OutboxProcessor:
                 reason="node became stale before its queued activation started",
             )
             return {}
-        if effect_type in {
-            "reopen_dependency_and_stale_descendants",
-            "reopen_verifier_and_stale_descendants",
-        }:
+        if effect_type == "reopen_dependency_and_stale_descendants":
             node = self._effect_snapshot(effect)
             repair_ref = ArtifactRef.from_mapping(dict(node.payload.get("repair_bill_ref") or {}))
             targets = tuple(
@@ -326,11 +343,7 @@ class MinionV2OutboxProcessor:
                     epoch_id=str(node.payload.get("epoch_id") or ""),
                     dependency_node_id=target,
                     repair_bill_ref=repair_ref,
-                    reopen_action=(
-                        "REOPEN_VERIFICATION"
-                        if effect_type == "reopen_verifier_and_stale_descendants"
-                        else "REOPEN_DEPENDENCY"
-                    ),
+                    reopen_action="REOPEN_DEPENDENCY",
                 )
             return {}
         if effect_type == "request_epoch_replan":
@@ -451,15 +464,18 @@ class MinionV2OutboxProcessor:
             DagScheduler(self.repository).schedule_ready_nodes(
                 workflow_id=epoch.workflow_id,
                 epoch_id=epoch.aggregate_id,
-                max_new_nodes=self.max_parallel_nodes,
             )
             nodes = self._epoch_nodes(epoch)
-            if nodes and all(item.state == "ACCEPTED" for item in nodes):
+            graph_execution = WorkflowCoordinator(self.repository).execution(
+                workflow_id=epoch.workflow_id,
+                generation=int(epoch.payload.get("graph_generation") or 0) or None,
+            )
+            if nodes and graph_execution.state.value == "COMPLETED":
                 accepted = next(
                     (
                         item
                         for item in nodes
-                        if str(item.payload.get("node_kind") or "") == "integration"
+                        if bool(item.payload.get("graph_sink"))
                     ),
                     sorted(nodes, key=lambda item: item.aggregate_id)[-1],
                 )
@@ -484,17 +500,12 @@ class MinionV2OutboxProcessor:
                 if item.aggregate_type == AggregateType.DAG_NODE_RUN
                 and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
             ]
-            integration = [item for item in nodes if str(item.payload.get("node_kind") or "") == "integration"]
-            implementation = [item for item in nodes if str(item.payload.get("node_kind") or "unit") == "unit"]
-            if not nodes or (not integration and not implementation):
+            sinks = [item for item in nodes if bool(item.payload.get("graph_sink"))]
+            if not nodes or len(sinks) != 1:
                 raise RuntimeError("execution compilation is incomplete and requires operator triage")
             payload = {"node_ids": [item.aggregate_id for item in nodes]}
-            if integration:
-                if len(integration) != 1:
-                    raise RuntimeError("legacy execution compilation has multiple integration nodes")
-                payload["integration_node_id"] = integration[0].aggregate_id
-            else:
-                payload["implementation_node_ids"] = [item.aggregate_id for item in implementation]
+            payload["implementation_node_ids"] = [item.aggregate_id for item in nodes]
+            payload["sink_node_id"] = sinks[0].aggregate_id
             self.repository.dispatch(
                 ActionEnvelope(
                     action_type="NODES_COMPILED",
@@ -824,6 +835,9 @@ class MinionV2OutboxProcessor:
         request = workflow_request_from_snapshot(self.service, workflow)
         operation = str(request.get("operation") or "new_requirement")
         if operation == "new_requirement":
+            WorkflowCoordinator(self.repository).ensure_plan_cycle(
+                workflow_id=workflow.workflow_id,
+            )
             revision_id = _derived_id("arch", str(effect["effect_key"]))
             self.repository.dispatch(
                 ActionEnvelope(
@@ -899,6 +913,9 @@ class MinionV2OutboxProcessor:
 
     def _create_revision(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         previous = self._effect_snapshot(effect)
+        WorkflowCoordinator(self.repository).begin_plan_revision(
+            workflow_id=previous.workflow_id,
+        )
         revision_id = _derived_id("arch", str(effect["effect_key"]))
         self.repository.dispatch(
             ActionEnvelope(
@@ -1018,9 +1035,6 @@ class MinionV2OutboxProcessor:
                 "REVIEWING",
                 "REVIEW_QUIESCING",
                 "REVIEW_SNAPSHOTTING",
-                "VERIFYING",
-                "VERIFY_QUIESCING",
-                "VERIFY_SNAPSHOTTING",
             }:
                 continue
             legal = self.repository.engine.legal_actions(AggregateType.DAG_NODE_RUN, node.state)
@@ -1068,10 +1082,6 @@ class MinionV2OutboxProcessor:
             "REVIEWING",
             "REVIEW_QUIESCING",
             "REVIEW_SNAPSHOTTING",
-            "VERIFYING",
-            "VERIFY_QUIESCING",
-            "VERIFY_SNAPSHOTTING",
-            "VERIFY_PREPARING",
             "PAUSE_REQUESTED",
             "CANCEL_REQUESTED",
         }
@@ -1115,6 +1125,9 @@ class MinionV2OutboxProcessor:
         generation = int(epoch.payload.get("replan_generation") or 0)
         revision_id = _derived_id("arch", f"replan:{epoch.aggregate_id}:{generation}")
         batch_ref = dict(epoch.payload.get("replan_finding_batch_ref") or {})
+        plan_cycle = WorkflowCoordinator(self.repository).begin_plan_revision(
+            workflow_id=epoch.workflow_id,
+        )
         self.repository.dispatch(
             ActionEnvelope(
                 action_type="CREATE_ARCHITECTURE_REVISION",
@@ -1133,7 +1146,7 @@ class MinionV2OutboxProcessor:
                     "source_execution_epoch_id": epoch.aggregate_id,
                     "replan_generation": generation,
                     "research_mode": "local_only",
-                    "revision_number": generation,
+                    "revision_number": plan_cycle.generation,
                 },
             )
         )
@@ -1331,26 +1344,9 @@ class MinionV2OutboxProcessor:
     def _node_accepted(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
         epoch_id = str(node.payload.get("epoch_id") or "")
-        if str(node.payload.get("node_kind") or "") == "integration":
-            epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
-            if epoch is not None and epoch.state == "RUNNING":
-                self.repository.dispatch(
-                    ActionEnvelope(
-                        action_type="INTEGRATION_ACCEPTED",
-                        workflow_id=node.workflow_id,
-                        aggregate_type=AggregateType.EXECUTION_EPOCH,
-                        aggregate_id=epoch_id,
-                        actor="minion-v2-outbox",
-                        expected_version=epoch.version,
-                        idempotency_key=f"effect:{effect['effect_key']}:integration",
-                        payload={"integration_candidate_ref": node.payload.get("candidate_ref")},
-                    )
-                )
-            return {}
         DagScheduler(self.repository).schedule_ready_nodes(
             workflow_id=node.workflow_id,
             epoch_id=epoch_id,
-            max_new_nodes=self.max_parallel_nodes,
         )
         nodes = [
             item
@@ -1358,15 +1354,20 @@ class MinionV2OutboxProcessor:
             if item.aggregate_type == AggregateType.DAG_NODE_RUN
             and str(item.payload.get("epoch_id") or "") == epoch_id
         ]
-        if nodes and not any(str(item.payload.get("node_kind") or "") == "integration" for item in nodes):
-            implementation = [item for item in nodes if str(item.payload.get("node_kind") or "unit") == "unit"]
-            system_nodes = [
-                item
-                for item in nodes
-                if str(item.payload.get("node_kind") or "") == "system_verification"
-            ]
-            if implementation and len(system_nodes) == 1 and all(
-                item.state == "ACCEPTED" for item in nodes
+        sinks = [item for item in nodes if bool(item.payload.get("graph_sink"))]
+        if nodes and len(sinks) == 1:
+            graph_execution = WorkflowCoordinator(self.repository).execution(
+                workflow_id=node.workflow_id,
+                generation=int(node.payload.get("graph_generation") or 0) or None,
+            )
+        else:
+            graph_execution = None
+        if graph_execution is not None and graph_execution.state.value == "COMPLETED":
+            sink = sinks[0]
+            if (
+                node.aggregate_id == sink.aggregate_id
+                and str(dict(sink.payload.get("candidate_ref") or {}).get("sha256") or "")
+                == graph_execution.published_sink_ref
             ):
                 epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
                 if epoch is not None and epoch.state == "RUNNING":
@@ -1380,156 +1381,19 @@ class MinionV2OutboxProcessor:
                             expected_version=epoch.version,
                             idempotency_key=f"effect:{effect['effect_key']}:all-required-accepted",
                             payload={
-                                "accepted_candidate_refs": [dict(item.payload["candidate_ref"]) for item in implementation],
+                                "accepted_candidate_refs": [dict(item.payload["candidate_ref"]) for item in nodes],
                                 "verification_artifact_refs": [
                                     dict(item.payload["verification_artifact_ref"])
-                                    for item in system_nodes
+                                    for item in nodes
+                                    if item.payload.get("verification_artifact_ref")
                                 ],
+                                "sink_candidate_ref": dict(
+                                    sink.payload.get("candidate_ref") or {}
+                                ),
                             },
                         )
                     )
         return {}
-
-    def _prepare_system_verification(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
-        node = self._effect_snapshot(effect)
-        if str(node.payload.get("node_kind") or "") != "system_verification":
-            raise ValueError("system verification preparation requires its single system node")
-        catalog_ref = dict(
-            node.payload.get("scenario_catalog_ref")
-            or node.payload.get("unit_contract_ref")
-            or {}
-        )
-        catalog = dict(self.service.artifacts.read_json(catalog_ref))
-        scenarios = {
-            str(name): dict(value or {})
-            for name, value in dict(catalog.get("scenarios") or {}).items()
-        }
-        if not scenarios:
-            raise ValueError("system verification requires a non-empty ScenarioCatalog")
-        dependency_nodes: list[AggregateSnapshot] = []
-        for dependency_id in list(node.payload.get("dependency_node_ids") or []):
-            dependency = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, str(dependency_id))
-            if dependency is None or dependency.state != "ACCEPTED":
-                raise ValueError("system verification dependency is not ACCEPTED")
-            dependency_nodes.append(dependency)
-        ordered_nodes = _topological_scenario_nodes(dependency_nodes)
-        dependencies: list[dict[str, Any]] = []
-        for dependency in ordered_nodes:
-            candidate_ref = dict(dependency.payload.get("candidate_ref") or {})
-            candidate_digest = str(dependency.payload.get("candidate_digest") or "")
-            if not candidate_ref.get("sha256") or not candidate_digest:
-                raise ValueError("system verification dependency has no accepted Candidate")
-            dependencies.append(
-                {
-                    "node_run_id": dependency.aggregate_id,
-                    "module_name": str(dependency.payload.get("module_name") or dependency.payload.get("unit_id") or ""),
-                    "candidate_ref": candidate_ref,
-                    "candidate_digest": candidate_digest,
-                    "output_hashes": dict(dependency.payload.get("output_hashes") or {}),
-                }
-            )
-        manifest = self.service.artifacts.read_json(dict(node.payload.get("architecture_manifest_ref") or {}))
-        submission = dict(manifest.get("submission") or {})
-        if not submission and isinstance(manifest.get("contract"), Mapping):
-            submission = software_contract_projection(
-                dict(manifest.get("contract") or {})
-            )
-        architecture_modules = {
-            str(name): dict(value or {})
-            for name, value in dict(
-                submission.get("modules") or {}
-            ).items()
-        }
-        requirements_ref = dict(manifest.get("requirements_ref") or {})
-        skeleton_sha = str(manifest.get("skeleton_commit_sha") or "")
-        workspace = Path(str(node.payload.get("workspace_path") or ""))
-        if not workspace.is_dir() or not skeleton_sha:
-            raise ValueError("system verification requires its accepted Skeleton worktree")
-        try:
-            integration_ref, integration_commit_sha = IntegrationService(
-                self.service.artifacts
-            ).integrate_candidates(
-                integration_worktree=workspace,
-                ordered_candidates=dependencies,
-                architecture_manifest_sha=str(
-                    dict(node.payload.get("architecture_manifest_ref") or {}).get(
-                        "sha256"
-                    )
-                    or ""
-                ),
-            )
-        except IntegrationOwnershipDefect as exc:
-            raise ValueError(
-                "system integration exposed an undeclared ownership dependency"
-            ) from exc
-        fingerprint_payload = {
-            "verification_name": "system_delivery",
-            "skeleton_commit_sha": skeleton_sha,
-            "dependencies": dependencies,
-            "scenarios": scenarios,
-            "environment_fingerprint": str(node.payload.get("environment_fingerprint") or ""),
-            "system_tree_sha": _git_output(
-                workspace, "rev-parse", f"{integration_commit_sha}^{{tree}}"
-            ),
-        }
-        system_fingerprint = hashlib.sha256(
-            json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        work_view_ref = self.service.artifacts.put_json(
-            {
-                "schema_version": "1",
-                "verification_name": "system_delivery",
-                "kind": "system_and_delivery",
-                "accepted_modules": [
-                    {
-                        "module_name": item["module_name"],
-                        "declared_outputs": sorted(item["output_hashes"]),
-                        "available_in_worktree": True,
-                    }
-                    for item in dependencies
-                ],
-                "scenarios": scenarios,
-                "public_module_contracts": {
-                    name: {
-                        "responsibility": module.get("responsibility"),
-                        "dependencies": list(module.get("dependencies") or []),
-                        "contract": dict(module.get("contract") or {}),
-                    }
-                    for name, module in sorted(architecture_modules.items())
-                },
-                "delivery_evidence_required": True,
-                "delivery_evidence_rule": (
-                    "Launch each task-mandated delivery surface through its real user boundary; "
-                    "source inspection, LSP, unit tests, and compile-only probes are not delivery evidence."
-                ),
-            },
-            artifact_type="SystemVerificationWorkViewArtifact",
-            child_refs=(
-                (str(catalog_ref.get("sha256") or ""), "scenario_catalog"),
-                (integration_ref.sha256, "integration_candidate"),
-                (str(requirements_ref.get("sha256") or ""), "task_ledger"),
-            ),
-        )
-        current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="VERIFICATION_PREPARED",
-                workflow_id=node.workflow_id,
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=node.aggregate_id,
-                actor="minion-v2-manager",
-                expected_version=current.version,
-                idempotency_key=f"effect:{effect['effect_key']}:system-prepared",
-                payload={
-                    "system_fingerprint": system_fingerprint,
-                    "system_work_view_ref": work_view_ref.to_dict(),
-                    "system_integration_ref": integration_ref.to_dict(),
-                    "system_commit_sha": integration_commit_sha,
-                    "verification_workspace_fingerprint": workspace_content_fingerprint(workspace),
-                },
-            )
-        )
-        return {"result_artifact_ref": work_view_ref.to_dict()}
 
     def _publish_accepted_memory_candidate(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
@@ -1826,6 +1690,7 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
     )
     if workflow is None:
         return
+    _reconcile_cycle_control_projection(repository, workflow, snapshots)
     requested_intent = {
         "PAUSE_REQUESTED": ControlIntent.PAUSE,
         "CANCEL_REQUESTED": ControlIntent.CANCEL,
@@ -2028,6 +1893,71 @@ def reconcile_control_requests(repository: Any, workflow_id: str) -> None:
             )
         )
 
+    refreshed = list(repository.list_workflow_snapshots(workflow_id))
+    refreshed_workflow = next(
+        (
+            item
+            for item in refreshed
+            if item.aggregate_type == AggregateType.WORKFLOW
+        ),
+        None,
+    )
+    if refreshed_workflow is not None:
+        _reconcile_cycle_control_projection(
+            repository,
+            refreshed_workflow,
+            refreshed,
+        )
+
+
+def _reconcile_cycle_control_projection(
+    repository: Any,
+    workflow: AggregateSnapshot,
+    snapshots: list[AggregateSnapshot],
+) -> None:
+    """Repair the crash window between aggregate control and cycle state.
+
+    Aggregate machines project process/effect progress. PlanCycle and
+    GraphExecution remain the semantic owners, so this reconciliation is
+    one-way and idempotent: committed aggregate intent may repair a missing
+    cycle write, never the reverse.
+    """
+
+    coordinator = WorkflowCoordinator(repository)
+    if workflow.state in {"PAUSE_REQUESTED", "PAUSED"}:
+        coordinator.request_workflow_pause(workflow_id=workflow.workflow_id)
+    elif workflow.state in {"CANCEL_REQUESTED", "CANCELLED"}:
+        coordinator.request_workflow_cancel(workflow_id=workflow.workflow_id)
+    elif workflow.state == "ACTIVE":
+        coordinator.resume_workflow(workflow_id=workflow.workflow_id)
+
+    active_revision_id = str(
+        workflow.payload.get("architecture_revision_id") or ""
+    )
+    for item in snapshots:
+        if (
+            item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+            and item.aggregate_id == active_revision_id
+            and item.state in {"PAUSED", "CANCELLED"}
+        ):
+            coordinator.confirm_plan_control(
+                workflow_id=workflow.workflow_id,
+                cancel=item.state == "CANCELLED",
+            )
+        if (
+            item.aggregate_type == AggregateType.DAG_NODE_RUN
+            and item.state in {"PAUSED", "CANCELLED"}
+        ):
+            coordinator.confirm_node_control(
+                workflow_id=workflow.workflow_id,
+                node_name=str(
+                    item.payload.get("module_name")
+                    or item.payload.get("unit_id")
+                    or ""
+                ),
+                cancel=item.state == "CANCELLED",
+            )
+
 
 def _active_control_children(
     snapshots: list[AggregateSnapshot],
@@ -2074,79 +2004,6 @@ def _active_control_children(
             "SUPERSEDED",
         }
     ]
-
-
-def _topological_scenario_nodes(nodes: list[AggregateSnapshot]) -> list[AggregateSnapshot]:
-    by_id = {node.aggregate_id: node for node in nodes}
-    selected = set(by_id)
-    for node in nodes:
-        missing = {
-            str(item)
-            for item in list(node.payload.get("contract_dependency_node_ids") or [])
-            if str(item) not in selected
-        }
-        if missing:
-            raise ValueError(
-                "verification scenario omitted construction dependencies for "
-                f"{node.payload.get('module_name') or node.aggregate_id}: {', '.join(sorted(missing))}"
-            )
-    ordered: list[AggregateSnapshot] = []
-    remaining = dict(by_id)
-    accepted: set[str] = set()
-    while remaining:
-        ready = sorted(
-            (
-                node
-                for node in remaining.values()
-                if {
-                    str(item)
-                    for item in list(node.payload.get("contract_dependency_node_ids") or [])
-                }
-                <= accepted
-            ),
-            key=lambda item: str(item.payload.get("module_name") or item.aggregate_id),
-        )
-        if not ready:
-            raise ValueError("verification scenario implementation dependencies are cyclic")
-        for node in ready:
-            ordered.append(node)
-            accepted.add(node.aggregate_id)
-            remaining.pop(node.aggregate_id)
-    return ordered
-
-
-def _reset_scenario_worktree(worktree: Path, skeleton_sha: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(worktree), "cherry-pick", "--abort"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    for args in (("reset", "--hard", skeleton_sha), ("clean", "-fd")):
-        completed = subprocess.run(
-            ["git", "-C", str(worktree), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(
-                completed.stderr or completed.stdout or "failed to reset verification scenario worktree"
-            )
-
-
-def _git_output(worktree: Path, *args: str) -> str:
-    completed = subprocess.run(
-        ["git", "-C", str(worktree), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(completed.stderr or completed.stdout or "Git command failed")
-    return completed.stdout.strip()
 
 
 def _derived_id(prefix: str, effect_key: str) -> str:

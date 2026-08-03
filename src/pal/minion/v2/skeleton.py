@@ -226,12 +226,6 @@ def module_verification_corpus_path(module_name: str) -> str:
     return f"{_module_test_root(module_name)}/verifier"
 
 
-def system_verification_corpus_path() -> str:
-    """Return the System Verifier-owned durable acceptance-test path."""
-
-    return "tests/system/verifier"
-
-
 @dataclass(frozen=True)
 class ArchitectureWorkspace:
     worktree: Path

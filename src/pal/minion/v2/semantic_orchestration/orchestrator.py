@@ -93,7 +93,6 @@ from pal.minion.v2.sessions import (
     module_name_from_payload,
     module_verifier_session_id,
     node_role_generation,
-    system_verifier_session_id,
 )
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_REPAIR_BASELINE_ARTIFACT,
@@ -108,7 +107,6 @@ from pal.minion.v2.skeleton import (
     module_developer_test_path,
     module_verification_corpus_path,
     review_architecture_skeleton,
-    system_verification_corpus_path,
 )
 from pal.minion.v2.task_ledger import (
     TASK_LEDGER_ARTIFACT,
@@ -117,13 +115,8 @@ from pal.minion.v2.task_ledger import (
 from pal.minion.v2.swe_verification import (
     SWE_VERIFICATION_CAPABILITIES,
     compile_swe_verification_tool_contract,
-    infer_repair_target_modules,
 )
-from pal.minion.v2.integration import (
-    DeliveryService,
-    IntegrationOwnershipDefect,
-    IntegrationService,
-)
+from pal.minion.v2.delivery import DeliveryService
 from pal.minion.v2.paths import (
     invocation_root,
     resolve_project_git_layout,
@@ -132,6 +125,10 @@ from pal.minion.v2.paths import (
 )
 from pal.minion.v2.projections import PlanRevisionProjectionStore
 from pal.minion.v2.process_lifecycle import WorkerProcessOwner
+from pal.minion.v2.role_runtime import RoleSupervisor
+from pal.minion.v2.cycle_protocol import AssignmentKind, CycleSlot
+from pal.minion.v2.workflow_runtime import WorkflowCoordinator
+from pal.minion.v2.graph_executor import FindingClass
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.machines import machine_spec_for
 from pal.minion.v2.review_findings import structured_advisories, structured_findings
@@ -279,17 +276,6 @@ def _verifier_reference_refs(
     producer_report_value = node_payload.get("producer_report_ref")
     if isinstance(producer_report_value, Mapping) and producer_report_value.get("sha256"):
         references["coder_report"] = _ref_from_mapping(producer_report_value)
-    architecture_ref_value = node_payload.get("architecture_manifest_ref")
-    if str(node_payload.get("node_kind") or "") != "system_verification":
-        return references
-    if not isinstance(architecture_ref_value, Mapping) or not architecture_ref_value.get("sha256"):
-        return references
-    architecture_manifest = artifacts.read_json(_ref_from_mapping(architecture_ref_value))
-    requirements_value = architecture_manifest.get("requirements_ref")
-    if not isinstance(requirements_value, Mapping) or not requirements_value.get("sha256"):
-        return references
-    requirements_source_ref = _ref_from_mapping(requirements_value)
-    references["task"] = requirements_source_ref
     return references
 
 
@@ -351,8 +337,6 @@ def _role_session_scope(
     if activation.role == OrchestrationRole.IMPLEMENTATION:
         return "module", module_name_from_payload(snapshot.payload)
     if activation.role == OrchestrationRole.VERIFIER:
-        if str(snapshot.payload.get("node_kind") or "unit") == "system_verification":
-            return "system_delivery", snapshot.workflow_id
         return "module", module_name_from_payload(snapshot.payload)
     return snapshot.aggregate_type.value, str(snapshot.aggregate_id)
 
@@ -368,8 +352,6 @@ def _node_role_session_id(
             module_name_from_payload(node.payload),
             generation,
         )
-    if str(node.payload.get("node_kind") or "unit") == "system_verification":
-        return system_verifier_session_id(node.workflow_id, generation)
     return module_verifier_session_id(
         node.workflow_id,
         module_name_from_payload(node.payload),
@@ -613,6 +595,12 @@ class SemanticOrchestrator:
     )
     _assignment_ids_by_effect: dict[str, str] = field(default_factory=dict, init=False)
     _stopping: bool = field(default=False, init=False)
+    _role_supervisor: RoleSupervisor = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._role_supervisor = RoleSupervisor(
+            max_active_runs=max(1, int(self.max_parallel_workers))
+        )
 
     @property
     def repository(self):
@@ -620,7 +608,19 @@ class SemanticOrchestrator:
 
     @property
     def active_background_count(self) -> int:
+        """Return live logical tasks for graceful-drain accounting only.
+
+        This is deliberately not execution capacity.  A durable role may be
+        materialized, suspended, or waiting for the process semaphore while
+        this task remains alive.  ``RoleSupervisor.active_run_count`` is the
+        sole capacity projection.
+        """
+
         return sum(not task.done() for task in self._background_workers.values())
+
+    @property
+    def active_process_count(self) -> int:
+        return self._role_supervisor.active_run_count
 
     def request_stop(self) -> None:
         self._stopping = True
@@ -776,8 +776,7 @@ class SemanticOrchestrator:
             self.service.artifacts.read_json(
                 (
                     node.payload.get("architecture_manifest_ref")
-                    if str(node.payload.get("node_kind") or "")
-                    == "integration"
+                    if bool(node.payload.get("graph_sink"))
                     else contract_ref
                 )
             )
@@ -813,13 +812,13 @@ class SemanticOrchestrator:
             provenance={"owner": "manager", "participant": "null"},
             child_refs=((candidate_ref.sha256, "candidate"),),
         )
-        fingerprint = stable_hash(
-            {
-                "contract": contract_ref.sha256,
-                "candidate": candidate_ref.sha256,
-                "verification": verification_ref.sha256,
-            }
+        graph_contract_hash = str(
+            node.payload.get("graph_contract_hash") or ""
         )
+        if not graph_contract_hash:
+            raise ValueError(
+                "null execution node has no GraphIR contract hash"
+            )
         accepted = self.repository.dispatch(
             ActionEnvelope(
                 action_type="ACCEPT_NULL_EXECUTION",
@@ -837,12 +836,24 @@ class SemanticOrchestrator:
                     "verification_artifact_ref": (
                         verification_ref.to_dict()
                     ),
-                    "module_revision_fingerprint": fingerprint,
+                    "graph_contract_hash": graph_contract_hash,
                     "output_hashes": {},
                     "null_execution": True,
                 },
             )
         ).snapshot
+        module_name = str(
+            node.payload.get("module_name")
+            or node.payload.get("unit_id")
+            or ""
+        )
+        coordinator = WorkflowCoordinator(self.repository)
+        coordinator.accept_null_node(
+            workflow_id=node.workflow_id,
+            node_name=module_name,
+            product_ref=candidate_ref.sha256,
+            input_fingerprint=str(effect["effect_key"]),
+        )
         return {
             "status": "accepted",
             "node_run_id": accepted.aggregate_id,
@@ -855,23 +866,18 @@ class SemanticOrchestrator:
 
     def _admit_verifier_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         mode = RoleMode(self._effect_role_mode(effect))
-        if mode == RoleMode.MODULE:
-            return self._admit_node_worker(
-                effect,
-                action_type="START_REVIEW",
-                activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
-            )
-        if mode == RoleMode.SYSTEM:
-            return self._admit_node_worker(
-                effect,
-                action_type="START_SYSTEM_VERIFICATION",
-                activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.SYSTEM),
-            )
-        raise ValueError(f"unsupported verifier mode: {mode.value}")
+        if mode != RoleMode.MODULE:
+            raise ValueError(f"unsupported verifier mode: {mode.value}")
+        return self._admit_node_worker(
+            effect,
+            action_type="START_REVIEW",
+            activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
+        )
 
     async def _run_verification_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
-        mode = RoleMode(self._effect_role_mode(effect))
-        return await self._run_verification(effect, system_mode=mode == RoleMode.SYSTEM)
+        if RoleMode(self._effect_role_mode(effect)) != RoleMode.MODULE:
+            raise ValueError("verifier role requires a module node cycle")
+        return await self._run_verification(effect)
 
     def _admit_reviewer_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         if RoleMode(self._effect_role_mode(effect)) != RoleMode.STANDALONE:
@@ -935,8 +941,6 @@ class SemanticOrchestrator:
                 "provider_request_id": self._assignment_ids_by_effect.get(effect_key, effect_key),
                 "status": "already_running",
             }
-        if self.active_background_count >= max(1, int(self.max_parallel_workers)):
-            raise DeferredEffectError("worker supervisor has no available execution slot")
         ready = self._assignment_ready_events.setdefault(effect_key, asyncio.Event())
         task = asyncio.create_task(
             self._background_worker_loop(effect, runner),
@@ -1397,8 +1401,6 @@ class SemanticOrchestrator:
             if snapshot.state in {
                 "REVIEW_QUIESCING",
                 "REVIEW_SNAPSHOTTING",
-                "VERIFY_QUIESCING",
-                "VERIFY_SNAPSHOTTING",
             }:
                 return
             resource = str(snapshot.payload.get("lease_resource_key") or "")
@@ -1472,6 +1474,7 @@ class SemanticOrchestrator:
             )
             if "ROLE_FAILED" not in legal:
                 if snapshot.state == "TRIAGE_REQUIRED":
+                    self._require_cycle_triage(snapshot)
                     self.repository.settle_role_assignment(
                         assignment_id=assignment_id,
                         submission_payload_hash=str(
@@ -1525,6 +1528,7 @@ class SemanticOrchestrator:
                         current_assignment["submission_payload_hash"]
                     ),
                 )
+                self._require_cycle_triage(snapshot)
                 return {
                     "provider_request_id": assignment_id,
                     "status": "triage_required",
@@ -1533,14 +1537,24 @@ class SemanticOrchestrator:
                 continue
         raise DeferredEffectError("role failure receipt settlement lost repeated CAS races")
 
+    def _require_cycle_triage(self, snapshot: AggregateSnapshot) -> None:
+        coordinator = WorkflowCoordinator(self.repository)
+        if snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+            coordinator.require_plan_triage(
+                workflow_id=snapshot.workflow_id
+            )
+        elif snapshot.aggregate_type == AggregateType.DAG_NODE_RUN:
+            coordinator.require_node_triage(
+                workflow_id=snapshot.workflow_id,
+                node_name=str(
+                    snapshot.payload.get("module_name")
+                    or snapshot.payload.get("unit_id")
+                    or ""
+                ),
+            )
+
     async def recover_background_assignments(self) -> int:
         if self._stopping:
-            return 0
-        available = max(
-            0,
-            max(1, int(self.max_parallel_workers)) - self.active_background_count,
-        )
-        if available == 0:
             return 0
         recoverable = sorted(
             self.repository.list_role_assignments(
@@ -1566,8 +1580,6 @@ class SemanticOrchestrator:
         )
         started = 0
         for assignment in recoverable:
-            if started >= available:
-                break
             effect = dict(assignment.get("execution_spec") or {})
             effect_key = str(effect.get("effect_key") or assignment["assignment_key"])
             effect["effect_key"] = effect_key
@@ -1680,15 +1692,20 @@ class SemanticOrchestrator:
                     )
                 )
             return {"status": "suppressed_by_replan"}
+        implementation = activation.role == OrchestrationRole.IMPLEMENTATION
         target_state = {
             "START_PRODUCING": "PRODUCING",
             "START_REVIEW": "REVIEWING",
             "START_REPAIR": "REPAIRING",
-            "START_SYSTEM_VERIFICATION": "VERIFYING",
         }[action_type]
         if node.state == target_state and node.payload.get("active_worker_id"):
+            self._start_graph_cycle_assignment(
+                node=node,
+                effect=effect,
+                action_type=action_type,
+                implementation=implementation,
+            )
             return {"provider_request_id": str(node.payload.get("active_worker_id"))}
-        implementation = activation.role == OrchestrationRole.IMPLEMENTATION
         cycle = int(node.payload.get("candidate_cycle") or 0) + (1 if implementation else 0)
         invocation_id = _node_role_session_id(node, activation)
         lease_resource = f"node:{node.aggregate_id}:{'writer' if implementation else 'review'}"
@@ -1724,7 +1741,49 @@ class SemanticOrchestrator:
                 payload=payload,
             )
         )
+        self._start_graph_cycle_assignment(
+            node=node,
+            effect=effect,
+            action_type=action_type,
+            implementation=implementation,
+        )
         return {"provider_request_id": invocation_id}
+
+    def _start_graph_cycle_assignment(
+        self,
+        *,
+        node: AggregateSnapshot,
+        effect: Mapping[str, Any],
+        action_type: str,
+        implementation: bool,
+    ) -> None:
+        module_name = str(
+            node.payload.get("module_name")
+            or node.payload.get("unit_id")
+            or ""
+        )
+        coordinator = WorkflowCoordinator(self.repository)
+        cycle = coordinator.execution(
+            workflow_id=node.workflow_id
+        ).cycles[module_name]
+        coordinator.start_assignment(
+            workflow_id=node.workflow_id,
+            node_name=module_name,
+            slot=(
+                CycleSlot.PRODUCER
+                if implementation
+                else CycleSlot.CHECKER
+            ),
+            kind=(
+                AssignmentKind.REPAIR
+                if action_type == "START_REPAIR"
+                else AssignmentKind.RECHECK
+                if action_type == "START_REVIEW"
+                and cycle.last_verdict is not None
+                else AssignmentKind.INITIAL
+            ),
+            input_fingerprint=str(effect["effect_key"]),
+        )
 
     def _install_verifier_tests_for_repair(
         self,
@@ -2020,8 +2079,6 @@ class SemanticOrchestrator:
                 RoleMode.REPAIR if repair else RoleMode.PRODUCE,
             ),
         )
-        if str(node.payload.get("node_kind") or "") == "integration" and not repair:
-            return await self._run_integration(effect, node)
         invocation_id = str(node.payload.get("active_worker_id") or "")
         lease_resource = str(node.payload.get("lease_resource_key") or "")
         fencing_token = int(node.payload.get("fencing_token") or 0)
@@ -2358,64 +2415,56 @@ class SemanticOrchestrator:
         invocation_id = str(node.payload.get("active_worker_id") or "")
         fencing_token = int(node.payload.get("fencing_token") or 0)
         lease_resource = str(node.payload.get("lease_resource_key") or "")
-        if str(node.payload.get("node_kind") or "") == "integration":
-            candidate_ref = _ref_from_mapping(node.payload.get("pending_integration_candidate_ref"))
-            candidate_digest = str(node.payload.get("pending_integration_candidate_digest") or "")
-            if not candidate_digest or not self._worktree_locks.is_held(node.aggregate_id):
-                raise RuntimeError("integration candidate is not quiesced for snapshot")
-            release_integration_lock = True
-        else:
-            release_integration_lock = False
-            contract_ref = _ref_from_mapping(node.payload.get("unit_contract_ref"))
-            contract = self.service.artifacts.read_json(contract_ref)
-            adapter = self._execution_adapter(node)
-            if adapter == SOFTWARE_GIT_ADAPTER:
-                base_sha = str(node.payload.get("candidate_digest") or node.payload.get("base_sha") or "")
-                candidate_ref, candidate_digest = CandidateSnapshotService(
-                    self.repository,
+        contract_ref = _ref_from_mapping(node.payload.get("unit_contract_ref"))
+        contract = self.service.artifacts.read_json(contract_ref)
+        adapter = self._execution_adapter(node)
+        if adapter == SOFTWARE_GIT_ADAPTER:
+            base_sha = str(node.payload.get("candidate_digest") or node.payload.get("base_sha") or "")
+            candidate_ref, candidate_digest = CandidateSnapshotService(
+                self.repository,
+                self.service.artifacts,
+                self._worktree_locks,
+            ).create_candidate(
+                node_run_id=node.aggregate_id,
+                worker_id=invocation_id,
+                lease_resource_key=lease_resource,
+                fencing_token=fencing_token,
+                worktree=Path(str(node.payload.get("workspace_path") or "")),
+                expected_workspace_fingerprint=str(node.payload.get("workspace_fingerprint") or ""),
+                reference_only_paths=[str(item) for item in list(contract.get("reference_only_paths") or [])],
+                path_policy=dict(node.payload.get("path_policy") or {}),
+                base_sha=base_sha,
+                candidate_baseline_sha=str(node.payload.get("base_sha") or ""),
+                unit_contract_hash=contract_ref.sha256,
+                dependency_output_hashes=dict(node.payload.get("dependency_output_hashes") or {}),
+                environment_fingerprint=str(node.payload.get("environment_fingerprint") or "default"),
+                repair_bill_ref=dict(node.payload.get("repair_bill_ref") or {}),
+            )
+        elif adapter == ARTIFACT_BUNDLE_ADAPTER:
+            try:
+                self.repository.assert_fencing_token(lease_resource, invocation_id, fencing_token)
+                workspace = Path(str(node.payload.get("workspace_path") or ""))
+                before = artifact_tree_fingerprint(workspace)
+                if before != str(node.payload.get("workspace_fingerprint") or ""):
+                    raise RuntimeError("artifact workspace changed after quiescing")
+                candidate_ref, candidate_digest = ArtifactBundleAdapter(
+                    self.service.runtime_root,
                     self.service.artifacts,
-                    self._worktree_locks,
-                ).create_candidate(
-                    node_run_id=node.aggregate_id,
-                    worker_id=invocation_id,
-                    lease_resource_key=lease_resource,
-                    fencing_token=fencing_token,
-                    worktree=Path(str(node.payload.get("workspace_path") or "")),
-                    expected_workspace_fingerprint=str(node.payload.get("workspace_fingerprint") or ""),
+                ).snapshot_candidate(
+                    workspace=workspace,
                     reference_only_paths=[str(item) for item in list(contract.get("reference_only_paths") or [])],
-                    path_policy=dict(node.payload.get("path_policy") or {}),
-                    base_sha=base_sha,
-                    candidate_baseline_sha=str(node.payload.get("base_sha") or ""),
                     unit_contract_hash=contract_ref.sha256,
                     dependency_output_hashes=dict(node.payload.get("dependency_output_hashes") or {}),
                     environment_fingerprint=str(node.payload.get("environment_fingerprint") or "default"),
+                    parent_candidate_digest=str(node.payload.get("candidate_digest") or ""),
                     repair_bill_ref=dict(node.payload.get("repair_bill_ref") or {}),
                 )
-            elif adapter == ARTIFACT_BUNDLE_ADAPTER:
-                try:
-                    self.repository.assert_fencing_token(lease_resource, invocation_id, fencing_token)
-                    workspace = Path(str(node.payload.get("workspace_path") or ""))
-                    before = artifact_tree_fingerprint(workspace)
-                    if before != str(node.payload.get("workspace_fingerprint") or ""):
-                        raise RuntimeError("artifact workspace changed after quiescing")
-                    candidate_ref, candidate_digest = ArtifactBundleAdapter(
-                        self.service.runtime_root,
-                        self.service.artifacts,
-                    ).snapshot_candidate(
-                        workspace=workspace,
-                        reference_only_paths=[str(item) for item in list(contract.get("reference_only_paths") or [])],
-                        unit_contract_hash=contract_ref.sha256,
-                        dependency_output_hashes=dict(node.payload.get("dependency_output_hashes") or {}),
-                        environment_fingerprint=str(node.payload.get("environment_fingerprint") or "default"),
-                        parent_candidate_digest=str(node.payload.get("candidate_digest") or ""),
-                        repair_bill_ref=dict(node.payload.get("repair_bill_ref") or {}),
-                    )
-                    if artifact_tree_fingerprint(workspace) != before:
-                        raise RuntimeError("artifact workspace changed while snapshotting")
-                finally:
-                    self._worktree_locks.release(node.aggregate_id)
-            else:
-                raise ValueError(f"unsupported candidate adapter: {adapter}")
+                if artifact_tree_fingerprint(workspace) != before:
+                    raise RuntimeError("artifact workspace changed while snapshotting")
+            finally:
+                self._worktree_locks.release(node.aggregate_id)
+        else:
+            raise ValueError(f"unsupported candidate adapter: {adapter}")
         current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
         self.repository.dispatch(
             ActionEnvelope(
@@ -2437,53 +2486,38 @@ class SemanticOrchestrator:
                 },
             )
         )
-        if release_integration_lock:
-            self._worktree_locks.release(node.aggregate_id)
+        WorkflowCoordinator(self.repository).producer_submitted(
+            workflow_id=node.workflow_id,
+            node_name=str(
+                node.payload.get("module_name")
+                or node.payload.get("unit_id")
+                or ""
+            ),
+            product_ref=candidate_ref.sha256,
+        )
         self.repository.release_lease(lease_resource, invocation_id, fencing_token)
         return {"result_artifact_ref": candidate_ref.to_dict()}
 
     async def _run_verification(
         self,
         effect: Mapping[str, Any],
-        *,
-        system_mode: bool = False,
     ) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
-        system_mode = (
-            system_mode
-            or str(node.payload.get("node_kind") or "") == "system_verification"
-        )
         node = await self._ensure_node_effect_lease(
             node,
-            action_type="REBIND_SYSTEM_VERIFIER" if system_mode else "REBIND_REVIEWER",
+            action_type="REBIND_REVIEWER",
             activation=RoleActivation(
                 OrchestrationRole.VERIFIER,
-                RoleMode.SYSTEM if system_mode else RoleMode.MODULE,
+                RoleMode.MODULE,
             ),
         )
         invocation_id = str(node.payload.get("active_worker_id") or "")
         lease_resource = str(node.payload.get("lease_resource_key") or "")
         fencing_token = int(node.payload.get("fencing_token") or 0)
-        candidate_ref = _ref_from_mapping(
-            node.payload.get("unit_contract_ref") if system_mode else node.payload.get("candidate_ref")
-        )
+        candidate_ref = _ref_from_mapping(node.payload.get("candidate_ref"))
         adapter = self._execution_adapter(node)
-        candidate_digest = str(
-            node.payload.get("system_commit_sha")
-            if system_mode and adapter == SOFTWARE_GIT_ADAPTER
-            else node.payload.get("system_fingerprint")
-            if system_mode
-            else node.payload.get("candidate_digest") or ""
-        )
-        if system_mode and adapter == SOFTWARE_GIT_ADAPTER:
-            review_workspace = Path(str(node.payload.get("workspace_path") or ""))
-            if not review_workspace.is_dir():
-                raise ValueError("system verification workspace is unavailable")
-            review_scratch = verification_scratch_root(self.service.runtime_root) / _safe_component(
-                node.aggregate_id
-            )
-            review_scratch.mkdir(parents=True, exist_ok=True)
-        elif adapter == SOFTWARE_GIT_ADAPTER:
+        candidate_digest = str(node.payload.get("candidate_digest") or "")
+        if adapter == SOFTWARE_GIT_ADAPTER:
             review_workspace, review_scratch = provision_module_verification_workspace(
                 self.service.runtime_root,
                 node=node,
@@ -2499,59 +2533,23 @@ class SemanticOrchestrator:
             )
         else:
             raise ValueError(f"unsupported verification adapter: {adapter}")
-        _seed_durable_verification_scratch(
-            invocation_root(self.service.runtime_root) / invocation_id / "attempts",
-            review_scratch,
-        )
-        if system_mode:
-            view_ref = _ref_from_mapping(node.payload.get("system_work_view_ref"))
-        elif str(node.payload.get("node_kind") or "") == "integration":
-            integration_contract = self.service.artifacts.read_json(
-                dict(node.payload["unit_contract_ref"])
-            )
-            dependency_modules: list[str] = []
-            for dependency_id in list(node.payload.get("dependency_node_ids") or []):
-                dependency = self.repository.read_snapshot(
-                    AggregateType.DAG_NODE_RUN, str(dependency_id)
-                )
-                if dependency is None:
-                    raise ValueError("integration verifier cannot resolve a dependency module")
-                dependency_modules.append(
-                    str(dependency.payload.get("module_name") or dependency.payload.get("unit_id") or "")
-                )
-            view_ref = self.service.artifacts.put_json(
-                {
-                    "schema_version": "1",
-                    "module_name": "integration",
-                    "integration_contract": integration_contract,
-                    "accepted_dependency_modules": dependency_modules,
-                    "verification_obligations": ["full build", "full test", "cross-unit lifecycle and interface adversarial probes"],
-                },
-                artifact_type="IntegrationWorkViewArtifact",
-                child_refs=((str(dict(node.payload["unit_contract_ref"])["sha256"]), "integration_contract"),),
-            )
-        else:
-            view_value = node.payload.get("unit_work_view_ref")
-            if not isinstance(view_value, Mapping) or not view_value.get("sha256"):
-                raise ValueError("verifier requires the exact work view used by Coder")
-            view_ref = _ref_from_mapping(view_value)
+        view_value = node.payload.get("unit_work_view_ref")
+        if not isinstance(view_value, Mapping) or not view_value.get("sha256"):
+            raise ValueError("verifier requires the exact work view used by Coder")
+        view_ref = _ref_from_mapping(view_value)
         candidate = dict(self.service.artifacts.read_json(candidate_ref))
         skeleton_manifest = adapter == SOFTWARE_GIT_ADAPTER
         candidate_view_ref: ArtifactRef | None = None
-        if system_mode or adapter != SOFTWARE_GIT_ADAPTER or not skeleton_manifest:
+        if adapter != SOFTWARE_GIT_ADAPTER or not skeleton_manifest:
             candidate_view_ref = self.service.artifacts.put_json(
                 {
                     "module_name": str(node.payload.get("module_name") or node.payload.get("unit_id") or ""),
                     "node_kind": str(node.payload.get("node_kind") or "unit"),
                     "changed_paths": [str(item) for item in list(candidate.get("changed_paths") or [])],
                     "candidate_cycle": int(node.payload.get("candidate_cycle") or 0),
-                    "instruction": (
-                        "Verify the exact accepted-module scenario assembled in the bound read-only worktree."
-                        if system_mode
-                        else "Inspect the immutable candidate in the bound review workspace."
-                    ),
+                    "instruction": "Inspect the immutable candidate in the bound review workspace.",
                 },
-                artifact_type="SystemCandidateSemanticViewArtifact" if system_mode else "CandidateSemanticViewArtifact",
+                artifact_type="CandidateSemanticViewArtifact",
                 provenance={"owner": "manager", "audience": "verifier"},
                 child_refs=((candidate_ref.sha256, "candidate"),),
             )
@@ -2563,7 +2561,7 @@ class SemanticOrchestrator:
         # prevents an upstream summary from narrowing user intent.
         candidate_diff_ref = candidate_view_ref
         git_diff_refs: dict[str, ArtifactRef] = {}
-        if not system_mode and adapter == SOFTWARE_GIT_ADAPTER and skeleton_manifest:
+        if adapter == SOFTWARE_GIT_ADAPTER and skeleton_manifest:
             git_diff_refs = _module_verifier_git_diff_refs(
                 artifacts=self.service.artifacts,
                 node_payload=node.payload,
@@ -2587,12 +2585,10 @@ class SemanticOrchestrator:
             dict(path_policy.get("developer_tests") or {}).get("path") or ""
         ).strip()
         verification_corpus_path = str(
-            system_verification_corpus_path()
-            if system_mode
-            else dict(path_policy.get("verification_corpus") or {}).get("path") or ""
+            dict(path_policy.get("verification_corpus") or {}).get("path") or ""
         ).strip()
         for corpus_path in (
-            developer_test_path if not system_mode else "",
+            developer_test_path,
             verification_corpus_path,
         ):
             if corpus_path:
@@ -2615,14 +2611,14 @@ class SemanticOrchestrator:
             profile=self._profile_for_role(node.workflow_id, "verifier"),
             activation=RoleActivation(
                 OrchestrationRole.VERIFIER,
-                RoleMode.SYSTEM if system_mode else RoleMode.MODULE,
+                RoleMode.MODULE,
             ),
             instruction=(
-                "This is the next Integration commit in your existing workflow-level verification session. First replay the "
-                "bound durable system corpus and every bound current or historical finding reproducer. Then inspect the current "
-                "Integration diff and affected contract graph and run a diff-risk check for newly introduced defects. Submit one "
-                "outcome bound to this Integration commit; no earlier verdict settles it."
-                if system_mode
+                "This is the terminal delivery module in the contract graph. Assume accepted dependencies satisfy their public "
+                "contracts, then test the real consumer entrypoint end to end in this node's assembled worktree. Replay the "
+                "bound corpora and findings, cover success and material failure paths, and inspect the current diff for new "
+                "defects. Submit one outcome bound to this Candidate; no earlier verdict settles it."
+                if bool(node.payload.get("graph_sink"))
                 else "This is the next Candidate assignment in your existing module verification session. First replay the bound "
                 "developer and verification corpora plus every bound current or historical RepairBill reproducer. Then inspect the "
                 "current Candidate diff and semantic neighborhood and run a diff-risk check for newly introduced defects. Submit one "
@@ -2642,30 +2638,18 @@ class SemanticOrchestrator:
                 "workspace_policy": {
                     "mode": "writable_git_branch"
                 },
-                "system_verification": system_mode,
                 "verification_scratch_only": (
                     adapter != SOFTWARE_GIT_ADAPTER
                 ),
-                "write_path_scopes": (
-                    [
-                        {
-                            "kind": "directory",
-                            "path": system_verification_corpus_path(),
-                        }
-                    ]
-                    if system_mode
-                    else [
-                        dict(
-                            dict(node.payload.get("path_policy") or {}).get(
-                                "verification_corpus"
-                            )
-                            or {}
+                "write_path_scopes": [
+                    dict(
+                        dict(node.payload.get("path_policy") or {}).get(
+                            "verification_corpus"
                         )
-                    ]
-                ),
-                "read_only_overlay_paths": (
-                    [] if system_mode else verifier_read_only_overlays
-                ),
+                        or {}
+                    )
+                ],
+                "read_only_overlay_paths": verifier_read_only_overlays,
             },
             prepare_workspace=True,
         )
@@ -2678,7 +2662,6 @@ class SemanticOrchestrator:
             return self._complete_semantic_verifier(
                 effect=effect,
                 node=node,
-                system_mode=system_mode,
                 invocation_id=invocation_id,
                 lease_resource=lease_resource,
                 fencing_token=fencing_token,
@@ -2703,7 +2686,6 @@ class SemanticOrchestrator:
         *,
         effect: Mapping[str, Any],
         node: AggregateSnapshot,
-        system_mode: bool,
         invocation_id: str,
         lease_resource: str,
         fencing_token: int,
@@ -2723,7 +2705,6 @@ class SemanticOrchestrator:
         allowed_outcomes = {
             "pass",
             "module_repair",
-            "verification_repairs",
             "contract_revision",
             "architecture_revision",
             "requirements_revision",
@@ -2794,15 +2775,11 @@ class SemanticOrchestrator:
             if scratch_only
             else _verification_workspace_changed_paths(review_workspace, candidate_digest)
         )
-        corpus_scope = (
-            {"kind": "directory", "path": system_verification_corpus_path()}
-            if system_mode
-            else dict(
-                dict(node.payload.get("path_policy") or {}).get(
-                    "verification_corpus"
-                )
-                or {}
+        corpus_scope = dict(
+            dict(node.payload.get("path_policy") or {}).get(
+                "verification_corpus"
             )
+            or {}
         )
         outside = [] if scratch_only else [
             path
@@ -2845,35 +2822,6 @@ class SemanticOrchestrator:
         if outcome == "pass" and not any(bool(item.get("ok")) for item in final_checks):
             errors.append("PASS requires a successful final command or LSP receipt")
         normalized_submission = dict(submission)
-        if system_mode and outcome == "module_repair":
-            try:
-                target_modules = infer_repair_target_modules(
-                    findings,
-                    _verification_repair_path_owners(self.repository, node),
-                )
-            except ValueError as exc:
-                errors.append(str(exc))
-            else:
-                normalized_submission["outcome"] = "module_repair"
-                normalized_submission["target_modules"] = target_modules
-        elif system_mode and outcome == "verification_repairs":
-            if {
-                str(item.get("finding_kind") or "")
-                for item in findings
-            } != {"verification_defect"}:
-                errors.append(
-                    "corpus repair requires every finding to use verification_defect"
-                )
-            else:
-                try:
-                    target_modules = infer_repair_target_modules(
-                        findings,
-                        _verification_corpus_path_owners(self.repository, node),
-                    )
-                except ValueError as exc:
-                    errors.append(str(exc))
-                else:
-                    normalized_submission["target_modules"] = target_modules
         if errors:
             raise SubmissionInvariantError(
                 "semantic verifier submission failed manager validation:\n- "
@@ -2893,15 +2841,12 @@ class SemanticOrchestrator:
         pending_ref = self.service.artifacts.put_json(
             {
                 "schema_version": "1",
-                "system_mode": system_mode,
                 "submission": normalized_submission,
                 "candidate_ref": candidate_ref.to_dict(),
                 "implementation_candidate_ref": candidate_ref.to_dict(),
                 "candidate_digest": candidate_digest,
                 "candidate_git_base": str(
-                    node.payload.get("system_commit_sha")
-                    if system_mode
-                    else candidate_digest
+                    candidate_digest
                     if execution_adapter == SOFTWARE_GIT_ADAPTER
                     else ""
                 ),
@@ -3085,7 +3030,6 @@ class SemanticOrchestrator:
         candidate_digest = str(pending.get("candidate_digest") or "")
         candidate = dict(self.service.artifacts.read_json(candidate_ref))
         submission = dict(pending.get("submission") or {})
-        system_mode = bool(pending.get("system_mode"))
         lock_key = f"verification:{node.aggregate_id}"
         expected_fingerprint = str(node.payload.get("workspace_fingerprint") or "")
         if not self._worktree_locks.is_held(lock_key):
@@ -3109,7 +3053,6 @@ class SemanticOrchestrator:
                 review_workspace=review_workspace,
                 review_scratch=review_scratch,
                 execution_adapter=str(pending.get("execution_adapter") or ""),
-                system_mode=system_mode,
             )
         finally:
             self._worktree_locks.release(lock_key)
@@ -3126,7 +3069,6 @@ class SemanticOrchestrator:
         review_workspace: Path,
         review_scratch: Path,
         execution_adapter: str,
-        system_mode: bool,
     ) -> Mapping[str, Any]:
         invocation_id = str(
             node.payload.get("active_worker_id")
@@ -3149,13 +3091,7 @@ class SemanticOrchestrator:
         reason = str(submission.get("reason") or "").strip()
         scratch_only = execution_adapter != SOFTWARE_GIT_ADAPTER
         candidate_git_base = str(
-            pending.get("candidate_git_base")
-            or (
-                node.payload.get("system_commit_sha")
-                if system_mode
-                else candidate_digest
-            )
-            or ""
+            pending.get("candidate_git_base") or candidate_digest or ""
         )
         changed_paths = (
             _verification_scratch_paths(review_scratch)
@@ -3165,15 +3101,11 @@ class SemanticOrchestrator:
                 candidate_digest,
             )
         )
-        corpus_scope = (
-            {"kind": "directory", "path": system_verification_corpus_path()}
-            if system_mode
-            else dict(
-                dict(node.payload.get("path_policy") or {}).get(
-                    "verification_corpus"
-                )
-                or {}
+        corpus_scope = dict(
+            dict(node.payload.get("path_policy") or {}).get(
+                "verification_corpus"
             )
+            or {}
         )
         outside = [] if scratch_only else [
             path
@@ -3244,11 +3176,6 @@ class SemanticOrchestrator:
                 "candidate_ref": accepted_candidate_ref.to_dict(),
                 "implementation_candidate_ref": candidate_ref.to_dict(),
                 "tool_receipts_ref": receipts_ref.to_dict(),
-                **(
-                    {"system_fingerprint": str(node.payload.get("system_fingerprint") or "")}
-                    if system_mode
-                    else {}
-                ),
             }
         if workspace_evidence_ref is not None:
             report_payload["workspace_evidence_ref"] = workspace_evidence_ref.to_dict()
@@ -3265,15 +3192,15 @@ class SemanticOrchestrator:
             provenance={"owner": "manager", "source_role": "verifier"},
             child_refs=tuple(report_children),
         )
+        routed_defect = dominant_verification_defect_kind(findings)
         defect_kind = {
-            "verification_repairs": DefectKind.VERIFICATION,
             "contract_revision": DefectKind.CONTRACT,
             "architecture_revision": DefectKind.ARCHITECTURE,
-            "requirements_revision": DefectKind.ARCHITECTURE,
+            "requirements_revision": DefectKind.REQUIREMENTS,
         }.get(
             outcome,
-            DefectKind.INTEGRATION
-            if str(node.payload.get("node_kind") or "") == "integration"
+            DefectKind(routed_defect)
+            if routed_defect
             else DefectKind.MODULE,
         )
         target_modules = [
@@ -3290,17 +3217,6 @@ class SemanticOrchestrator:
             for module_name in target_modules
         ]
         module_node_id = ""
-        if system_mode and outcome in {
-            "module_repair",
-            "verification_repairs",
-        }:
-            if not repair_node_ids:
-                raise SubmissionInvariantError(
-                    "system repair requires Manager-resolved module targets"
-                )
-            module_node_id = repair_node_ids[0]
-            if outcome != "verification_repairs":
-                defect_kind = DefectKind.MODULE
         fingerprint = hashlib.sha256(
             json.dumps(
                 {
@@ -3356,7 +3272,10 @@ class SemanticOrchestrator:
         if current is None:
             raise SubmissionInvariantError("verification node disappeared before verdict")
         unknown_policy = _manager_unknown_policy(node)
-        VerificationService(self.repository, self.service.artifacts).submit_verdict(
+        verdict_result = VerificationService(
+            self.repository,
+            self.service.artifacts,
+        ).submit_verdict(
             node=current,
             verification_ref=report_ref,
             status=status,
@@ -3381,119 +3300,63 @@ class SemanticOrchestrator:
             ),
             module_node_id=module_node_id,
             module_node_ids=(repair_node_ids if module_node_id else ()),
-            system_fingerprint=str(node.payload.get("system_fingerprint") or ""),
+            system_fingerprint="",
             accepted_candidate_ref=(
                 accepted_candidate_ref
-                if not system_mode
-                and not scratch_only
+                if not scratch_only
                 and accepted_candidate_digest != candidate_digest
                 else None
             ),
             accepted_candidate_digest=(
                 accepted_candidate_digest
-                if not system_mode
-                and not scratch_only
+                if not scratch_only
                 and accepted_candidate_digest != candidate_digest
                 else ""
             ),
         )
+        coordinator = WorkflowCoordinator(self.repository)
+        node_name = str(
+            node.payload.get("module_name")
+            or node.payload.get("unit_id")
+            or ""
+        )
+        if verdict_result.snapshot.state == "TRIAGE_REQUIRED":
+            coordinator.require_node_triage(
+                workflow_id=node.workflow_id,
+                node_name=node_name,
+            )
+        else:
+            coordinator.checker_verdict(
+                workflow_id=node.workflow_id,
+                node_name=node_name,
+                accepted=verdict_result.snapshot.state == "ACCEPTED",
+                finding_refs=(
+                    (repair_ref.sha256,)
+                    if repair_ref is not None
+                    else ()
+                ),
+                finding_class=(
+                    None
+                    if verdict_result.snapshot.state == "ACCEPTED"
+                    else FindingClass(defect_kind.value)
+                ),
+                dependency_node=(
+                    target_modules[0]
+                    if target_modules
+                    and defect_kind == DefectKind.DEPENDENCY
+                    else ""
+                ),
+                accepted_product_ref=(
+                    accepted_candidate_ref.sha256
+                    if verdict_result.snapshot.state == "ACCEPTED"
+                    else ""
+                ),
+            )
         self.repository.release_lease(lease_resource, invocation_id, fencing_token)
         return {
             "provider_request_id": invocation_id,
             "result_artifact_ref": report_ref.to_dict(),
         }
-
-    async def _run_integration(
-        self,
-        effect: Mapping[str, Any],
-        node: AggregateSnapshot,
-    ) -> Mapping[str, Any]:
-        snapshots = self.repository.list_workflow_snapshots(node.workflow_id)
-        node_by_id = {
-            item.aggregate_id: item
-            for item in snapshots
-            if item.aggregate_type == AggregateType.DAG_NODE_RUN
-            and str(item.payload.get("epoch_id") or "") == str(node.payload.get("epoch_id") or "")
-        }
-        ordered_candidates = []
-        for dependency_id in list(node.payload.get("dependency_node_ids") or []):
-            dependency = node_by_id[str(dependency_id)]
-            if dependency.state != "ACCEPTED":
-                raise ValueError(f"integration dependency is not accepted: {dependency_id}")
-            ordered_candidates.append(
-                {
-                    "node_run_id": dependency.aggregate_id,
-                    "candidate_digest": str(dependency.payload.get("candidate_digest") or ""),
-                    "candidate_ref": dict(dependency.payload.get("candidate_ref") or {}),
-                }
-            )
-        manifest_ref = _ref_from_mapping(node.payload.get("architecture_manifest_ref"))
-        try:
-            adapter = self._execution_adapter(node)
-            if adapter == SOFTWARE_GIT_ADAPTER:
-                candidate_ref, candidate_digest = IntegrationService(self.service.artifacts).integrate_candidates(
-                    integration_worktree=Path(str(node.payload.get("workspace_path") or "")),
-                    ordered_candidates=ordered_candidates,
-                    architecture_manifest_sha=manifest_ref.sha256,
-                )
-            elif adapter == ARTIFACT_BUNDLE_ADAPTER:
-                candidate_ref, candidate_digest = ArtifactBundleAdapter(
-                    self.service.runtime_root,
-                    self.service.artifacts,
-                ).integrate_candidates(
-                    integration_workspace=Path(str(node.payload.get("workspace_path") or "")),
-                    ordered_candidates=ordered_candidates,
-                    architecture_manifest_sha=manifest_ref.sha256,
-                )
-            else:
-                raise ValueError(f"unsupported integration adapter: {adapter}")
-        except (IntegrationOwnershipDefect, ValueError) as exc:
-            finding_ref = self.service.artifacts.put_json(
-                {
-                    "defect_kind": "architecture_defect",
-                    "reason": "exclusive ownership contracts produced an integration conflict",
-                    "detail": str(exc),
-                    "dependency_node_ids": list(node.payload.get("dependency_node_ids") or []),
-                },
-                artifact_type="IntegrationOwnershipDefectArtifact",
-                child_refs=((manifest_ref.sha256, "architecture_manifest"),),
-            )
-            current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="PRODUCER_ARCHITECTURE_DEFECT",
-                    workflow_id=node.workflow_id,
-                    aggregate_type=AggregateType.DAG_NODE_RUN,
-                    aggregate_id=node.aggregate_id,
-                    actor="minion-v2-integration",
-                    expected_version=current.version,
-                    idempotency_key=f"integration-ownership:{finding_ref.sha256}",
-                    payload={"finding_artifact_ref": finding_ref.to_dict()},
-                )
-            )
-            lease_resource = str(node.payload.get("lease_resource_key") or "")
-            invocation_id = str(node.payload.get("active_worker_id") or "")
-            fencing_token = int(node.payload.get("fencing_token") or 0)
-            self.repository.release_lease(lease_resource, invocation_id, fencing_token)
-            return {"result_artifact_ref": finding_ref.to_dict()}
-        current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="SUBMIT_CANDIDATE",
-                workflow_id=node.workflow_id,
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=node.aggregate_id,
-                actor="minion-v2-integration",
-                expected_version=current.version,
-                idempotency_key=f"integration-submit:{candidate_ref.sha256}",
-                payload={
-                    "fencing_token": int(node.payload.get("fencing_token") or 0),
-                    "pending_integration_candidate_ref": candidate_ref.to_dict(),
-                    "pending_integration_candidate_digest": candidate_digest,
-                },
-            )
-        )
-        return {"result_artifact_ref": candidate_ref.to_dict()}
 
     async def _stop_node_worker(
         self,
@@ -3568,6 +3431,15 @@ class SemanticOrchestrator:
                     idempotency_key=f"effect:{effect['effect_key']}:stopped",
                 )
             )
+            WorkflowCoordinator(self.repository).confirm_node_control(
+                workflow_id=node.workflow_id,
+                node_name=str(
+                    node.payload.get("module_name")
+                    or node.payload.get("unit_id")
+                    or ""
+                ),
+                cancel=action_type == "CANCEL_CONFIRMED",
+            )
         fencing_token = int(node.payload.get("fencing_token") or 0)
         if lease_resource and invocation_id and fencing_token:
             try:
@@ -3622,6 +3494,11 @@ class SemanticOrchestrator:
                     idempotency_key=f"effect:{effect['effect_key']}:stopped",
                 )
             )
+            if snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+                WorkflowCoordinator(self.repository).confirm_plan_control(
+                    workflow_id=snapshot.workflow_id,
+                    cancel=cancel,
+                )
         fencing_token = int(snapshot.payload.get("fencing_token") or 0)
         if lease_resource and invocation_id and fencing_token:
             try:
@@ -3715,15 +3592,6 @@ class SemanticOrchestrator:
     async def _resume_node(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
         if node.state == "QUEUED":
-            if str(node.payload.get("node_kind") or "") == "system_verification":
-                return self._admit_node_worker(
-                    effect,
-                    action_type="START_SYSTEM_VERIFICATION",
-                    activation=RoleActivation(
-                        OrchestrationRole.VERIFIER,
-                        RoleMode.SYSTEM,
-                    ),
-                )
             return self._admit_node_worker(
                 effect,
                 action_type="START_PRODUCING",
@@ -3751,23 +3619,10 @@ class SemanticOrchestrator:
             return await self._quiesce_node(effect)
         if node.state == "SNAPSHOTTING":
             return await self._snapshot_implementation_result(effect)
-        if node.state in {"REVIEW_QUIESCING", "VERIFY_QUIESCING"}:
+        if node.state == "REVIEW_QUIESCING":
             return await self._quiesce_verifier_role(effect)
-        if node.state in {"REVIEW_SNAPSHOTTING", "VERIFY_SNAPSHOTTING"}:
+        if node.state == "REVIEW_SNAPSHOTTING":
             return self._snapshot_semantic_verification(effect)
-        if node.state == "VERIFY_PREPARING":
-            current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="RETRY_VERIFICATION_PREPARATION",
-                    workflow_id=node.workflow_id,
-                    aggregate_type=AggregateType.DAG_NODE_RUN,
-                    aggregate_id=node.aggregate_id,
-                    actor="minion-v2-recovery",
-                    expected_version=current.version,
-                    idempotency_key=f"effect:{effect['effect_key']}:retry-verification-preparation",
-                )
-            )
         return {}
 
     @staticmethod
@@ -3796,26 +3651,37 @@ class SemanticOrchestrator:
             if item.aggregate_type == AggregateType.DAG_NODE_RUN
             and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
         ]
-        integration = next(
+        sink = next(
             (
-                item
-                for item in snapshots
-                if item.aggregate_type == AggregateType.DAG_NODE_RUN
-                and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
-                and str(item.payload.get("node_kind") or "") == "integration"
+                item for item in epoch_nodes
+                if bool(item.payload.get("graph_sink"))
                 and item.state == "ACCEPTED"
             ),
             None,
         )
-        if integration is None:
-            return await self._publish_skeleton_delivery(effect, epoch, epoch_nodes)
-        verification_ref = _ref_from_mapping(integration.payload.get("verification_artifact_ref"))
-        adapter = self._execution_adapter(integration)
+        if sink is None or any(item.state != "ACCEPTED" for item in epoch_nodes):
+            raise ValueError(
+                "final delivery requires the declared sink and every executable node ACCEPTED"
+            )
+        published_sink_ref = WorkflowCoordinator(
+            self.repository
+        ).published_sink_ref(workflow_id=epoch.workflow_id)
+        if (
+            str(dict(sink.payload.get("candidate_ref") or {}).get("sha256") or "")
+            != published_sink_ref
+        ):
+            raise ValueError(
+                "delivery sink Candidate disagrees with GraphExecution publication"
+            )
+        verification_ref = _ref_from_mapping(
+            sink.payload.get("verification_artifact_ref")
+        )
+        adapter = self._execution_adapter(sink)
         if adapter == SOFTWARE_GIT_ADAPTER:
-            repository = Path(str(integration.payload.get("workspace_path") or ""))
+            repository = Path(str(sink.payload.get("workspace_path") or ""))
             deliverable_ref = self._publish_verified_git_delivery(
                 epoch=epoch,
-                delivery_node=integration,
+                delivery_node=sink,
                 repository=repository,
                 verification_ref=verification_ref,
             )
@@ -3825,68 +3691,12 @@ class SemanticOrchestrator:
                 self.service.artifacts,
             ).publish_deliverable(
                 workflow_id=epoch.workflow_id,
-                candidate_ref=dict(integration.payload.get("candidate_ref") or {}),
+                candidate_ref=dict(sink.payload.get("candidate_ref") or {}),
                 verification_ref=verification_ref,
             )
         else:
             raise ValueError(f"unsupported publisher adapter: {adapter}")
         current = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="FINAL_DELIVERABLE_PUBLISHED",
-                workflow_id=epoch.workflow_id,
-                aggregate_type=AggregateType.EXECUTION_EPOCH,
-                aggregate_id=epoch.aggregate_id,
-                actor="minion-v2-manager",
-                expected_version=current.version,
-                idempotency_key=f"publish:{deliverable_ref.sha256}",
-                payload={"published_deliverable_ref": deliverable_ref.to_dict()},
-            )
-        )
-        return {"result_artifact_ref": deliverable_ref.to_dict()}
-
-    async def _publish_skeleton_delivery(
-        self,
-        effect: Mapping[str, Any],
-        epoch: AggregateSnapshot,
-        nodes: list[AggregateSnapshot],
-    ) -> Mapping[str, Any]:
-        implementation = [
-            item
-            for item in nodes
-            if str(item.payload.get("node_kind") or "unit") == "unit"
-        ]
-        system_nodes = [
-            item
-            for item in nodes
-            if str(item.payload.get("node_kind") or "") == "system_verification"
-        ]
-        if (
-            not implementation
-            or len(system_nodes) != 1
-            or any(item.state != "ACCEPTED" for item in nodes)
-        ):
-            raise ValueError(
-                "final delivery requires every Module and the System Verifier ACCEPTED"
-            )
-        system_node = system_nodes[0]
-        verification_ref = _ref_from_mapping(
-            system_node.payload.get("verification_artifact_ref")
-        )
-        integration_worktree = Path(
-            str(system_node.payload.get("workspace_path") or "")
-        )
-        if not integration_worktree.is_dir():
-            raise ValueError("final delivery requires the canonical Integration worktree")
-        deliverable_ref = self._publish_verified_git_delivery(
-            epoch=epoch,
-            delivery_node=system_node,
-            repository=integration_worktree,
-            verification_ref=verification_ref,
-        )
-        current = self.repository.read_snapshot(
-            AggregateType.EXECUTION_EPOCH, epoch.aggregate_id
-        )
         self.repository.dispatch(
             ActionEnvelope(
                 action_type="FINAL_DELIVERABLE_PUBLISHED",
@@ -3910,7 +3720,7 @@ class SemanticOrchestrator:
         verification_ref: ArtifactRef,
     ) -> ArtifactRef:
         if not repository.is_dir():
-            raise ValueError("delivery requires the canonical Integration worktree")
+            raise ValueError("delivery requires the accepted sink module worktree")
         commit_sha = _git_output(repository, "rev-parse", "HEAD")
         manifest_ref = _ref_from_mapping(epoch.payload.get("architecture_manifest_ref"))
         manifest = dict(self.service.artifacts.read_json(manifest_ref))
@@ -4024,10 +3834,6 @@ class SemanticOrchestrator:
                 Path(repo_path),
             )
             reviewer_inputs = {"review_request": request_ref}
-        _seed_durable_verification_scratch(
-            invocation_root(self.service.runtime_root) / invocation_id / "attempts",
-            review_scratch,
-        )
         terminal, prompt_ref, terminal_ref = await self._run_profile(
             effect=effect,
             snapshot=review,
@@ -4276,6 +4082,26 @@ class SemanticOrchestrator:
             child_refs=((str(report_ref.get("sha256") or ""), "standalone_review"),),
         )
 
+    def _start_plan_cycle_assignment(
+        self,
+        *,
+        workflow_id: str,
+        effect: Mapping[str, Any],
+        slot: CycleSlot,
+    ) -> None:
+        coordinator = WorkflowCoordinator(self.repository)
+        cycle = coordinator.ensure_plan_cycle(workflow_id=workflow_id)
+        coordinator.start_plan_assignment(
+            workflow_id=workflow_id,
+            slot=slot,
+            kind=(
+                AssignmentKind.REVISION
+                if cycle.generation > 1
+                else AssignmentKind.INITIAL
+            ),
+            input_fingerprint=str(effect["effect_key"]),
+        )
+
     async def _run_architecture_stage(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         initial_revision = self._effect_snapshot(effect)
         if self._uses_git_skeleton(initial_revision.workflow_id):
@@ -4305,6 +4131,11 @@ class SemanticOrchestrator:
         if revision.state == running_state:
             active_lease = self.repository.read_lease(lease_resource)
             if active_lease and str(active_lease.get("owner_id") or "") and _lease_is_live(active_lease):
+                self._start_plan_cycle_assignment(
+                    workflow_id=revision.workflow_id,
+                    effect=effect,
+                    slot=CycleSlot.PRODUCER,
+                )
                 return {"status": "already_running", "active_worker_id": str(active_lease["owner_id"])}
         lease = self.repository.claim_lease(
             lease_resource,
@@ -4356,6 +4187,11 @@ class SemanticOrchestrator:
                         },
                     )
                 ).snapshot
+            self._start_plan_cycle_assignment(
+                workflow_id=revision.workflow_id,
+                effect=effect,
+                slot=CycleSlot.PRODUCER,
+            )
             prompt, reference_refs = self._architecture_stage_prompt(stage, revision)
             terminal, prompt_ref, terminal_ref = await self._run_profile(
                 effect=effect,
@@ -4386,11 +4222,15 @@ class SemanticOrchestrator:
             revision_base_manifest_ref = self._revision_input_base_manifest_ref(revision)
             result_ref = self.service.artifacts.put_json(
                 {
-                    "schema_version": "1",
+                    "schema_version": "2",
                     "contract_schema": str(
                         submission.get("contract_schema") or ""
                     ),
                     "contract": contract,
+                    "graph_ir": dict(submission.get("graph_ir") or {}),
+                    "graph_source_map_ref": dict(
+                        submission.get("graph_source_map_ref") or {}
+                    ),
                     "requirements_ref": requirements_ref.to_dict(),
                 },
                 artifact_type="ContractArtifact",
@@ -4398,7 +4238,25 @@ class SemanticOrchestrator:
                     "architecture_revision_id": revision.aggregate_id,
                     "role": "architect",
                 },
-                child_refs=((requirements_ref.sha256, "requirements"),),
+                child_refs=((requirements_ref.sha256, "requirements"),)
+                + (
+                    (
+                        (
+                            str(
+                                dict(
+                                    submission.get("graph_source_map_ref")
+                                    or {}
+                                ).get("sha256")
+                                or ""
+                            ),
+                            "graph_source_map",
+                        ),
+                    )
+                    if dict(
+                        submission.get("graph_source_map_ref") or {}
+                    ).get("sha256")
+                    else ()
+                ),
             )
             checklist_ref = self.service.artifacts.put_json(
                 checklist,
@@ -4433,6 +4291,10 @@ class SemanticOrchestrator:
                     effect,
                     assignment_id=self._terminal_role_assignment_id(terminal),
                 ),
+            )
+            WorkflowCoordinator(self.repository).submit_plan_product(
+                workflow_id=revision.workflow_id,
+                product_ref=result_ref.sha256,
             )
             self._record_role_turn(
                 terminal=terminal,
@@ -4598,6 +4460,11 @@ class SemanticOrchestrator:
                     },
                 )
             ).snapshot
+            self._start_plan_cycle_assignment(
+                workflow_id=revision.workflow_id,
+                effect=effect,
+                slot=CycleSlot.PRODUCER,
+            )
             references: dict[str, ArtifactRef] = {"task": requirements_ref}
             if finding_value:
                 references["revision_finding"] = self._publish_architecture_finding_view(
@@ -5017,11 +4884,15 @@ class SemanticOrchestrator:
             )
             manifest_ref = self.service.artifacts.put_json(
                 {
-                    "schema_version": "1",
+                    "schema_version": "2",
                     "contract_schema": str(
                         contract_intent.get("contract_schema") or ""
                     ),
                     "contract": dict(contract_intent.get("contract") or {}),
+                    "graph_ir": dict(contract_intent.get("graph_ir") or {}),
+                    "graph_source_map_ref": dict(
+                        contract_intent.get("graph_source_map_ref") or {}
+                    ),
                     "requirements_ref": requirements_ref.to_dict(),
                     "repository_layout": dict(
                         skeleton_artifact.get("repository_layout") or {}
@@ -5075,6 +4946,26 @@ class SemanticOrchestrator:
                     (submission_ref.sha256, "contract_submission"),
                     (skeleton_ref.sha256, "repository_snapshot"),
                     (requirements_ref.sha256, "requirements"),
+                )
+                + (
+                    (
+                        (
+                            str(
+                                dict(
+                                    contract_intent.get(
+                                        "graph_source_map_ref"
+                                    )
+                                    or {}
+                                ).get("sha256")
+                                or ""
+                            ),
+                            "graph_source_map",
+                        ),
+                    )
+                    if dict(
+                        contract_intent.get("graph_source_map_ref") or {}
+                    ).get("sha256")
+                    else ()
                 ),
             )
         except ValueError as exc:
@@ -5127,6 +5018,9 @@ class SemanticOrchestrator:
                     },
                 )
             )
+            WorkflowCoordinator(self.repository).reject_plan_product(
+                workflow_id=revision.workflow_id,
+            )
             self._worktree_locks.release(revision.aggregate_id)
             self.repository.release_lease(lease_resource, invocation_id, fencing_token)
             return {"result_artifact_ref": finding_ref.to_dict(), "status": "rejected"}
@@ -5150,6 +5044,10 @@ class SemanticOrchestrator:
                     "workspace_fingerprint": before,
                 },
             )
+        )
+        WorkflowCoordinator(self.repository).submit_plan_product(
+            workflow_id=revision.workflow_id,
+            product_ref=manifest_ref.sha256,
         )
         self._worktree_locks.release(revision.aggregate_id)
         self.repository.release_lease(lease_resource, invocation_id, fencing_token)
@@ -5210,6 +5108,11 @@ class SemanticOrchestrator:
                 and str(active.get("owner_id") or "")
                 and _lease_is_live(active)
             ):
+                self._start_plan_cycle_assignment(
+                    workflow_id=revision.workflow_id,
+                    effect=effect,
+                    slot=CycleSlot.CHECKER,
+                )
                 return {
                     "status": "already_running",
                     "active_worker_id": str(active["owner_id"]),
@@ -5256,6 +5159,11 @@ class SemanticOrchestrator:
                     },
                 )
             ).snapshot
+            self._start_plan_cycle_assignment(
+                workflow_id=revision.workflow_id,
+                effect=effect,
+                slot=CycleSlot.CHECKER,
+            )
             requirements_ref = _ref_from_mapping(artifact["requirements_ref"])
             contract_view_ref = self.service.artifacts.put_json(
                 {
@@ -5863,7 +5771,18 @@ class SemanticOrchestrator:
                 workspace,
                 runtime_root=self.service.runtime_root,
             )
-            if bool(workspace_policy.get("prewarm_lsp", False)) and list(workspace.get("languages") or []):
+            # LSP is implementation/verification evidence.  Architect and
+            # architecture-review roles only author/compile-check contracts;
+            # a missing optional language server must never block that phase.
+            lsp_role = activation.role in {
+                OrchestrationRole.IMPLEMENTATION,
+                OrchestrationRole.VERIFIER,
+            }
+            if (
+                lsp_role
+                and bool(workspace_policy.get("prewarm_lsp", False))
+                and list(workspace.get("languages") or [])
+            ):
                 lsp_preparation = prewarm_workspace_lsp(
                     runtime_root=self.service.runtime_root,
                     workspace=workspace,
@@ -5980,7 +5899,7 @@ class SemanticOrchestrator:
             ]
         elif activation.role == OrchestrationRole.VERIFIER:
             invocation_acceptance = [
-                "For module verification, read and run both durable corpora; extend only tests/<module_name>/verifier and only for a demonstrated coverage gap, while tests/<module_name>/developer remains read-only. For system verification, extend only tests/system/verifier. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
+                "Read and run both durable corpora; extend only tests/<module_name>/verifier and only for a demonstrated coverage gap, while tests/<module_name>/developer remains read-only. When this module is the authored graph sink, keep its end-to-end and delivery cases in the same verifier corpus. Run evidence with shell/LSP tools and classified read-only Git queries through shell.",
                 "For this assignment, first record every required current/historical regression, then record a current-Candidate diff-risk check for newly introduced defects. A failing regression blocks PASS but never skips the diff-risk phase.",
                 "Call exactly one semantic verification outcome tool; do not construct a VerificationPlan or evidence JSON.",
             ]
@@ -6189,10 +6108,6 @@ class SemanticOrchestrator:
                         self.repository,
                         snapshot,
                     ),
-                    verification_path_owners=_verification_corpus_path_owners(
-                        self.repository,
-                        snapshot,
-                    ),
                 )
                 pack_value = pack.to_dict()
                 metadata = dict(pack_value.get("metadata") or {})
@@ -6397,36 +6312,46 @@ class SemanticOrchestrator:
         )
         durable_prompt_reused = False
         if assignment is None:
-            assignment = self.repository.create_role_assignment(
-                RoleAssignmentRequest(
-                    assignment_key=(
-                        f"{str(effect.get('effect_key') or effect.get('effect_id') or '')}:"
-                        f"{role}:{mode}:{input_fingerprint}"
-                    ),
-                    session_id=invocation_id,
-                    workflow_id=snapshot.workflow_id,
-                    aggregate_type=snapshot.aggregate_type.value,
-                    aggregate_id=snapshot.aggregate_id,
-                    role=role,
-                    mode=mode,
-                    role_profile_id=profile,
-                    family_binding_sha=str(binding_ref.get("sha256") or ""),
-                    input_fingerprint=input_fingerprint,
-                    required_inputs=(),
-                    input_refs=durable_input_refs,
-                    execution_spec={
-                        "effect_type": str(effect.get("effect_type") or "run_role"),
-                        "effect_id": str(effect.get("effect_id") or ""),
-                        "effect_key": str(effect.get("effect_key") or ""),
-                        "workflow_id": snapshot.workflow_id,
-                        "aggregate_type": snapshot.aggregate_type.value,
-                        "aggregate_id": snapshot.aggregate_id,
-                        "payload": dict(effect.get("payload") or {}),
-                        "evaluation_generation": evaluation_generation,
-                    },
-                    submission_kind=submission_kind,
+            try:
+                assignment = self.repository.create_role_assignment(
+                    RoleAssignmentRequest(
+                        assignment_key=(
+                            f"{str(effect.get('effect_key') or effect.get('effect_id') or '')}:"
+                            f"{role}:{mode}:{input_fingerprint}"
+                        ),
+                        session_id=invocation_id,
+                        workflow_id=snapshot.workflow_id,
+                        aggregate_type=snapshot.aggregate_type.value,
+                        aggregate_id=snapshot.aggregate_id,
+                        role=role,
+                        mode=mode,
+                        role_profile_id=profile,
+                        family_binding_sha=str(binding_ref.get("sha256") or ""),
+                        input_fingerprint=input_fingerprint,
+                        required_inputs=(),
+                        input_refs=durable_input_refs,
+                        execution_spec={
+                            "effect_type": str(effect.get("effect_type") or "run_role"),
+                            "effect_id": str(effect.get("effect_id") or ""),
+                            "effect_key": str(effect.get("effect_key") or ""),
+                            "workflow_id": snapshot.workflow_id,
+                            "aggregate_type": snapshot.aggregate_type.value,
+                            "aggregate_id": snapshot.aggregate_id,
+                            "role": role,
+                            "payload": dict(effect.get("payload") or {}),
+                            "evaluation_generation": evaluation_generation,
+                        },
+                        submission_kind=submission_kind,
+                    )
                 )
-            )
+            except ValueError as exc:
+                # Triage/rebind cancellation and assignment creation are
+                # separate durable effects.  During that small window the
+                # previous assignment is still visible as open; this is a
+                # retryable ordering race, not a role failure.
+                if "role session already has an open assignment" in str(exc):
+                    raise DeferredEffectError(str(exc)) from exc
+                raise
         elif assignment["state"] in {
             RoleAssignmentState.CLAIMED.value,
             RoleAssignmentState.RUNNING.value,
@@ -6560,6 +6485,38 @@ class SemanticOrchestrator:
             )
         )
         pack_value = pack.to_dict()
+        # The durable role workspace is part of the worker's authoring
+        # context.  Keep its lease identity in lockstep with the attempt
+        # metadata below: retries keep the logical role session, but each
+        # materialized attempt gets a new fencing owner.  Leaving the old
+        # session id here makes draft_read present a context that the Role
+        # Gateway (correctly) rejects as belonging to another assignment.
+        workspace_value = dict(pack_value.get("workspace") or {})
+        workspace_binding = dict(workspace_value.get("minion_v2") or {})
+        workspace_binding.update(
+            {
+                # SubmissionDraftContext is reconstructed from the workspace
+                # pack inside the worker.  Keep the complete immutable
+                # authoring binding there, not only the per-attempt lease
+                # fields; metadata.minion_v2 is not visible to that parser.
+                "workflow_id": snapshot.workflow_id,
+                "aggregate_type": snapshot.aggregate_type.value,
+                "aggregate_id": snapshot.aggregate_id,
+                "role": role,
+                "mode": mode,
+                "authoring_input_fingerprint": input_fingerprint,
+                "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
+                "invocation_id": str(attempt["attempt_id"]),
+                "lease_resource": assignment_lease_resource,
+                "lease_resource_key": assignment_lease_resource,
+                "fencing_token": assignment_lease.fencing_token,
+                "harness_id": harness_spec.harness_id,
+                "harness_generation": harness_generation.generation_hash,
+                "harness_config": dict(harness_spec.config),
+            }
+        )
+        workspace_value["minion_v2"] = workspace_binding
+        pack_value["workspace"] = workspace_value
         metadata = dict(pack_value.get("metadata") or {})
         minion_v2 = dict(metadata.get("minion_v2") or {})
         minion_v2.update(
@@ -6751,7 +6708,11 @@ class SemanticOrchestrator:
         )
         events: list[dict[str, Any]] = []
         worker_error = ""
-        async with owner:
+        shell = self._role_supervisor.process_shell(
+            owner,
+            run_id=run_id,
+        )
+        async with shell:
             process = owner.process
             if process is None or process.stdout is None:
                 raise RuntimeError("worker process has no stdout pipe")
@@ -7239,7 +7200,7 @@ class SemanticOrchestrator:
             raise RuntimeError("worker checkpoint output is unreadable") from exc
         if not isinstance(payload, dict) or str(payload.get("session_id") or "") != invocation_id:
             raise RuntimeError("worker checkpoint output has the wrong session identity")
-        if str(payload.get("schema_version") or "") != "5":
+        if str(payload.get("schema_version") or "") != "6":
             raise RuntimeError("worker checkpoint output has an unsupported schema version")
         if int(payload.get("fencing_token") or 0) != int(fencing_token):
             raise RuntimeError("worker checkpoint output has a stale fencing token")
@@ -7445,6 +7406,15 @@ class SemanticOrchestrator:
             **self._role_submission_settlement(
                 effect or {},
                 assignment_id=assignment_id,
+            ),
+        )
+        WorkflowCoordinator(self.repository).submit_plan_verdict(
+            workflow_id=current.workflow_id,
+            accepted=review.verdict == "PASS",
+            finding_refs=(
+                ()
+                if review.verdict == "PASS"
+                else (review_ref.sha256,)
             ),
         )
 
@@ -7814,7 +7784,7 @@ def _verification_workspace_from_prompt_pack(
 ) -> tuple[Path, Path]:
     """Resolve the Manager-bound workspace actually used by the verifier.
 
-    Software verifiers work directly in the canonical Module or Integration
+    Software verifiers work directly in the canonical module
     worktree shared with the corresponding producer.  Other adapters may still
     receive an attempt-local role workspace.  The immutable prompt pack records
     which ownership model was selected.
@@ -8109,11 +8079,6 @@ def apply_v2_role_capability_policy(
                 {
                     *SWE_VERIFICATION_CAPABILITIES,
                     *VERIFICATION_EVIDENCE_CAPABILITIES,
-                    *(
-                        {"op_minion_verification_scratch_write"}
-                        if activation.mode == RoleMode.SYSTEM
-                        else set()
-                    ),
                 }
                 if current.intersection(SWE_VERIFICATION_CAPABILITIES)
                 else set(VERIFICATION_BUILDER_CAPABILITIES)
@@ -8125,16 +8090,6 @@ def apply_v2_role_capability_policy(
             },
             OrchestrationRole.IMPLEMENTATION: set(CANDIDATE_BUILDER_CAPABILITIES),
         }.get(activation.role)
-        if (
-            activation == RoleActivation(
-                OrchestrationRole.VERIFIER,
-                RoleMode.MODULE,
-            )
-            and allowed_authoring is not None
-        ):
-            allowed_authoring.discard(
-                "op_minion_verification_request_corpus_repair"
-            )
     if allowed_authoring is None:
         return pack
     allowed_authoring.add("op_minion_update_checklist")
@@ -8685,40 +8640,6 @@ def _reject_manager_identity_fields(value: Any, *, owner: str, path: str = "$") 
             _reject_manager_identity_fields(item, owner=owner, path=f"{path}[{index}]")
 
 
-def _resolve_verification_defect_targets(
-    repository: MinionV2Repository,
-    node: AggregateSnapshot,
-    *,
-    plan: Mapping[str, Any],
-    status: VerificationStatus,
-    defect_kind: DefectKind,
-    system_mode: bool,
-) -> tuple[str, str]:
-    """Resolve only the node target required by the selected FAIL route."""
-
-    if status != VerificationStatus.FAIL:
-        return "", ""
-    if defect_kind == DefectKind.DEPENDENCY:
-        return (
-            _resolve_dependency_node_id(
-                repository,
-                node,
-                dependency_module=str(plan.get("dependency_module") or ""),
-            ),
-            "",
-        )
-    if system_mode and defect_kind == DefectKind.MODULE:
-        return (
-            "",
-            _resolve_dependency_node_id(
-                repository,
-                node,
-                dependency_module=str(plan.get("affected_module") or ""),
-            ),
-        )
-    return "", ""
-
-
 def _resolve_dependency_node_id(
     repository: MinionV2Repository,
     node: AggregateSnapshot,
@@ -8748,7 +8669,7 @@ def _verification_repair_path_owners(
     for dependency in _verification_related_module_nodes(
         repository,
         node,
-        include_current=str(node.payload.get("node_kind") or "") != "system_verification",
+        include_current=True,
     ):
         module_name = str(
             dependency.payload.get("module_name")
@@ -8798,36 +8719,6 @@ def _verification_repair_path_owners(
                     for scope in normalized
                 }.values()
             )
-    return dict(sorted(owners.items()))
-
-
-def _verification_corpus_path_owners(
-    repository: MinionV2Repository,
-    node: AggregateSnapshot,
-) -> dict[str, list[dict[str, str]]]:
-    """Compile Verifier-owned corpus paths separately from product repair paths."""
-
-    owners: dict[str, list[dict[str, str]]] = {}
-    for dependency in _verification_related_module_nodes(
-        repository,
-        node,
-        include_current=str(node.payload.get("node_kind") or "") != "system_verification",
-    ):
-        module_name = str(
-            dependency.payload.get("module_name")
-            or dependency.payload.get("unit_id")
-            or ""
-        ).strip()
-        scope = dict(
-            dict(dependency.payload.get("path_policy") or {}).get(
-                "verification_corpus"
-            )
-            or {}
-        )
-        kind = str(scope.get("kind") or "").strip()
-        path = str(scope.get("path") or "").replace("\\", "/").strip("/")
-        if module_name and kind in {"file", "directory"} and path:
-            owners[module_name] = [{"kind": kind, "path": path}]
     return dict(sorted(owners.items()))
 
 
@@ -9041,23 +8932,6 @@ def _compile_standalone_review_markdown(report: Mapping[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def _defect_kind(
-    plan: Mapping[str, Any],
-    node: AggregateSnapshot,
-    *,
-    findings: list[Mapping[str, Any]] | None = None,
-) -> DefectKind:
-    dominant = dominant_verification_defect_kind(list(findings or []))
-    if dominant:
-        return DefectKind(dominant)
-    raw = str(plan.get("defect_kind") or "").strip()
-    if raw:
-        return DefectKind(raw)
-    if str(node.payload.get("node_kind") or "") == "integration":
-        return DefectKind.INTEGRATION
-    return DefectKind.MODULE
-
-
 def _routable_verification_findings(
     findings: list[Mapping[str, Any]],
     case_results: list[VerificationCaseResult],
@@ -9123,37 +8997,6 @@ def _prepare_standalone_review_workspace(
     subprocess.run(["git", "-C", str(review_repo), "checkout", "--detach", "--quiet", base_sha], check=True)
     scratch.mkdir(parents=True, exist_ok=True)
     return review_repo, scratch, base_sha
-
-
-def _seed_durable_verification_scratch(attempts_root: Path, durable_scratch: Path) -> None:
-    """Recover pre-durable verifier probes once, then keep one candidate-bound scratch."""
-
-    durable_scratch.mkdir(parents=True, exist_ok=True)
-    if any(path.is_file() for path in durable_scratch.rglob("*")):
-        return
-    attempts = sorted(
-        (path for path in attempts_root.glob("fence-*") if path.is_dir()),
-        key=lambda path: path.stat().st_mtime_ns,
-        reverse=True,
-    )
-    source = next(
-        (
-            path / "review-scratch"
-            for path in attempts
-            if (path / "review-scratch").is_dir()
-            and any(item.is_file() and not item.is_symlink() for item in (path / "review-scratch").rglob("*"))
-        ),
-        None,
-    )
-    if source is None:
-        return
-    files = [item for item in source.rglob("*") if item.is_file() and not item.is_symlink()]
-    if sum(item.stat().st_size for item in files) > 5 * 1024 * 1024:
-        raise ValueError("legacy verification scratch exceeds 5 MiB recovery budget")
-    for source_file in files:
-        destination = durable_scratch / source_file.relative_to(source)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_file, destination)
 
 
 def _safe_component(value: str) -> str:

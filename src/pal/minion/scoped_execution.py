@@ -608,6 +608,14 @@ class MinionScopedExecutionRuntime:
         )
         return reconcile(**kwargs) if callable(reconcile) else None
 
+    def commit_tool_delivery(self, **kwargs: Any) -> Any:
+        commit = getattr(
+            self._original_runtime,
+            "commit_tool_delivery",
+            None,
+        )
+        return commit(**kwargs) if callable(commit) else None
+
     def resolve_capability_address(self, name: object) -> str:
         return self.base_runtime.resolve_capability_address(name)
 

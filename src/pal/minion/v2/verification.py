@@ -27,7 +27,7 @@ class DefectKind(StrEnum):
     VERIFICATION = "verification_defect"
     CONTRACT = "contract_defect"
     ARCHITECTURE = "architecture_defect"
-    INTEGRATION = "integration_defect"
+    SINK = "sink_defect"
     REQUIREMENTS = "requirements_defect"
 
 
@@ -201,11 +201,6 @@ class VerificationService:
             "findings": [semantic_finding_payload(item) for item in findings],
             "reviewer_summary": reviewer_summary,
             "test_workspace_ref": dict(test_workspace_ref or {}),
-            **(
-                {"system_fingerprint": str(node.payload.get("system_fingerprint") or "")}
-                if str(node.payload.get("node_kind") or "") == "system_verification"
-                else {}
-            ),
         }
         child_refs: list[tuple[str, str]] = []
         if candidate_ref.get("sha256"):
@@ -375,32 +370,16 @@ class VerificationService:
                 if str(item)
             )
         )
-        module_targets = tuple(
-            dict.fromkeys(
-                str(item)
-                for item in (module_node_id, *module_node_ids)
-                if str(item)
-            )
-        )
-        system = str(node.payload.get("node_kind") or "") == "system_verification"
-        if system:
-            if not system_fingerprint or system_fingerprint != str(
-                node.payload.get("system_fingerprint") or ""
-            ):
-                raise ValueError(
-                    "verification verdict does not match the prepared system fingerprint"
-                )
-            common["system_fingerprint"] = system_fingerprint
         if status == VerificationStatus.PASS:
-            action_type = "VERIFICATION_PASSED" if system else "REVIEW_PASSED"
+            action_type = "REVIEW_PASSED"
             payload = common
         elif status == VerificationStatus.NOT_APPLICABLE:
-            action_type = "VERIFICATION_PASSED" if system else "REVIEW_PASSED"
+            action_type = "REVIEW_PASSED"
             payload = {**common, "not_applicable": True}
         elif status == VerificationStatus.UNKNOWN:
             policy = unknown_policy or UnknownPolicy(False, None, True)
             if policy.allows():
-                action_type = "VERIFICATION_UNKNOWN_ALLOWED" if system else "REVIEW_UNKNOWN_ALLOWED"
+                action_type = "REVIEW_UNKNOWN_ALLOWED"
                 payload = {
                     **common,
                     "policy_allows_unknown": True,
@@ -454,36 +433,25 @@ class VerificationService:
                     "repair_bill_ref": repair_bill_ref.to_dict(),
                     "failure_history": history,
                 }
-            elif defect_kind == DefectKind.ARCHITECTURE:
-                action_type = "ARCHITECTURE_DEFECT"
+            elif defect_kind in {
+                DefectKind.ARCHITECTURE,
+                DefectKind.REQUIREMENTS,
+            }:
+                action_type = (
+                    "REQUIREMENTS_DEFECT"
+                    if defect_kind == DefectKind.REQUIREMENTS
+                    else "ARCHITECTURE_DEFECT"
+                )
                 payload = {
                     **common,
                     "repair_bill_ref": repair_bill_ref.to_dict(),
                     "failure_history": history,
                 }
             elif defect_kind == DefectKind.VERIFICATION:
-                if not system or not module_targets:
-                    raise ValueError(
-                        "verification defect requires system verification and a verifier-owned target"
-                    )
                 action_type = "VERIFICATION_DEFECT"
                 payload = {
                     **common,
                     "repair_bill_ref": repair_bill_ref.to_dict(),
-                    "repair_target_node_id": module_targets[0],
-                    "repair_target_node_ids": list(module_targets),
-                    "finding_fingerprint": finding_fingerprint_value,
-                    "failure_history": history,
-                }
-            elif system:
-                if not module_targets:
-                    raise ValueError("system module defect requires module_node_id")
-                action_type = "MODULE_DEFECT"
-                payload = {
-                    **common,
-                    "repair_bill_ref": repair_bill_ref.to_dict(),
-                    "repair_target_node_id": module_targets[0],
-                    "repair_target_node_ids": list(module_targets),
                     "finding_fingerprint": finding_fingerprint_value,
                     "failure_history": history,
                 }
@@ -850,36 +818,6 @@ def no_progress_detected(history: Sequence[Mapping[str, Any]]) -> bool:
     fingerprints = {str(item.get("finding_fingerprint") or "") for item in latest}
     tree_hashes = {str(item.get("candidate_tree_hash") or "") for item in latest}
     return len(fingerprints) == 1 and "" not in fingerprints and len(tree_hashes) == 1 and "" not in tree_hashes
-
-
-def module_revision_fingerprint(
-    *,
-    unit_contract_hash: str,
-    relevant_requirements_hash: str,
-    relevant_evidence_hash: str,
-    global_constraint_hash: str,
-    owned_area_hash: str,
-    dependency_set_hash: str,
-    dependency_interface_hash: str,
-    dependency_output_hash: str,
-    integration_contract_subset_hash: str,
-    environment_policy_hash: str,
-) -> str:
-    payload = {
-        "unit_contract_hash": unit_contract_hash,
-        "relevant_requirements_hash": relevant_requirements_hash,
-        "relevant_evidence_hash": relevant_evidence_hash,
-        "global_constraint_hash": global_constraint_hash,
-        "owned_area_hash": owned_area_hash,
-        "dependency_set_hash": dependency_set_hash,
-        "dependency_interface_hash": dependency_interface_hash,
-        "dependency_output_hash": dependency_output_hash,
-        "integration_contract_subset_hash": integration_contract_subset_hash,
-        "environment_policy_hash": environment_policy_hash,
-    }
-    if any(not str(value) for value in payload.values()):
-        raise ValueError("module revision fingerprint requires every contract and environment hash")
-    return _normalized_hash(payload)
 
 
 def validate_verification_case_order(

@@ -13,6 +13,7 @@ from pal.llm.ir import (
     LLMResponseIR,
     LLMResponseUpdate,
     MessageRole,
+    ReasoningPartIR,
     TextPartIR,
     ThinkingLevel,
     WireShape,
@@ -70,6 +71,21 @@ class AnthropicMessagesCodec(ShapeCodecBase):
                     continue
             if message.role == MessageRole.ASSISTANT:
                 blocks: list[dict[str, Any]] = []
+                # Replay is the authoritative provider wire form.  Keep a
+                # lossless semantic fallback for an active turn restored from
+                # an older checkpoint (or after an endpoint/model switch)
+                # where the envelope is unavailable but reasoning is still in
+                # the IR.  Omitting this block while thinking mode is enabled
+                # makes Anthropic reject the next request before it reaches
+                # the model.
+                for part in message.parts:
+                    if isinstance(part, ReasoningPartIR):
+                        blocks.append(
+                            {
+                                "type": "redacted_thinking" if part.redacted else "thinking",
+                                **({} if part.redacted else {"thinking": part.text}),
+                            }
+                        )
                 text = "".join(part.text for part in message.parts if isinstance(part, TextPartIR))
                 if text:
                     blocks.append({"type": "text", "text": text})

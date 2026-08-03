@@ -155,3 +155,11 @@ class ExecutionRuntimePort(Protocol):
 
     async def interrupt_turn(self, turn_id: str) -> None:
         ...
+
+    def commit_tool_delivery(
+        self,
+        *,
+        turn_id: str | None,
+        context_delivery: dict[str, Any] | None,
+    ) -> Any:
+        ...

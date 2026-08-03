@@ -201,7 +201,7 @@ def provision_artifact_workspaces(
 ) -> dict[str, dict[str, Any]]:
     root = artifact_epoch_root(runtime_root) / epoch_id / "artifact-workspaces"
     result: dict[str, dict[str, Any]] = {}
-    for unit_id in [*unit_ids, "integration"]:
+    for unit_id in unit_ids:
         workspace = root / _safe_component(unit_id)
         workspace.mkdir(parents=True, exist_ok=True)
         result[unit_id] = {
@@ -282,44 +282,6 @@ class ArtifactBundleAdapter:
         scratch.mkdir(parents=True, exist_ok=True)
         self.materialize_candidate(candidate_ref, candidate)
         return candidate, scratch
-
-    def integrate_candidates(
-        self,
-        *,
-        integration_workspace: Path,
-        ordered_candidates: Sequence[Mapping[str, Any]],
-        architecture_manifest_sha: str,
-    ) -> tuple[ArtifactRef, str]:
-        if integration_workspace.exists():
-            shutil.rmtree(integration_workspace)
-        integration_workspace.mkdir(parents=True, exist_ok=True)
-        owners: dict[str, str] = {}
-        for candidate in ordered_candidates:
-            node_run_id = str(candidate.get("node_run_id") or "")
-            ref = dict(candidate.get("candidate_ref") or {})
-            payload = dict(self.artifacts.read_json(ref))
-            for raw in list(payload.get("files") or []):
-                item = dict(raw or {})
-                relative = _safe_relative(str(item.get("path") or ""))
-                digest = str(item.get("sha256") or "")
-                if relative in owners:
-                    existing = hashlib.sha256((integration_workspace / relative).read_bytes()).hexdigest()
-                    if existing != digest:
-                        raise ValueError(f"artifact ownership conflict for {relative}: {owners[relative]} vs {node_run_id}")
-                    continue
-                content = base64.b64decode(str(item.get("content_base64") or ""))
-                target = integration_workspace / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(content)
-                owners[relative] = node_run_id
-        ref, digest = self.snapshot_candidate(
-            workspace=integration_workspace,
-            reference_only_paths=(),
-            unit_contract_hash=architecture_manifest_sha,
-            dependency_output_hashes={str(item.get("node_run_id") or ""): str(dict(item.get("candidate_ref") or {}).get("sha256") or "") for item in ordered_candidates},
-            environment_fingerprint="artifact_bundle.v2",
-        )
-        return ref, digest
 
     def publish_deliverable(
         self,

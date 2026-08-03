@@ -315,6 +315,23 @@ class ExecutionRuntime(ExecutionRuntimePort):
             deliveries=tuple(deliveries),
         )
 
+    def commit_tool_delivery(
+        self,
+        *,
+        turn_id: str | None,
+        context_delivery: dict[str, Any] | None,
+    ) -> LogicalExecutionContext:
+        """Commit a tool delivery after its result has entered L1."""
+
+        context = self.logical_context_for_turn(turn_id)
+        manifest = FileDeliveryManifest.from_dict(context_delivery)
+        if manifest is None:
+            return context
+        return self.logical_state.record_delivery(
+            logical_session_id=context.logical_session_id,
+            delivery=manifest.to_dict(),
+        )
+
     def list_tool_specs(self) -> list[dict[str, Any]]:
         generation = self._registry_generation
         records = {**generation.direct_aliases, **generation.indirect_aliases}

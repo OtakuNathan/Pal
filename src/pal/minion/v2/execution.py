@@ -39,6 +39,13 @@ from pal.minion.v2.role_contracts import (
     family_execution_adapter,
     validate_family_binding_payload,
 )
+from pal.minion.v2.graph_executor import (
+    GraphDiff,
+    NodeReuseKind,
+    diff_graphs,
+)
+from pal.minion.v2.graph_protocol import EdgeKind, GraphIR, graph_ir_from_mapping
+from pal.minion.v2.workflow_runtime import InstalledGraph, WorkflowCoordinator
 from pal.minion.v2.sessions import (
     coder_session_id,
     module_verifier_session_id,
@@ -50,7 +57,7 @@ from pal.minion.v2.skeleton import (
     module_developer_test_path,
     module_verification_corpus_path,
 )
-from pal.minion.v2.verification import module_revision_fingerprint, repair_bill_semantic_view
+from pal.minion.v2.verification import repair_bill_semantic_view
 
 
 @dataclass(frozen=True)
@@ -58,8 +65,7 @@ class ExecutionCompilation:
     epoch_id: str
     node_run_ids: tuple[str, ...]
     unit_node_ids: Mapping[str, str]
-    system_verification_node_id: str = ""
-    integration_node_id: str = ""
+    sink_node_id: str
 
 
 @dataclass(frozen=True)
@@ -237,13 +243,19 @@ class ExecutionCompiler:
             or self.contracts.artifacts.read_json(manifest_ref)
         )
         submission = dict(artifact.get("submission") or {})
+        installed_graph = _install_execution_graph(
+            artifact,
+            workflow_id=workflow_id,
+            repository=self.repository,
+        )
+        graph = installed_graph.execution.graph
         modules = {str(name): dict(value or {}) for name, value in dict(submission.get("modules") or {}).items()}
         if not modules:
             raise ValueError("software ContractArtifact has no modules")
         implementation_modules = {
             name: module
             for name, module in modules.items()
-            if str(module.get("module_kind") or "") == "implementation"
+            if name in graph.nodes
         }
         if not implementation_modules:
             raise ValueError("software ContractArtifact has no implementation modules")
@@ -319,42 +331,6 @@ class ExecutionCompiler:
                 artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
             )
-        scenario_catalog_ref = self.contracts.artifacts.put_json(
-            {
-                "schema_version": "1",
-                "kind": "system_delivery",
-                "scenarios": {
-                    name: {
-                        "modules": [
-                            str(item) for item in list(scenario.get("modules") or [])
-                        ],
-                        "entrypoints": [str(scenario.get("entrypoint") or "")],
-                        "contract_flow": list(scenario.get("contract_flow") or []),
-                        "observable_behavior": str(
-                            scenario.get("observable_behavior") or ""
-                        ),
-                        "failure_behavior": str(
-                            scenario.get("failure_behavior") or ""
-                        ),
-                        "environment": {
-                            "description": str(scenario.get("environment") or "")
-                        },
-                        "requirements": {
-                            requirement_name: requirements[requirement_name]
-                            for requirement_name in [
-                                str(item)
-                                for item in list(
-                                    scenario.get("requirement_refs") or []
-                                )
-                            ]
-                        },
-                    }
-                    for name, scenario in sorted(scenarios.items())
-                },
-            },
-            artifact_type="ScenarioCatalogArtifact",
-            child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
-        )
         self.repository.dispatch(
             _action(
                 "CREATE_EXECUTION_EPOCH",
@@ -368,6 +344,7 @@ class ExecutionCompiler:
                     "topology_ref": topology_ref.to_dict(),
                     "architecture_manifest_sha": manifest_ref.sha256,
                     "skeleton_commit_sha": str(artifact.get("skeleton_commit_sha") or ""),
+                    "graph_generation": graph.generation,
                 },
             )
         )
@@ -380,14 +357,12 @@ class ExecutionCompiler:
             if workflow is not None and workflow.payload.get("request_ref")
             else {}
         )
-        system_unit_id = "system_delivery"
         workspaces = provision_skeleton_module_worktrees(
             self.repository.runtime_root,
             artifacts=self.contracts.artifacts,
             workflow_id=workflow_id,
             workflow_name=str(request.get("workflow_name") or request.get("goal") or workflow_id),
-            unit_ids=sorted([*implementation_modules, system_unit_id]),
-            verification_unit_ids={system_unit_id},
+            unit_ids=sorted(implementation_modules),
             workspace=dict(request.get("workspace") or {}),
             architecture_artifact=artifact,
         )
@@ -400,14 +375,8 @@ class ExecutionCompiler:
                 "toolchain": dict(request.get("toolchain") or {}),
             }
         )
-        global_constraint_hash = _stable_json_hash(
-            {
-                "constraints": list(request.get("constraints") or []),
-                "requirements": self.contracts.artifacts.read_json(dict(artifact.get("requirements_ref") or {})),
-            }
-        )
         unit_node_ids = {name: f"{epoch_id}:node:{name}" for name in implementation_modules}
-        system_verification_node_id = f"{epoch_id}:system-verification"
+        sink_node_id = unit_node_ids[graph.sink]
         module_responsibilities = {
             name: str(modules[name].get("responsibility") or "")
             for name in implementation_modules
@@ -422,11 +391,11 @@ class ExecutionCompiler:
             self.repository,
             workflow_id=workflow_id,
             source_epoch_id=source_epoch_id,
-            target_subjects={*implementation_modules, system_unit_id},
+            target_subjects=set(implementation_modules),
             replaced_subjects=set(module_identity_delta["replaced"]),
         )
         for name in sorted(implementation_modules):
-            paths = dict(modules[name].get("paths") or {})
+            paths = dict(graph.nodes[name].workspace_policy)
             self.repository.dispatch(
                 _action(
                     "CREATE_NODE_RUN",
@@ -437,20 +406,25 @@ class ExecutionCompiler:
                     0,
                     {
                         "epoch_id": epoch_id,
+                        "graph_generation": graph.generation,
+                        "graph_contract_hash": graph.nodes[name].contract_hash,
                         "unit_id": name,
                         "module_name": name,
                         "module_responsibility": module_responsibilities[name],
                         "node_kind": "unit",
                         "unit_contract_ref": module_refs[name].to_dict(),
                         "architecture_manifest_ref": manifest_ref.to_dict(),
-                        # Contract dependencies describe protocol/data flow. Accepted
-                        # Skeleton contracts make them available before implementation,
-                        # so they are not Coder start barriers.
-                        "dependency_node_ids": [],
-                        "contract_dependency_node_ids": [
+                        "dependency_node_ids": [
                             unit_node_ids[item]
-                            for item in module_dependencies[name]
-                            if item in unit_node_ids
+                            for item in graph.execution_predecessors(name)
+                        ],
+                        "contract_dependency_node_ids": [
+                            unit_node_ids[edge.producer]
+                            for edge in graph.incoming(name)
+                            if (
+                                edge.kind == EdgeKind.CONTRACT
+                                and edge.producer in unit_node_ids
+                            )
                         ],
                         "accepted_dependency_node_ids": [],
                         "epoch_frozen": False,
@@ -459,7 +433,6 @@ class ExecutionCompiler:
                             0,
                         ),
                         "environment_fingerprint": environment_fingerprint,
-                        "global_constraint_hash": global_constraint_hash,
                         "path_policy": {
                             "contract_mode": str(paths.get("contract_mode") or "review_guarded"),
                             "contract_paths": list(paths.get("contract_paths") or []),
@@ -474,6 +447,7 @@ class ExecutionCompiler:
                             },
                             "reference_only": list(paths.get("reference_only") or []),
                         },
+                        **({"graph_sink": True} if name == graph.sink else {}),
                         **(
                             {"historical_repair_bill_refs": [dict(initial_repair_bill_ref)]}
                             if initial_repair_bill_ref
@@ -483,45 +457,6 @@ class ExecutionCompiler:
                     },
                 )
             )
-        self.repository.dispatch(
-            _action(
-                "CREATE_NODE_RUN",
-                workflow_id,
-                AggregateType.DAG_NODE_RUN,
-                system_verification_node_id,
-                actor,
-                0,
-                {
-                    "epoch_id": epoch_id,
-                    "unit_id": system_unit_id,
-                    "module_name": system_unit_id,
-                    "node_kind": "system_verification",
-                    "unit_contract_ref": scenario_catalog_ref.to_dict(),
-                    "scenario_catalog_ref": scenario_catalog_ref.to_dict(),
-                    "architecture_manifest_ref": manifest_ref.to_dict(),
-                    "dependency_node_ids": [
-                        unit_node_ids[name] for name in sorted(unit_node_ids)
-                    ],
-                    "accepted_dependency_node_ids": [],
-                    "epoch_frozen": False,
-                    "role_session_generation": source_role_generations.get(
-                        system_unit_id,
-                        0,
-                    ),
-                    "environment_fingerprint": environment_fingerprint,
-                    "global_constraint_hash": global_constraint_hash,
-                    "path_policy": {
-                        "contract_mode": "read_only",
-                        "contract_paths": [],
-                        "implementation_scopes": [],
-                        "developer_tests": None,
-                        "verification_corpus": None,
-                        "reference_only": [],
-                    },
-                    **dict(workspaces[system_unit_id]),
-                },
-            )
-        )
         if source_epoch_id:
             reconcile_module_identities(
                 repository=self.repository,
@@ -530,11 +465,12 @@ class ExecutionCompiler:
                 source_epoch_id=source_epoch_id,
                 target_epoch_id=epoch_id,
                 target_manifest_ref=manifest_ref,
+                target_graph=graph,
+                installed_graph_diff=installed_graph.diff,
                 actor=actor,
             )
         node_ids = tuple(
-            [unit_node_ids[name] for name in sorted(unit_node_ids)]
-            + [system_verification_node_id]
+            unit_node_ids[name] for name in sorted(unit_node_ids)
         )
         self.repository.dispatch(
             _action(
@@ -547,7 +483,7 @@ class ExecutionCompiler:
                 {
                     "node_ids": list(node_ids),
                     "implementation_node_ids": list(unit_node_ids.values()),
-                    "system_verification_node_id": system_verification_node_id,
+                    "sink_node_id": sink_node_id,
                     "module_identity_delta": module_identity_delta,
                 },
             )
@@ -556,7 +492,7 @@ class ExecutionCompiler:
             epoch_id=epoch_id,
             node_run_ids=node_ids,
             unit_node_ids=unit_node_ids,
-            system_verification_node_id=system_verification_node_id,
+            sink_node_id=sink_node_id,
         )
 
     def _compile_data_contract_epoch(
@@ -570,6 +506,12 @@ class ExecutionCompiler:
     ) -> ExecutionCompilation:
         artifact = dict(self.contracts.artifacts.read_json(manifest_ref))
         contract = dict(artifact.get("contract") or {})
+        installed_graph = _install_execution_graph(
+            artifact,
+            workflow_id=workflow_id,
+            repository=self.repository,
+        )
+        graph = installed_graph.execution.graph
         modules = {
             str(name): dict(value or {})
             for name, value in dict(contract.get("modules") or {}).items()
@@ -577,13 +519,13 @@ class ExecutionCompiler:
         }
         if not modules:
             raise ValueError("ContractArtifact has no produced modules")
+        if set(modules) != set(graph.nodes):
+            raise ValueError(
+                "ContractArtifact produced modules disagree with GraphIR nodes"
+            )
         dependencies = {
-            name: [
-                str(provider)
-                for provider in dict(module.get("dependencies") or {})
-                if str(provider) in modules
-            ]
-            for name, module in modules.items()
+            name: list(graph.execution_predecessors(name))
+            for name in modules
         }
         _topological_module_order(dependencies)
         requirements = {
@@ -643,16 +585,6 @@ class ExecutionCompiler:
                 artifact_type="ContractModuleArtifact",
                 child_refs=((manifest_ref.sha256, "contract"),),
             )
-        scenario_ref = self.contracts.artifacts.put_json(
-            {
-                "schema_version": "1",
-                "kind": "integration",
-                "scenarios": scenarios,
-                "requirements": requirements,
-            },
-            artifact_type="ScenarioCatalogArtifact",
-            child_refs=((manifest_ref.sha256, "contract"),),
-        )
         self.repository.dispatch(
             _action(
                 "CREATE_EXECUTION_EPOCH",
@@ -665,6 +597,7 @@ class ExecutionCompiler:
                     "architecture_manifest_ref": manifest_ref.to_dict(),
                     "topology_ref": topology_ref.to_dict(),
                     "architecture_manifest_sha": manifest_ref.sha256,
+                    "graph_generation": graph.generation,
                 },
             )
         )
@@ -704,7 +637,7 @@ class ExecutionCompiler:
             self.repository,
             workflow_id=workflow_id,
             source_epoch_id=source_epoch_id,
-            target_subjects={*modules, "integration"},
+            target_subjects=set(modules),
             replaced_subjects=set(module_identity_delta["replaced"]),
         )
         environment_fingerprint = _stable_json_hash(
@@ -726,6 +659,8 @@ class ExecutionCompiler:
                     0,
                     {
                         "epoch_id": epoch_id,
+                        "graph_generation": graph.generation,
+                        "graph_contract_hash": graph.nodes[name].contract_hash,
                         "unit_id": name,
                         "module_name": name,
                         "module_responsibility": responsibilities[name],
@@ -740,41 +675,11 @@ class ExecutionCompiler:
                         "epoch_frozen": False,
                         "role_session_generation": generations.get(name, 0),
                         "environment_fingerprint": environment_fingerprint,
+                        **({"graph_sink": True} if name == graph.sink else {}),
                         **dict(workspaces[name]),
                     },
                 )
             )
-        integration_node_id = f"{epoch_id}:node:integration"
-        self.repository.dispatch(
-            _action(
-                "CREATE_NODE_RUN",
-                workflow_id,
-                AggregateType.DAG_NODE_RUN,
-                integration_node_id,
-                actor,
-                0,
-                {
-                    "epoch_id": epoch_id,
-                    "unit_id": "integration",
-                    "module_name": "integration",
-                    "node_kind": "integration",
-                    "unit_contract_ref": scenario_ref.to_dict(),
-                    "scenario_catalog_ref": scenario_ref.to_dict(),
-                    "architecture_manifest_ref": manifest_ref.to_dict(),
-                    "dependency_node_ids": [
-                        unit_node_ids[name]
-                        for name in _topological_module_order(dependencies)
-                    ],
-                    "accepted_dependency_node_ids": [],
-                    "epoch_frozen": False,
-                    "role_session_generation": generations.get(
-                        "integration", 0
-                    ),
-                    "environment_fingerprint": environment_fingerprint,
-                    **dict(workspaces["integration"]),
-                },
-            )
-        )
         if source_epoch_id:
             reconcile_module_identities(
                 repository=self.repository,
@@ -783,12 +688,14 @@ class ExecutionCompiler:
                 source_epoch_id=source_epoch_id,
                 target_epoch_id=epoch_id,
                 target_manifest_ref=manifest_ref,
+                target_graph=graph,
+                installed_graph_diff=installed_graph.diff,
                 actor=actor,
             )
         node_ids = tuple(
-            [unit_node_ids[name] for name in sorted(unit_node_ids)]
-            + [integration_node_id]
+            unit_node_ids[name] for name in sorted(unit_node_ids)
         )
+        sink_node_id = unit_node_ids[graph.sink]
         self.repository.dispatch(
             _action(
                 "NODES_COMPILED",
@@ -799,7 +706,7 @@ class ExecutionCompiler:
                 2,
                 {
                     "node_ids": list(node_ids),
-                    "integration_node_id": integration_node_id,
+                    "sink_node_id": sink_node_id,
                     "module_identity_delta": module_identity_delta,
                 },
             )
@@ -808,7 +715,7 @@ class ExecutionCompiler:
             epoch_id=epoch_id,
             node_run_ids=node_ids,
             unit_node_ids=unit_node_ids,
-            integration_node_id=integration_node_id,
+            sink_node_id=sink_node_id,
         )
 
 
@@ -834,6 +741,27 @@ def _workflow_execution_adapter(
     return family_execution_adapter(binding.get("execution_adapter"))
 
 
+def _install_execution_graph(
+    artifact: Mapping[str, Any],
+    *,
+    workflow_id: str,
+    repository: MinionV2Repository,
+) -> InstalledGraph:
+    raw = artifact.get("graph_ir")
+    if not isinstance(raw, Mapping) or not raw:
+        raise ValueError(
+            "ContractArtifact has no Manager-compiled GraphIR; fresh v27 "
+            "contracts must be re-authored"
+        )
+    graph = graph_ir_from_mapping(raw)
+    if graph.graph_id != workflow_id:
+        raise ValueError("ContractArtifact GraphIR belongs to another workflow")
+    return WorkflowCoordinator(repository).install_graph(
+        workflow_id=workflow_id,
+        graph=graph,
+    )
+
+
 def reconcile_module_identities(
     *,
     repository: MinionV2Repository,
@@ -842,6 +770,8 @@ def reconcile_module_identities(
     source_epoch_id: str,
     target_epoch_id: str,
     target_manifest_ref: ArtifactRef,
+    target_graph: GraphIR,
+    installed_graph_diff: GraphDiff | None,
     actor: str,
 ) -> tuple[str, ...]:
     source_epoch = repository.read_snapshot(
@@ -863,6 +793,13 @@ def reconcile_module_identities(
         and _artifact_is_contract(target_record)
     ):
         return ()
+    graph_diff = _replan_graph_diff(
+        repository=repository,
+        workflow_id=workflow_id,
+        source_epoch=source_epoch,
+        target_graph=target_graph,
+        installed_graph_diff=installed_graph_diff,
+    )
     execution_adapter = _workflow_execution_adapter(
         repository,
         contracts,
@@ -877,6 +814,8 @@ def reconcile_module_identities(
             target_epoch_id=target_epoch_id,
             source_manifest_ref=source_manifest_ref,
             target_manifest_ref=target_manifest_ref,
+            target_graph=target_graph,
+            graph_diff=graph_diff,
             actor=actor,
         )
     if execution_adapter == ARTIFACT_BUNDLE_ADAPTER:
@@ -886,12 +825,54 @@ def reconcile_module_identities(
             workflow_id=workflow_id,
             source_epoch_id=source_epoch_id,
             target_epoch_id=target_epoch_id,
+            target_graph=target_graph,
+            graph_diff=graph_diff,
             actor=actor,
         )
     raise ValueError(
         "workflow selected an unsupported execution adapter: "
         + execution_adapter
     )
+
+
+def _replan_graph_diff(
+    *,
+    repository: MinionV2Repository,
+    workflow_id: str,
+    source_epoch: AggregateSnapshot,
+    target_graph: GraphIR,
+    installed_graph_diff: GraphDiff | None,
+) -> GraphDiff:
+    """Resolve the one graph-level reuse decision for a compiled replan.
+
+    GraphExecution is authoritative for which accepted products may cross a
+    generation boundary.  Aggregate node rows are only a durable projection,
+    so they must consume this decision rather than independently deciding
+    which products to carry forward.
+    """
+
+    source_generation = int(source_epoch.payload.get("graph_generation") or 0)
+    if source_generation < 1:
+        raise RuntimeError(
+            "replan source execution epoch has no GraphIR generation"
+        )
+    source_graph = repository.read_graph_generation(
+        graph_id=workflow_id,
+        generation=source_generation,
+    )
+    if source_graph is None:
+        raise RuntimeError(
+            "replan source GraphIR generation is unavailable"
+        )
+    if source_graph.graph_id != target_graph.graph_id:
+        raise RuntimeError("replan GraphIR identity changed across one workflow")
+    if (
+        installed_graph_diff is not None
+        and installed_graph_diff.source_generation == source_generation
+        and installed_graph_diff.target_generation == target_graph.generation
+    ):
+        return installed_graph_diff
+    return diff_graphs(source_graph, target_graph)
 
 
 def _reconcile_data_contract_module_identities(
@@ -901,6 +882,8 @@ def _reconcile_data_contract_module_identities(
     workflow_id: str,
     source_epoch_id: str,
     target_epoch_id: str,
+    target_graph: GraphIR,
+    graph_diff: GraphDiff,
     actor: str,
 ) -> tuple[str, ...]:
     """Carry exact immutable artifact modules across a contract revision."""
@@ -922,18 +905,11 @@ def _reconcile_data_contract_module_identities(
     }
     target_dependencies = {
         name: [
-            str(provider)
-            for provider in dict(
-                dict(
-                    contracts.artifacts.read_json(
-                        dict(node.payload.get("unit_contract_ref") or {})
-                    )
-                ).get("module")
-                or {}
-            ).get("dependencies", {})
-            if str(provider) in target_nodes
+            provider
+            for provider in target_graph.execution_predecessors(name)
+            if provider in target_nodes
         ]
-        for name, node in target_nodes.items()
+        for name in target_nodes
     }
     carried: list[str] = []
     for name in _topological_module_order(target_dependencies):
@@ -944,12 +920,17 @@ def _reconcile_data_contract_module_identities(
         )
         if source is None or target is None:
             continue
+        decision = graph_diff.decisions.get(name)
+        if decision is None:
+            raise RuntimeError(
+                f"GraphDiff is missing reuse decision for projected node {name}"
+            )
+        if decision.kind != NodeReuseKind.REUSE_ACCEPTED:
+            continue
         if (
             source.state != "ACCEPTED"
             or target.state != "BLOCKED_BY_DEPS"
             or not _same_module_identity(source, target)
-            or dict(source.payload.get("unit_contract_ref") or {})
-            != dict(target.payload.get("unit_contract_ref") or {})
         ):
             continue
         accepted_dependencies = [
@@ -973,20 +954,8 @@ def _reconcile_data_contract_module_identities(
             source.payload.get("verification_artifact_ref") or {}
         )
         candidate_digest = str(source.payload.get("candidate_digest") or "")
-        fingerprint = str(
-            source.payload.get("module_revision_fingerprint") or ""
-        )
         if not all((candidate_ref, verification_ref, candidate_digest)):
             continue
-        if not fingerprint:
-            fingerprint = _stable_json_hash(
-                {
-                    "unit_contract_ref": dict(
-                        source.payload.get("unit_contract_ref") or {}
-                    ),
-                    "candidate_digest": candidate_digest,
-                }
-            )
         result = repository.dispatch(
             _action(
                 "CARRY_FORWARD_MODULE",
@@ -999,7 +968,9 @@ def _reconcile_data_contract_module_identities(
                     "candidate_ref": candidate_ref,
                     "candidate_digest": candidate_digest,
                     "verification_artifact_ref": verification_ref,
-                    "module_revision_fingerprint": fingerprint,
+                    "graph_contract_hash": target_graph.nodes[
+                        name
+                    ].contract_hash,
                     "accepted_dependency_node_ids": accepted_dependencies,
                     "epoch_frozen": False,
                     "output_hashes": dict(
@@ -1033,10 +1004,10 @@ def _reconcile_skeleton_module_identities(
     target_epoch_id: str,
     source_manifest_ref: ArtifactRef,
     target_manifest_ref: ArtifactRef,
+    target_graph: GraphIR,
+    graph_diff: GraphDiff,
     actor: str,
 ) -> tuple[str, ...]:
-    source_artifact = dict(contracts.artifacts.read_json(source_manifest_ref))
-    target_artifact = dict(contracts.artifacts.read_json(target_manifest_ref))
     snapshots = repository.list_workflow_snapshots(workflow_id)
     source_nodes = {
         str(item.payload.get("module_name") or item.payload.get("unit_id") or ""): item
@@ -1066,27 +1037,15 @@ def _reconcile_skeleton_module_identities(
         )
         for name, node in target_nodes.items()
     }
-    contract_dependencies = {
-        name: [
-            str(item)
-            for item in dict(dict(contract.get("module") or {}).get("dependencies") or {})
-        ]
-        for name, (_ref, contract) in target_contracts.items()
-    }
-    if set(contract_dependencies) != set(target_nodes):
+    if set(target_graph.nodes) != set(target_nodes):
         return ()
-    # Contract-only modules participate in the architecture graph but do not
-    # have execution nodes. Module revision fingerprints include implementation
-    # dependency interfaces, but never waits for replacement implementations
-    # or their optional output projections. The unit-contract hash still
-    # covers the consumer's complete declared dependency set.
     dependencies = {
         name: [
-            dependency
-            for dependency in module_dependencies
-            if dependency in target_nodes
+            provider
+            for provider in target_graph.execution_predecessors(name)
+            if provider in target_nodes
         ]
-        for name, module_dependencies in contract_dependencies.items()
+        for name in target_nodes
     }
     carried_forward: list[str] = []
     for module_name in _topological_module_order(dependencies):
@@ -1097,7 +1056,17 @@ def _reconcile_skeleton_module_identities(
         )
         if source_node is None or target_node is None:
             continue
+        decision = graph_diff.decisions.get(module_name)
+        if decision is None:
+            raise RuntimeError(
+                f"GraphDiff is missing reuse decision for projected node {module_name}"
+            )
         if not _same_module_identity(source_node, target_node):
+            if decision.kind != NodeReuseKind.CREATE:
+                raise RuntimeError(
+                    "GraphDiff and Module workspace identity disagree for "
+                    + module_name
+                )
             _recreate_replaced_module_worktree(
                 repository=repository,
                 workflow_id=workflow_id,
@@ -1109,23 +1078,6 @@ def _reconcile_skeleton_module_identities(
         target_contract = target_contracts.get(module_name)
         if source_contract is None or target_contract is None:
             continue
-        dependency_modules = dependencies[module_name]
-        source_fingerprint = _skeleton_module_revision_signature(
-            artifact=source_artifact,
-            contract_ref=source_contract[0],
-            contract=source_contract[1],
-            node=source_node,
-            dependencies=dependency_modules,
-            contracts_by_module=source_contracts,
-        )
-        target_fingerprint = _skeleton_module_revision_signature(
-            artifact=target_artifact,
-            contract_ref=target_contract[0],
-            contract=target_contract[1],
-            node=target_node,
-            dependencies=dependency_modules,
-            contracts_by_module=target_contracts,
-        )
         source_candidate_ref = dict(source_node.payload.get("candidate_ref") or {})
         verification_ref = dict(source_node.payload.get("verification_artifact_ref") or {})
         source_candidate_digest = str(source_node.payload.get("candidate_digest") or "")
@@ -1150,12 +1102,12 @@ def _reconcile_skeleton_module_identities(
             "dependency_outputs": {},
             "dependency_fingerprint": "",
         }
-        if (
-            source_node.state != "ACCEPTED"
-            or not verification_ref
-            or not source_fingerprint
-            or source_fingerprint != target_fingerprint
-        ):
+        can_carry_acceptance = (
+            decision.kind == NodeReuseKind.REUSE_ACCEPTED
+            and source_node.state == "ACCEPTED"
+            and bool(verification_ref)
+        )
+        if not can_carry_acceptance:
             result = repository.dispatch(
                 _action(
                     "PRESERVE_MODULE_WORKTREE",
@@ -1197,7 +1149,9 @@ def _reconcile_skeleton_module_identities(
                     "candidate_ref": candidate_ref.to_dict(),
                     "candidate_digest": module_head,
                     "verification_artifact_ref": verification_ref,
-                    "module_revision_fingerprint": target_fingerprint,
+                    "graph_contract_hash": target_graph.nodes[
+                        module_name
+                    ].contract_hash,
                     "accepted_dependency_node_ids": [],
                     "epoch_frozen": False,
                     "output_hashes": dict(source_node.payload.get("output_hashes") or {}),
@@ -1519,96 +1473,6 @@ def _recreate_replaced_module_worktree(
     )
 
 
-def _skeleton_module_revision_signature(
-    *,
-    artifact: Mapping[str, Any],
-    contract_ref: Mapping[str, Any],
-    contract: Mapping[str, Any],
-    node: AggregateSnapshot,
-    dependencies: list[str],
-    contracts_by_module: Mapping[str, tuple[Mapping[str, Any], Mapping[str, Any]]],
-) -> str:
-    dependency_interfaces: dict[str, Any] = {}
-    for dependency in sorted(dependencies):
-        dependency_contract = contracts_by_module.get(dependency)
-        if dependency_contract is None:
-            return ""
-        dependency_interfaces[dependency] = {
-            "contract_hash": str(dependency_contract[0].get("sha256") or ""),
-            "contract_file_hashes": dict(dependency_contract[1].get("contract_file_hashes") or {}),
-        }
-    try:
-        return module_revision_fingerprint(
-            unit_contract_hash=str(contract_ref.get("sha256") or ""),
-            relevant_requirements_hash=_stable_json_hash(dict(artifact.get("requirements_ref") or {})),
-            relevant_evidence_hash=_stable_json_hash({}),
-            global_constraint_hash=str(node.payload.get("global_constraint_hash") or ""),
-            owned_area_hash=_stable_json_hash(dict(contract.get("paths") or {})),
-            dependency_set_hash=_stable_json_hash(sorted(dependencies)),
-            dependency_interface_hash=_stable_json_hash(dependency_interfaces),
-            # Skeleton modules consume declared interfaces. The concrete
-            # implementation chosen for an upstream module is deliberately
-            # outside the consumer Module revision identity.
-            dependency_output_hash=_stable_json_hash({}),
-            integration_contract_subset_hash=_stable_json_hash({}),
-            environment_policy_hash=str(node.payload.get("environment_fingerprint") or ""),
-        )
-    except ValueError:
-        return ""
-
-
-
-def _module_revision_signature(
-    *,
-    manifest: Mapping[str, Any],
-    fragments: Mapping[str, Any],
-    contract_ref: Mapping[str, Any],
-    contract: Mapping[str, Any],
-    unit_id: str,
-    dependencies: Mapping[str, list[str]],
-    node: AggregateSnapshot,
-    node_by_module: Mapping[str, AggregateSnapshot],
-) -> str:
-    task_ledger_hash = str(dict(manifest.get("requirements_ref") or {}).get("sha256") or "")
-    dependency_modules = sorted(dependencies.get(unit_id) or [])
-    dependency_interfaces = {
-        dependency: dict(_contract_value(node_by_module.get(dependency), fragments)).get("provided_interfaces") or []
-        for dependency in dependency_modules
-    }
-    dependency_outputs = {
-        dependency: {
-            "candidate_digest": str((node_by_module.get(dependency) or node).payload.get("candidate_digest") or ""),
-            "output_hashes": dict((node_by_module.get(dependency) or node).payload.get("output_hashes") or {}),
-        }
-        for dependency in dependency_modules
-    }
-    cross_contracts = [
-        item
-        for item in list(fragments.get("cross_unit_contract") or [])
-        if _mapping_mentions(item, {unit_id, *dependency_modules})
-    ]
-    return module_revision_fingerprint(
-        unit_contract_hash=str(contract_ref.get("sha256") or ""),
-        relevant_requirements_hash=task_ledger_hash,
-        relevant_evidence_hash=_stable_json_hash([]),
-        global_constraint_hash=str(dict(manifest.get("global_constraints_ref") or {}).get("sha256") or ""),
-        owned_area_hash=_stable_json_hash(list(contract.get("owned_area") or [])),
-        dependency_set_hash=_stable_json_hash(dependency_modules),
-        dependency_interface_hash=_stable_json_hash(
-            {
-                "provided": dependency_interfaces,
-                "consumed": list(contract.get("consumed_interfaces") or []),
-                "cross_contracts": cross_contracts,
-            }
-        ),
-        dependency_output_hash=_stable_json_hash(dependency_outputs),
-        integration_contract_subset_hash=str(
-            dict(manifest.get("integration_contract_ref") or {}).get("sha256") or ""
-        ),
-        environment_policy_hash=str(node.payload.get("environment_fingerprint") or ""),
-    )
-
-
 def _topological_module_order(dependencies: Mapping[str, list[str]]) -> list[str]:
     pending = {unit_id: set(values) for unit_id, values in dependencies.items()}
     result: list[str] = []
@@ -1717,31 +1581,6 @@ def _normalized_responsibility(value: str) -> str:
     return " ".join(str(value).casefold().split())
 
 
-def _contract_value(
-    node: AggregateSnapshot | None,
-    fragments: Mapping[str, Any],
-) -> Mapping[str, Any]:
-    if node is None:
-        return {}
-    unit_id = str(node.payload.get("unit_id") or "")
-    return next(
-        (
-            item
-            for item in list(fragments.get("unit_contract") or [])
-            if str(dict(item).get("unit_id") or "") == unit_id
-        ),
-        {},
-    )
-
-
-def _mapping_mentions(value: Any, identifiers: set[str]) -> bool:
-    if isinstance(value, Mapping):
-        return any(_mapping_mentions(item, identifiers) for item in value.values())
-    if isinstance(value, list):
-        return any(_mapping_mentions(item, identifiers) for item in value)
-    return str(value) in identifiers
-
-
 def _carry_forward_candidate(
     source_node: AggregateSnapshot,
     target_node: AggregateSnapshot,
@@ -1780,7 +1619,6 @@ class DagScheduler:
         *,
         workflow_id: str,
         epoch_id: str,
-        max_new_nodes: int,
         actor: str = "minion-scheduler",
     ) -> tuple[str, ...]:
         snapshots = self.repository.list_workflow_snapshots(workflow_id)
@@ -1801,38 +1639,48 @@ class DagScheduler:
             and str(item.payload.get("epoch_id") or "") == epoch_id
         }
         accepted_ids = {node_id for node_id, item in node_by_id.items() if item.state == "ACCEPTED"}
-        active_slots = sum(
-            item.state in {
-                "PRODUCING",
-                "REVIEWING",
-                "REVIEW_QUIESCING",
-                "REVIEW_SNAPSHOTTING",
-                "REPAIRING",
-                "QUIESCING",
-                "SNAPSHOTTING",
-                "VERIFY_PREPARING",
-                "VERIFYING",
-                "VERIFY_QUIESCING",
-                "VERIFY_SNAPSHOTTING",
-            }
-            for item in node_by_id.values()
+        graph_execution = WorkflowCoordinator(self.repository).execution(
+            workflow_id=workflow_id,
+            generation=int(epoch.payload.get("graph_generation") or 0) or None,
         )
-        available_slots = max(0, int(max_new_nodes) - active_slots)
+        runnable_producers = {
+            assignment.node_name
+            for assignment in WorkflowCoordinator(
+                self.repository
+            ).runnable_assignments(
+                workflow_id=workflow_id,
+                generation=graph_execution.graph.generation,
+            )
+            if assignment.slot.value == "producer"
+        }
         ready: list[AggregateSnapshot] = []
         for node_id in sorted(node_by_id):
             node = node_by_id[node_id]
             if node.state not in {"BLOCKED_BY_DEPS", "STALE"}:
                 continue
+            module_name = str(
+                node.payload.get("module_name")
+                or node.payload.get("unit_id")
+                or ""
+            )
+            if module_name not in runnable_producers:
+                continue
             dependencies = {str(item) for item in list(node.payload.get("dependency_node_ids") or [])}
-            if dependencies <= accepted_ids:
-                ready.append(node)
+            if not dependencies <= accepted_ids:
+                raise RuntimeError(
+                    "GraphExecution marked a projected node runnable before "
+                    f"its aggregate dependencies were accepted: {module_name}"
+                )
+            ready.append(node)
         scheduled: list[str] = []
-        for node in ready[:available_slots]:
-            node_kind = str(node.payload.get("node_kind") or "unit")
+        # Readiness creates durable logical coroutine work. It does not reserve
+        # an OS process slot: the process shell owns the only execution
+        # semaphore and acquires it immediately before materialization.
+        for node in ready:
             baseline = prepare_node_dependency_baseline(
                 node,
                 node_by_id,
-                apply_candidates=node_kind != "system_verification",
+                apply_candidates=True,
             )
             payload = {
                 "accepted_dependency_node_ids": sorted(
@@ -1841,22 +1689,10 @@ class DagScheduler:
                 "epoch_frozen": False,
                 **baseline,
             }
-            verification = node_kind == "system_verification"
-            integration = node_kind == "integration"
             if node.state == "BLOCKED_BY_DEPS":
-                if verification:
-                    action_type = "VERIFICATION_DEPENDENCIES_ACCEPTED"
-                elif integration:
-                    action_type = "INTEGRATION_DEPENDENCIES_ACCEPTED"
-                else:
-                    action_type = "DEPENDENCIES_ACCEPTED"
+                action_type = "DEPENDENCIES_ACCEPTED"
             else:
-                if verification:
-                    action_type = "REQUEUE_VERIFICATION_STALE"
-                elif integration:
-                    action_type = "REQUEUE_INTEGRATION_STALE"
-                else:
-                    action_type = "REQUEUE_STALE"
+                action_type = "REQUEUE_STALE"
             if node.state == "STALE":
                 payload.update(
                     {
@@ -1882,6 +1718,22 @@ class DagScheduler:
 @dataclass
 class UnitWorkViewBuilder:
     contracts: ContractArtifactAccess
+
+    @staticmethod
+    def _entrypoint_view(value: Any) -> dict[str, Any]:
+        """Normalize both contract entrypoint shapes at the work-view boundary.
+
+        The family contract schema uses a structured ``{module, surface}``
+        entrypoint, while the SWE skeleton projection deliberately preserves
+        the authored scenario entrypoint as a compact string.  A work view is
+        the common input to implementation and verification, so it must accept
+        both representations instead of attempting ``dict(string)``.
+        """
+
+        if isinstance(value, Mapping):
+            return dict(value)
+        text = str(value or "").strip()
+        return {"target": text} if text else {}
 
     def build(self, node: AggregateSnapshot) -> ArtifactRef:
         manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
@@ -1926,10 +1778,6 @@ class UnitWorkViewBuilder:
             str(name): dict(value or {})
             for name, value in dict(submission.get("modules") or {}).items()
         }
-        if str(node.payload.get("node_kind") or "") == "system_verification":
-            raise ValueError(
-                "SystemVerificationWorkView is prepared only after all module Candidates are accepted"
-            )
         path_policy = dict(node.payload.get("path_policy") or contract.get("paths") or {})
         module_name = str(contract.get("module_name") or node.payload.get("module_name") or "")
         semantic_module = dict(contract.get("module") or {})
@@ -1939,24 +1787,15 @@ class UnitWorkViewBuilder:
         }
         dependency_names = set(dependency_edges)
         dependency_contract_slices: dict[str, Any] = {}
-        for dependency_id in list(node.payload.get("contract_dependency_node_ids") or []):
-            dependency = self.contracts.repository.read_snapshot(
-                AggregateType.DAG_NODE_RUN, str(dependency_id)
-            )
-            if dependency is None:
-                continue
-            dependency_name = str(
-                dependency.payload.get("module_name") or dependency.payload.get("unit_id") or ""
-            )
-            if dependency_name not in dependency_names:
-                continue
-            dependency_contract = dict(
-                self.contracts.artifacts.read_json(
-                    dict(dependency.payload.get("unit_contract_ref") or {})
+        for dependency_name in sorted(dependency_names):
+            provider_module = dict(all_modules.get(dependency_name) or {})
+            if not provider_module:
+                raise ValueError(
+                    f"module {module_name} has no accepted contract for "
+                    f"dependency {dependency_name}"
                 )
-            )
-            provider_module = dict(dependency_contract.get("module") or {})
             provider_contract = dict(provider_module.get("contract") or {})
+            provider_paths = dict(provider_module.get("paths") or {})
             edge = dependency_edges[dependency_name]
             consumed = [
                 str(item) for item in list(edge.get("consumes") or [])
@@ -1964,7 +1803,7 @@ class UnitWorkViewBuilder:
             dependency_contract_slices[dependency_name] = {
                 "edge": edge,
                 "contract_paths": list(
-                    dict(dependency_contract.get("paths") or {}).get("contract_paths") or []
+                    provider_paths.get("contract_paths") or []
                 ),
                 "consumed_outputs": {
                     name: dict(
@@ -1983,9 +1822,18 @@ class UnitWorkViewBuilder:
             for item in list(node.payload.get("historical_repair_bill_refs") or [])
             if isinstance(item, Mapping) and item.get("sha256")
         ]
+        bound_requirements = dict(contract.get("requirements") or {})
+        bound_scenarios = dict(contract.get("scenarios") or {})
+        if bool(node.payload.get("graph_sink")):
+            # The authored sink checker owns system and delivery verification,
+            # so it receives the complete scenario graph.  Other nodes remain
+            # scoped to scenarios that bind their module.
+            bound_requirements = dict(submission.get("requirements") or {})
+            bound_scenarios = dict(submission.get("scenarios") or {})
         payload = {
             "schema_version": "3",
             "module_name": module_name,
+            "graph_sink": bool(node.payload.get("graph_sink")),
             "module": semantic_module,
             "contract_mode": str(path_policy.get("contract_mode") or "review_guarded"),
             "contract_paths": list(path_policy.get("contract_paths") or []),
@@ -1993,6 +1841,14 @@ class UnitWorkViewBuilder:
             "developer_tests": dict(path_policy.get("developer_tests") or {}),
             "verification_corpus": dict(path_policy.get("verification_corpus") or {}),
             "reference_only": list(path_policy.get("reference_only") or []),
+            "requirements": bound_requirements,
+            "scenarios": bound_scenarios,
+            "entrypoints": [
+                self._entrypoint_view(scenario.get("entrypoint"))
+                for scenario in bound_scenarios.values()
+                if isinstance(scenario, Mapping)
+                and self._entrypoint_view(scenario.get("entrypoint"))
+            ],
             "dependency_contracts": dependency_contract_slices,
             "consumer_obligations": {
                 name: dict(dict(value.get("dependencies") or {}).get(module_name) or {})
@@ -2041,12 +1897,13 @@ class UnitWorkViewBuilder:
             ).items()
             if provider in all_modules
         }
-        if str(node.payload.get("node_kind") or "") == "integration":
-            dependency_contracts = {
-                name: {"module": module}
-                for name, module in all_modules.items()
-                if str(module.get("execution") or "") == "produce"
-            }
+        bound_requirements = dict(
+            module_contract.get("requirements") or {}
+        )
+        bound_scenarios = dict(module_contract.get("scenarios") or {})
+        if bool(node.payload.get("graph_sink")):
+            bound_requirements = dict(full_contract.get("requirements") or {})
+            bound_scenarios = dict(full_contract.get("scenarios") or {})
         payload = {
             "schema_version": "3",
             "execution_adapter": ARTIFACT_BUNDLE_ADAPTER,
@@ -2055,12 +1912,17 @@ class UnitWorkViewBuilder:
                 or node.payload.get("module_name")
                 or ""
             ),
+            "graph_sink": bool(node.payload.get("graph_sink")),
             "module": owned_module,
             "context": dict(module_contract.get("context") or {}),
-            "requirements": dict(
-                module_contract.get("requirements") or {}
-            ),
-            "scenarios": dict(module_contract.get("scenarios") or {}),
+            "requirements": bound_requirements,
+            "scenarios": bound_scenarios,
+            "entrypoints": [
+                self._entrypoint_view(scenario.get("entrypoint"))
+                for scenario in bound_scenarios.values()
+                if isinstance(scenario, Mapping)
+                and self._entrypoint_view(scenario.get("entrypoint"))
+            ],
             "dependency_contracts": dependency_contracts,
             "historical_repair_bills": [
                 repair_bill_semantic_view(self.contracts.artifacts, item)
@@ -2257,13 +2119,9 @@ def provision_module_worktrees(
         workspace=workspace,
     )
     result: dict[str, dict[str, str]] = {}
-    for unit_id in [*unit_ids, "integration"]:
-        if unit_id == "integration":
-            worktree = layout.integration_worktree
-            branch = layout.integration_branch
-        else:
-            worktree = layout.module_worktree(unit_id)
-            branch = layout.module_branch(unit_id)
+    for unit_id in unit_ids:
+        worktree = layout.module_worktree(unit_id)
+        branch = layout.module_branch(unit_id)
         if not worktree.exists():
             worktree.parent.mkdir(parents=True, exist_ok=True)
             _add_branch_worktree(common_git_dir, worktree=worktree, branch=branch, start_sha=base_sha)
@@ -2290,7 +2148,6 @@ def provision_skeleton_module_worktrees(
     workflow_id: str,
     workflow_name: str,
     unit_ids: list[str],
-    verification_unit_ids: set[str] | None = None,
     workspace: Mapping[str, Any] | None = None,
     architecture_artifact: Mapping[str, Any],
 ) -> dict[str, dict[str, str]]:
@@ -2327,16 +2184,10 @@ def provision_skeleton_module_worktrees(
         if restored_tree != skeleton_tree:
             raise RuntimeError("restored skeleton Git bundle does not match the accepted tree")
         _force_branch(common_git_dir, layout.workflow_branch, skeleton_sha)
-    verification_names = set(verification_unit_ids or set())
     result: dict[str, dict[str, str]] = {}
     for unit_id in unit_ids:
-        verification = unit_id in verification_names
-        if verification:
-            worktree = layout.integration_worktree
-            branch = layout.integration_branch
-        else:
-            worktree = layout.module_worktree(unit_id)
-            branch = layout.module_branch(unit_id)
+        worktree = layout.module_worktree(unit_id)
+        branch = layout.module_branch(unit_id)
         if not worktree.exists():
             worktree.parent.mkdir(parents=True, exist_ok=True)
             _add_branch_worktree(

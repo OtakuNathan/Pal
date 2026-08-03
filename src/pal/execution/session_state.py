@@ -318,6 +318,15 @@ class LogicalExecutionStateBackend(Protocol):
     ) -> LogicalExecutionContext:
         ...
 
+    def record_delivery(
+        self,
+        *,
+        logical_session_id: str,
+        delivery: dict[str, Any],
+    ) -> LogicalExecutionContext:
+        """Commit one tool-result delivery without changing the projection."""
+        ...
+
     def store_pager(self, manifest: PagerHandleManifest) -> PagerHandleManifest:
         ...
 
@@ -440,6 +449,22 @@ class InMemoryLogicalExecutionState:
             state.projection = normalized_projection
             for delivery in deliveries:
                 self._apply_delivery(state, dict(delivery))
+            return self._context(session_id, "", state)
+
+    def record_delivery(
+        self,
+        *,
+        logical_session_id: str,
+        delivery: dict[str, Any],
+    ) -> LogicalExecutionContext:
+        """Commit a just-delivered result while preserving projection state."""
+
+        session_id = _required(logical_session_id, "logical_session_id")
+        with self._lock:
+            state = self._sessions.setdefault(session_id, _SessionState())
+            if state.retired:
+                raise RuntimeError("logical execution session is retired")
+            self._apply_delivery(state, dict(delivery))
             return self._context(session_id, "", state)
 
     def store_pager(self, manifest: PagerHandleManifest) -> PagerHandleManifest:

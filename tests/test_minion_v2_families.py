@@ -27,6 +27,9 @@ from pal.minion.v2.contract_runtime import ContractArtifactAccess
 from pal.minion.v2.catalog import MinionV2Catalog
 from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.execution import ExecutionCompiler
+from pal.minion.v2.graph_compiler import GraphCompileBindings, GraphCompiler
+from pal.minion.v2.graph_satellites import FamilyGraphSatelliteProjector
+from pal.minion.v2.graph_protocol import RoleBinding
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.role_contracts import (
@@ -58,6 +61,32 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
+    def _lifestyle_graph(self, contract, *, workflow_id: str):
+        return GraphCompiler().compile(
+            contract,
+            graph_id=workflow_id,
+            generation=1,
+            bindings=GraphCompileBindings(
+                producer=RoleBinding(
+                    "null",
+                    reason="external_human_execution",
+                ),
+                checker=RoleBinding(
+                    "null",
+                    reason="external_human_execution",
+                ),
+                execution_adapter="artifact_bundle.v2",
+            ),
+            satellite_projector=FamilyGraphSatelliteProjector(
+                specialization_id="lifestyle.nutrition_checkin.v1",
+                template="""satellite_data:
+  architecture: {{ document | tojson }}
+workspace_policy: {}
+""",
+            ),
+            source_ref="architect.yaml",
+        )
+
     def _pack(self, profile: str) -> MinionInvocationPack:
         group, name = profile.split(".", 1)
         return MinionProfileRegistry(runtime_root=self.root).resolve_pack(
@@ -75,7 +104,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             "lifestyle.nutritionist"
         )
         binding = self.store.read_json(ref)
-        self.assertEqual(binding["schema_version"], "6")
+        self.assertEqual(binding["schema_version"], "7")
         self.assertEqual(binding["workflow_template"], "contract_dag.v2")
         self.assertEqual(
             set(binding["role_bindings"]),
@@ -123,6 +152,14 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             template["generation_hash"],
             architecture["generation_hash"],
         )
+        satellite_template = dict(
+            self.store.read_json(architecture["satellite_template_ref"])
+        )
+        self.assertEqual(
+            satellite_template["generation_hash"],
+            architecture["generation_hash"],
+        )
+        self.assertIn("satellite_data", satellite_template["template"])
         self.assertNotIn(
             "contract",
             binding["role_bindings"]["architect"]["role_profile"],
@@ -137,7 +174,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         binding["role_bindings"]["architect"].pop("participant")
         with self.assertRaisesRegex(
             ValueError,
-            "schema_version 6",
+            "schema_version 7",
         ):
             validate_family_binding_payload(binding)
 
@@ -342,15 +379,6 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             "op_minion_verification_scratch_write",
             software.allowed_capabilities,
         )
-        system = apply_v2_role_capability_policy(
-            self._pack("software_engineering.v2_verifier"),
-            activation=RoleActivation(OrchestrationRole.VERIFIER, RoleMode.SYSTEM),
-        )
-        self.assertIn(
-            "op_minion_verification_scratch_write",
-            system.allowed_capabilities,
-        )
-
         for profile in ("general.verifier",):
             with self.subTest(profile=profile):
                 verifier = apply_v2_role_capability_policy(
@@ -411,21 +439,11 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
 
         module = _role_mode_profile_payload(base, mode="module")
-        system = _role_mode_profile_payload(base, mode="system")
-
         self.assertIn("exactly one module Candidate", module["identity_fragment"])
         self.assertIn("Do not search for task.yaml", module["behavior_fragment"])
-        self.assertNotIn(
-            "single workflow-level System Verifier",
-            module["behavior_fragment"],
-        )
-        self.assertIn(
-            "single workflow-level System Verifier",
-            system["identity_fragment"],
-        )
-        self.assertIn("Do not split scenarios into workers", system["behavior_fragment"])
-        self.assertIn("real system and delivery tests", system["behavior_fragment"])
-        self.assertNotEqual(module["behavior_fragment"], system["behavior_fragment"])
+        self.assertIn("authored graph sink", module["behavior_fragment"])
+        self.assertIn("real public surface", module["behavior_fragment"])
+        self.assertIn("same node cycle", module["behavior_fragment"])
 
     def test_role_binding_replaces_the_shared_profiles_output_contract(self) -> None:
         cases = (
@@ -449,7 +467,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
             ),
             (
                 "general.generic",
-                RoleActivation(OrchestrationRole.VERIFIER, RoleMode.SYSTEM),
+                RoleActivation(OrchestrationRole.VERIFIER, RoleMode.MODULE),
                 "verification_submission.json",
                 ["SemanticVerificationSubmissionArtifact"],
             ),
@@ -1048,7 +1066,6 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         )
         self.assertIn("Manager-bound contract as adjudication truth", verifier_behavior)
         self.assertIn("smallest sufficient checks", verifier_behavior)
-        self.assertNotIn("SystemVerificationWorkView", verifier_behavior)
         self.assertNotIn("tests/<module_name>/verifier", verifier_behavior)
         architecture_review_behavior = str(
             self._pack("software_engineering.v2_reviewer").resolved_profile[
@@ -1212,12 +1229,6 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 mode="module",
             )["behavior_fragment"]
         )
-        system_verifier = str(
-            _role_mode_profile_payload(
-                verifier_profile,
-                mode="system",
-            )["behavior_fragment"]
-        )
         generic = str(self._pack("general.generic").resolved_profile["behavior_fragment"])
 
         # Stable role philosophy remains explicit even though invocation-specific
@@ -1227,6 +1238,9 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("newer text wins only where meanings conflict", architect)
         self.assertIn("Mechanically verify examples", architect)
         self.assertIn("request one user clarification through the harness and wait", architect)
+        self.assertIn("Never retry unchanged errors", architect)
+        self.assertIn("Retry a rejection only after changing the relevant input or state", architect)
+        self.assertIn("call ask_question and wait", architect)
         self.assertIn("Design the smallest complete system at module level", architect)
         self.assertIn("architect.yaml is the final submission projection", architect)
         self.assertIn("Once the design is settled", architect)
@@ -1287,12 +1301,10 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Do not search for task.yaml", verifier)
         self.assertIn("reuse them across Candidate repairs", verifier)
         self.assertIn("material complexity or resource growth", verifier)
-        self.assertIn("SystemVerificationWorkView", system_verifier)
-        self.assertIn("Do not split scenarios into workers", system_verifier)
-        self.assertIn("real system and delivery tests", system_verifier)
-        self.assertIn("PTY/tmux/expect-style harness", system_verifier)
-        self.assertIn("first public boundary", system_verifier)
-        self.assertIn("successful real-boundary evidence", system_verifier)
+        self.assertIn("authored graph sink", verifier)
+        self.assertIn("real public surface", verifier)
+        self.assertIn("same node cycle", verifier)
+        self.assertIn("interactive TTY with a PTY-style harness", verifier)
         self.assertIn("do not invent facts", generic)
         self.assertIn("never acceptance evidence", verifier)
         self.assertIn("minimum sufficient focused build/test path", verifier)
@@ -1300,15 +1312,13 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Do not block acceptance for stylistic type-level abstraction", verifier)
         self.assertIn("positive and negative consumer compile probe", verifier)
         self.assertIn("does not prove overload exclusion", verifier)
-        self.assertIn("positive and negative external-consumer compile probes", system_verifier)
         self.assertIn("invalid combinations cannot be expressed as well-formed programs", verifier)
-        self.assertIn("invalid combinations cannot be expressed as well-formed programs", system_verifier)
         self.assertNotIn("owned_impl", coder)
         self.assertNotIn("owned_test", coder)
 
         # Prompt budgets prevent mechanical policy from creeping back into every
         # role while leaving the semantic philosophy readable in one place.
-        self.assertLess(len(architect), 7_000)
+        self.assertLess(len(architect), 7_500)
         self.assertLess(len(architecture_review), 7_000)
         self.assertLess(len(coder), 5_500)
         for behavior in (architect, architecture_review, coder):
@@ -1480,7 +1490,8 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 "requirements_ref": dict(prepared["requirements_ref"]),
                 "contract_schema": "lifestyle.nutrition_checkin.v1",
                 "contract": {
-                    "schema_version": "1",
+                    "schema_version": "2",
+                    "graph": {"sink": "checkin"},
                     "context": {
                         "goal": "Produce a structured nutrition check-in.",
                         "hard_restrictions": ["non-medical guidance"],
@@ -1542,6 +1553,17 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                         }
                     },
                 },
+            },
+            artifact_type="ContractArtifact",
+        )
+        manifest_payload = dict(self.store.read_json(manifest))
+        manifest = self.store.put_json(
+            {
+                **manifest_payload,
+                "graph_ir": self._lifestyle_graph(
+                    manifest_payload["contract"],
+                    workflow_id="nutrition-workflow",
+                ).to_dict(),
             },
             artifact_type="ContractArtifact",
         )
@@ -1609,7 +1631,8 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 "requirements_ref": dict(prepared["requirements_ref"]),
                 "contract_schema": "lifestyle.nutrition_checkin.v1",
                 "contract": {
-                    "schema_version": "1",
+                    "schema_version": "2",
+                    "graph": {"sink": "checkin"},
                     "context": {
                         "goal": "Produce a structured nutrition check-in.",
                         "hard_restrictions": ["non-medical guidance"],
@@ -1667,6 +1690,17 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                         }
                     },
                 },
+            },
+            artifact_type="ContractArtifact",
+        )
+        manifest_payload = dict(service.artifacts.read_json(manifest))
+        manifest = service.artifacts.put_json(
+            {
+                **manifest_payload,
+                "graph_ir": self._lifestyle_graph(
+                    manifest_payload["contract"],
+                    workflow_id="nutritionist-e2e-workflow",
+                ).to_dict(),
             },
             artifact_type="ContractArtifact",
         )

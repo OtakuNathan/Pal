@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
+from pal.minion.v2.cycle_protocol import PlanCycle, PlanCycleState
 from pal.minion.v2.orchestration import (
     MinionV2OutboxProcessor,
     _active_control_children,
@@ -75,6 +76,15 @@ class MinionV2ReplanTests(unittest.TestCase):
             self.workflow_id,
             "LINK_EXECUTION_EPOCH",
             {"execution_epoch_id": self.epoch_id},
+        )
+        self.repository.store_plan_cycle(
+            workflow_id=self.workflow_id,
+            cycle=PlanCycle(
+                cycle_id=f"{self.workflow_id}:plan",
+                state=PlanCycleState.ACCEPTED,
+                product_ref="architecture-v1",
+                accepted_product_ref="architecture-v1",
+            ),
         )
 
     def tearDown(self) -> None:

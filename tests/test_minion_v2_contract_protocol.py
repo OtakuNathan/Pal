@@ -93,12 +93,13 @@ class ContractProtocolTests(unittest.TestCase):
                     copy.deepcopy(definition.example),
                     definition=definition,
                 )
-                self.assertEqual(document.schema_version, "1")
+                self.assertEqual(document.schema_version, "2")
                 template = yaml.safe_load(definition.template)
                 self.assertEqual(
                     set(template),
                     {
                         "schema_version",
+                        "graph",
                         "context",
                         "requirements",
                         "modules",

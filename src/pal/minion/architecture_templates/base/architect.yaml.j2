@@ -2,7 +2,12 @@
 # This file is a Manager-rendered authoring form, not a JSON Schema.
 # Dynamic names use snake_case. Preserve this shape and do not add fields.
 # Type notation in comments is authoritative authoring guidance compiled from the pinned family schema.
-schema_version: "1"  # type: literal string "1"
+schema_version: "2"  # type: literal string "2"
+graph:
+  # type: snake_case name of the one produced terminal module
+  # The sink is an ordinary authored module. It owns assembly/delivery and
+  # must consume every executable branch. Manager never invents semantic nodes.
+  sink: replace_with_terminal_module
 context:  # type: family-specific mapping; fill every displayed field
 {{ context_template | trim | indent(2, true) }}
 requirements: {}  # type: map[snake_case, Requirement], min 1

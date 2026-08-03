@@ -3,9 +3,17 @@
   "$id": "pal://minion/architectures/base",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "context", "requirements", "modules", "scenarios"],
+  "required": ["schema_version", "graph", "context", "requirements", "modules", "scenarios"],
   "properties": {
-    "schema_version": {"const": "1"},
+    "schema_version": {"const": "2"},
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sink"],
+      "properties": {
+        "sink": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
+      }
+    },
     "context": {"$ref": "#/$defs/context"},
     "requirements": {"$ref": "#/$defs/requirements"},
     "modules": {
