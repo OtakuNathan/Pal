@@ -10,6 +10,10 @@ class CoroutineRunPermit:
     run_id: str
     _released: bool = field(default=False, init=False)
 
+    @property
+    def released(self) -> bool:
+        return self._released
+
     async def release(self) -> None:
         if self._released:
             return

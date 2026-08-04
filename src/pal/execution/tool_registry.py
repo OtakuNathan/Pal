@@ -416,7 +416,7 @@ def _compile_record(
             raise TypeError(f"MCP capability {alias!r} requires guidance and execution semantics")
         guidance = descriptor.guidance
         execution = descriptor.execution
-        search_text = str(descriptor.search_text or _default_search_text(descriptor, alias)).strip()
+        search_text = str(descriptor.search_text or "").strip()
     else:
         input_model = descriptor.InputModel
         output_model = descriptor.OutputModel
@@ -434,7 +434,10 @@ def _compile_record(
             raise TypeError(f"internal capability {alias!r} requires guidance and execution semantics")
         guidance = descriptor.guidance
         execution = descriptor.execution
-        search_text = str(descriptor.search_text or _default_search_text(descriptor, alias)).strip()
+        search_text = str(descriptor.search_text or "").strip()
+
+    if not search_text:
+        raise ValueError(f"capability {alias!r} requires non-empty search_text")
 
     example = dict(examples[0]) if examples else None
     for candidate in examples:
@@ -472,20 +475,6 @@ def _compile_record(
         binding=binding,
         is_mcp=is_mcp,
         requires_effect_receipt=execution.effect_kind is not EffectKind.NONE,
-    )
-
-
-def _default_search_text(descriptor: CapabilityDescriptor, alias: str) -> str:
-    return " ".join(
-        value
-        for value in (
-            alias,
-            descriptor.description,
-            descriptor.family,
-            descriptor.module_id,
-            descriptor.target_label,
-        )
-        if str(value or "").strip()
     )
 
 

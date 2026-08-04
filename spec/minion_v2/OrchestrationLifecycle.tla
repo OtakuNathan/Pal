@@ -54,7 +54,7 @@ AllDependenciesAccepted(n) ==
     \A dep \in Deps[n] : nodeState[dep] = "Accepted"
 
 SafeNodeResume(n) ==
-    IF AllDependenciesAccepted(n) THEN "Queued" ELSE "Blocked"
+    "Queued"
 
 Init ==
     /\ workflowState = "Active"
@@ -62,7 +62,7 @@ Init ==
     /\ nodeState = [n \in Nodes |-> "Blocked"]
     /\ desiredControl = "Run"
     /\ epochResume = "Starting"
-    /\ nodeResume = [n \in Nodes |-> IF Deps[n] = {} THEN "Queued" ELSE "Blocked"]
+    /\ nodeResume = [n \in Nodes |-> "Queued"]
     /\ defectSource = Foundation
     /\ generation = 1
     /\ managerUp = TRUE
@@ -73,7 +73,7 @@ CompileEpoch ==
     /\ epochState = "Starting"
     /\ desiredControl = "Run"
     /\ epochState' = "Running"
-    /\ nodeState' = [n \in Nodes |-> IF Deps[n] = {} THEN "Queued" ELSE "Blocked"]
+    /\ nodeState' = [n \in Nodes |-> "Queued"]
     /\ UNCHANGED <<workflowState, desiredControl, epochResume, nodeResume,
         defectSource, generation, managerUp>>
 
@@ -94,7 +94,6 @@ StartNode(n) ==
     /\ epochState = "Running"
     /\ desiredControl = "Run"
     /\ nodeState[n] = "Queued"
-    /\ AllDependenciesAccepted(n)
     /\ nodeState' = [nodeState EXCEPT ![n] = "Active"]
     /\ UNCHANGED <<workflowState, epochState, desiredControl, epochResume,
         nodeResume, defectSource, generation, managerUp>>
@@ -104,6 +103,7 @@ AcceptNode(n) ==
     /\ workflowState = "Active"
     /\ epochState = "Running"
     /\ nodeState[n] = "Active"
+    /\ AllDependenciesAccepted(n)
     /\ nodeState' = [nodeState EXCEPT ![n] = "Accepted"]
     /\ UNCHANGED <<workflowState, epochState, desiredControl, epochResume,
         nodeResume, defectSource, generation, managerUp>>
@@ -166,11 +166,11 @@ ApplyReplan ==
        IN nodeState' = [n \in Nodes |->
             IF n \in reusable
             THEN "Accepted"
-            ELSE IF Deps[n] \subseteq reusable THEN "Queued" ELSE "Blocked"]
+            ELSE "Queued"]
     /\ epochState' = "Running"
     /\ desiredControl' = "Run"
     /\ generation' = generation + 1
-    /\ nodeResume' = [n \in Nodes |-> IF Deps[n] = {} THEN "Queued" ELSE "Blocked"]
+    /\ nodeResume' = [n \in Nodes |-> "Queued"]
     /\ UNCHANGED <<workflowState, epochResume, defectSource, managerUp>>
 
 RequestWorkflowPause ==
@@ -369,17 +369,15 @@ TypeOK ==
     /\ managerUp \in BOOLEAN
 
 DependencySafety ==
-    \A n \in Nodes : nodeState[n] = "Active" =>
-        /\ AllDependenciesAccepted(n)
-        /\ workflowState \in {"Active", "PauseRequested", "CancelRequested"}
-        /\ epochState \in {"Running", "PauseRequested", "CancelRequested"}
+    \A n \in Nodes : nodeState[n] = "Accepted" =>
+        AllDependenciesAccepted(n)
 
 CompletionSafety ==
     /\ epochState = "Completed" => \A n \in Nodes : nodeState[n] = "Accepted"
     /\ workflowState = "Completed" => epochState = "Completed"
 
-SinkStartsAfterAllModules ==
-    nodeState[Sink] \in {"Active", "Accepted"} =>
+SinkAcceptsAfterAllModules ==
+    nodeState[Sink] = "Accepted" =>
         \A n \in Nodes \ {Sink} : nodeState[n] = "Accepted"
 
 PauseControlAlignment ==

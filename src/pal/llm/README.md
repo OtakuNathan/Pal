@@ -6,6 +6,8 @@ Owns:
 - three wire-shape codecs and OpenAI/Anthropic SDK transport boundaries
 - endpoint-declared thinking enums and per-endpoint selection
 - exact-model request hooks loaded from `<runtime_root>/llm/models`
+- built-in provider response hooks that recover leaked provider text protocols
+  before Core, L1, or Channel can observe them
 - provider-neutral, resident-process usage accounting
 - endpoint retry, fallback, timeout, preflight, and usage accounting reused by
   ordinary and compaction requests
@@ -30,9 +32,17 @@ Exposes:
   max-output continuation disabled by Core
 
 Invariants:
-- provider is credential/display/telemetry identity, never a behavior switch
+- provider is credential/display/telemetry identity and may select only a
+  response-syntax normalizer; it never selects request semantics or a codec
 - the validated endpoint row is the only thinking-level truth source
 - exact-model hooks can modify only messages and tool definitions
+- provider response hooks decorate the codec-owned response-update iterator
+  and can only normalize updates into the same immutable IR; malformed
+  provider protocols are endpoint failures
+- the DeepSeek decorator streams ordinary text but retains possible DSML tag
+  prefixes across chunks, so textual DSML can never escape as a channel delta
+- only successful terminal DeepSeek responses can promote complete DSML to a
+  tool call; native structured calls retain precedence and provider call IDs
 - SDK clients are reused per endpoint and retired safely when the active endpoint changes
 - credentials are endpoint-local; a missing/rejected key falls back the whole endpoint
 - incomplete or length-truncated tool drafts are never executable

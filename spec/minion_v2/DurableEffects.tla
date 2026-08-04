@@ -23,6 +23,8 @@ VARIABLES
     effectReceipts,
     externalCalls,
     businessAdvanced,
+    aggregateProjection,
+    cycleProjection,
     effectTriaged,
     assignmentState,
     assignmentFence,
@@ -37,6 +39,7 @@ VARIABLES
 vars == <<
     aggregateVersion, dedup, events, outbox, effectOwner, effectFence,
     effectApplied, effectReceipts, externalCalls, businessAdvanced,
+    aggregateProjection, cycleProjection,
     effectTriaged, assignmentState, assignmentFence, assignmentLease,
     zombieFence, writeTokens, rejectedZombieWrites, resultReceipt,
     parentSettled, managerUp
@@ -53,6 +56,8 @@ Init ==
     /\ effectReceipts = {}
     /\ externalCalls = [a \in Actions |-> 0]
     /\ businessAdvanced = {}
+    /\ aggregateProjection = {}
+    /\ cycleProjection = {}
     /\ effectTriaged = {}
     /\ assignmentState = "None"
     /\ assignmentFence = 0
@@ -73,7 +78,8 @@ DispatchAction(a) ==
     /\ events' = events \cup {a}
     /\ outbox' = [outbox EXCEPT ![a] = "Pending"]
     /\ UNCHANGED <<effectOwner, effectFence, effectApplied, effectReceipts,
-        externalCalls, businessAdvanced, effectTriaged, assignmentState,
+        externalCalls, businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentState,
         assignmentFence, assignmentLease, zombieFence, writeTokens,
         rejectedZombieWrites, resultReceipt, parentSettled, managerUp>>
 
@@ -91,7 +97,8 @@ ClaimEffect(a, worker) ==
     /\ effectOwner' = [effectOwner EXCEPT ![a] = worker]
     /\ effectFence' = [effectFence EXCEPT ![a] = @ + 1]
     /\ UNCHANGED <<aggregateVersion, dedup, events, effectApplied,
-        effectReceipts, externalCalls, businessAdvanced, effectTriaged,
+        effectReceipts, externalCalls, businessAdvanced,
+        aggregateProjection, cycleProjection, effectTriaged,
         assignmentState, assignmentFence, assignmentLease, zombieFence,
         writeTokens, rejectedZombieWrites, resultReceipt, parentSettled,
         managerUp>>
@@ -100,25 +107,45 @@ PerformExternalEffect(a) ==
     /\ managerUp
     /\ outbox[a] = "Inflight"
     /\ effectOwner[a] \in Workers
+    /\ a \notin businessAdvanced
     /\ externalCalls[a] < MaxExternalCalls
     /\ effectApplied' = effectApplied \cup {a}
     /\ externalCalls' = [externalCalls EXCEPT ![a] = @ + 1]
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
-        effectFence, effectReceipts, businessAdvanced, effectTriaged,
+        effectFence, effectReceipts, businessAdvanced,
+        aggregateProjection, cycleProjection, effectTriaged,
         assignmentState, assignmentFence, assignmentLease, zombieFence,
         writeTokens, rejectedZombieWrites, resultReceipt, parentSettled,
         managerUp>>
 
-AckEffect(a) ==
+\* Handler invocation and durable business projection are intentionally
+\* separate. A manager may crash after the handler returned but before the
+\* aggregate + plan-cycle transaction commits, so invocation is at-least-once.
+\* The local business projection itself must still advance atomically once.
+CommitBusinessProjection(a) ==
     /\ managerUp
     /\ outbox[a] = "Inflight"
     /\ a \in effectApplied
+    /\ a \notin businessAdvanced
+    /\ businessAdvanced' = businessAdvanced \cup {a}
+    /\ aggregateProjection' = aggregateProjection \cup {a}
+    /\ cycleProjection' = cycleProjection \cup {a}
+    /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
+        effectFence, effectApplied, effectReceipts, externalCalls,
+        effectTriaged, assignmentState, assignmentFence, assignmentLease,
+        zombieFence, writeTokens, rejectedZombieWrites, resultReceipt,
+        parentSettled, managerUp>>
+
+AckEffect(a) ==
+    /\ managerUp
+    /\ outbox[a] = "Inflight"
+    /\ a \in businessAdvanced
     /\ outbox' = [outbox EXCEPT ![a] = "Completed"]
     /\ effectOwner' = [effectOwner EXCEPT ![a] = "None"]
     /\ effectReceipts' = effectReceipts \cup {a}
-    /\ businessAdvanced' = businessAdvanced \cup {a}
     /\ UNCHANGED <<aggregateVersion, dedup, events, effectFence,
-        effectApplied, externalCalls, effectTriaged, assignmentState,
+        effectApplied, externalCalls, businessAdvanced,
+        aggregateProjection, cycleProjection, effectTriaged, assignmentState,
         assignmentFence, assignmentLease, zombieFence, writeTokens,
         rejectedZombieWrites, resultReceipt, parentSettled, managerUp>>
 
@@ -128,7 +155,8 @@ ExpireEffectClaim(a) ==
     /\ effectOwner' = [effectOwner EXCEPT ![a] = "None"]
     /\ UNCHANGED <<aggregateVersion, dedup, events, effectFence,
         effectApplied, effectReceipts, externalCalls, businessAdvanced,
-        effectTriaged, assignmentState, assignmentFence, assignmentLease,
+        aggregateProjection, cycleProjection, effectTriaged,
+        assignmentState, assignmentFence, assignmentLease,
         zombieFence, writeTokens, rejectedZombieWrites, resultReceipt,
         parentSettled, managerUp>>
 
@@ -139,7 +167,8 @@ FailEffect(a) ==
     /\ effectTriaged' = effectTriaged \cup {a}
     /\ UNCHANGED <<aggregateVersion, dedup, events, effectFence,
         effectApplied, effectReceipts, externalCalls, businessAdvanced,
-        assignmentState, assignmentFence, assignmentLease, zombieFence,
+        aggregateProjection, cycleProjection, assignmentState,
+        assignmentFence, assignmentLease, zombieFence,
         writeTokens, rejectedZombieWrites, resultReceipt, parentSettled,
         managerUp>>
 
@@ -148,7 +177,8 @@ CreateAssignment ==
     /\ assignmentState' = "Queued"
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, assignmentFence, assignmentLease,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentFence, assignmentLease,
         zombieFence, writeTokens, rejectedZombieWrites, resultReceipt,
         parentSettled, managerUp>>
 
@@ -162,7 +192,8 @@ ClaimAssignment ==
     /\ assignmentLease' = TRUE
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, writeTokens, rejectedZombieWrites,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, writeTokens, rejectedZombieWrites,
         resultReceipt, parentSettled, managerUp>>
 
 StartAssignment ==
@@ -172,7 +203,8 @@ StartAssignment ==
     /\ assignmentState' = "Running"
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, assignmentFence, assignmentLease,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentFence, assignmentLease,
         zombieFence, writeTokens, rejectedZombieWrites, resultReceipt,
         parentSettled, managerUp>>
 
@@ -185,7 +217,8 @@ WorkerWrite ==
     /\ writeTokens' = writeTokens \cup {assignmentFence}
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, assignmentState, assignmentFence,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentState, assignmentFence,
         assignmentLease, zombieFence, rejectedZombieWrites, resultReceipt,
         parentSettled, managerUp>>
 
@@ -197,7 +230,8 @@ ExpireAssignmentLease ==
     /\ zombieFence' = assignmentFence
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, assignmentFence, writeTokens,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentFence, writeTokens,
         rejectedZombieWrites, resultReceipt, parentSettled, managerUp>>
 
 RejectZombieWrite ==
@@ -207,7 +241,8 @@ RejectZombieWrite ==
     /\ rejectedZombieWrites' = rejectedZombieWrites + 1
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, assignmentState, assignmentFence,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentState, assignmentFence,
         assignmentLease, zombieFence, writeTokens, resultReceipt,
         parentSettled, managerUp>>
 
@@ -220,7 +255,8 @@ RecordResult ==
     /\ resultReceipt' = TRUE
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, assignmentFence, zombieFence,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentFence, zombieFence,
         writeTokens, rejectedZombieWrites, parentSettled, managerUp>>
 
 SettleResult ==
@@ -231,7 +267,8 @@ SettleResult ==
     /\ parentSettled' = TRUE
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, assignmentFence, assignmentLease,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentFence, assignmentLease,
         zombieFence, writeTokens, rejectedZombieWrites, resultReceipt,
         managerUp>>
 
@@ -241,7 +278,8 @@ CancelAssignment ==
     /\ assignmentLease' = FALSE
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, assignmentFence, zombieFence,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentFence, zombieFence,
         writeTokens, rejectedZombieWrites, resultReceipt, parentSettled,
         managerUp>>
 
@@ -250,7 +288,8 @@ CrashManager ==
     /\ managerUp' = FALSE
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, assignmentState, assignmentFence,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentState, assignmentFence,
         assignmentLease, zombieFence, writeTokens, rejectedZombieWrites,
         resultReceipt, parentSettled>>
 
@@ -259,12 +298,14 @@ RestartManager ==
     /\ managerUp' = TRUE
     /\ UNCHANGED <<aggregateVersion, dedup, events, outbox, effectOwner,
         effectFence, effectApplied, effectReceipts, externalCalls,
-        businessAdvanced, effectTriaged, assignmentState, assignmentFence,
+        businessAdvanced, aggregateProjection, cycleProjection,
+        effectTriaged, assignmentState, assignmentFence,
         assignmentLease, zombieFence, writeTokens, rejectedZombieWrites,
         resultReceipt, parentSettled>>
 
 ClaimSomeEffect == \E a \in Actions, worker \in Workers : ClaimEffect(a, worker)
 PerformSomeEffect == \E a \in Actions : PerformExternalEffect(a)
+CommitSomeBusinessProjection == \E a \in Actions : CommitBusinessProjection(a)
 AckSomeEffect == \E a \in Actions : AckEffect(a)
 ExpireSomeEffect == \E a \in Actions : ExpireEffectClaim(a)
 FailSomeEffect == \E a \in Actions : FailEffect(a)
@@ -274,6 +315,7 @@ Next ==
     \/ \E a \in Actions : ReplayAction(a)
     \/ ClaimSomeEffect
     \/ PerformSomeEffect
+    \/ CommitSomeBusinessProjection
     \/ AckSomeEffect
     \/ ExpireSomeEffect
     \/ FailSomeEffect
@@ -295,6 +337,7 @@ Spec ==
     /\ WF_vars(RestartManager)
     /\ SF_vars(ClaimSomeEffect)
     /\ SF_vars(PerformSomeEffect)
+    /\ SF_vars(CommitSomeBusinessProjection)
     /\ SF_vars(AckSomeEffect)
     /\ SF_vars(FailSomeEffect)
     /\ SF_vars(SettleResult)
@@ -310,6 +353,8 @@ TypeOK ==
     /\ effectReceipts \subseteq Actions
     /\ externalCalls \in [Actions -> 0..MaxExternalCalls]
     /\ businessAdvanced \subseteq Actions
+    /\ aggregateProjection \subseteq Actions
+    /\ cycleProjection \subseteq Actions
     /\ effectTriaged \subseteq Actions
     /\ assignmentState \in AssignmentStates
     /\ assignmentFence \in 0..MaxToken
@@ -328,12 +373,15 @@ AtomicDispatch ==
 
 EffectReceiptSafety ==
     /\ effectReceipts \subseteq effectApplied
-    /\ businessAdvanced = effectReceipts
+    /\ effectReceipts \subseteq businessAdvanced
     /\ \A a \in Actions : outbox[a] = "Completed" => a \in effectReceipts
     /\ \A a \in Actions : outbox[a] = "Failed" => a \in effectTriaged
 
-AtLeastOnceDoesNotDoubleAdvance ==
-    \A a \in Actions : externalCalls[a] > 1 => a \in businessAdvanced \/ outbox[a] # "Completed"
+AtomicBusinessProjection ==
+    /\ aggregateProjection = cycleProjection
+    /\ businessAdvanced = aggregateProjection
+    /\ businessAdvanced \subseteq effectApplied
+    /\ \A a \in businessAdvanced : externalCalls[a] > 0
 
 EffectClaimOwnership ==
     \A a \in Actions :

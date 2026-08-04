@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any
 
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
@@ -12,6 +13,7 @@ from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
 class MinionEventDelivery:
     queue: list[dict[str, Any]] = field(default_factory=list)
     subscribers: list[asyncio.StreamWriter] = field(default_factory=list)
+    load_backlog: Callable[[], list[dict[str, Any]]] | None = None
 
     async def handle_subscription(
         self,
@@ -22,7 +24,14 @@ class MinionEventDelivery:
         shutdown_event: asyncio.Event,
     ) -> None:
         request_id = str(request.get("id") or "")
-        backlog = list(self.queue)
+        backlog = [*list(self.queue), *(
+            list(self.load_backlog() or []) if self.load_backlog is not None else []
+        )]
+        deduplicated: dict[str, dict[str, Any]] = {}
+        for event in backlog:
+            key = str(event.get("delivery_id") or "") or repr(event)
+            deduplicated[key] = event
+        backlog = list(deduplicated.values())
         self.queue.clear()
         self.subscribers.append(writer)
         try:

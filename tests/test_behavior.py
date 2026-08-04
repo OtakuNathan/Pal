@@ -42,7 +42,7 @@ from pal.behavior.tools import (
 from pal.channel import ChannelEnvelope, ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityDescriptor, register_with_core as register_execution_with_core
-from pal.execution.tool_facade import EmptyToolInput, ProviderPayloadOutput, ToolGuidance
+from pal.execution.tool_facade import EmptyToolInput, StructuredToolOutput, ToolGuidance
 from pal.execution.tool_semantics import INDIRECT_NONE
 from pal.foundation import EventEnvelope, HeatLevel, HeatPolicy, HeatStateMachine, HeatStateRegistry, PalV2Database
 from pal.lsp.plugin import LspManagerPluginProvider
@@ -1596,7 +1596,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
                     display_name="demo show",
                     aliases=("demo_show",),
                     InputModel=EmptyToolInput,
-                    OutputModel=ProviderPayloadOutput,
+                    OutputModel=StructuredToolOutput,
                     guidance=ToolGuidance(
                         purpose="Show demo module state.",
                         use_when="Demo module state is needed.",
@@ -1616,7 +1616,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
                     display_name="demo run",
                     aliases=("demo_run",),
                     InputModel=EmptyToolInput,
-                    OutputModel=ProviderPayloadOutput,
+                    OutputModel=StructuredToolOutput,
                     guidance=ToolGuidance(
                         purpose="Run the demo operation.",
                         use_when="The demo operation is requested.",

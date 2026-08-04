@@ -37,7 +37,6 @@ from pal.execution.tool_facade import (
     McpToolOutput,
     PagingMode,
     PagedResult,
-    ProviderPayloadOutput,
     RejectedResult,
     RetryDirective,
     ToolAffordance,
@@ -209,7 +208,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         page_size: int | None = None,
         anchor: str = "head",
         turn_id: str | None = None,
-        logical_session_id: str = "",
+        execution_lifetime_id: str = "",
     ) -> ToolResultPage | None:
         return self.tool_result_pager.read_page(
             result_ref,
@@ -217,7 +216,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             page_size=page_size,
             anchor=anchor,
             turn_id=turn_id,
-            logical_session_id=logical_session_id,
+            execution_lifetime_id=execution_lifetime_id,
         )
 
     def logical_context_for_turn(self, turn_id: str | None) -> LogicalExecutionContext:
@@ -249,68 +248,15 @@ class ExecutionRuntime(ExecutionRuntimePort):
             source = original_by_call.get(call_id, "")
             if manifest is None or not source:
                 continue
-            raw_ranges = message.get("_pal_visible_source_ranges")
-            source_ranges = (
-                tuple(
-                    (max(0, int(item[0])), max(0, int(item[1])))
-                    for item in list(raw_ranges or ())
-                    if isinstance(item, (list, tuple)) and len(item) == 2
-                )
-                if raw_ranges is not None
-                else ((0, len(source)),)
-            )
-            visible_spans_list: list[FileDeliverySpan] = []
-            for span in manifest.spans:
-                for range_start, range_end in source_ranges:
-                    visible_start = max(span.start_offset, range_start)
-                    visible_end = min(span.end_offset, range_end)
-                    if visible_end <= visible_start:
-                        continue
-                    visible_spans_list.append(
-                        FileDeliverySpan(
-                            start_offset=visible_start,
-                            end_offset=visible_end,
-                            start_line=span.start_line,
-                            end_line=span.end_line,
-                            visible_start_in_line=(
-                                span.visible_start_in_line
-                                + visible_start
-                                - span.start_offset
-                            ),
-                            visible_end_in_line=(
-                                span.visible_start_in_line
-                                + visible_end
-                                - span.start_offset
-                            ),
-                            line_length=span.line_length,
-                        )
-                    )
-            visible_spans = tuple(visible_spans_list)
-            empty_visible = (
-                manifest.empty_file
-                and any(
-                    range_start <= source.find(manifest.empty_marker)
-                    and range_end
-                    >= source.find(manifest.empty_marker)
-                    + len(manifest.empty_marker)
-                    for range_start, range_end in source_ranges
-                )
-                and manifest.empty_marker in source
-            )
-            if not visible_spans and not empty_visible:
+            # A head/tail preview is useful evidence, but it is not the exact
+            # delivered file range. Only byte-for-byte visible results may
+            # authorize later mutation; projected results use their replay
+            # handle to regain exact delivery grants.
+            if content != source:
                 continue
-            deliveries.append(
-                FileDeliveryManifest(
-                    file_key=manifest.file_key,
-                    digest=manifest.digest,
-                    total_lines=manifest.total_lines,
-                    spans=visible_spans,
-                    empty_file=empty_visible,
-                    empty_marker=manifest.empty_marker,
-                ).to_dict()
-            )
+            deliveries.append(manifest.to_dict())
         return self.logical_state.reconcile_projection(
-            logical_session_id=context.logical_session_id,
+            execution_lifetime_id=context.execution_lifetime_id,
             projection=tuple(projection),
             deliveries=tuple(deliveries),
         )
@@ -328,8 +274,19 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if manifest is None:
             return context
         return self.logical_state.record_delivery(
-            logical_session_id=context.logical_session_id,
+            execution_lifetime_id=context.execution_lifetime_id,
             delivery=manifest.to_dict(),
+        )
+
+    def discard_uncommitted_tool_delivery(
+        self,
+        *,
+        turn_id: str,
+        result_ref: str,
+    ) -> None:
+        self.tool_result_pager.discard_uncommitted(
+            turn_id=str(turn_id),
+            result_ref=str(result_ref),
         )
 
     def list_tool_specs(self) -> list[dict[str, Any]]:
@@ -1181,20 +1138,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
             else:
                 if record.output_model is None:
                     raise TypeError("internal tool has no OutputModel")
-                if record.output_model is ProviderPayloadOutput:
-                    candidate = (
-                        candidate
-                        if isinstance(candidate, dict)
-                        and set(candidate) == {"payload"}
-                        and isinstance(candidate.get("payload"), dict)
-                        else {
-                            "payload": (
-                                dict(candidate)
-                                if isinstance(candidate, dict)
-                                else {"value": candidate}
-                            )
-                        }
-                    )
                 output_model = validate_output(record.output_model, candidate)
                 output = output_model.model_dump(mode="json", exclude_none=True)
         except (ValidationError, JsonSchemaValidationError, TypeError) as exc:
@@ -1207,7 +1150,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 details={"output_schema": record.output_schema},
             )
         rendered = llm_text.strip() or json.dumps(output, ensure_ascii=False, sort_keys=True)
-        paged = self._page_validated_output(
+        paged, replay_result_ref = self._page_validated_output(
             record,
             call,
             output,
@@ -1225,6 +1168,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             llm_text=rendered,
             affordances=affordances,
             context_delivery=context_delivery,
+            replay_result_ref=replay_result_ref,
         )
 
     def _page_validated_output(
@@ -1238,15 +1182,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         turn_id: str | None,
         context_delivery: dict[str, Any] | None,
-    ) -> PagedResult | None:
+    ) -> tuple[PagedResult | None, str]:
         if budget is None or record.execution.paging is PagingMode.NEVER:
-            return None
+            return None, ""
         char_limit = self._resolve_char_limit(budget)
         serialized = json.dumps(output, ensure_ascii=False, sort_keys=True)
-        if char_limit is None or len(serialized) <= char_limit:
-            return None
         result_ref = str(call.call_id or "").strip() or f"call_{uuid4().hex[:12]}"
-        page_size = min(max(256, int(budget.preview_chars or 1000)), char_limit)
+        if isinstance(context_delivery, dict):
+            context_delivery["replay_result_ref"] = result_ref
+        page_size = max(256, int(budget.preview_chars or 1000))
+        if char_limit is not None:
+            page_size = min(page_size, char_limit)
         handle = self.tool_result_pager.store(
             runtime_root=self.runtime_root,
             turn_id=str(turn_id or budget.artifact_bucket_id or result_ref),
@@ -1267,10 +1213,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
             },
             context_delivery=context_delivery,
         )
+        if char_limit is None or len(serialized) <= char_limit:
+            return None, handle.result_ref
         page = self.tool_result_pager.read_page(
             result_ref,
             page=1,
-            turn_id=turn_id,
+            execution_lifetime_id=handle.execution_lifetime_id,
         )
         page_text = page.content if page is not None else rendered[:page_size]
         affordances: list[ToolAffordance] = []
@@ -1295,12 +1243,15 @@ class ExecutionRuntime(ExecutionRuntimePort):
             effect=outcome,
             llm_text=page_text,
             affordances=affordances,
+            # Paging changes presentation, not what the validated handler
+            # actually read.  File-state authority follows the complete
+            # delivery retained by this handle and retires with that handle.
             context_delivery=(
-                dict(page.context_delivery)
-                if page is not None and page.context_delivery
+                dict(context_delivery)
+                if isinstance(context_delivery, dict)
                 else None
             ),
-        )
+        ), handle.result_ref
 
     @staticmethod
     def _rejected_error_result(exc: ToolRejectedError) -> RejectedResult:
@@ -1366,6 +1317,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     if isinstance(result.context_delivery, dict)
                     else None
                 ),
+                replay_result_ref=str(result.replay_result_ref or ""),
             )
         payload = result.model_dump(mode="json")
         return ToolExecutionResult(
@@ -1382,6 +1334,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 if isinstance(result, PagedResult)
                 and isinstance(result.context_delivery, dict)
                 else None
+            ),
+            replay_result_ref=(
+                str(result.result_handle.get("result_ref") or "")
+                if isinstance(result, PagedResult)
+                else ""
             ),
         )
 
@@ -1652,13 +1609,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 CapabilityCall(
                     name=call.name,
                     args=dict(call.args),
-                    meta={
-                        **dict(call.meta),
-                        "direct_context_id": (
-                            str(call.meta.get("direct_context_id") or "")
-                            or f"runtime:{id(self)}"
-                        ),
-                    },
+                    meta={**dict(call.meta), "execution_runtime": self},
                 )
             )
             return CapabilityResult(
@@ -1667,6 +1618,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 structured=result.structured,
                 llm_text=getattr(result, "llm_text", ""),
                 context_delivery=getattr(result, "context_delivery", None),
+            )
+        except ToolRejectedError as exc:
+            return CapabilityResult(
+                status=RuntimeStatus.INVALID,
+                text=str(exc),
+                structured={
+                    "error": str(exc),
+                    "error_code": exc.error_code,
+                    "capability": call.name,
+                },
+                llm_text=str(exc),
             )
         except Exception as exc:
             return CapabilityResult(
@@ -1682,13 +1644,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 CapabilityCall(
                     name=call.name,
                     args=dict(call.args),
-                    meta={
-                        **dict(call.meta),
-                        "direct_context_id": (
-                            str(call.meta.get("direct_context_id") or "")
-                            or f"runtime:{id(self)}"
-                        ),
-                    },
+                    meta={**dict(call.meta), "execution_runtime": self},
                 )
             )
             return CapabilityResult(
@@ -1697,6 +1653,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 structured=result.structured,
                 llm_text=getattr(result, "llm_text", ""),
                 context_delivery=getattr(result, "context_delivery", None),
+            )
+        except ToolRejectedError as exc:
+            return CapabilityResult(
+                status=RuntimeStatus.INVALID,
+                text=str(exc),
+                structured={
+                    "error": str(exc),
+                    "error_code": exc.error_code,
+                    "capability": call.name,
+                },
+                llm_text=str(exc),
             )
         except Exception as exc:
             return CapabilityResult(

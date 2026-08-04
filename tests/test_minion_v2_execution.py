@@ -28,6 +28,7 @@ from pal.minion.v2.execution import (
     UnitWorkViewBuilder,
     WorkspaceLockRegistry,
     prepare_node_dependency_baseline,
+    prepare_node_verification_baseline,
     format_workspace_process_holders,
     terminate_process_group,
     workspace_process_holders,
@@ -530,6 +531,107 @@ class MinionV2ExecutionTests(unittest.TestCase):
             "int value() { return 1; }\n",
         )
         self.assertTrue((worktree / "module_test.cpp").is_file())
+
+    def test_software_verification_assembles_dependencies_after_coder_candidate(self) -> None:
+        worktree = self.runtime_root / "verification_assembly_repo"
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+        (worktree / "README.md").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=worktree, check=True)
+        base_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+
+        (worktree / "dependency.cpp").write_text("int dependency();\n", encoding="utf-8")
+        subprocess.run(["git", "add", "dependency.cpp"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "dependency"], cwd=worktree, check=True)
+        dependency_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        dependency_ref = self.store.put_json(
+            {"candidate_digest": dependency_sha, "base_sha": base_sha},
+            artifact_type="GitCheckpointArtifact",
+        )
+
+        subprocess.run(["git", "reset", "--hard", base_sha], cwd=worktree, check=True)
+        (worktree / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+        subprocess.run(["git", "add", "main.cpp"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "consumer"], cwd=worktree, check=True)
+        consumer_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        consumer_ref = self.store.put_json(
+            {
+                "candidate_digest": consumer_sha,
+                "base_sha": base_sha,
+                "previous_head_sha": base_sha,
+                "candidate_tree_sha": subprocess.check_output(
+                    ["git", "rev-parse", f"{consumer_sha}^{{tree}}"],
+                    cwd=worktree,
+                    text=True,
+                ).strip(),
+                "changed_paths": ["main.cpp"],
+            },
+            artifact_type="GitCheckpointArtifact",
+        )
+
+        dependency = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="dependency",
+            workflow_id="wf-assembly",
+            state="ACCEPTED",
+            version=1,
+            payload={
+                "base_sha": base_sha,
+                "candidate_digest": dependency_sha,
+                "candidate_ref": dependency_ref.to_dict(),
+                "dependency_node_ids": [],
+                "output_hashes": {},
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        consumer = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="consumer",
+            workflow_id="wf-assembly",
+            state="REVIEW_BLOCKED_BY_DEPS",
+            version=1,
+            payload={
+                "workspace_path": str(worktree),
+                "execution_adapter": SOFTWARE_GIT_ADAPTER,
+                "base_sha": base_sha,
+                "candidate_digest": consumer_sha,
+                "candidate_ref": consumer_ref.to_dict(),
+                "dependency_node_ids": [dependency.aggregate_id],
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        assembled = prepare_node_verification_baseline(
+            consumer,
+            {dependency.aggregate_id: dependency, consumer.aggregate_id: consumer},
+            artifacts=self.store,
+        )
+
+        self.assertTrue((worktree / "main.cpp").is_file())
+        self.assertTrue((worktree / "dependency.cpp").is_file())
+        self.assertEqual(
+            assembled["implementation_candidate_ref"],
+            consumer_ref.to_dict(),
+        )
+        self.assertNotEqual(assembled["candidate_digest"], consumer_sha)
+        assembled_artifact = self.store.read_json(assembled["candidate_ref"])
+        self.assertEqual(assembled_artifact["assembly_boundary"], "verification")
+        self.assertEqual(assembled_artifact["base_sha"], base_sha)
+        self.assertEqual(
+            set(assembled_artifact["changed_paths"]),
+            {"dependency.cpp", "main.cpp"},
+        )
 
     def test_dependency_baseline_rolls_back_the_whole_attempt_on_conflict(self) -> None:
         worktree = self.runtime_root / "dependency_rollback_repo"
@@ -1425,6 +1527,10 @@ class MinionV2ExecutionTests(unittest.TestCase):
                     workflow_id=snapshot.workflow_id,
                     node_name=module_name,
                     product_ref=candidate_ref.sha256,
+                )
+                DagScheduler(self.repository).schedule_ready_nodes(
+                    workflow_id=snapshot.workflow_id,
+                    epoch_id=str(snapshot.payload.get("epoch_id") or ""),
                 )
             elif action_type == "START_REVIEW":
                 coordinator.start_assignment(

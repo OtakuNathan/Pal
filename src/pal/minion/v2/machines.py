@@ -209,6 +209,24 @@ def _worker_finished_reducer(payload: Mapping[str, Any], action: ActionEnvelope)
     return updated
 
 
+def _architecture_review_passed_reducer(
+    payload: Mapping[str, Any],
+    action: ActionEnvelope,
+) -> Mapping[str, Any]:
+    """Project only unresolved review state into Human Review.
+
+    A failed review deliberately remains attached while the Architect repairs it so
+    the next Reviewer can regress the exact finding.  Once that Reviewer passes the
+    replacement manifest, those fields describe history rather than current defects
+    and must not leak into the Human Review projection.
+    """
+
+    updated = dict(_worker_finished_reducer(payload, action))
+    for field in ("finding_artifact_ref", "findings"):
+        updated.pop(field, None)
+    return updated
+
+
 def _replan_finding_reducer(
     payload: Mapping[str, Any],
     action: ActionEnvelope,
@@ -500,6 +518,29 @@ def _ready_dependencies(payload: Mapping[str, Any], action: ActionEnvelope) -> N
         raise TransitionGuardError("execution epoch is frozen")
 
 
+def _ready_producer_dependencies(
+    payload: Mapping[str, Any], action: ActionEnvelope
+) -> None:
+    dependencies = {
+        str(item)
+        for item in list(payload.get("producer_dependency_node_ids") or [])
+    }
+    accepted = {
+        str(item)
+        for item in list(
+            action.payload.get(
+                "accepted_producer_dependency_node_ids",
+                payload.get("accepted_producer_dependency_node_ids"),
+            )
+            or []
+        )
+    }
+    if dependencies - accepted:
+        raise TransitionGuardError("node producer dependencies are not all ACCEPTED")
+    if bool(action.payload.get("epoch_frozen", payload.get("epoch_frozen"))):
+        raise TransitionGuardError("execution epoch is frozen")
+
+
 def _node_kind(expected: str):
     def guard(payload: Mapping[str, Any], _action: ActionEnvelope) -> None:
         actual = str(payload.get("node_kind") or "unit")
@@ -594,7 +635,6 @@ def _workflow_transitions() -> list[TransitionSpec]:
         _spec(kind, S.ACTIVE, "LINK_ARCHITECTURE_REVISION", S.ACTIVE, guard=_required("architecture_revision_id")),
         _spec(kind, S.ACTIVE, "LINK_EXECUTION_EPOCH", S.ACTIVE, guard=_required("execution_epoch_id")),
         _spec(kind, S.ACTIVE, "LINK_STANDALONE_REVIEW", S.ACTIVE, guard=_required("standalone_review_id")),
-        _spec(kind, S.ACTIVE, "REBIND_CHANNEL", S.ACTIVE, guard=_required("active_channel", "control_route")),
         _spec(kind, S.ACTIVE, "MARK_COMPLETED", S.COMPLETED, guard=_required("result_artifact_ref")),
         _spec(kind, S.ACTIVE, "REJECT_WORKFLOW", S.REJECTED),
         _spec(kind, S.PAUSE_REQUESTED, "CHILDREN_PAUSED", S.PAUSED),
@@ -842,7 +882,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             "ARCHITECTURE_REVIEW_PASSED",
             S.HUMAN_REVIEW,
             guard=_required("review_artifact_ref", "architecture_manifest_ref"),
-            reducer=_worker_finished_reducer,
+            reducer=_architecture_review_passed_reducer,
             effects=_effect("publish_architecture_review_request"),
         ),
         _spec(
@@ -903,6 +943,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
             "HUMAN_ACCEPT",
             S.ACCEPTED,
             guard=_required("decision_token", "architecture_manifest_ref"),
+            reducer=_architecture_review_passed_reducer,
             effects=_combined_effects(
                 _effect("materialize_plan_revision", status="accepted"),
                 _effect("submit_action", action_type="START_EXECUTION"),
@@ -1225,7 +1266,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 ),
             ),
         ),
-        _spec(kind, S.BLOCKED_BY_DEPS, "DEPENDENCIES_ACCEPTED", S.QUEUED, guard=_all(_node_kind("unit"), _ready_dependencies), effects=_effect("admit_implementation_role", role_mode="produce")),
+        _spec(kind, S.BLOCKED_BY_DEPS, "DEPENDENCIES_ACCEPTED", S.QUEUED, guard=_all(_node_kind("unit"), _ready_producer_dependencies), effects=_effect("admit_implementation_role", role_mode="produce")),
         _spec(
             kind,
             S.QUEUED,
@@ -1268,7 +1309,7 @@ def _node_transitions() -> list[TransitionSpec]:
             reducer=_triage_reducer(str(S.QUIESCING)),
             effects=_effect("quiesce_role_for_triage"),
         ),
-        _spec(kind, S.SNAPSHOTTING, "CANDIDATE_SNAPSHOTTED", S.REVIEW_QUEUED, guard=_candidate_guard, effects=_effect("admit_verifier_role", role_mode="module")),
+        _spec(kind, S.SNAPSHOTTING, "CANDIDATE_SNAPSHOTTED", S.REVIEW_BLOCKED_BY_DEPS, guard=_candidate_guard, effects=_effect("schedule_ready_nodes")),
         _spec(kind, S.SNAPSHOTTING, "REBIND_SNAPSHOTTER", S.SNAPSHOTTING, guard=_lease_guard, reducer=_worker_started_reducer),
         _spec(
             kind,
@@ -1278,6 +1319,15 @@ def _node_transitions() -> list[TransitionSpec]:
             guard=_required("failure_artifact_ref"),
             reducer=_triage_reducer(str(S.SNAPSHOTTING)),
             effects=_effect("quiesce_role_for_triage"),
+        ),
+        _spec(
+            kind,
+            S.REVIEW_BLOCKED_BY_DEPS,
+            "VERIFICATION_DEPENDENCIES_ACCEPTED",
+            S.REVIEW_QUEUED,
+            guard=_all(_node_kind("unit"), _ready_dependencies),
+            effects=_effect("admit_verifier_role", role_mode="module"),
+            reducer=_merge_payload,
         ),
         _spec(kind, S.REVIEW_QUEUED, "START_REVIEW", S.REVIEWING, guard=_lease_guard, effects=_effect("run_verifier_role", role_mode="module"), reducer=_worker_started_reducer),
         _spec(kind, S.REVIEWING, "REBIND_REVIEWER", S.REVIEWING, guard=_lease_guard, reducer=_worker_started_reducer),
@@ -1307,7 +1357,7 @@ def _node_transitions() -> list[TransitionSpec]:
         _spec(kind, S.REVIEW_SNAPSHOTTING, "CONTRACT_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "ARCHITECTURE_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
         _spec(kind, S.REVIEW_SNAPSHOTTING, "REQUIREMENTS_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("request_epoch_replan"), reducer=_worker_finished_reducer),
-        _spec(kind, S.STALE, "REQUEUE_STALE", S.QUEUED, guard=_all(_node_kind("unit"), _required("unit_contract_ref", "dependency_fingerprint"), _ready_dependencies), effects=_effect("admit_implementation_role", role_mode="produce")),
+        _spec(kind, S.STALE, "REQUEUE_STALE", S.QUEUED, guard=_all(_node_kind("unit"), _required("unit_contract_ref", "dependency_fingerprint"), _ready_producer_dependencies), effects=_effect("admit_implementation_role", role_mode="produce")),
         _spec(kind, S.PAUSE_REQUESTED, "PAUSE_CONFIRMED", S.PAUSED),
         _spec(
             kind,
@@ -1339,6 +1389,7 @@ def _node_transitions() -> list[TransitionSpec]:
         S.BLOCKED_BY_DEPS,
         S.QUEUED,
         S.PRODUCING,
+        S.REVIEW_BLOCKED_BY_DEPS,
         S.REVIEW_QUEUED,
         S.REVIEWING,
         S.REVIEW_QUIESCING,
@@ -1353,6 +1404,7 @@ def _node_transitions() -> list[TransitionSpec]:
         str(S.BLOCKED_BY_DEPS): str(S.BLOCKED_BY_DEPS),
         str(S.QUEUED): str(S.QUEUED),
         str(S.PRODUCING): str(S.QUEUED),
+        str(S.REVIEW_BLOCKED_BY_DEPS): str(S.REVIEW_BLOCKED_BY_DEPS),
         str(S.REVIEW_QUEUED): str(S.REVIEW_QUEUED),
         str(S.REVIEWING): str(S.REVIEW_QUEUED),
         str(S.REVIEW_QUIESCING): str(S.REVIEW_QUIESCING),
@@ -1386,7 +1438,7 @@ def _node_transitions() -> list[TransitionSpec]:
                 effects=_effect("cancel_role"),
             )
         )
-    directly_staleable = {S.BLOCKED_BY_DEPS, S.QUEUED, S.REVIEW_QUEUED, S.REPAIR_QUEUED, S.ACCEPTED, S.CANCELLED}
+    directly_staleable = {S.BLOCKED_BY_DEPS, S.QUEUED, S.REVIEW_BLOCKED_BY_DEPS, S.REVIEW_QUEUED, S.REPAIR_QUEUED, S.ACCEPTED, S.CANCELLED}
     for state in directly_staleable:
         transitions.append(
             _spec(
@@ -1669,6 +1721,7 @@ def all_machine_specs() -> tuple[MachineSpec, ...]:
         {
             StateClass.DEPENDENCY_WAIT: {
                 DagNodeRunState.BLOCKED_BY_DEPS,
+                DagNodeRunState.REVIEW_BLOCKED_BY_DEPS,
                 DagNodeRunState.STALE,
             },
             StateClass.WORKER_LIVENESS: {

@@ -5,7 +5,7 @@ from enum import Enum
 from functools import lru_cache
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError, model_validator
 
 from pal.shared.tool_protocol import (
     CompleteResult,
@@ -34,10 +34,14 @@ class EmptyToolOutput(StrictToolModel):
     pass
 
 
-class ProviderPayloadOutput(StrictToolModel):
-    """Stable boundary for provider-defined payloads without a local schema."""
+class StructuredToolOutput(RootModel[dict[str, Any]]):
+    """Strict top-level object for capabilities without a narrower output model.
 
-    payload: dict[str, Any]
+    This model validates the handler's real top-level object and does not
+    invent a compatibility wrapper around provider-defined values.
+    """
+
+    model_config = ConfigDict(strict=True)
 
 
 class McpToolOutput(StrictToolModel):
@@ -292,13 +296,13 @@ __all__ = [
     "Idempotency",
     "InvocationMode",
     "McpToolOutput",
-    "ProviderPayloadOutput",
     "PagedResult",
     "PagingMode",
     "RejectedResult",
     "RetryDirective",
     "RetryPolicy",
     "StrictToolModel",
+    "StructuredToolOutput",
     "ToolAffordance",
     "ToolExecutionSemantics",
     "ToolGuidance",

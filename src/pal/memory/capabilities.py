@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
     MemoryCapabilitiesMemoryIntrospectionProviderRecallInput,
@@ -439,6 +443,7 @@ class MemoryIntrospectionProvider:
         description="Switch the active L3 provider for memory recall",
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,
         aliases=("memory_set_active_provider",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("active_provider_id") or "").strip()
@@ -476,6 +481,7 @@ def inspect_memory(provider: MemoryIntrospectionProvider) -> MemorySnapshot:
 
 def register_with_core(context: MainContext, service: MemoryService, *, config: Any = None) -> ModuleHandle:
     from pal.memory.prompt import MemoryPromptFragmentProvider
+    from pal.memory.runtime_state import MemoryRuntimeStatePort
 
     provider = MemoryIntrospectionProvider(service=service, context=context)
     prompt_provider = MemoryPromptFragmentProvider(config=config)
@@ -489,6 +495,7 @@ def register_with_core(context: MainContext, service: MemoryService, *, config: 
             "memory_candidate_decision": provider.handle_memory_candidate_decision_async,
         },
         ports={"memory": service},
+        runtime_state_port=MemoryRuntimeStatePort(service),
     )
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)

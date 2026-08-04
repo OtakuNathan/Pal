@@ -73,6 +73,36 @@ class L1TurnIRTests(unittest.TestCase):
         with self.assertRaises(L1TurnProtocolError):
             turn.settle()
 
+    def test_unconsumed_truncated_assistant_can_be_discarded_atomically(self) -> None:
+        turn = L1TurnStore().begin("turn-1", user_text="work")
+        turn = turn.append(
+            LLMMessageIR(
+                MessageRole.ASSISTANT,
+                (TextPartIR("partial"), new_tool_call("call-1", "write", {})),
+                message_id="truncated-1",
+            )
+        )
+
+        recovered = turn.discard_assistant("truncated-1")
+
+        self.assertEqual(len(recovered.messages), 1)
+        self.assertEqual(recovered.messages[0].role, MessageRole.USER)
+        self.assertFalse(recovered.pending_call_ids)
+
+    def test_consumed_assistant_cannot_be_discarded(self) -> None:
+        turn = L1TurnStore().begin("turn-1", user_text="work")
+        turn = turn.append(
+            LLMMessageIR(
+                MessageRole.ASSISTANT,
+                (new_tool_call("call-1", "read", {}),),
+                message_id="assistant-1",
+            )
+        )
+        turn = turn.append_tool_result(ToolResultIR("call-1", "read", "ok"))
+
+        with self.assertRaises(L1TurnProtocolError):
+            turn.discard_assistant("assistant-1")
+
 
 if __name__ == "__main__":
     unittest.main()

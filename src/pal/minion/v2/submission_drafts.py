@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,8 @@ from pal.minion.v2.schema import ensure_minion_v2_schema
 AUTHORING_CONTRACT_VERSION = "8"
 ACTIVE_DRAFT_STATUS = "active"
 SUBMITTED_DRAFT_STATUS = "submitted"
+_SCHEMA_CACHE_LOCK = threading.Lock()
+_SCHEMA_FILE_IDENTITIES: dict[Path, tuple[int, int]] = {}
 
 
 @dataclass(frozen=True)
@@ -459,8 +462,9 @@ class SubmissionDraftStore:
         """Read an immutable submission receipt without requiring the expired worker lease."""
 
         self._ensure_schema()
-        with sqlite3.connect(str(self.db_path)) as connection:
+        with sqlite3.connect(str(self.db_path), timeout=30.0) as connection:
             connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=30000")
             row = connection.execute(
                 "SELECT * FROM minion_v2_submission_drafts WHERE draft_key = ?",
                 (str(draft_key),),
@@ -487,8 +491,9 @@ class SubmissionDraftStore:
         """Resolve the newest exact-input receipt for one logical role invocation."""
 
         self._ensure_schema()
-        with sqlite3.connect(str(self.db_path)) as connection:
+        with sqlite3.connect(str(self.db_path), timeout=30.0) as connection:
             connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=30000")
             row = connection.execute(
                 """
                 SELECT * FROM minion_v2_submission_drafts
@@ -659,11 +664,23 @@ class SubmissionDraftStore:
 
     def _ensure_schema(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path)) as connection:
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA foreign_keys=ON")
-            ensure_minion_v2_schema(connection)
+        cache_key = self.db_path.resolve()
+        with _SCHEMA_CACHE_LOCK:
+            try:
+                stat = self.db_path.stat()
+                identity = (int(stat.st_dev), int(stat.st_ino))
+            except FileNotFoundError:
+                identity = (-1, -1)
+            if _SCHEMA_FILE_IDENTITIES.get(cache_key) == identity and identity != (-1, -1):
+                return
+            with sqlite3.connect(str(self.db_path), timeout=30.0) as connection:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA busy_timeout=30000")
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA foreign_keys=ON")
+                ensure_minion_v2_schema(connection)
+            stat = self.db_path.stat()
+            _SCHEMA_FILE_IDENTITIES[cache_key] = (int(stat.st_dev), int(stat.st_ino))
 
     def _transaction(self):
         return _SqliteTransaction(self.db_path)
@@ -677,6 +694,7 @@ class _SqliteTransaction:
     def __enter__(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.db_path), timeout=30.0)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("BEGIN IMMEDIATE")
         self.connection = connection

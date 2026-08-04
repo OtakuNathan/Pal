@@ -202,6 +202,13 @@ def part_to_payload(part: Any) -> dict[str, Any]:
             "kind": "tool_result", "call_id": part.call_id, "name": part.name,
             "content": part.content, "ok": part.ok, "status": part.status,
             "structured": thaw_json(part.structured) if part.structured is not None else None,
+            # Runtime-only truth. Provider shape codecs deliberately ignore it.
+            "context_delivery": (
+                thaw_json(part.context_delivery)
+                if part.context_delivery is not None
+                else None
+            ),
+            "replay_result_ref": part.replay_result_ref,
         }
     raise TypeError(f"unsupported LLM IR part: {type(part).__name__}")
 
@@ -228,5 +235,11 @@ def part_from_payload(payload: Mapping[str, Any]) -> Any:
             content=str(payload.get("content") or ""), ok=bool(payload.get("ok", True)),
             status=str(payload.get("status") or "ok"),
             structured=dict(payload["structured"]) if isinstance(payload.get("structured"), Mapping) else None,
+            context_delivery=(
+                dict(payload["context_delivery"])
+                if isinstance(payload.get("context_delivery"), Mapping)
+                else None
+            ),
+            replay_result_ref=str(payload.get("replay_result_ref") or ""),
         )
     raise ValueError(f"unknown LLM IR part kind: {kind}")

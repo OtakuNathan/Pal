@@ -165,7 +165,8 @@ legacy 文档中已证明稳定、并应视为直接迁入新架构的语义还�
 - `supervisor -> pal -> worker` process model
 - `supervisor-pal` 控制面与 `pal-worker` 执行面的 IPC 分层
 - `Pal`-owned user-facing channel
-- provider-neutral LLM IR + three wire-shape codecs + exact-model hooks
+- provider-neutral LLM IR + three wire-shape codecs + exact-model request hooks
+  + provider-specific response-iterator normalization
 - `skill = manual`、`tool = 唯一执行原语`
 - `L1` 作为近无损压缩 transcript，而不是 summary bucket
 

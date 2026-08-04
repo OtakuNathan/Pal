@@ -15,6 +15,9 @@ Owns:
   budget preflight, an independently configured model-attempt budget,
   validation, degraded checkpoints, and commit ordering
 - stagnation guard orchestration
+- module runtime-state orchestration: deterministic snapshot/restore order,
+  reverse-order whole-runtime reset, exact incarnation checks, and encrypted
+  composite envelopes
 
 Does not own:
 - durable truth
@@ -37,6 +40,9 @@ Exposes:
 
 Interaction rule:
 - `PalCore` is the only governance center
+- all channel input enters one resident mailbox and one L1/execution lifetime;
+  channels select only the response transport and never create a persona,
+  conversation, or execution scope
 - Pal and Minion supply host policy and ports to the same `AgentTurnRuntime`;
   they do not maintain separate prompt compilers or turn executors
 - automatic compaction is requested only by the real model context-budget
@@ -45,9 +51,9 @@ Interaction rule:
   and each closed tool batch are committed to L1 before compaction; provider
   projections, recall caches, and role anchors are not parallel truth sources
 - exact provider tool-continuation fields belong to the active logical turn.
-  They survive an in-flight checkpoint, but turn closure releases them; L1
-  retains only the provider-neutral tool semantics used by compaction and
-  future context
+  Snapshots occur only at closed protocol boundaries; crash restore removes
+  any unmatched/duplicate protocol and incomplete stream fragments instead of
+  fabricating results. Turn closure releases provider-only continuation data
 - one logical turn may create at most three compact generations. Semantic
   generation gets three attempts before a mechanical checkpoint, and the
   prompt plus local validator cap visible checkpoint JSON at an estimated
@@ -59,6 +65,9 @@ Interaction rule:
 - turn computations yield effect requests and are resumed by `PalCore`
 - `MainLoop` drains mailbox-backed sources after async wakeups rather than
   pulling module-private queues on an idle timer
+- resident reset interrupts the active turn, preserves already queued channel
+  messages, and resets module-owned runtime state through their registered
+  runtime-state ports before the same mailbox resumes
 - modules may register ports, event sources, providers, and introspection
   surfaces with `PalCore`
 - `register_with_core(...)` is also the hydration seam for Capability Forest

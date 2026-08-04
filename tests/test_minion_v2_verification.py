@@ -445,6 +445,24 @@ class MinionV2VerificationTests(unittest.TestCase):
                 },
             )
 
+    def test_verification_repair_can_target_the_reviewed_module(self) -> None:
+        node = type(
+            "Node",
+            (),
+            {
+                "aggregate_id": "node-framepipe-cli",
+                "payload": {"module_name": "framepipe_cli"},
+            },
+        )()
+        self.assertEqual(
+            _resolve_dependency_node_id(
+                object(),
+                node,
+                dependency_module="framepipe_cli",
+            ),
+            "node-framepipe-cli",
+        )
+
     def test_artifact_verifier_uses_durable_scratch_as_workspace_evidence(self) -> None:
         scratch = self.runtime_root / "artifact-verifier-scratch"
         scratch.mkdir()
@@ -2993,7 +3011,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(results[0].status, VerificationStatus.PASS)
 
     def test_manager_resolves_fenced_attempt_to_logical_role_session(self) -> None:
-        logical_session_id = "inv_logical_verifier"
+        verifier_session_id = "inv_logical_verifier"
         input_fingerprint = "logical-verifier-input"
         self.repository.dispatch(
             ActionEnvelope(
@@ -3021,7 +3039,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             )
         )
         self.repository.ensure_role_session(
-            session_id=logical_session_id,
+            session_id=verifier_session_id,
             workflow_id="wf_verify",
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node_drawing",
@@ -3035,7 +3053,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         assignment = self.repository.create_role_assignment(
             RoleAssignmentRequest(
                 assignment_key="logical-verifier-assignment",
-                session_id=logical_session_id,
+                session_id=verifier_session_id,
                 workflow_id="wf_verify",
                 aggregate_type=AggregateType.DAG_NODE_RUN.value,
                 aggregate_id="node_drawing",
@@ -3105,7 +3123,7 @@ class MinionV2VerificationTests(unittest.TestCase):
             artifacts=self.store,
             runtime_root=self.runtime_root,
             workflow_id="wf_verify",
-            invocation_id=logical_session_id,
+            invocation_id=verifier_session_id,
             lease_resource_key="node:node_drawing:verifier",
             fencing_token=999,
             role="verifier",
@@ -3959,6 +3977,10 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "workspace_fingerprint": "tree",
                 },
             ),
+            (
+                "VERIFICATION_DEPENDENCIES_ACCEPTED",
+                {"accepted_dependency_node_ids": [], "epoch_frozen": False},
+            ),
             ("START_REVIEW", {"fencing_token": 2}),
             (
                 "SUBMIT_SEMANTIC_VERIFICATION",
@@ -4129,11 +4151,12 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "unit_contract_ref": artifact.to_dict(),
                     "epoch_id": "epoch",
                     "dependency_node_ids": list(dependency_node_ids),
+                    "producer_dependency_node_ids": [],
                 },
             ),
             (
                 "DEPENDENCIES_ACCEPTED",
-                {"accepted_dependency_node_ids": list(dependency_node_ids), "epoch_frozen": False},
+                {"accepted_producer_dependency_node_ids": [], "epoch_frozen": False},
             ),
             ("START_PRODUCING", {"fencing_token": 1}),
             ("SUBMIT_CANDIDATE", {"fencing_token": 1}),
@@ -4142,6 +4165,13 @@ class MinionV2VerificationTests(unittest.TestCase):
                 {"fencing_token": 1, "process_group_reaped": True, "exclusive_workspace_lock": True, "workspace_fingerprint": "tree"},
             ),
             ("CANDIDATE_SNAPSHOTTED", {"candidate_ref": artifact.to_dict(), "candidate_digest": "c1", "workspace_fingerprint": "tree"}),
+            (
+                "VERIFICATION_DEPENDENCIES_ACCEPTED",
+                {
+                    "accepted_dependency_node_ids": list(dependency_node_ids),
+                    "epoch_frozen": False,
+                },
+            ),
             ("START_REVIEW", {"fencing_token": 2}),
             (
                 "SUBMIT_SEMANTIC_VERIFICATION",

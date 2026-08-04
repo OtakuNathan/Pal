@@ -115,7 +115,7 @@ class GraphExecution:
         for name in graph.nodes:
             state = (
                 NodeCycleState.PRODUCER_READY
-                if not graph.execution_predecessors(name)
+                if not graph.producer_predecessors(name)
                 else NodeCycleState.BLOCKED
             )
             cycles[name] = NodeCycle(
@@ -141,9 +141,14 @@ class GraphExecution:
                 NodeCycleState.CHECKER_READY,
             }:
                 continue
+            predecessors = (
+                self.graph.checker_predecessors(name)
+                if cycle.state == NodeCycleState.CHECKER_READY
+                else self.graph.producer_predecessors(name)
+            )
             if all(
                 self.cycles[dependency].state == NodeCycleState.ACCEPTED
-                for dependency in self.graph.execution_predecessors(name)
+                for dependency in predecessors
             ) and all(
                 self.cycles[provider].state == NodeCycleState.ACCEPTED
                 for provider in self.repair_barriers.get(name, ())
@@ -356,7 +361,7 @@ class GraphExecution:
                     continue
                 if all(
                     cycles[dependency].state == NodeCycleState.ACCEPTED
-                    for dependency in self.graph.execution_predecessors(name)
+                    for dependency in self.graph.producer_predecessors(name)
                 ) and all(
                     cycles[provider].state == NodeCycleState.ACCEPTED
                     for provider in self.repair_barriers.get(name, ())

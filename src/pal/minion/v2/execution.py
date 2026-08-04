@@ -418,6 +418,11 @@ class ExecutionCompiler:
                             unit_node_ids[item]
                             for item in graph.execution_predecessors(name)
                         ],
+                        "producer_dependency_node_ids": [
+                            unit_node_ids[item]
+                            for item in graph.producer_predecessors(name)
+                        ],
+                        "accepted_producer_dependency_node_ids": [],
                         "contract_dependency_node_ids": [
                             unit_node_ids[edge.producer]
                             for edge in graph.incoming(name)
@@ -671,6 +676,11 @@ class ExecutionCompiler:
                             unit_node_ids[provider]
                             for provider in dependencies[name]
                         ],
+                        "producer_dependency_node_ids": [
+                            unit_node_ids[provider]
+                            for provider in graph.producer_predecessors(name)
+                        ],
+                        "accepted_producer_dependency_node_ids": [],
                         "accepted_dependency_node_ids": [],
                         "epoch_frozen": False,
                         "role_session_generation": generations.get(name, 0),
@@ -750,7 +760,7 @@ def _install_execution_graph(
     raw = artifact.get("graph_ir")
     if not isinstance(raw, Mapping) or not raw:
         raise ValueError(
-            "ContractArtifact has no Manager-compiled GraphIR; fresh v27 "
+            "ContractArtifact has no Manager-compiled GraphIR; fresh v29 "
             "contracts must be re-authored"
         )
     graph = graph_ir_from_mapping(raw)
@@ -1643,48 +1653,106 @@ class DagScheduler:
             workflow_id=workflow_id,
             generation=int(epoch.payload.get("graph_generation") or 0) or None,
         )
+        runnable_assignments = WorkflowCoordinator(
+            self.repository
+        ).runnable_assignments(
+            workflow_id=workflow_id,
+            generation=graph_execution.graph.generation,
+        )
         runnable_producers = {
             assignment.node_name
-            for assignment in WorkflowCoordinator(
-                self.repository
-            ).runnable_assignments(
-                workflow_id=workflow_id,
-                generation=graph_execution.graph.generation,
-            )
+            for assignment in runnable_assignments
             if assignment.slot.value == "producer"
         }
-        ready: list[AggregateSnapshot] = []
+        runnable_checkers = {
+            assignment.node_name
+            for assignment in runnable_assignments
+            if assignment.slot.value == "checker"
+        }
+        node_id_by_name = {
+            str(item.payload.get("module_name") or item.payload.get("unit_id") or ""): node_id
+            for node_id, item in node_by_id.items()
+        }
+        ready_producers: list[AggregateSnapshot] = []
+        ready_checkers: list[AggregateSnapshot] = []
         for node_id in sorted(node_by_id):
             node = node_by_id[node_id]
-            if node.state not in {"BLOCKED_BY_DEPS", "STALE"}:
-                continue
             module_name = str(
                 node.payload.get("module_name")
                 or node.payload.get("unit_id")
                 or ""
             )
-            if module_name not in runnable_producers:
-                continue
-            dependencies = {str(item) for item in list(node.payload.get("dependency_node_ids") or [])}
-            if not dependencies <= accepted_ids:
-                raise RuntimeError(
-                    "GraphExecution marked a projected node runnable before "
-                    f"its aggregate dependencies were accepted: {module_name}"
-                )
-            ready.append(node)
+            if (
+                node.state in {"BLOCKED_BY_DEPS", "STALE"}
+                and module_name in runnable_producers
+            ):
+                expected = {
+                    node_id_by_name[name]
+                    for name in graph_execution.graph.producer_predecessors(module_name)
+                }
+                projected = {
+                    str(item)
+                    for item in list(
+                        node.payload.get("producer_dependency_node_ids") or []
+                    )
+                }
+                if projected != expected:
+                    raise RuntimeError(
+                        "projected producer dependencies disagree with GraphIR: "
+                        f"{module_name}"
+                    )
+                if not expected <= accepted_ids:
+                    raise RuntimeError(
+                        "GraphExecution marked a producer runnable before its "
+                        f"dependencies were accepted: {module_name}"
+                    )
+                ready_producers.append(node)
+            if (
+                node.state == "REVIEW_BLOCKED_BY_DEPS"
+                and module_name in runnable_checkers
+            ):
+                expected = {
+                    node_id_by_name[name]
+                    for name in graph_execution.graph.checker_predecessors(module_name)
+                }
+                projected = {
+                    str(item)
+                    for item in list(node.payload.get("dependency_node_ids") or [])
+                }
+                if projected != expected:
+                    raise RuntimeError(
+                        "projected verification dependencies disagree with GraphIR: "
+                        f"{module_name}"
+                    )
+                if not expected <= accepted_ids:
+                    raise RuntimeError(
+                        "GraphExecution marked a checker runnable before its "
+                        f"dependencies were accepted: {module_name}"
+                    )
+                ready_checkers.append(node)
         scheduled: list[str] = []
         # Readiness creates durable logical coroutine work. It does not reserve
         # an OS process slot: the process shell owns the only execution
         # semaphore and acquires it immediately before materialization.
-        for node in ready:
-            baseline = prepare_node_dependency_baseline(
-                node,
-                node_by_id,
-                apply_candidates=True,
+        for node in ready_producers:
+            producer_dependencies = {
+                str(item)
+                for item in list(
+                    node.payload.get("producer_dependency_node_ids") or []
+                )
+            }
+            baseline = (
+                prepare_node_dependency_baseline(
+                    node,
+                    node_by_id,
+                    apply_candidates=True,
+                )
+                if producer_dependencies
+                else {}
             )
             payload = {
-                "accepted_dependency_node_ids": sorted(
-                    set(node.payload.get("dependency_node_ids") or []) & accepted_ids
+                "accepted_producer_dependency_node_ids": sorted(
+                    producer_dependencies & accepted_ids
                 ),
                 "epoch_frozen": False,
                 **baseline,
@@ -1711,6 +1779,55 @@ class DagScheduler:
                     payload,
                 )
             )
+            scheduled.append(node.aggregate_id)
+        for node in ready_checkers:
+            artifacts = ContentAddressedArtifactStore(
+                self.repository.runtime_root,
+                self.repository,
+            )
+
+            def assemble_and_publish(current: AggregateSnapshot) -> bool:
+                if current.state != "REVIEW_BLOCKED_BY_DEPS":
+                    return False
+                baseline = prepare_node_verification_baseline(
+                    current,
+                    node_by_id,
+                    artifacts=artifacts,
+                )
+                self.repository.dispatch(
+                    _action(
+                        "VERIFICATION_DEPENDENCIES_ACCEPTED",
+                        workflow_id,
+                        AggregateType.DAG_NODE_RUN,
+                        current.aggregate_id,
+                        actor,
+                        current.version,
+                        {
+                            "accepted_dependency_node_ids": sorted(
+                                set(
+                                    current.payload.get("dependency_node_ids")
+                                    or []
+                                )
+                                & accepted_ids
+                            ),
+                            "epoch_frozen": False,
+                            **baseline,
+                        },
+                    )
+                )
+                return True
+
+            if str(node.payload.get("execution_adapter") or "") == SOFTWARE_GIT_ADAPTER:
+                workspace = Path(str(node.payload.get("workspace_path") or ""))
+                with exclusive_workspace_lock(workspace):
+                    current = self.repository.read_snapshot(
+                        AggregateType.DAG_NODE_RUN,
+                        node.aggregate_id,
+                    )
+                    if current is None or not assemble_and_publish(current):
+                        continue
+            elif not assemble_and_publish(node):
+                continue
             scheduled.append(node.aggregate_id)
         return tuple(scheduled)
 
@@ -2311,6 +2428,141 @@ def prepare_node_dependency_baseline(
         "dependency_outputs": dependency_outputs,
         "dependency_fingerprint": dependency_fingerprint(node, node_by_id),
     }
+
+
+def prepare_node_verification_baseline(
+    node: AggregateSnapshot,
+    node_by_id: Mapping[str, AggregateSnapshot],
+    *,
+    artifacts: ContentAddressedArtifactStore,
+) -> dict[str, Any]:
+    """Assemble accepted dependency products after the producer submits.
+
+    Software producers work from contracts in parallel.  The Manager applies
+    accepted dependency deltas only at the checker boundary and publishes a
+    new immutable checkpoint describing the assembled worktree.  The original
+    implementation checkpoint remains linked for module-local diff review.
+    """
+
+    dependency_ids = {
+        str(item) for item in list(node.payload.get("dependency_node_ids") or [])
+    }
+    candidate_ref = ArtifactRef.from_mapping(
+        dict(node.payload.get("candidate_ref") or {})
+    )
+    candidate_digest = str(node.payload.get("candidate_digest") or "")
+    if not candidate_digest:
+        raise ValueError("verification baseline requires a Candidate digest")
+    adapter = str(node.payload.get("execution_adapter") or "").strip()
+    baseline = prepare_node_dependency_baseline(
+        node,
+        node_by_id,
+        apply_candidates=True,
+    )
+    verification_digest = str(
+        baseline.pop("base_sha", "") or baseline.pop("base_digest", "")
+    )
+    baseline.pop("base_digest", None)
+    result = {
+        **baseline,
+        "verification_base_sha": verification_digest,
+    }
+    if adapter != SOFTWARE_GIT_ADAPTER or not dependency_ids:
+        return result
+    if verification_digest == candidate_digest:
+        return result
+    workspace = Path(str(node.payload.get("workspace_path") or ""))
+    try:
+        implementation_candidate = dict(artifacts.read_json(candidate_ref))
+        review_base_sha = str(
+            implementation_candidate.get("base_sha")
+            or implementation_candidate.get("previous_head_sha")
+            or ""
+        )
+        if not review_base_sha:
+            raise ValueError("implementation Candidate has no Git review base")
+        if _git(workspace, "rev-parse", "HEAD").strip() != verification_digest:
+            raise RuntimeError("assembled verification worktree moved unexpectedly")
+        candidate_tree_sha = _git(
+            workspace, "rev-parse", f"{verification_digest}^{{tree}}"
+        ).strip()
+        baseline_tree_sha = _git(
+            workspace, "rev-parse", f"{review_base_sha}^{{tree}}"
+        ).strip()
+        delta_patch = _git_bytes(
+            workspace,
+            "diff",
+            "--binary",
+            review_base_sha,
+            verification_digest,
+            "--",
+        )
+        assembly_key = hashlib.sha256(
+            json.dumps(
+                {
+                    "node_run_id": node.aggregate_id,
+                    "implementation_candidate_digest": candidate_digest,
+                    "dependency_candidate_digests": baseline[
+                        "accepted_dependency_candidate_digests"
+                    ],
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        assembled_candidate = {
+            **implementation_candidate,
+            "candidate_digest": verification_digest,
+            "base_sha": review_base_sha,
+            "previous_head_sha": review_base_sha,
+            "baseline_tree_sha": baseline_tree_sha,
+            "candidate_tree_sha": candidate_tree_sha,
+            "delta_patch_sha": hashlib.sha256(delta_patch).hexdigest(),
+            "workspace_fingerprint": workspace_content_fingerprint(workspace),
+            "changed_paths": git_changed_paths(workspace, review_base_sha),
+            "candidate_key": assembly_key,
+            "implementation_candidate_ref": candidate_ref.to_dict(),
+            "implementation_candidate_digest": candidate_digest,
+            "accepted_dependency_candidate_digests": baseline[
+                "accepted_dependency_candidate_digests"
+            ],
+            "dependency_output_hashes": baseline["dependency_output_hashes"],
+            "assembly_boundary": "verification",
+        }
+        child_refs = [(candidate_ref.sha256, "implementation_candidate")]
+        child_refs.extend(
+            (
+                str(
+                    dict(
+                        node_by_id[node_id].payload.get("candidate_ref") or {}
+                    )["sha256"]
+                ),
+                "accepted_dependency_candidate",
+            )
+            for node_id in sorted(dependency_ids)
+        )
+        assembled_ref = artifacts.put_json(
+            assembled_candidate,
+            artifact_type="GitCheckpointArtifact",
+            provenance={"owner": "manager", "purpose": "verification_assembly"},
+            child_refs=tuple(child_refs),
+        )
+    except BaseException:
+        _abort_cherry_pick(workspace)
+        _git(workspace, "reset", "--hard", candidate_digest)
+        _git(workspace, "clean", "-fd")
+        raise
+    result.update(
+        {
+            "implementation_candidate_ref": candidate_ref.to_dict(),
+            "implementation_candidate_digest": candidate_digest,
+            "candidate_ref": assembled_ref.to_dict(),
+            "candidate_digest": verification_digest,
+            "workspace_fingerprint": assembled_candidate[
+                "workspace_fingerprint"
+            ],
+        }
+    )
+    return result
 
 
 def _apply_dependency_candidate_delta(

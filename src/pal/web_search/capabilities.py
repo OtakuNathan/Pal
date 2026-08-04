@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_CONTROL,
+    INDIRECT_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
     WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput,
@@ -205,6 +210,7 @@ class WebSearchIntrospectionProvider:
         description="Set the configured active web search provider",
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput,
         aliases=("web_search_set_active_provider",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("active_provider_id") or "").strip()
@@ -277,6 +283,7 @@ class WebSearchIntrospectionProvider:
         action_name="enable",
         description="Enable a web search provider",
         aliases=("web_search_provider_enable",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=True)
@@ -288,6 +295,7 @@ class WebSearchIntrospectionProvider:
         action_name="disable",
         description="Disable a web search provider",
         aliases=("web_search_provider_disable",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=False)
@@ -300,6 +308,7 @@ class WebSearchIntrospectionProvider:
         description="Update web search provider auth material without exposing secrets",
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetAuthMaterialInput,
         aliases=("web_search_provider_set_auth_material",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -328,6 +337,7 @@ class WebSearchIntrospectionProvider:
         description="Merge config into a web search provider settings blob",
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetConfigInput,
         aliases=("web_search_provider_set_config",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_config(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -347,7 +357,7 @@ class WebSearchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web search provider config updated", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach web search module", aliases=("web_search_attach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach web search module", aliases=("web_search_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -355,7 +365,7 @@ class WebSearchIntrospectionProvider:
         payload = {"mounted": True, "degraded": False}
         return IntrospectionResult(status=RuntimeStatus.OK, text="web search attached", structured=payload, llm_text=render_titled_structured_for_llm("Web search attached", payload))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach web search module", aliases=("web_search_detach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach web search module", aliases=("web_search_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False

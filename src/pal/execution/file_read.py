@@ -163,7 +163,7 @@ class SessionFileVisibilityCache:
     ) -> bool:
         _ = scope
         grant = self.backend.file_grant(
-            logical_session_id=self.context.logical_session_id,
+            execution_lifetime_id=self.context.execution_lifetime_id,
             file_key=file_cache_key(file_path),
             digest=version,
         )
@@ -177,9 +177,44 @@ class SessionFileVisibilityCache:
         )
 
     def mark_visible(self, *args: Any, **kwargs: Any) -> None:
-        # Runtime delivery is committed only after the result enters the
-        # provider-visible tool protocol.
-        _ = args, kwargs
+        _ = args
+        file_path = kwargs.get("file_path")
+        # FileVisibilityCache passes file_path positionally. Preserve that
+        # protocol while committing direct host reads immediately: unlike a
+        # Core turn, the returned CapabilityResult is already visible to its
+        # caller and has no later L1 delivery boundary.
+        if file_path is None and len(args) >= 2:
+            file_path = args[1]
+        start_line = int(kwargs.get("start_line") or 0)
+        end_line = int(kwargs.get("end_line") or 0)
+        version = str(kwargs.get("version") or "")
+        if file_path is None or not version or start_line <= 0 or end_line < start_line:
+            return
+        snapshot = self.backend.file_snapshot(
+            execution_lifetime_id=self.context.execution_lifetime_id,
+            file_key=file_cache_key(file_path),
+            digest=version,
+        )
+        total_lines = int(getattr(snapshot, "total_lines", 0) or end_line)
+        self.backend.record_delivery(
+            execution_lifetime_id=self.context.execution_lifetime_id,
+            delivery=FileDeliveryManifest(
+                file_key=file_cache_key(file_path),
+                digest=version,
+                total_lines=total_lines,
+                spans=(
+                    FileDeliverySpan(
+                        start_offset=0,
+                        end_offset=1,
+                        start_line=start_line,
+                        end_line=end_line,
+                        visible_start_in_line=0,
+                        visible_end_in_line=1,
+                        line_length=1,
+                    ),
+                ),
+            ).to_dict(),
+        )
 
     def clear_scope(self, scope: str) -> None:
         _ = scope
@@ -264,7 +299,8 @@ class FileReadTool:
         # bytes differ, so the new delivery can replace it. If the snapshot
         # already names these bytes, preserve it (including mutation authority)
         # and avoid downgrading a complete view on a partial reread.
-        if self.defer_delivery and self.cache.get_valid_state(resolved) is None:
+        cached_state = self.cache.get_valid_state(resolved)
+        if self.defer_delivery and cached_state is None:
             self.cache.invalidate(resolved)
 
         already_visible = self.visibility_cache.covers(
@@ -292,6 +328,32 @@ class FileReadTool:
                 full_view=full_view,
                 unchanged=True,
                 encoding="utf-8",
+            )
+
+        if (
+            self.defer_delivery
+            and cached_state is not None
+            and cached_state.full_view
+            and cached_state.replay_result_ref
+        ):
+            result_ref = cached_state.replay_result_ref
+            replay = (
+                f"{FILE_UNCHANGED_STUB}\n"
+                "The complete bytes are available from the existing result handle: "
+                f"read_tool_result(result_ref={result_ref!r}, page=1, anchor='head')"
+            )
+            return _result(
+                RuntimeStatus.OK,
+                replay,
+                file_path=str(resolved),
+                start_line=start,
+                end_line=end,
+                total_lines=total_lines,
+                truncated=end < total_lines,
+                full_view=True,
+                unchanged=True,
+                encoding="utf-8",
+                replay_result_ref=result_ref,
             )
 
         if total_lines == 0:

@@ -17,6 +17,8 @@ from unittest.mock import patch
 
 import msgpack
 
+from pal.core.module_registry import ModuleRegistry
+from pal.core.runtime_state import RuntimeSnapshotCoordinator
 from pal.execution.git_tool import classify_git_command
 from pal.llm import EndpointResolver, LLMRuntime
 from pal.lsp.ipc import LspManagerClient
@@ -109,12 +111,6 @@ class MinionSandboxTests(unittest.TestCase):
                 minion_id="minion-question",
                 invocation_id="inv-question",
                 workflow_id="wf-question",
-                control_route={
-                    "endpoint_id": "socket",
-                    "channel_kind": "socket",
-                    "reply_target": {"connection_id": "client-1"},
-                    "control_scope_key": "socket:client-1",
-                },
             )
             pending = asyncio.create_task(
                 port.request_clarification(
@@ -138,15 +134,7 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertFalse(pending.done())
             clarification = dict(events[0]["payload"])
             self.assertEqual(clarification["workflow_id"], "wf-question")
-            self.assertEqual(
-                clarification["control_route"],
-                {
-                    "endpoint_id": "socket",
-                    "channel_kind": "socket",
-                    "reply_target": {"connection_id": "client-1"},
-                    "control_scope_key": "socket:client-1",
-                },
-            )
+            self.assertNotIn("control_route", clarification)
             await responses.put(
                 {
                     "type": "clarification",
@@ -1493,6 +1481,8 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                     llm_runtime=SimpleNamespace(),
                     execution_runtime=SimpleNamespace(),
                     memory_service=MemoryService(),
+                    module_registry=(registry := ModuleRegistry()),
+                    runtime_state_coordinator=RuntimeSnapshotCoordinator(registry),
                 ),
             )
             result = await runner._execute_allowed_tool(
@@ -1548,6 +1538,8 @@ if printf pass > tests/test_router.py 2>/dev/null; then exit 41; fi
                     llm_runtime=SimpleNamespace(),
                     execution_runtime=SimpleNamespace(),
                     memory_service=MemoryService(),
+                    module_registry=(registry := ModuleRegistry()),
+                    runtime_state_coordinator=RuntimeSnapshotCoordinator(registry),
                 ),
             )
 

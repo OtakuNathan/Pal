@@ -59,6 +59,12 @@ class MinionManagerProvider:
     event_notify: Callable[[], None] | None = None
     _buffered_events: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _seen_event_keys: set[str] = field(default_factory=set, init=False, repr=False)
+    _inflight_event_keys: set[str] = field(default_factory=set, init=False, repr=False)
+    _locally_delivered_parts: dict[str, set[str]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     _buffer_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _event_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _event_stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
@@ -143,13 +149,250 @@ class MinionManagerProvider:
 
     def has_pending_events(self) -> bool:
         with self._buffer_lock:
-            return bool(self._buffered_events)
+            events = list(self._buffered_events)
+            inflight = set(self._inflight_event_keys)
+        return any(
+            self._buffered_event_key(item) not in inflight
+            and self._prepare_delivery_event(item) is not None
+            for item in events
+        )
 
     def drain_events_sync(self, *, limit: int = 20) -> dict[str, Any]:
         with self._buffer_lock:
-            events = self._buffered_events[: max(1, int(limit))]
-            del self._buffered_events[: len(events)]
-            return {"events": events, "remaining": len(self._buffered_events)}
+            candidates = list(self._buffered_events)
+            inflight = set(self._inflight_event_keys)
+        events: list[dict[str, Any]] = []
+        for item in candidates:
+            key = self._buffered_event_key(item)
+            if key in inflight:
+                continue
+            prepared = self._prepare_delivery_event(item)
+            if prepared is None:
+                continue
+            events.append(prepared)
+            with self._buffer_lock:
+                self._inflight_event_keys.add(key)
+            if len(events) >= max(1, int(limit)):
+                break
+        with self._buffer_lock:
+            remaining = len(self._buffered_events)
+        return {"events": events, "remaining": remaining}
+
+    def settle_event(
+        self,
+        event: dict[str, Any],
+        *,
+        accepted: bool,
+        error: str = "",
+    ) -> bool:
+        """Commit or retry one event after Core has handled it.
+
+        The manager outbox is acknowledged only after the concrete channel
+        endpoint accepted the delivery.  A failed attempt releases the local
+        in-flight reservation and leaves the durable outbox pending.
+        """
+        key = self._buffered_event_key(event)
+        delivery_id = str(event.get("delivery_id") or "")
+        if not accepted:
+            if delivery_id:
+                with contextlib.suppress(Exception):
+                    self.client.request_sync(
+                        "v2_defer_task_delivery",
+                        {"delivery_id": delivery_id, "error": str(error or "delivery failed")},
+                    )
+            with self._buffer_lock:
+                if not delivery_id:
+                    self._buffered_events = [
+                        item
+                        for item in self._buffered_events
+                        if self._buffered_event_key(item) != key
+                    ]
+                self._inflight_event_keys.discard(key)
+                if not delivery_id:
+                    self._seen_event_keys.discard(key)
+            if self.event_notify is not None:
+                with contextlib.suppress(Exception):
+                    self.event_notify()
+            return False
+        try:
+            if delivery_id:
+                result = self.client.request_sync(
+                    "v2_ack_task_delivery",
+                    {"delivery_id": delivery_id},
+                )
+                # An already acknowledged row is still settled locally; the
+                # manager is the source of truth for duplicate acknowledgements.
+                if result.get("acknowledged") is False:
+                    pass
+        except Exception:
+            # The provider accepted the message, but the durable ACK itself
+            # was not confirmed.  Keep the payload for an at-least-once retry;
+            # leaving it reserved here would strand it until the whole plugin
+            # was restarted.  A duplicate is preferable to silent loss when
+            # the manager may have committed the ACK just before the reply
+            # failed.
+            with self._buffer_lock:
+                self._inflight_event_keys.discard(key)
+            if self.event_notify is not None:
+                with contextlib.suppress(Exception):
+                    self.event_notify()
+            return False
+        with self._buffer_lock:
+            self._buffered_events = [
+                item
+                for item in self._buffered_events
+                if self._buffered_event_key(item) != key
+            ]
+            self._inflight_event_keys.discard(key)
+            self._seen_event_keys.discard(key)
+            if delivery_id:
+                self._locally_delivered_parts.pop(delivery_id, None)
+        return True
+
+    def delivered_event_parts(self, event: dict[str, Any]) -> set[str]:
+        delivery_id = str(event.get("delivery_id") or "").strip()
+        if not delivery_id:
+            return set()
+        with self._buffer_lock:
+            local = set(self._locally_delivered_parts.get(delivery_id, set()))
+        result = self.client.request_sync(
+            "v2_list_task_delivery_parts",
+            {"delivery_id": delivery_id},
+        )
+        return local | {
+            str(item)
+            for item in list(result.get("parts") or ())
+            if str(item).strip()
+        }
+
+    def settle_event_part(self, event: dict[str, Any], part_key: str) -> bool:
+        delivery_id = str(event.get("delivery_id") or "").strip()
+        normalized_part_key = str(part_key or "").strip()
+        if not delivery_id or not normalized_part_key:
+            return False
+        # Keep the accepted part locally before the IPC acknowledgement. This
+        # prevents an ACK retry in the same provider process from replaying a
+        # channel side effect even if the manager reply is lost.
+        with self._buffer_lock:
+            self._locally_delivered_parts.setdefault(delivery_id, set()).add(
+                normalized_part_key
+            )
+        result = self.client.request_sync(
+            "v2_ack_task_delivery_part",
+            {"delivery_id": delivery_id, "part_key": normalized_part_key},
+        )
+        return bool(result.get("acknowledged"))
+
+    def _prepare_delivery_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        item = dict(event)
+        delivery_id = str(item.get("delivery_id") or "")
+        if not delivery_id:
+            return item
+        task_id = str(item.get("task_id") or "")
+        binding_row = MinionV2WorkflowService(
+            self.runtime_root
+        ).repository.read_task_delivery(task_id)
+        binding = dict((binding_row or {}).get("current") or {})
+        route = self._live_route_for_binding(binding)
+        if route is None:
+            route = self._recovery_socket_route(delivery_id)
+        if route is None:
+            return None
+        payload = dict(item.get("payload") or {})
+        payload["route"] = route
+        item["payload"] = payload
+        return item
+
+    def _live_route_for_binding(
+        self,
+        binding: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if self.context is None:
+            return None
+        runtime = self.context.port_registry.get("channel:channel")
+        channel_id = str(binding.get("channel_id") or "")
+        endpoint = runtime.get_endpoint(channel_id) if runtime is not None else None
+        if endpoint is None or not endpoint.attached or not endpoint.enabled:
+            return None
+        inspect_health = getattr(endpoint, "inspect_health", None)
+        health = inspect_health() if callable(inspect_health) else {}
+        if isinstance(health, dict) and health.get("healthy") is False:
+            return None
+        target = dict(binding.get("reply_target") or {})
+        sessions = getattr(endpoint, "sessions", None)
+        if isinstance(sessions, dict):
+            session_id = str(target.get("session_id") or "")
+            session = sessions.get(session_id)
+            if session is None or bool(getattr(session, "closed", False)):
+                return None
+            target["request_id"] = (
+                f"task-notification:{uuid4().hex}"
+            )
+        if not target:
+            return None
+        return {
+            "endpoint_id": channel_id,
+            "channel_kind": str(binding.get("channel_kind") or endpoint.endpoint.channel_kind),
+            "reply_target": target,
+            "control_scope_key": str(
+                binding.get("control_scope_key")
+                or target.get("control_scope_key")
+                or f"{endpoint.endpoint.channel_kind}:{channel_id}"
+            ),
+        }
+
+    def _recovery_socket_route(self, delivery_id: str) -> dict[str, Any] | None:
+        if self.context is None:
+            return None
+        runtime = self.context.port_registry.get("channel:channel")
+        endpoints = runtime.list_endpoints() if runtime is not None else ()
+        expected_path = (Path(self.runtime_root) / "pal.sock").resolve(strict=False)
+        for endpoint in endpoints:
+            if str(endpoint.endpoint.channel_kind or "") != "socket":
+                continue
+            socket_path = Path(
+                getattr(endpoint, "socket_path", None) or endpoint.endpoint.binding_key
+            ).expanduser().resolve(strict=False)
+            if socket_path != expected_path or not endpoint.attached or not endpoint.enabled:
+                continue
+            inspect_health = getattr(endpoint, "inspect_health", None)
+            health = inspect_health() if callable(inspect_health) else {}
+            if isinstance(health, dict) and health.get("healthy") is False:
+                continue
+            sessions = getattr(endpoint, "sessions", {})
+            live = [
+                session
+                for session in sessions.values()
+                if not bool(getattr(session, "closed", False))
+            ]
+            if not live:
+                return None
+            session = live[-1]
+            request_id = f"task-notification:{delivery_id}"
+            target = {
+                "session_id": str(session.session_id),
+                "request_id": request_id,
+                "control_scope_key": (
+                    f"socket:{endpoint.endpoint.endpoint_id}:{session.session_id}"
+                ),
+            }
+            return {
+                "endpoint_id": endpoint.endpoint.endpoint_id,
+                "channel_kind": "socket",
+                "reply_target": target,
+                "control_scope_key": target["control_scope_key"],
+            }
+        return None
+
+    @staticmethod
+    def _buffered_event_key(event: dict[str, Any]) -> str:
+        return str(event.get("delivery_id") or "") or "|".join(
+            (
+                str(event.get("event_kind") or ""),
+                str(event.get("workflow_id") or ""),
+                str(event.get("run_id") or ""),
+            )
+        )
 
     async def handle_control_action_async(self, action: ControlAction) -> str:
         if action.action_kind == "minion_v2_human_decision":
@@ -174,7 +417,7 @@ class MinionManagerProvider:
                             else {}
                         ),
                         "actor": str(action.args.get("actor_id") or "pal"),
-                        "source_channel": str(action.args.get("active_channel_id") or "local"),
+                        "source_channel": "control",
                     },
                 )
                 await asyncio.to_thread(self.wake_v2)
@@ -279,6 +522,10 @@ class MinionManagerProvider:
             raise RuntimeError("minion manager did not stop during detach")
         self._cleanup_stale_endpoint()
         self.last_health = {}
+        # A manager/process boundary ends the local delivery attempt, not the
+        # durable event.  Let a reattached provider retry buffered events.
+        with self._buffer_lock:
+            self._inflight_event_keys.clear()
 
     def _stop_process_only(self, *, kill_process_group: bool = False) -> None:
         process = self.process
@@ -479,14 +726,7 @@ class MinionManagerProvider:
     def _buffer_event(self, event: dict[str, Any]) -> None:
         if str(event.get("event_kind") or "") == "progress":
             return
-        key = "|".join(
-            (
-                str(event.get("event_kind") or ""),
-                str(event.get("run_id") or ""),
-                str(event.get("workflow_id") or event.get("invocation_id") or ""),
-                str(dict(event.get("payload") or {}).get("manifest_sha") or ""),
-            )
-        )
+        key = self._buffered_event_key(event)
         with self._buffer_lock:
             if key in self._seen_event_keys:
                 return

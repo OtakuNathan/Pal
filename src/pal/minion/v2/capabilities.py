@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_CONTROL,
+    INDIRECT_LOCAL_WRITE,
+    INDIRECT_UNSAFE_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput,
     MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput,
@@ -44,7 +50,7 @@ if TYPE_CHECKING:
 
 
 MINION_START_WORKFLOW_PURPOSE = (
-    "Start one durable Minion workflow and bind it to the current actor/channel. Before calling this action, search "
+    "Start one durable Minion workflow for the current actor and capture this turn's delivery target on its Task. Before calling this action, search "
     "active Pal skills for an operation manual relevant to the requested work. If one or more relevant skills are "
     "found, ask the user whether to provide them to the workflow and wait for the answer. When the user agrees, pass "
     "the exact approved IDs in skill_refs; when the user declines, omit skill_refs. Never infer consent. The Manager "
@@ -88,8 +94,23 @@ class MinionV2StartWorkflowWorkspace(StrictToolModel):
             "missing repo_path; use existing_repo only when repo_path already exists."
         ),
     )
-    repo_path: str | None = None
-    repo_root: str | None = None
+    repo_path: str | None = Field(
+        default=None,
+        description=(
+            "Exact project repository the workflow may inspect and modify. Bind the "
+            "narrowest repository that owns the deliverable; never pass a parent "
+            "container merely because it also contains requirements, benchmark "
+            "comparators, or sibling implementations. Those inputs must remain "
+            "outside the worker workspace and be supplied explicitly when relevant."
+        ),
+    )
+    repo_root: str | None = Field(
+        default=None,
+        description=(
+            "Legacy path spelling accepted only as an alias for repo_path. It is not "
+            "a broader search root and must identify the same exact project repository."
+        ),
+    )
     primary_language: str | None = None
 
 
@@ -168,10 +189,7 @@ class MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput(StrictT
 
     task: str | None = Field(
         default=None,
-        description=(
-            "Human-readable Task title. Omit it to use the Task bound to the "
-            "current channel."
-        ),
+        description="Human-readable Task title. Required when more than one active Task exists.",
     )
     decision: Literal["accept", "edit", "reject"]
     edit_instruction: str | None = Field(
@@ -181,6 +199,18 @@ class MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput(StrictT
             "already pinned task; new requirements or preferences must use normal Pal "
             "communication and a new workflow revision."
         ),
+    )
+
+
+class MinionV2CapabilitiesMinionV2PublicProviderRebindTaskDeliveryInput(StrictToolModel):
+    """Public semantic address for changing only a Task's reply target."""
+
+    task: str = Field(description="Exact human-readable Task title.")
+    channel_id: str = Field(
+        description=(
+            "Enabled channel endpoint ID that should receive future Task notifications. "
+            "Provider-specific reply-target fields are Manager-owned and are not accepted."
+        )
     )
 
 
@@ -298,6 +328,7 @@ class MinionV2PublicProvider:
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInput,
         aliases=("minion_catalog_set_profile_override",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_profile_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -317,6 +348,7 @@ class MinionV2PublicProvider:
         description="Remove one explicit profile override in the sidecar and restore the current package builtin when one exists.",
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResetProfileOverrideInput,
         aliases=("minion_catalog_reset_profile_override",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def reset_profile_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -339,6 +371,7 @@ class MinionV2PublicProvider:
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput,
         aliases=("minion_catalog_set_family_override",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_family_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -358,6 +391,7 @@ class MinionV2PublicProvider:
         description="Remove one explicit family override in the sidecar and restore the current package builtin when one exists.",
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResetFamilyOverrideInput,
         aliases=("minion_catalog_reset_family_override",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def reset_family_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -380,6 +414,7 @@ class MinionV2PublicProvider:
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderRefreshInput,
         aliases=("minion_catalog_refresh",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def refresh_catalog(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -412,14 +447,14 @@ class MinionV2PublicProvider:
                 args["artifact_ref"] = self.service.resolve_artifact_name(
                     name=artifact_name,
                     actor=actor,
-                    source_channel=channel,
                 )
-            payload = self.service.start_workflow(
+            payload = self._request_manager(
+                "v2_start_workflow",
                 {
                     **args,
                     "actor": actor,
                     "source_channel": channel,
-                    "control_route": self._control_route(call),
+                    "delivery_binding": self._capture_delivery_binding(call),
                 }
             )
             self._wake()
@@ -434,11 +469,12 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="submit_artifact",
         description=(
-            "Publish a durable artifact under a natural-language name in the current actor/channel. This does not execute it. "
+            "Publish a durable artifact under a natural-language name for the current actor. This does not execute it. "
             "Later workflow calls refer to this name; the Manager owns its content hash and internal identity."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput,
         aliases=("minion_submit_artifact",),
+        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
     def submit_artifact(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -462,8 +498,8 @@ class MinionV2PublicProvider:
         scope="minion_task",
         action_name="search",
         description=(
-            "Search the durable Minion V2 Task Ledger across channels for the current actor. Use this before claiming that a workflow cannot be "
-            "found, and when the current channel has no bound workflow. Returns semantic Task details and compact Workflow phase/liveness summaries "
+            "Search the durable Minion V2 Task Ledger for the current actor. Use this before claiming that a workflow cannot be "
+            "found. Returns semantic Task details and compact Workflow phase/liveness summaries "
             "without exposing Manager identities. An empty query lists the most recently updated Tasks."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSearchInput,
@@ -528,7 +564,6 @@ class MinionV2PublicProvider:
             task_id, workflow_id = self.service.resolve_task_workflow_selector(
                 selector=str(call.args.get("task") or ""),
                 actor=actor,
-                source_channel=channel,
                 include_terminal=True,
             )
             view = str(call.args.get("view") or "status")
@@ -563,6 +598,7 @@ class MinionV2PublicProvider:
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput,
         aliases=("minion_resume_workflow",),
+        execution=INDIRECT_CONTROL,
     )
     def resume_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -570,7 +606,6 @@ class MinionV2PublicProvider:
             _, workflow_id = self.service.resolve_task_workflow_selector(
                 selector=str(call.args.get("task") or ""),
                 actor=actor,
-                source_channel=channel,
                 include_terminal=False,
             )
             if not workflow_id:
@@ -599,6 +634,7 @@ class MinionV2PublicProvider:
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput,
         aliases=("minion_restart_execution",),
+        execution=INDIRECT_CONTROL,
     )
     def restart_execution(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -606,7 +642,6 @@ class MinionV2PublicProvider:
             _, workflow_id = self.service.resolve_task_workflow_selector(
                 selector=str(call.args.get("task") or ""),
                 actor=actor,
-                source_channel=channel,
                 include_terminal=False,
             )
             if not workflow_id:
@@ -616,7 +651,6 @@ class MinionV2PublicProvider:
                 actor=actor,
                 source_channel=channel,
                 reason=str(call.args.get("reason") or ""),
-                control_route=self._control_route(call),
             )
             self._wake()
             return _public_result("minion execution restart requested", payload)
@@ -637,6 +671,7 @@ class MinionV2PublicProvider:
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput,
         aliases=("minion_resolve_triage",),
+        execution=INDIRECT_CONTROL,
     )
     def resolve_triage(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -644,7 +679,6 @@ class MinionV2PublicProvider:
             _, workflow_id = self.service.resolve_task_workflow_selector(
                 selector=str(call.args.get("task") or ""),
                 actor=actor,
-                source_channel=channel,
                 include_terminal=False,
             )
             if not workflow_id:
@@ -668,11 +702,12 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="submit_human_decision",
         description=(
-            "Submit Accept/Edit/Reject for the current channel-bound architecture review. The Manager resolves the unique pending card and "
-            "atomically validates its actor, channel, revision, and content before acting. Use this manual path when an inline card expired."
+            "Submit Accept/Edit/Reject for an architecture review. The Manager resolves the unique pending card and "
+            "atomically validates its actor, revision, and content before acting. Use this manual path when an inline card is unavailable."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
         aliases=("minion_submit_human_decision",),
+        execution=INDIRECT_CONTROL,
     )
     def submit_human_decision(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -680,7 +715,6 @@ class MinionV2PublicProvider:
             _, workflow_id = self.service.resolve_task_workflow_selector(
                 selector=str(call.args.get("task") or ""),
                 actor=actor,
-                source_channel=channel,
                 include_terminal=False,
             )
             if not workflow_id:
@@ -695,7 +729,6 @@ class MinionV2PublicProvider:
                     "workflow_id": workflow_id,
                     "actor": actor,
                     "source_channel": channel,
-                    "control_route": self._control_route(call),
                 }
             )
             self._wake()
@@ -708,14 +741,60 @@ class MinionV2PublicProvider:
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="minion",
+        action_name="rebind_task_delivery",
+        description=(
+            "Change only where future notifications for one Task are delivered. The Manager keeps the Task, workflow, "
+            "workers, graph, and review state unchanged. Use this when the user explicitly asks to receive a running "
+            "Task's questions, review cards, or completion on another enabled channel endpoint."
+        ),
+        InputModel=MinionV2CapabilitiesMinionV2PublicProviderRebindTaskDeliveryInput,
+        aliases=("minion_rebind_task_delivery",),
+        guidance=ToolGuidance(
+            purpose="Rebind one Task's Manager-owned reply target without changing its workflow.",
+            use_when="Use only after the user explicitly names a Task and destination channel endpoint.",
+            do_not_use_when="Do not use merely because the user contacted Pal from another channel; ordinary conversation never moves Task delivery.",
+            failure_next_steps="List channel endpoints or correct the exact Task title; never edit workflow state to repair delivery.",
+        ),
+        execution=DIRECT_CONTROL,
+    )
+    def rebind_task_delivery(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, _channel = self._actor_and_channel(call)
+            task_id = self.service.resolve_task_selector(
+                selector=str(call.args.get("task") or ""),
+                actor=actor,
+            )
+            binding = self._resolve_rebind_binding(
+                call,
+                str(call.args.get("channel_id") or ""),
+            )
+            payload = self._request_manager(
+                "v2_rebind_task_delivery",
+                {"task_id": task_id, "binding": binding},
+            )
+            public = {
+                "task": str(call.args.get("task") or "").strip(),
+                "channel_id": str(binding.get("channel_id") or "").strip(),
+                "changed": bool(payload.get("changed")),
+            }
+            return _public_result("minion Task delivery rebound", public)
+        except ValueError as exc:
+            return _invalid("minion Task delivery rebind invalid", exc)
+        except Exception as exc:
+            return _error("minion Task delivery rebind failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
         action_name="answer_question",
         description=(
-            "Answer the single pending Architect question for the current channel-bound workflow with custom free text. "
+            "Answer the single pending Architect question for the named Task with custom free text. "
             "Use this when the user's response is not one of the inline options. The Architect remains running and receives "
             "the answer through its existing tool call."
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput,
         aliases=("minion_answer_question",),
+        execution=INDIRECT_CONTROL,
     )
     def answer_question(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -723,7 +802,6 @@ class MinionV2PublicProvider:
             _, workflow_id = self.service.resolve_task_workflow_selector(
                 selector=str(call.args.get("task") or ""),
                 actor=actor,
-                source_channel=channel,
                 include_terminal=False,
             )
             if not workflow_id:
@@ -750,6 +828,7 @@ class MinionV2PublicProvider:
         description="Request asynchronous pause or cancel for a V2 workflow. Child aggregates stop at safe points before the workflow settles.",
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput,
         aliases=("minion_control_workflow",),
+        execution=INDIRECT_CONTROL,
     )
     def control_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -757,7 +836,6 @@ class MinionV2PublicProvider:
             _, workflow_id = self.service.resolve_task_workflow_selector(
                 selector=str(call.args.get("task") or ""),
                 actor=actor,
-                source_channel=channel,
                 include_terminal=False,
             )
             if not workflow_id:
@@ -783,6 +861,7 @@ class MinionV2PublicProvider:
         description="Archive a terminal V2 workflow. Active workflows must be cancelled and settled first.",
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput,
         aliases=("minion_archive_workflow",),
+        execution=INDIRECT_CONTROL,
     )
     def archive_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -790,7 +869,6 @@ class MinionV2PublicProvider:
             _, workflow_id = self.service.resolve_task_workflow_selector(
                 selector=str(call.args.get("task") or ""),
                 actor=actor,
-                source_channel=channel,
                 include_terminal=True,
             )
             if not workflow_id:
@@ -808,44 +886,56 @@ class MinionV2PublicProvider:
 
     def _actor_and_channel(self, call: CapabilityCall) -> tuple[str, str]:
         actor = str(call.meta.get("actor_id") or call.meta.get("persona_id") or "pal")
-        channel = str(call.meta.get("channel_id") or "")
-        turn_id = str(call.meta.get("turn_id") or "")
-        if self.context is not None and turn_id:
-            core = self.context.port_registry.get("core:core")
-            continuation = getattr(getattr(core, "state", None), "active_turns", {}).get(turn_id)
-            envelope = getattr(continuation, "channel_envelope", None)
-            if envelope is not None:
-                try:
-                    from pal.control.routing import route_from_channel_envelope
+        binding = self._capture_delivery_binding(call)
+        return actor, str(binding.get("channel_id") or "local")
 
-                    route = route_from_channel_envelope(envelope)
-                    channel = f"{route.channel_kind}:{route.endpoint_id}"
-                except Exception:
-                    pass
-        return actor, channel or "local"
-
-    def _control_route(self, call: CapabilityCall) -> dict[str, Any]:
+    def _capture_delivery_binding(self, call: CapabilityCall) -> dict[str, Any]:
         turn_id = str(call.meta.get("turn_id") or "")
         if self.context is None or not turn_id:
             return {}
-        core = self.context.port_registry.get("core:core")
-        continuation = getattr(getattr(core, "state", None), "active_turns", {}).get(turn_id)
-        envelope = getattr(continuation, "channel_envelope", None)
-        if envelope is None:
+        runtime = getattr(self.context, "execution_runtime", None)
+        port = getattr(runtime, "provider_registry", {}).get("core:turn_io")
+        capture = getattr(port, "capture_delivery_binding", None)
+        if not callable(capture):
             return {}
-        try:
-            from pal.control.routing import route_from_channel_envelope
+        return dict(capture(turn_id) or {})
 
-            route = route_from_channel_envelope(envelope)
-            return {
-                "endpoint_id": route.endpoint_id,
-                "channel_kind": route.channel_kind,
-                "reply_target": dict(route.reply_target),
-                "control_scope_key": route.control_scope_key,
-                "correlation_id": route.correlation_id,
-            }
-        except Exception:
-            return {}
+    def _resolve_rebind_binding(
+        self,
+        call: CapabilityCall,
+        channel_id: str,
+    ) -> dict[str, Any]:
+        requested = str(channel_id or "").strip()
+        if not requested:
+            raise ValueError("channel_id is required")
+        current = self._capture_delivery_binding(call)
+        if requested == str(current.get("channel_id") or ""):
+            return current
+        if self.context is None:
+            raise ValueError("channel runtime is unavailable")
+        runtime = self.context.port_registry.get("channel:channel")
+        endpoint = runtime.get_endpoint(requested) if runtime is not None else None
+        if endpoint is None:
+            raise ValueError(f"channel endpoint {requested!r} was not found")
+        if not bool(getattr(endpoint, "attached", False)):
+            raise ValueError(f"channel endpoint {requested!r} is detached")
+        if not bool(getattr(endpoint, "enabled", False)):
+            raise ValueError(f"channel endpoint {requested!r} is disabled")
+        reply_target = dict(endpoint.derive_default_reply_target() or {})
+        if not reply_target:
+            raise ValueError(
+                f"channel endpoint {requested!r} has no unambiguous reply target"
+            )
+        channel_kind = str(endpoint.endpoint.channel_kind or "")
+        return {
+            "channel_id": requested,
+            "channel_kind": channel_kind,
+            "reply_target": reply_target,
+            "control_scope_key": str(
+                reply_target.get("control_scope_key")
+                or f"{channel_kind}:{requested}"
+            ),
+        }
 
     def _wake(self) -> None:
         if self.wake_manager is None:

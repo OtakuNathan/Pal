@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pal.foundation.log_paths import pal_log_root
+from pal.foundation.encryption import ensure_runtime_snapshot_key
 from pal.foundation.sidecar import python_subprocess_env
 from pal.minion.ipc import (
     ROLE_GATEWAY_TOKEN_ENV,
@@ -610,6 +611,8 @@ def _append_runtime_root_binds(
 ) -> None:
     runtime_root = Path(runtime_root).expanduser()
     _append_dir_scaffold(args, runtime_root)
+    snapshot_key = ensure_runtime_snapshot_key(runtime_root)
+    _append_bind_path(args, snapshot_key, read_only=True)
     for file_name in ("pal.sqlite3", "pal.sqlite3-shm", "pal.sqlite3-wal", "config.toml"):
         path = runtime_root / file_name
         if path.exists():
@@ -622,7 +625,6 @@ def _append_runtime_root_binds(
     run_dir_value = str(pack.workspace.get("run_dir") or "").strip()
     run_dir = Path(run_dir_value).expanduser() if run_dir_value else None
     if run_dir is not None and run_dir.is_dir():
-        (run_dir / "tool-results").mkdir(parents=True, exist_ok=True)
         _append_bind_path(args, run_dir, read_only=False)
     endpoint_path = minion_role_socket_path(runtime_root)
     if not endpoint_path.exists():

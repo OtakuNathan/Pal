@@ -38,7 +38,13 @@ def bound_reference_payload(
         item = dict(raw or {})
         if str(item.get("name") or "") != name:
             continue
-        if bool(item.get("bound_input")):
+        path = Path(str(item.get("path") or "")).expanduser()
+        # A projected /pal path is visible only inside the bwrap worker.  A
+        # submission preflight can also run in a Manager-side continuation or
+        # in a recovery probe, where that path is intentionally unavailable.
+        # Resolve the authenticated immutable input by name in that case;
+        # never accept a caller-supplied host path as a fallback.
+        if bool(item.get("bound_input")) or not path.is_file():
             from pal.minion.v2.role_gateway import role_gateway_client_from_env
 
             gateway = role_gateway_client_from_env(
@@ -50,8 +56,6 @@ def bound_reference_payload(
                 if not isinstance(value, Mapping):
                     raise ValueError(f"bound input {name!r} must contain a JSON object")
                 return dict(value)
-        path = Path(str(item.get("path") or "")).expanduser()
-        if not path.is_file():
             raise ValueError(f"bound input {name!r} is unavailable at {path}")
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, Mapping):

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import threading
 from dataclasses import dataclass, field
 from html import escape
@@ -51,12 +50,10 @@ class ToolResultPage:
 @dataclass
 class ToolResultPagerStore:
     retention_user_turns: int = DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS
-    storage_root: Path | None = None
     state_backend: LogicalExecutionStateBackend = field(
         default_factory=InMemoryLogicalExecutionState
     )
     _turn_contexts: dict[str, LogicalExecutionContext] = field(default_factory=dict)
-    _last_context: LogicalExecutionContext | None = None
     _lock: threading.RLock = field(default_factory=threading.RLock)
 
     def begin_turn(
@@ -74,30 +71,41 @@ class ToolResultPagerStore:
         session_id = str(scope_key or "").strip() or "local:default"
         semantic_input = str(input_id or "").strip() or normalized_turn_id or "input:default"
         context = self.state_backend.begin_input(
-            logical_session_id=session_id,
+            execution_lifetime_id=session_id,
             input_id=semantic_input,
             retention_user_turns=self.retention_user_turns,
         )
         with self._lock:
+            self._turn_contexts = {
+                key: candidate
+                for key, candidate in self._turn_contexts.items()
+                if not (
+                    candidate.execution_lifetime_id
+                    == context.execution_lifetime_id
+                    and context.current_user_turn
+                    >= candidate.current_user_turn + self.retention_user_turns
+                )
+            }
             if normalized_turn_id:
                 self._turn_contexts[normalized_turn_id] = context
-            self._last_context = context
         _ = runtime_root
         return context
 
     def context_for_turn(self, turn_id: str | None) -> LogicalExecutionContext:
         normalized = str(turn_id or "").strip()
+        if not normalized:
+            raise ValueError("tool result state requires an explicit turn_id")
         with self._lock:
-            context = self._turn_contexts.get(normalized) if normalized else None
-            if context is None:
-                context = self._last_context
+            context = self._turn_contexts.get(normalized)
         if context is not None:
-            return self.state_backend.context(context.logical_session_id)
+            return self.state_backend.context(context.execution_lifetime_id)
+        # Direct host invocations do not have a Core-owned L1 turn. Give that
+        # explicit id an isolated lifetime; never borrow a previous context.
         return self.begin_turn(
             runtime_root=None,
-            turn_id=normalized or "local:default",
-            scope_key="local:default",
-            input_id=normalized or "input:default",
+            turn_id=normalized,
+            scope_key=f"local:{normalized}",
+            input_id=normalized,
         )
 
     def store(
@@ -118,20 +126,16 @@ class ToolResultPagerStore:
         normalized_ref = str(result_ref or "").strip()
         if not normalized_ref:
             raise ValueError("result_ref is required")
-        normalized_turn_id = str(turn_id or "").strip() or "unknown_turn"
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            raise ValueError("tool result state requires an explicit turn_id")
         context = self.context_for_turn(normalized_turn_id)
         rendered_text = str(rendered or "")
         resolved_page_size = max(256, int(page_size or DEFAULT_TOOL_RESULT_PAGE_SIZE))
-        path: Path | None = None
-        root = self._ephemeral_root(runtime_root)
-        if root is not None and isinstance(self.state_backend, InMemoryLogicalExecutionState):
-            turn_dir = root / _safe_file_name(context.logical_session_id)
-            turn_dir.mkdir(parents=True, exist_ok=True)
-            path = turn_dir / f"{_safe_file_name(normalized_ref)}.txt"
-            path.write_text(rendered_text, encoding="utf-8")
+        _ = runtime_root
         manifest = PagerHandleManifest(
             result_ref=normalized_ref,
-            logical_session_id=context.logical_session_id,
+            execution_lifetime_id=context.execution_lifetime_id,
             tool_name=str(tool_name or ""),
             status=str(status or ""),
             ok=bool(ok),
@@ -144,7 +148,6 @@ class ToolResultPagerStore:
             rendered=rendered_text,
             origin=dict(origin or {}),
             delivery_manifest=dict(context_delivery or {}),
-            backing_path=str(path) if path is not None else "",
         )
         return self.state_backend.store_pager(manifest)
 
@@ -156,19 +159,28 @@ class ToolResultPagerStore:
         page_size: int | None = None,
         anchor: str = "head",
         turn_id: str | None = None,
-        logical_session_id: str = "",
+        execution_lifetime_id: str = "",
     ) -> ToolResultPage | None:
         normalized_ref = str(result_ref or "").strip()
         if not normalized_ref:
             return None
         normalized_anchor = _normalize_anchor(anchor)
-        context = (
-            self.state_backend.context(str(logical_session_id))
-            if str(logical_session_id or "").strip()
-            else self.context_for_turn(turn_id)
-        )
+        if str(execution_lifetime_id or "").strip():
+            context = self.state_backend.context(str(execution_lifetime_id))
+        elif str(turn_id or "").strip():
+            context = self.context_for_turn(turn_id)
+        else:
+            resolve_lifetime = getattr(self.state_backend, "pager_lifetime", None)
+            lifetime = (
+                str(resolve_lifetime(normalized_ref) or "")
+                if callable(resolve_lifetime)
+                else ""
+            )
+            if not lifetime:
+                return None
+            context = self.state_backend.context(lifetime)
         result = self.state_backend.read_pager(
-            logical_session_id=context.logical_session_id,
+            execution_lifetime_id=context.execution_lifetime_id,
             result_ref=normalized_ref,
             page=page,
             page_size=page_size,
@@ -203,18 +215,51 @@ class ToolResultPagerStore:
             context_delivery=dict(result.delivery_manifest),
         )
 
-    def prune(self, *, runtime_root: Path | None = None) -> None:
-        _ = runtime_root
+    def delete(self, result_ref: str, *, execution_lifetime_id: str) -> None:
+        context = self.state_backend.context(execution_lifetime_id)
+        retire = getattr(self.state_backend, "retire_pagers", None)
+        if not callable(retire):
+            return
+        retire(
+            execution_lifetime_id=context.execution_lifetime_id,
+            result_refs=(str(result_ref),),
+        )
 
-    def delete(self, result_ref: str) -> None:
-        _ = result_ref
+    def retire(
+        self,
+        *,
+        execution_lifetime_id: str,
+        result_refs: tuple[str, ...],
+    ) -> None:
+        retire = getattr(self.state_backend, "retire_pagers", None)
+        if not callable(retire):
+            return
+        retire(
+            execution_lifetime_id=str(execution_lifetime_id),
+            result_refs=tuple(str(item) for item in result_refs),
+        )
 
-    def _ephemeral_root(self, runtime_root: Path | None) -> Path | None:
-        if self.storage_root is not None:
-            return Path(self.storage_root)
-        if runtime_root is None:
-            return None
-        return Path(runtime_root) / "data" / "tool_results" / "ephemeral"
+    def discard_uncommitted(self, *, turn_id: str, result_ref: str) -> None:
+        """Retire a result that failed to enter the owning L1 protocol."""
+
+        normalized_ref = str(result_ref or "").strip()
+        if not normalized_ref:
+            return
+        with self._lock:
+            context = self._turn_contexts.get(str(turn_id or "").strip())
+        lifetime = (
+            context.execution_lifetime_id
+            if context is not None
+            else str(getattr(self.state_backend, "pager_lifetime", lambda _ref: "")(
+                normalized_ref
+            ) or "")
+        )
+        if not lifetime:
+            return
+        self.retire(
+            execution_lifetime_id=lifetime,
+            result_refs=(normalized_ref,),
+        )
 
 
 def render_tool_result_page_for_llm(page: ToolResultPage, *, tag: str = "tool_result") -> str:
@@ -264,9 +309,3 @@ def render_tool_result_page_for_llm(page: ToolResultPage, *, tag: str = "tool_re
 
 def _normalize_anchor(value: object) -> str:
     return "tail" if str(value or "").strip().lower() in {"tail", "end", "last", "bottom"} else "head"
-
-
-def _safe_file_name(value: str) -> str:
-    text = str(value or "").strip()
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("._")
-    return safe or "result"

@@ -21,6 +21,8 @@ from pal.execution.file_read import (
 )
 from pal.execution.file_state import FileStateCache
 from pal.execution.generated_tool_models import ExecutionFileCapabilitiesFileCapabilityMixinReadInput
+from pal.execution.session_state import InMemoryLogicalExecutionState
+from pal.execution.tool_facade import ToolRejectedError
 from pal.shared import IntrospectionCall, RuntimeStatus
 
 
@@ -314,34 +316,58 @@ class ErrorHandlingTests(_TempFileMixin, unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    class _LogicalRuntime:
+        def __init__(self) -> None:
+            self.logical_state = InMemoryLogicalExecutionState()
+
+        def logical_context_for_turn(self, turn_id: str):
+            lifetime = f"test:{turn_id}"
+            try:
+                return self.logical_state.context(lifetime)
+            except KeyError:
+                return self.logical_state.begin_input(
+                    execution_lifetime_id=lifetime,
+                    input_id=turn_id,
+                )
+
     def test_input_model_has_required_file_path(self) -> None:
         schema = ExecutionFileCapabilitiesFileCapabilityMixinReadInput.model_json_schema(mode="validation")
         self.assertIn("file_path", schema.get("required", []))
 
-    def test_capability_visibility_uses_turn_id_as_context_scope(self) -> None:
+    def test_capability_visibility_uses_explicit_logical_context_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "capability-scope.txt"
             path.write_text("visible once per context\n", encoding="utf-8")
             capability = FileCapabilityMixin()
+            runtime = self._LogicalRuntime()
             first = capability.file_read(
                 IntrospectionCall(
                     name="op_file_read",
                     args={"file_path": str(path)},
-                    meta={"turn_id": "read-context-a"},
+                    meta={
+                        "direct_context_id": "read-context-a",
+                        "execution_runtime": runtime,
+                    },
                 )
             )
             repeated = capability.file_read(
                 IntrospectionCall(
                     name="op_file_read",
                     args={"file_path": str(path)},
-                    meta={"turn_id": "read-context-a"},
+                    meta={
+                        "direct_context_id": "read-context-a",
+                        "execution_runtime": runtime,
+                    },
                 )
             )
             other_context = capability.file_read(
                 IntrospectionCall(
                     name="op_file_read",
                     args={"file_path": str(path)},
-                    meta={"turn_id": "read-context-b"},
+                    meta={
+                        "direct_context_id": "read-context-b",
+                        "execution_runtime": runtime,
+                    },
                 )
             )
 
@@ -349,26 +375,21 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(repeated.text, FILE_UNCHANGED_STUB)
         self.assertIn("visible once", other_context.text)
 
-    def test_unscoped_capability_calls_never_share_visibility(self) -> None:
+    def test_unscoped_capability_call_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "unscoped.txt"
             path.write_text("always returned without a context id\n", encoding="utf-8")
             capability = FileCapabilityMixin()
-            first = capability.file_read(
-                IntrospectionCall(
-                    name="op_file_read",
-                    args={"file_path": str(path)},
+            with self.assertRaisesRegex(
+                ToolRejectedError,
+                "explicit logical turn",
+            ):
+                capability.file_read(
+                    IntrospectionCall(
+                        name="op_file_read",
+                        args={"file_path": str(path)},
+                    )
                 )
-            )
-            second = capability.file_read(
-                IntrospectionCall(
-                    name="op_file_read",
-                    args={"file_path": str(path)},
-                )
-            )
-
-        self.assertIn("always returned", first.text)
-        self.assertIn("always returned", second.text)
 
 
 if __name__ == "__main__":

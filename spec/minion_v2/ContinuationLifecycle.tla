@@ -3,8 +3,8 @@ EXTENDS Naturals, TLC
 
 CONSTANT MaxRetries
 
-Schemas == {"v5", "v6", "other"}
-Shapes == {"items", "turns", "invalid"}
+Schemas == {"v7", "v8", "other"}
+Shapes == {"plaintext", "encrypted", "invalid"}
 Phases == {
     "Stored", "Ready", "Running", "Failed", "Rejected",
     "Completed", "Terminal"
@@ -35,15 +35,15 @@ Init ==
 
 AdmitCurrent ==
     /\ phase = "Stored"
-    /\ schema = "v6"
-    /\ shape = "turns"
+    /\ schema = "v8"
+    /\ shape = "encrypted"
     /\ phase' = "Ready"
     /\ UNCHANGED <<schema, shape, workerStarted, errorClass,
                     errorVisible, retries>>
 
 RejectUnsupported ==
     /\ phase = "Stored"
-    /\ ~(schema = "v6" /\ shape = "turns")
+    /\ ~(schema = "v8" /\ shape = "encrypted")
     /\ phase' = "Rejected"
     /\ errorClass' = "deterministic"
     /\ errorVisible' = TRUE
@@ -51,8 +51,8 @@ RejectUnsupported ==
 
 StartWorker ==
     /\ phase = "Ready"
-    /\ schema = "v6"
-    /\ shape = "turns"
+    /\ schema = "v8"
+    /\ shape = "encrypted"
     /\ phase' = "Running"
     /\ workerStarted' = TRUE
     /\ UNCHANGED <<schema, shape, errorClass, errorVisible, retries>>
@@ -120,10 +120,13 @@ TypeOK ==
     /\ retries \in 0..MaxRetries
 
 WorkerStartsOnlyWithCurrentL1 ==
-    workerStarted => schema = "v6" /\ shape = "turns"
+    workerStarted => schema = "v8" /\ shape = "encrypted"
 
 LegacyCheckpointNeverBecomesReady ==
-    schema = "v5" => phase \notin {"Ready", "Running", "Completed"}
+    schema = "v7" => phase \notin {"Ready", "Running", "Completed"}
+
+PlaintextCheckpointNeverBecomesReady ==
+    shape = "plaintext" => phase \notin {"Ready", "Running", "Completed"}
 
 FailureRemainsVisible ==
     errorClass # "none" => errorVisible

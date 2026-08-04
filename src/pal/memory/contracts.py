@@ -242,7 +242,19 @@ class MemoryServicePort(Protocol):
     def upsert_l1_assistant(self, turn_id: str, message: "LLMMessageIR") -> "L1TurnIR":
         ...
 
+    def discard_l1_assistant(self, turn_id: str, message_id: str) -> "L1TurnIR":
+        ...
+
     def append_l1_tool_result(self, turn_id: str, result: "ToolResultIR") -> "L1TurnIR":
+        ...
+
+    def rollback_l1_tool_result(
+        self,
+        turn_id: str,
+        *,
+        previous: "L1TurnIR",
+        call_id: str,
+    ) -> "L1TurnIR":
         ...
 
     def settle_l1_turn(self, turn_id: str) -> "L1TurnIR":

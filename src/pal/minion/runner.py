@@ -22,6 +22,11 @@ from pal.core import AgentTurnRuntime, CoreRuntimeState, MainContext
 from pal.core.module_lifecycle import ModuleLifecycle
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.core.runtime_config import RuntimeConfig
+from pal.core.runtime_state import (
+    RuntimeSnapshotCoordinator,
+    RuntimeSnapshotIdentity,
+    runtime_spec_hash,
+)
 from pal.core.prompt_debug_log import (
     append_prompt_debug_log,
     render_llm_outcome_debug_log,
@@ -60,19 +65,17 @@ from pal.llm.ir import (
     MessageState,
     TextPartIR,
 )
-from pal.llm.serde import message_from_payload, message_to_payload
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.lsp import build_lsp_plugin
 from pal.memory import (
     L1MessageKind,
     L1TranscriptMessage,
-    L2Entry,
     L3ProviderSelector,
     MemoryService,
     build_ollama_embedding_provider_from_config,
     register_with_core as register_memory_with_core,
 )
-from pal.memory.turn_ir import L1TurnIR, L1TurnState, L1TurnStore
+from pal.memory.turn_ir import L1TurnState
 from pal.memory.tool_protocol import l1_tool_protocol_validation_error
 from pal.memory.prompt import MemoryPromptFragmentProvider
 from pal.memory.compact import normalize_l1_transcript
@@ -80,10 +83,11 @@ from pal.minion.compact import (
     MinionCompactionPolicy,
 )
 from pal.minion.checkpoint import (
-    AGENT_SESSION_CHECKPOINT_SCHEMA_VERSION,
     AgentSessionCheckpointError,
-    normalize_agent_session_checkpoint,
+    open_agent_session_checkpoint,
+    seal_agent_session_checkpoint,
 )
+from pal.minion.v2.role_contracts import role_session_stage_key
 from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.llm_broker import MinionBrokerLLMRuntime
 from pal.minion.web_broker import MinionBrokerWebClient
@@ -124,6 +128,16 @@ from pal.shared import (
     default_tool_result_text,
 )
 from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository, WebFetchService, register_with_core as register_web_fetch_with_core
+
+
+DEFAULT_MINION_OUTPUT_LENGTH_RECOVERY_ROUNDS = 3
+MINION_OUTPUT_LENGTH_RECOVERY_NOTE = (
+    "The previous assistant response reached the output limit and was discarded; "
+    "do not repeat, recap, or continue that response as prose. Resume from the "
+    "existing workspace and checklist. Execute only the next bounded action with "
+    "complete tool calls. Split large edits across multiple tool-call rounds and "
+    "write content directly to files. Keep the final reply short."
+)
 from pal.web_search import WebSearchProviderRepository, WebSearchService, register_with_core as register_web_search_with_core
 from pal.wizard.runtime import ALL_MODELS, DEFAULT_LLM_ENDPOINTS, DEFAULT_WEB_FETCH_PROVIDERS, DEFAULT_WEB_SEARCH_PROVIDERS
 
@@ -139,6 +153,8 @@ class MinionRuntimeBundle:
     llm_runtime: Any
     execution_runtime: Any
     memory_service: MemoryService
+    module_registry: Any
+    runtime_state_coordinator: RuntimeSnapshotCoordinator
     config: RuntimeConfig | None = None
     close_async: Callable[[], Awaitable[None]] | None = None
 
@@ -373,6 +389,8 @@ class MinionAgentLoopState:
     pending_tool_results: list[ToolExecutionResult] = field(default_factory=list)
     llm_round_count: int = 0
     tool_call_count: int = 0
+    output_length_recovery_count: int = 0
+    pending_output_length_recovery_note: str = ""
 
 
 @dataclass
@@ -524,9 +542,12 @@ class MinionRunner:
         return 0
 
     def _completion_gate_progress_marker(self) -> tuple[int, tuple[tuple[str, str], ...]]:
+        checkpoint_state = dict(
+            self._agent_session_checkpoint.get("coroutine_state") or {}
+        )
         tool_call_count = max(
             self._observed_tool_call_count,
-            int(self._agent_session_checkpoint.get("tool_call_count") or 0),
+            int(checkpoint_state.get("tool_call_count") or 0),
         )
         artifacts = tuple(
             sorted(
@@ -582,8 +603,51 @@ class MinionRunner:
             if isinstance(self.pack.metadata.get("requirements_brief"), dict):
                 workspace.setdefault("requirements_brief", dict(self.pack.metadata.get("requirements_brief") or {}))
             if isinstance(self.pack.metadata.get("minion_v2"), dict):
-                workspace.setdefault("minion_v2", dict(self.pack.metadata.get("minion_v2") or {}))
+                # ``workspace.minion_v2`` already carries the assignment-bound
+                # fields from the prompt pack.  The Manager also puts derived
+                # role contracts (for example the verifier's
+                # ``swe_verification_tool_contract``) in metadata.  A
+                # ``setdefault`` here silently discarded those derived fields
+                # whenever the workspace had any binding at all, so a verifier
+                # could record a perfectly located finding and still fail to
+                # route it because its repair-owner map was missing.  Merge the
+                # two projections, with the prompt-pack workspace remaining the
+                # authoritative value for fields that are bound there.
+                bound_minion_v2 = dict(workspace.get("minion_v2") or {})
+                bound_minion_v2.update(
+                    {
+                        key: value
+                        for key, value in dict(self.pack.metadata.get("minion_v2") or {}).items()
+                        if key not in bound_minion_v2
+                    }
+                )
+                workspace["minion_v2"] = bound_minion_v2
         workspace.setdefault("review_tool_evidence_refs", self.review_tool_evidence_refs)
+        session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
+        session_id = str(session_metadata.get("session_id") or "").strip()
+        restored = self._load_agent_session_checkpoint(
+            workspace,
+            session_id=session_id,
+            bundle=bundle,
+        )
+        if restored:
+            try:
+                await bundle.runtime_state_coordinator.restore(
+                    dict(restored["runtime_snapshot"]),
+                    expected_identity=RuntimeSnapshotIdentity(
+                        logical_coroutine_id=str(restored["logical_coroutine_id"]),
+                        workflow_id=str(restored["workflow_id"]),
+                        stage_key=str(restored["stage_key"]),
+                        sequence=int(restored["sequence"]),
+                        producer_fencing_token=int(restored["producer_fencing_token"]),
+                        runtime_spec_hash=str(restored["runtime_spec_hash"]),
+                    ),
+                )
+            except (TypeError, ValueError, RuntimeError) as exc:
+                raise AgentSessionCheckpointError(
+                    "manager-selected agent continuation contains invalid runtime module state"
+                ) from exc
+        restored_state = dict(restored.get("coroutine_state") or {})
         execution_runtime = MinionScopedExecutionRuntime(
             bundle.execution_runtime,
             self.pack.allowed_capabilities,
@@ -599,11 +663,7 @@ class MinionRunner:
             for spec in execution_runtime.build_llm_tool_contracts()
             if str(dict(spec.get("function") or {}).get("name") or "").strip()
         ]
-        session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
-        session_id = str(session_metadata.get("session_id") or "").strip()
-        restored = self._load_agent_session_checkpoint(workspace, session_id=session_id)
-        _restore_minion_memory_state(memory_service, restored)
-        initial_instruction = str(restored.get("initial_instruction") or self.pack.instruction or self.pack.goal).strip()
+        initial_instruction = str(restored_state.get("initial_instruction") or self.pack.instruction or self.pack.goal).strip()
         current_channel_envelope = _minion_task_envelope(
             self.pack,
             minion_id=self.minion_id,
@@ -615,13 +675,13 @@ class MinionRunner:
                 {**self.pack.to_dict(), "goal": initial_instruction, "instruction": initial_instruction}
             )
         channel_envelope = _minion_task_envelope(prompt_pack, minion_id=self.minion_id, run_id=self.run_id)
-        response_keys = [str(item) for item in list(restored.get("response_keys") or []) if str(item)]
+        response_keys = [str(item) for item in list(restored_state.get("response_keys") or []) if str(item)]
         previous_response_keys = set(response_keys)
         response_key = str(session_metadata.get("response_key") or "").strip()
         response_text = ""
         if restored and response_key and response_key not in response_keys:
             response_text = self._new_session_response_message(
-                restored,
+                restored_state,
                 response_key=response_key,
                 response_text=_minion_primary_input(current_channel_envelope),
             )
@@ -632,9 +692,14 @@ class MinionRunner:
             not restored
             or bool(response_key and response_key not in previous_response_keys)
         )
+        self._restore_invocation_checkpoint_state(
+            restored_state,
+            active_response_key=response_key,
+            memory_candidate_sink=memory_candidate_sink,
+        )
         if restored:
             event_text = response_text if semantic_input_is_new else ""
-            active_input_id = str(restored.get("active_input_id") or "").strip()
+            active_input_id = str(restored_state.get("active_input_id") or "").strip()
             channel_envelope = ChannelEnvelope(
                 event=EventEnvelope(
                     event_kind=EventKind.USER_MESSAGE,
@@ -655,8 +720,15 @@ class MinionRunner:
             memory_service=memory_service,
             memory_candidate_sink=memory_candidate_sink,
             channel_envelope=channel_envelope,
-            llm_round_count=max(0, int(restored.get("llm_round_count") or 0)),
-            tool_call_count=max(0, int(restored.get("tool_call_count") or 0)),
+            llm_round_count=max(0, int(restored_state.get("llm_round_count") or 0)),
+            tool_call_count=max(0, int(restored_state.get("tool_call_count") or 0)),
+            output_length_recovery_count=max(
+                0,
+                int(restored_state.get("output_length_recovery_count") or 0),
+            ),
+            pending_output_length_recovery_note=str(
+                restored_state.get("pending_output_length_recovery_note") or ""
+            ),
         )
         self._observed_tool_call_count = max(
             self._observed_tool_call_count,
@@ -670,7 +742,12 @@ class MinionRunner:
         forced_retry_note = str(forced_retry_note or "").strip()
 
         def build_context(frame: AgentLoopFrame):
-            retry_note = str(frame.retry_note or forced_retry_note or "")
+            retry_note = str(
+                frame.retry_note
+                or state.pending_output_length_recovery_note
+                or forced_retry_note
+                or ""
+            )
             metadata = {"retry_note": retry_note}
             return _minion_prompt_context(self.pack, event=state.channel_envelope.event, metadata=metadata)
 
@@ -714,7 +791,12 @@ class MinionRunner:
             render_final_text=lambda outcome: str(getattr(outcome, "text", "") or "") if outcome is not None else "",
             build_commit_payload=build_commit_payload,
             max_output_tokens=max_output_tokens,
-            build_retry_note=self._build_minion_retry_note,
+            build_retry_note=lambda outcome, observations, retry_count: self._build_minion_retry_note(
+                outcome,
+                observations,
+                retry_count,
+                state=state,
+            ),
         )
         continuation = TurnContinuation(
             turn_id=turn_id,
@@ -723,14 +805,13 @@ class MinionRunner:
             correlation_id=self.run_id,
             control_scope_key=f"minion:{self.run_id}",
             turn_settings_snapshot=_minion_turn_settings_snapshot(self.pack, bundle.llm_runtime),
-            tool_batch_count=max(0, int(restored.get("tool_batch_count") or 0)),
-            preferred_llm_endpoint_id=str(restored.get("preferred_llm_endpoint_id") or "") or None,
-            preferred_llm_model_id=str(restored.get("preferred_llm_model_id") or "") or None,
+            tool_batch_count=max(0, int(restored_state.get("tool_batch_count") or 0)),
+            preferred_llm_endpoint_id=str(restored_state.get("preferred_llm_endpoint_id") or "") or None,
+            preferred_llm_model_id=str(restored_state.get("preferred_llm_model_id") or "") or None,
         )
         begin_tool_results = getattr(state.execution_runtime, "begin_tool_result_turn", None)
-        logical_context = None
         if callable(begin_tool_results):
-            logical_context = begin_tool_results(
+            begin_tool_results(
                 turn_id=turn_id,
                 scope_key=session_id or f"minion:{self.run_id}",
                 input_id=response_key or turn_id,
@@ -741,6 +822,14 @@ class MinionRunner:
         agent_turn_runtime = self._build_minion_agent_runtime(bundle, state, continuation)
         executor = agent_turn_runtime.executor
         current: EffectResult | None = None
+        if self._continuation_is_restart_safe(continuation, state.memory_service):
+            await self._persist_agent_session_checkpoint(
+                bundle,
+                state,
+                continuation,
+                initial_instruction=initial_instruction,
+                response_keys=response_keys,
+            )
         while True:
             await self._raise_if_cancel_requested()
             if self._continuation_is_restart_safe(continuation, state.memory_service):
@@ -783,14 +872,12 @@ class MinionRunner:
                 executor.clear_execution_cursors(continuation)
                 self._sync_minion_state_from_continuation(state, continuation)
                 self.memory_candidates = _memory_candidates_from_sink(state.memory_candidate_sink)
-                self._persist_agent_session_checkpoint(
-                    workspace,
+                await self._persist_agent_session_checkpoint(
+                    bundle,
                     state,
                     continuation,
                     initial_instruction=initial_instruction,
                     response_keys=response_keys,
-                    logical_context=logical_context,
-                    max_output_tokens=max_output_tokens,
                 )
                 await self._raise_if_cancel_requested()
                 await self._raise_if_restart_requested()
@@ -802,18 +889,15 @@ class MinionRunner:
                 yielded,
                 max_output_tokens=max_output_tokens,
             )
+            await self._raise_if_cancel_requested()
             if self._continuation_is_restart_safe(continuation, state.memory_service):
-                self._persist_agent_session_checkpoint(
-                    workspace,
+                await self._persist_agent_session_checkpoint(
+                    bundle,
                     state,
                     continuation,
                     initial_instruction=initial_instruction,
                     response_keys=response_keys,
-                    logical_context=logical_context,
-                    max_output_tokens=max_output_tokens,
                 )
-            await self._raise_if_cancel_requested()
-            if self._continuation_is_restart_safe(continuation, state.memory_service):
                 await self._raise_if_restart_requested()
 
     @staticmethod
@@ -941,7 +1025,13 @@ class MinionRunner:
             + text
         )
 
-    def _load_agent_session_checkpoint(self, workspace: dict[str, Any], *, session_id: str) -> dict[str, Any]:
+    def _load_agent_session_checkpoint(
+        self,
+        workspace: dict[str, Any],
+        *,
+        session_id: str,
+        bundle: MinionRuntimeBundle,
+    ) -> dict[str, Any]:
         if not session_id:
             return {}
         session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
@@ -959,34 +1049,77 @@ class MinionRunner:
             raise AgentSessionCheckpointError(
                 "manager-selected agent continuation is unreadable"
             ) from exc
-        if not isinstance(value, dict) or str(value.get("session_id") or "") != session_id:
+        if not isinstance(value, dict) or str(value.get("logical_coroutine_id") or "") != session_id:
             raise AgentSessionCheckpointError(
                 "manager-selected agent continuation has the wrong session identity"
             )
-        value = normalize_agent_session_checkpoint(value)
-        expected_scope = str(session_metadata.get("scope_kind") or "")
-        expected_subject = str(session_metadata.get("subject_key") or "")
-        if str(value.get("scope_kind") or "") != expected_scope:
+        value = open_agent_session_checkpoint(self.runtime_root, value)
+        expected = self._agent_session_static_identity(bundle)
+        if str(value.get("workflow_id") or "") != expected["workflow_id"]:
             raise AgentSessionCheckpointError(
-                "manager-selected agent continuation has the wrong scope"
+                "manager-selected agent continuation has the wrong workflow"
             )
-        if str(value.get("subject_key") or "") != expected_subject:
+        if str(value.get("stage_key") or "") != expected["stage_key"]:
             raise AgentSessionCheckpointError(
-                "manager-selected agent continuation has the wrong subject"
+                "manager-selected agent continuation has the wrong stage"
+            )
+        if str(value.get("runtime_spec_hash") or "") != expected["runtime_spec_hash"]:
+            raise AgentSessionCheckpointError(
+                "manager-selected agent continuation has the wrong runtime specification"
             )
         self._agent_session_checkpoint = dict(value)
         return dict(value)
 
-    def _persist_agent_session_checkpoint(
+    def _agent_session_static_identity(
         self,
-        workspace: dict[str, Any],
+        bundle: MinionRuntimeBundle,
+    ) -> dict[str, str]:
+        session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
+        binding = dict((self.pack.metadata or {}).get("minion_v2") or {})
+        workflow_id = str(
+            session_metadata.get("workflow_id")
+            or binding.get("workflow_id")
+            or ""
+        ).strip()
+        scope_kind = str(session_metadata.get("scope_kind") or "").strip()
+        subject_key = str(session_metadata.get("subject_key") or "").strip()
+        stage_key = str(session_metadata.get("stage_key") or "").strip()
+        if not stage_key:
+            stage_key = role_session_stage_key(
+                scope_kind,
+                subject_key,
+                str(binding.get("role") or "").strip(),
+            )
+        if not workflow_id or not stage_key:
+            raise AgentSessionCheckpointError(
+                "agent session metadata has no stable workflow/stage identity"
+            )
+        spec_hash = runtime_spec_hash(
+            bundle.module_registry,
+            identity_parts={
+                "family_binding_sha": str(binding.get("family_binding_sha") or ""),
+                "role": str(binding.get("role") or ""),
+                "profile": str(self.pack.minion_profile or ""),
+                "harness_id": str(session_metadata.get("harness_id") or "pal"),
+                "harness_generation": str(
+                    session_metadata.get("harness_generation") or ""
+                ),
+            },
+        )
+        return {
+            "workflow_id": workflow_id,
+            "stage_key": stage_key,
+            "runtime_spec_hash": spec_hash,
+        }
+
+    async def _persist_agent_session_checkpoint(
+        self,
+        bundle: MinionRuntimeBundle,
         state: MinionAgentLoopState,
         continuation: TurnContinuation,
         *,
         initial_instruction: str,
         response_keys: list[str],
-        logical_context: Any = None,
-        max_output_tokens: int,
     ) -> None:
         session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
         session_id = str(session_metadata.get("session_id") or "").strip()
@@ -997,47 +1130,157 @@ class MinionRunner:
         checkpoint_path = Path(checkpoint_text)
         if not self._continuation_is_restart_safe(continuation, state.memory_service):
             return
-        payload = {
-            "schema_version": AGENT_SESSION_CHECKPOINT_SCHEMA_VERSION,
-            "session_id": session_id,
-            "scope_kind": str(session_metadata.get("scope_kind") or ""),
-            "subject_key": str(session_metadata.get("subject_key") or ""),
-            "invocation_id": self.pack.invocation_id,
-            "fencing_token": fencing_token,
-            "initial_instruction": str(initial_instruction),
-            "response_keys": list(response_keys),
-            "active_input_id": str(
-                getattr(
+        static_identity = self._agent_session_static_identity(bundle)
+        sequence = max(
+            0,
+            int(self._agent_session_checkpoint.get("sequence") or 0),
+        ) + 1
+        identity = RuntimeSnapshotIdentity(
+            logical_coroutine_id=session_id,
+            workflow_id=static_identity["workflow_id"],
+            stage_key=static_identity["stage_key"],
+            sequence=sequence,
+            producer_fencing_token=fencing_token,
+            runtime_spec_hash=static_identity["runtime_spec_hash"],
+        )
+        runtime_snapshot = await bundle.runtime_state_coordinator.snapshot(identity)
+        private_payload = {
+            **identity.to_dict(),
+            "coroutine_state": {
+                "initial_instruction": str(initial_instruction),
+                "response_keys": list(response_keys),
+                "active_input_id": str(
                     getattr(
-                        getattr(continuation, "channel_envelope", None),
-                        "event",
-                        None,
+                        getattr(
+                            getattr(continuation, "channel_envelope", None),
+                            "event",
+                            None,
+                        ),
+                        "event_id",
+                        "",
+                    )
+                    or ""
+                ),
+                "llm_round_count": int(state.llm_round_count),
+                "tool_call_count": int(state.tool_call_count),
+                "output_length_recovery_count": int(
+                    getattr(state, "output_length_recovery_count", 0) or 0
+                ),
+                "pending_output_length_recovery_note": str(
+                    getattr(state, "pending_output_length_recovery_note", "") or ""
+                ),
+                "tool_batch_count": int(continuation.tool_batch_count),
+                "preferred_llm_endpoint_id": str(
+                    continuation.preferred_llm_endpoint_id or ""
+                ),
+                "preferred_llm_model_id": str(
+                    continuation.preferred_llm_model_id or ""
+                ),
+                "active_response_key": (
+                    str(response_keys[-1]) if response_keys else ""
+                ),
+                "invocation_state": {
+                    "produced_artifacts": [
+                        dict(item) for item in self.produced_artifacts
+                    ],
+                    "memory_candidate_records": [
+                        dict(item)
+                        for item in list(
+                            getattr(state.memory_candidate_sink, "records", ()) or ()
+                        )
+                        if isinstance(item, Mapping)
+                    ],
+                    "review_tool_evidence_refs": [
+                        dict(item) for item in self.review_tool_evidence_refs
+                    ],
+                    "web_research_usage": {
+                        str(key): max(0, int(value))
+                        for key, value in self.web_research_usage.items()
+                    },
+                    "manager_submission_receipt_observed": bool(
+                        self._manager_submission_receipt_observed
                     ),
-                    "event_id",
-                    "",
-                )
-                or ""
-            ),
-            "l1_turns": _serialize_minion_l1(state.memory_service),
-            "llm_round_count": int(state.llm_round_count),
-            "tool_call_count": int(state.tool_call_count),
-            "tool_batch_count": int(continuation.tool_batch_count),
-            "preferred_llm_endpoint_id": str(continuation.preferred_llm_endpoint_id or ""),
-            "preferred_llm_model_id": str(continuation.preferred_llm_model_id or ""),
-            "manager_input_sequence": max(
-                0,
-                int(getattr(logical_context, "current_user_turn", 0) or 0),
-            ),
-            "l2_hot_entries": _serialize_minion_l2_projection(
-                state.memory_service
-            ),
+                },
+            },
+            "runtime_snapshot": runtime_snapshot,
         }
+        payload = seal_agent_session_checkpoint(self.runtime_root, private_payload)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         target = checkpoint_path
-        temporary = target.parent / f".{target.name}.{os.getpid()}.tmp"
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        temporary = target.parent / f".{target.name}.{os.getpid()}.{uuid4().hex}.tmp"
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
         os.replace(temporary, target)
-        self._agent_session_checkpoint = payload
+        _fsync_directory(target.parent)
+        self._agent_session_checkpoint = private_payload
+
+    def _restore_invocation_checkpoint_state(
+        self,
+        coroutine_state: Mapping[str, Any],
+        *,
+        active_response_key: str,
+        memory_candidate_sink: MockL3Plugin,
+    ) -> None:
+        """Restore process-local state only for the same semantic assignment."""
+
+        checkpoint_key = str(
+            coroutine_state.get("active_response_key") or ""
+        ).strip()
+        current_key = str(active_response_key or "").strip()
+        raw_state = coroutine_state.get("invocation_state")
+        if not checkpoint_key or checkpoint_key != current_key or not isinstance(
+            raw_state,
+            Mapping,
+        ):
+            self.produced_artifacts.clear()
+            self.memory_candidates.clear()
+            self.review_tool_evidence_refs.clear()
+            self.web_research_usage.clear()
+            self._manager_submission_receipt_observed = False
+            memory_candidate_sink.records.clear()
+            return
+        value = dict(raw_state)
+
+        def object_list(field_name: str) -> list[dict[str, Any]]:
+            raw = value.get(field_name, [])
+            if not isinstance(raw, list) or any(
+                not isinstance(item, Mapping) for item in raw
+            ):
+                raise AgentSessionCheckpointError(
+                    f"agent continuation has invalid {field_name}"
+                )
+            return [dict(item) for item in raw]
+
+        raw_usage = value.get("web_research_usage", {})
+        if not isinstance(raw_usage, Mapping):
+            raise AgentSessionCheckpointError(
+                "agent continuation has invalid web_research_usage"
+            )
+        usage = {
+            str(key): int(count)
+            for key, count in raw_usage.items()
+        }
+        if any(not key or count < 0 for key, count in usage.items()):
+            raise AgentSessionCheckpointError(
+                "agent continuation has invalid web_research_usage"
+            )
+        self.produced_artifacts[:] = object_list("produced_artifacts")
+        self.review_tool_evidence_refs[:] = object_list(
+            "review_tool_evidence_refs"
+        )
+        memory_candidate_sink.records[:] = object_list(
+            "memory_candidate_records"
+        )
+        self.memory_candidates[:] = _memory_candidates_from_sink(
+            memory_candidate_sink
+        )
+        self.web_research_usage = usage
+        self._manager_submission_receipt_observed = bool(
+            value.get("manager_submission_receipt_observed")
+        )
 
     def _runner_memory_candidate_sink(self) -> MockL3Plugin:
         if self._memory_candidate_sink is not None:
@@ -1113,7 +1356,16 @@ class MinionRunner:
         }
         return dict(self._restart_requested)
 
-    def _build_minion_retry_note(self, outcome: Any, observations: list[Any], retry_count: int) -> str:
+    def _build_minion_retry_note(
+        self,
+        outcome: Any,
+        observations: list[Any],
+        retry_count: int,
+        *,
+        state: MinionAgentLoopState | None = None,
+    ) -> str:
+        if state is not None and state.pending_output_length_recovery_note:
+            return state.pending_output_length_recovery_note
         if self.blocked_summary:
             return ""
         if str(getattr(outcome, "finish_reason", "") or "") == LLMFinishReason.ERROR:
@@ -1230,7 +1482,11 @@ class MinionRunner:
                 summary=_preview_text(getattr(result.payload, "summary", ""), limit=500),
             )
         if isinstance(effect, LLMRequestEffect):
-            result = await self._postprocess_minion_llm_round(state, result)
+            result = await self._postprocess_minion_llm_round(
+                state,
+                result,
+                continuation=continuation,
+            )
         return result
 
     def _preflight_minion_llm_round(self, state: MinionAgentLoopState) -> EffectResult | None:
@@ -1255,7 +1511,13 @@ class MinionRunner:
             outcome = _minion_generation_result(self.blocked_summary)
         return EffectResult(status=RuntimeStatus.OK, payload=outcome)
 
-    async def _postprocess_minion_llm_round(self, state: MinionAgentLoopState, result: EffectResult) -> EffectResult:
+    async def _postprocess_minion_llm_round(
+        self,
+        state: MinionAgentLoopState,
+        result: EffectResult,
+        *,
+        continuation: TurnContinuation | None = None,
+    ) -> EffectResult:
         outcome = result.payload
         finish_reason = str(getattr(outcome, "finish_reason", "") or "")
         provider_failed = finish_reason in {
@@ -1301,14 +1563,56 @@ class MinionRunner:
                     str(getattr(outcome, "text", "") or "LLM generation failed")
                 )
         elif truncated:
-            partial_text = str(getattr(outcome, "text", "") or "").strip()
-            if partial_text:
-                await self._persist_text_deliverable_if_needed(
-                    partial_text,
-                    partial=True,
-                    truncation_reason=finish_reason,
+            if continuation is not None:
+                response = getattr(outcome, "response", None)
+                message = getattr(response, "message", None)
+                message_id = str(getattr(message, "message_id", "") or "").strip()
+                if not message_id:
+                    raise RuntimeError(
+                        "truncated LLM response has no message id for atomic L1 discard"
+                    )
+                state.memory_service.discard_l1_assistant(
+                    continuation.turn_id,
+                    message_id,
                 )
-            self.blocked_summary = self._truncated_output_blocked_summary(finish_reason)
+            recovery_limit = max(
+                0,
+                int(
+                    self.pack.metadata.get(
+                        "max_output_length_recovery_rounds",
+                        DEFAULT_MINION_OUTPUT_LENGTH_RECOVERY_ROUNDS,
+                    )
+                    if isinstance(self.pack.metadata, dict)
+                    else DEFAULT_MINION_OUTPUT_LENGTH_RECOVERY_ROUNDS
+                ),
+            )
+            if state.output_length_recovery_count < recovery_limit:
+                state.output_length_recovery_count += 1
+                state.pending_output_length_recovery_note = (
+                    MINION_OUTPUT_LENGTH_RECOVERY_NOTE
+                )
+                await self._emit_progress(
+                    "llm_output_length_recovery_scheduled",
+                    round=state.llm_round_count,
+                    attempt=state.output_length_recovery_count,
+                    max_attempts=recovery_limit,
+                    summary="truncated response discarded; bounded tool-call recovery scheduled",
+                )
+            else:
+                partial_text = str(getattr(outcome, "text", "") or "").strip()
+                if partial_text:
+                    await self._persist_text_deliverable_if_needed(
+                        partial_text,
+                        partial=True,
+                        truncation_reason=finish_reason,
+                    )
+                state.pending_output_length_recovery_note = ""
+                self.blocked_summary = self._truncated_output_blocked_summary(
+                    finish_reason
+                )
+        elif consumed:
+            state.output_length_recovery_count = 0
+            state.pending_output_length_recovery_note = ""
         await self._emit_progress(
             "llm_round_completed" if consumed else "llm_round_discarded",
             round=state.llm_round_count,
@@ -1747,7 +2051,6 @@ class MinionRunner:
                 minion_id=self.minion_id,
                 invocation_id=self.pack.invocation_id,
                 workflow_id=str(binding.get("workflow_id") or ""),
-                control_route=dict(binding.get("control_route") or {}),
                 auto_accept_approvals=self.auto_accept_approvals,
             )
         return self.user_interaction
@@ -1929,10 +2232,6 @@ class MinionRunner:
     async def _emit(self, event_kind: str, payload: dict[str, Any]) -> None:
         binding = dict(dict(self.pack.metadata or {}).get("minion_v2") or {})
         event_payload = dict(payload)
-        if event_kind in {"approval_requested", "clarification_requested"}:
-            control_route = dict(binding.get("control_route") or {})
-            if control_route and not event_payload.get("control_route"):
-                event_payload["control_route"] = control_route
         event = {
             "type": "event",
             "event_kind": event_kind,
@@ -2334,14 +2633,6 @@ def build_slim_minion_runtime(
     context = MainContext()
     context.execution_runtime.runtime_root = Path(runtime_root)
     lifecycle = ModuleLifecycle(context, CoreRuntimeState())
-    from pal.minion.v2.execution_state import RoleGatewayLogicalExecutionState
-    from pal.minion.v2.role_gateway import role_gateway_client_from_env
-
-    role_gateway_client = role_gateway_client_from_env(Path(runtime_root))
-    if role_gateway_client is not None:
-        logical_state = RoleGatewayLogicalExecutionState(role_gateway_client)
-        context.execution_runtime.logical_state = logical_state
-        context.execution_runtime.tool_result_pager.state_backend = logical_state
     artifact_service = ArtifactManager(runtime_root=Path(runtime_root), repository=ArtifactRepository())
     if llm_authority == "manager_broker":
         llm_runtime = MinionBrokerLLMRuntime(runtime_root=Path(runtime_root), run_id=run_id)
@@ -2398,19 +2689,30 @@ def build_slim_minion_runtime(
         lifecycle.publish_module_capabilities(module_id)
 
     async def close() -> None:
+        failures: list[Exception] = []
         for handle in tuple(context.module_registry.modules.values()):
             shutdown_async = getattr(handle, "shutdown_async", None)
             shutdown_sync = getattr(handle, "shutdown_sync", None)
-            if callable(shutdown_async):
-                await shutdown_async()
-            elif callable(shutdown_sync):
-                shutdown_sync()
-        database.close()
+            try:
+                if callable(shutdown_async):
+                    await shutdown_async()
+                elif callable(shutdown_sync):
+                    shutdown_sync()
+            except Exception as exc:
+                failures.append(exc)
+        try:
+            database.close()
+        except Exception as exc:
+            failures.append(exc)
+        if failures:
+            raise ExceptionGroup("minion runtime shutdown failed", failures)
 
     return MinionRuntimeBundle(
         llm_runtime=llm_runtime,
         execution_runtime=context.execution_runtime,
         memory_service=memory_service,
+        module_registry=context.module_registry,
+        runtime_state_coordinator=RuntimeSnapshotCoordinator(context.module_registry),
         config=config,
         close_async=close,
     )
@@ -2451,120 +2753,6 @@ def _memory_candidates_from_sink(memory_candidate_sink: MockL3Plugin) -> list[di
         if item["summary"].strip() or item["title"].strip():
             result.append(item)
     return result
-
-
-def _serialize_minion_l2_projection(memory_service: MemoryService) -> list[dict[str, Any]]:
-    entries = list(memory_service.l2_store.list_hot_entries())
-    return [
-        {
-            "entry_id": entry.entry_id,
-            "kind": entry.kind,
-            "scope": entry.scope,
-            "title": entry.title,
-            "summary": entry.summary,
-            "task_id": entry.task_id,
-            "source_kind": entry.source_kind,
-            "source_ref": entry.source_ref,
-            "candidate_state": entry.candidate_state,
-            "touched_at": entry.touched_at,
-            "rendered": entry.rendered,
-            "search_text": entry.search_text,
-            "canonical_key": entry.canonical_key,
-            "dedupe_fingerprint": entry.dedupe_fingerprint,
-            "payload": dict(entry.payload or {}),
-        }
-        for entry in entries
-    ]
-
-
-def _serialize_minion_l1(
-    memory_service: MemoryService,
-) -> list[dict[str, Any]]:
-    return [
-        {
-            "turn_id": turn.turn_id,
-            "state": turn.state.value,
-            "revision": turn.revision,
-            "metadata": dict(turn.metadata),
-            "messages": [message_to_payload(message) for message in turn.messages],
-        }
-        for turn in memory_service.l1_store.turns.turns
-    ]
-
-
-def _restore_minion_memory_state(
-    memory_service: MemoryService,
-    checkpoint: Mapping[str, Any],
-) -> None:
-    if checkpoint:
-        normalized_checkpoint = normalize_agent_session_checkpoint(checkpoint)
-        raw_l1 = normalized_checkpoint["l1_turns"]
-        turns = L1TurnStore()
-        for raw_turn in raw_l1:
-            if not isinstance(raw_turn, Mapping):
-                raise AgentSessionCheckpointError(
-                    "manager-selected agent continuation contains invalid L1"
-                )
-            value = dict(raw_turn)
-            turns.turns.append(
-                L1TurnIR(
-                    turn_id=str(value.get("turn_id") or ""),
-                    state=L1TurnState(str(value.get("state") or "active")),
-                    revision=int(value.get("revision") or 0),
-                    metadata=dict(value.get("metadata") or {}),
-                    messages=tuple(
-                        message_from_payload(item)
-                        for item in value.get("messages") or ()
-                        if isinstance(item, Mapping)
-                    ),
-                )
-            )
-        memory_service.l1_store.turns = turns
-    entries: list[L2Entry] = []
-    for raw in list(checkpoint.get("l2_hot_entries") or ()):
-        if not isinstance(raw, Mapping):
-            continue
-        value = dict(raw)
-        entry_id = str(value.get("entry_id") or "").strip()
-        if not entry_id:
-            continue
-        entries.append(
-            L2Entry(
-                entry_id=entry_id,
-                kind=str(value.get("kind") or "memory"),
-                scope=str(value.get("scope") or "task"),
-                title=str(value.get("title") or ""),
-                summary=str(value.get("summary") or ""),
-                task_id=(
-                    str(value.get("task_id"))
-                    if value.get("task_id") is not None
-                    else None
-                ),
-                source_kind=str(value.get("source_kind") or "l3_recall"),
-                source_ref=str(value.get("source_ref") or ""),
-                candidate_state=str(value.get("candidate_state") or "stable"),
-                touched_at=str(value.get("touched_at") or ""),
-                rendered=str(value.get("rendered") or ""),
-                search_text=str(value.get("search_text") or ""),
-                canonical_key=(
-                    str(value.get("canonical_key"))
-                    if value.get("canonical_key") is not None
-                    else None
-                ),
-                dedupe_fingerprint=(
-                    str(value.get("dedupe_fingerprint"))
-                    if value.get("dedupe_fingerprint") is not None
-                    else None
-                ),
-                payload=dict(value.get("payload") or {}),
-            )
-        )
-    if entries:
-        memory_service.project_l2_entries(
-            entries,
-            touch=False,
-            top_of_mind=True,
-        )
 
 
 async def _minion_noop_failure_handler(*args: Any, **kwargs: Any) -> _MinionFailureResult:
@@ -3084,3 +3272,14 @@ def _dedupe_nonempty(values: list[str]) -> list[str]:
         seen.add(item)
         result.append(item)
     return result
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

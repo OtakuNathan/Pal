@@ -299,11 +299,49 @@ class MemoryService(MemoryServicePort):
         self.l1_store.replace(updated)
         return updated
 
+    def discard_l1_assistant(self, turn_id: str, message_id: str) -> L1TurnIR:
+        current = self.l1_store.active(turn_id)
+        updated = current.discard_assistant(message_id)
+        self.l1_store.replace(updated)
+        return updated
+
     def append_l1_tool_result(self, turn_id: str, result: ToolResultIR) -> L1TurnIR:
         current = self.l1_store.active(turn_id)
         updated = current.append_tool_result(result)
         self.l1_store.replace(updated)
         return updated
+
+    def rollback_l1_tool_result(
+        self,
+        turn_id: str,
+        *,
+        previous: L1TurnIR,
+        call_id: str,
+    ) -> L1TurnIR:
+        """Undo exactly one just-appended result in a failed delivery commit."""
+
+        current = self.l1_store.active(turn_id)
+        latest = current.messages[-1] if current.messages else None
+        latest_results = tuple(
+            part
+            for part in getattr(latest, "parts", ())
+            if isinstance(part, ToolResultIR)
+        )
+        if (
+            previous.turn_id != str(turn_id)
+            or current.revision != previous.revision + 1
+            or current.messages[:-1] != previous.messages
+            or len(latest_results) != 1
+            or latest_results[0].call_id != str(call_id)
+        ):
+            raise L1TurnProtocolError(
+                "cannot roll back a tool result after unrelated L1 progress"
+            )
+        for index, item in enumerate(self.l1_store.turns.turns):
+            if item.turn_id == str(turn_id):
+                self.l1_store.turns.turns[index] = previous
+                return previous
+        raise L1TurnProtocolError(f"unknown L1 turn: {turn_id}")
 
     def settle_l1_turn(self, turn_id: str) -> L1TurnIR:
         current = self.l1_store.active(turn_id)

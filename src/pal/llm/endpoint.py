@@ -12,6 +12,7 @@ from pal.llm.ir import (
 )
 from pal.llm.credentials import LLMCredentialUnavailableError
 from pal.llm.models import LLMEndpointModel
+from pal.llm.response_hooks import ProviderResponseHookRegistry
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext
 from pal.llm.transport import SDKJSONTransport, SDKTransportRequest
@@ -24,6 +25,9 @@ CredentialResolver = Callable[[LLMEndpointModel], str | None]
 class ShapeEndpointInvoker:
     credential_resolver: CredentialResolver
     transport: SDKJSONTransport = field(default_factory=SDKJSONTransport)
+    response_hooks: ProviderResponseHookRegistry = field(
+        default_factory=ProviderResponseHookRegistry.builtin
+    )
 
     def refresh_credentials(self) -> bool:
         owner = getattr(self.credential_resolver, "__self__", None)
@@ -57,19 +61,26 @@ class ShapeEndpointInvoker:
         codec = codec_for_shape(shape)
         encoded = codec.encode(request, context)
         updates = tuple(
-            codec.decode(
-                self.transport.frames(
-                    SDKTransportRequest(
-                        endpoint_id=str(endpoint.endpoint_id),
-                        wire_shape=shape,
-                        api_key=self._credential(endpoint),
-                        base_url=str(endpoint.base_url or ""),
-                        timeout_seconds=float(timeout_seconds),
-                        payload=encoded.payload,
-                        stream=bool(stream),
-                    )
+            self.response_hooks.normalize(
+                endpoint_id=str(endpoint.endpoint_id),
+                provider_id=str(endpoint.provider),
+                model_id=str(endpoint.model_id),
+                wire_shape=shape,
+                request=request,
+                updates=codec.decode(
+                    self.transport.frames(
+                        SDKTransportRequest(
+                            endpoint_id=str(endpoint.endpoint_id),
+                            wire_shape=shape,
+                            api_key=self._credential(endpoint),
+                            base_url=str(endpoint.base_url or ""),
+                            timeout_seconds=float(timeout_seconds),
+                            payload=encoded.payload,
+                            stream=bool(stream),
+                        )
+                    ),
+                    context,
                 ),
-                context,
             )
         )
         if not updates:
@@ -92,7 +103,7 @@ class ShapeEndpointInvoker:
         codec = codec_for_shape(shape)
         encoded = codec.encode(request, context)
         last: LLMResponseUpdate | None = None
-        for update in codec.decode(
+        decoded = codec.decode(
             self.transport.frames(
                 SDKTransportRequest(
                     endpoint_id=str(endpoint.endpoint_id),
@@ -105,6 +116,14 @@ class ShapeEndpointInvoker:
                 )
             ),
             context,
+        )
+        for update in self.response_hooks.normalize(
+            endpoint_id=str(endpoint.endpoint_id),
+            provider_id=str(endpoint.provider),
+            model_id=str(endpoint.model_id),
+            wire_shape=shape,
+            request=request,
+            updates=decoded,
         ):
             last = update
             yield update

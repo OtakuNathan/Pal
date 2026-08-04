@@ -161,6 +161,12 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             submission_payload_hash=payload_hash,
         )
         self.assertEqual(settled["state"], "settled")
+        completed = self.repository.read_latest_completed_role_harness_attempt(
+            session_id="session-router",
+            harness_id="pal",
+        )
+        self.assertIsNotNone(completed)
+        self.assertEqual(completed["attempt_id"], attempt["attempt_id"])
         self.assertEqual(
             self.repository.settle_role_assignment(
                 assignment_id=first["assignment_id"],
@@ -198,6 +204,24 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
         self.assertEqual(
             self.repository.read_role_assignment(assignment["assignment_id"])["session_id"],
             "session-router",
+        )
+
+    def test_claim_pins_the_harness_that_actually_runs_the_session(self) -> None:
+        assignment = self.repository.create_role_assignment(self.request())
+
+        attempt = self.repository.claim_role_assignment(
+            assignment["assignment_id"],
+            harness_id="pal",
+            harness_generation="registry-generation-2",
+        )
+
+        self.assertEqual(attempt["harness_id"], "pal")
+        session = self.repository.read_role_session("session-router")
+        self.assertIsNotNone(session)
+        self.assertEqual(session["preferred_harness_id"], "pal")
+        self.assertEqual(
+            session["preferred_harness_generation"],
+            "registry-generation-2",
         )
 
     def test_assignment_machine_has_no_business_triage_state(self) -> None:
@@ -378,9 +402,6 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
         self.assertEqual(
             self.repository.read_role_session("session-router")["status"],
             RoleSessionState.CANCELLED.value,
-        )
-        self.assertTrue(
-            self.repository.read_role_execution_state("session-router")["retired"]
         )
 
     def test_role_session_scope_is_immutable(self) -> None:

@@ -47,6 +47,7 @@ class FileState:
     content: str
     mtime_ns: int
     full_view: bool = True
+    replay_result_ref: str = ""
 
 
 class FileStateCache:
@@ -188,7 +189,7 @@ class SessionFileStateCache:
         if not full_view:
             return
         self.backend.set_file_snapshot(
-            logical_session_id=self.context.logical_session_id,
+            execution_lifetime_id=self.context.execution_lifetime_id,
             file_key=file_cache_key(file_path),
             digest=content_digest(content),
             total_lines=count_text_lines(content),
@@ -214,7 +215,7 @@ class SessionFileStateCache:
         except (OSError, UnicodeError):
             return None
         snapshot = self.backend.file_snapshot(
-            logical_session_id=self.context.logical_session_id,
+            execution_lifetime_id=self.context.execution_lifetime_id,
             file_key=file_cache_key(resolved),
             digest=content_digest(content),
         )
@@ -224,11 +225,12 @@ class SessionFileStateCache:
             content=content,
             mtime_ns=mtime_ns,
             full_view=snapshot.complete,
+            replay_result_ref=snapshot.replay_result_ref,
         )
 
     def invalidate(self, file_path: str | Path) -> None:
         self.backend.invalidate_file(
-            logical_session_id=self.context.logical_session_id,
+            execution_lifetime_id=self.context.execution_lifetime_id,
             file_key=file_cache_key(file_path),
         )
 
@@ -243,7 +245,7 @@ class SessionFileStateCache:
     def __contains__(self, file_path: str | Path) -> bool:
         return (
             self.backend.file_snapshot(
-                logical_session_id=self.context.logical_session_id,
+                execution_lifetime_id=self.context.execution_lifetime_id,
                 file_key=file_cache_key(file_path),
                 digest="",
             )

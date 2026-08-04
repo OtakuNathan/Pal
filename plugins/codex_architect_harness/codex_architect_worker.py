@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pal.shared.tool_protocol import ToolCallIR, new_tool_call
+from pal.shared.tool_protocol import new_tool_call
 
 import argparse
 import asyncio

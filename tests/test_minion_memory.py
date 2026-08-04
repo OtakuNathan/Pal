@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from pal.core import CompactionClockKind, CompactionSnapshot
+from pal.core.module_registry import ModuleHandle, ModuleRegistry
+from pal.core.runtime_state import RuntimeSnapshotCoordinator, RuntimeSnapshotIdentity
 from pal.llm import (
     generation_result_from_values,
 )
@@ -26,15 +28,19 @@ from pal.memory import (
     MemoryService,
 )
 from pal.memory.prompt import MemoryPromptFragmentProvider
+from pal.memory.runtime_state import MemoryRuntimeStatePort
 from pal.minion.compact import (
     MinionCompactionPolicy,
+)
+from pal.minion.checkpoint import (
+    open_agent_session_checkpoint,
+    seal_agent_session_checkpoint,
 )
 from pal.minion.runner import (
     MinionAgentLoopState,
     MinionLLMRetryableError,
     MinionRunner,
     _minion_llm_request_metadata,
-    _restore_minion_memory_state,
 )
 from pal.plugins.l3 import MockL3Plugin
 from pal.shared import (
@@ -409,6 +415,73 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(state.llm_round_count, 2)
 
+    def test_truncated_minion_round_is_discarded_and_retried_with_bounded_tool_note(self) -> None:
+        runner = self._runner()
+        service, _provider = self._memory_service()
+        turn_id = "length-recovery-turn"
+        service.begin_l1_turn(turn_id, user_text="implement the module")
+        prior_call = new_tool_call(
+            call_id="read-1",
+            name="read_file",
+            args={"file_path": "owned.cpp"},
+        )
+        service.upsert_l1_assistant(
+            turn_id,
+            LLMMessageIR(
+                role=MessageRole.ASSISTANT,
+                parts=(prior_call,),
+                message_id="prior-assistant",
+            ),
+        )
+        service.append_l1_tool_result(
+            turn_id,
+            ToolResultIR(
+                call_id="read-1",
+                name="read_file",
+                content="owned source",
+            ),
+        )
+        truncated = generation_result_from_values(
+            text="a very large uncommitted response",
+            finish_reason=LLMFinishReason.LENGTH,
+        )
+        service.upsert_l1_assistant(turn_id, truncated.response.message)
+        state = MinionAgentLoopState(
+            execution_runtime=SimpleNamespace(),
+            memory_service=service,
+            memory_candidate_sink=SimpleNamespace(),
+            llm_round_count=8,
+            tool_call_count=1,
+        )
+
+        asyncio.run(
+            runner._postprocess_minion_llm_round(
+                state,
+                EffectResult(status=RuntimeStatus.OK, payload=truncated),
+                continuation=SimpleNamespace(turn_id=turn_id),
+            )
+        )
+
+        active = service.active_l1_turn(turn_id)
+        self.assertIsNotNone(active)
+        message_ids = [message.message_id for message in active.messages]
+        self.assertIn("prior-assistant", message_ids)
+        self.assertNotIn(truncated.response.message.message_id, message_ids)
+        self.assertEqual(active.pending_call_ids, frozenset())
+        self.assertEqual(state.llm_round_count, 7)
+        self.assertEqual(state.output_length_recovery_count, 1)
+        self.assertIn("bounded action", state.pending_output_length_recovery_note)
+        self.assertIn(
+            "complete tool calls",
+            runner._build_minion_retry_note(
+                truncated,
+                [SimpleNamespace()],
+                retry_count=2,
+                state=state,
+            ),
+        )
+        self.assertEqual(runner.blocked_summary, "")
+
     def test_retryable_llm_error_does_not_become_a_blocked_completion(self) -> None:
         runner = self._runner()
         service, _provider = self._memory_service()
@@ -456,29 +529,6 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
     def test_checkpoint_atomically_restores_complete_l1(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_minion_compact_checkpoint_"))
         self.addCleanup(shutil.rmtree, root, True)
-        checkpoint_path = root / "attempt" / "continuation.json"
-        pack = MinionInvocationPack(
-            invocation_id="checkpoint-compact",
-            goal="continue module work",
-            metadata={
-                "agent_session": {
-                    "session_id": "checkpoint-compact",
-                    "response_key": "effect-1",
-                    "fencing_token": 2,
-                    "scope_kind": "module_run",
-                    "subject_key": "module-a",
-                    "continuation_output_path": str(checkpoint_path),
-                }
-            },
-        )
-        runner = MinionRunner(
-            runtime_root=root,
-            pack=pack,
-            minion_id="checkpoint-compact",
-            run_id="checkpoint-run",
-            write_event=_noop_write_event,
-            read_decision=_noop_read_decision,
-        )
         service, _provider = self._memory_service()
         snapshot = CompactionSnapshot.capture(
             service,
@@ -535,45 +585,68 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
                 content="validated content",
             ),
         )
-        state = SimpleNamespace(
-            llm_round_count=6,
-            tool_call_count=2,
-            execution_runtime=SimpleNamespace(registry_generation=None),
-            memory_service=service,
+        registry = ModuleRegistry()
+        registry.register(
+            ModuleHandle(
+                module_id="memory",
+                tier="test",
+                runtime_state_port=MemoryRuntimeStatePort(service),
+            )
         )
-        continuation = SimpleNamespace(
-            channel_envelope=SimpleNamespace(
-                event=SimpleNamespace(event_id="checkpoint-active-input")
-            ),
-            pending_assistant_tool_text="",
-            pending_tool_call_batch=[],
-            pending_tool_results=[],
-            tool_batch_count=1,
-            preferred_llm_endpoint_id=None,
-            preferred_llm_model_id=None,
+        identity = RuntimeSnapshotIdentity(
+            logical_coroutine_id="checkpoint-compact",
+            workflow_id="workflow-1",
+            stage_key="module:module-a:implementation",
+            sequence=1,
+            producer_fencing_token=2,
+            runtime_spec_hash="spec-1",
         )
-        runner._persist_agent_session_checkpoint(
-            pack.workspace,
-            state,
-            continuation,
-            initial_instruction="continue module work",
-            response_keys=["effect-1"],
-            max_output_tokens=2048,
+        runtime_snapshot = asyncio.run(
+            RuntimeSnapshotCoordinator(registry).snapshot(identity)
         )
-
-        payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], "6")
-        self.assertEqual(payload["llm_round_count"], 6)
-        self.assertEqual(payload["active_input_id"], "checkpoint-active-input")
-        self.assertNotIn("active_tool_protocol_messages", payload)
-        self.assertNotIn("tool_delivery_records", payload)
-        serialized_text = json.dumps(payload["l1_turns"])
+        payload = seal_agent_session_checkpoint(
+            root,
+            {
+                **identity.to_dict(),
+                "coroutine_state": {
+                    "initial_instruction": "continue module work",
+                    "response_keys": ["effect-1"],
+                    "active_input_id": "checkpoint-active-input",
+                    "llm_round_count": 6,
+                    "tool_call_count": 2,
+                },
+                "runtime_snapshot": runtime_snapshot,
+            },
+        )
+        self.assertEqual(payload["schema_version"], "8")
+        self.assertNotIn("new work after compact", json.dumps(payload))
+        private = open_agent_session_checkpoint(root, payload)
+        self.assertEqual(private["coroutine_state"]["llm_round_count"], 6)
+        self.assertEqual(
+            private["coroutine_state"]["active_input_id"],
+            "checkpoint-active-input",
+        )
+        serialized_text = json.dumps(
+            private["runtime_snapshot"]["modules"]["memory"]["payload"]["l1_turns"]
+        )
         self.assertIn("new work after compact", serialized_text)
         self.assertIn("inspect the file first", serialized_text)
-        self.assertFalse(checkpoint_path.with_name("protocol.jsonl").exists())
 
         restored_service, _restored_provider = self._memory_service()
-        _restore_minion_memory_state(restored_service, payload)
+        restored_registry = ModuleRegistry()
+        restored_registry.register(
+            ModuleHandle(
+                module_id="memory",
+                tier="test",
+                runtime_state_port=MemoryRuntimeStatePort(restored_service),
+            )
+        )
+        asyncio.run(
+            RuntimeSnapshotCoordinator(restored_registry).restore(
+                private["runtime_snapshot"],
+                expected_identity=identity,
+            )
+        )
         restored = restored_service.build_pack(
             MemoryPackRequest()
         ).current_summary
@@ -595,6 +668,7 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         assert restored_turn is not None
         self.assertEqual(restored_turn.pending_call_ids, frozenset())
         self.assertIn("inspect the file first", restored_turn.messages[1].reasoning_text)
+        self.assertEqual(restored_turn.state.value, "active")
 
 
 if __name__ == "__main__":

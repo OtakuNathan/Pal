@@ -24,11 +24,10 @@ from pal.web_search.capabilities import WebSearchIntrospectionProvider
 
 
 class MinionWebBrokerTests(unittest.TestCase):
-    def test_role_pager_uses_its_invocation_directory(self) -> None:
+    def test_role_pager_keeps_payload_in_memory_and_uses_explicit_lifetime(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_pager_") as tmp:
             root = Path(tmp)
-            role_root = root / "role-run" / "tool-results"
-            pager = ToolResultPagerStore(storage_root=role_root)
+            pager = ToolResultPagerStore()
             pager.begin_turn(
                 runtime_root=root,
                 turn_id="turn-1",
@@ -45,10 +44,15 @@ class MinionWebBrokerTests(unittest.TestCase):
                 page_size=1000,
             )
 
-            self.assertTrue(Path(handle.backing_path).is_relative_to(role_root))
+            self.assertEqual(handle.execution_lifetime_id, "role-assignment")
+            self.assertFalse(hasattr(handle, "backing_path"))
             self.assertFalse((root / "data" / "tool_results").exists())
             self.assertEqual(
-                pager.read_page("result-1", page=2).content,
+                pager.read_page(
+                    "result-1",
+                    page=2,
+                    execution_lifetime_id="role-assignment",
+                ).content,
                 "x" * 1000,
             )
 

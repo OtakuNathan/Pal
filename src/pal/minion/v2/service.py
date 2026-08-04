@@ -95,28 +95,35 @@ class MinionV2WorkflowService:
             policies=dict(data.get("policies") or {}),
             actor=str(data.get("actor") or "pal"),
         )
-        result = self.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_TASK",
-                workflow_id="",
-                aggregate_type=AggregateType.TASK,
-                aggregate_id=task_id,
-                actor=str(data.get("actor") or "pal"),
-                source_channel=str(data.get("source_channel") or "local"),
-                expected_version=0,
-                idempotency_key=f"create-task:{task_id}",
-                payload={
-                    "title": title,
-                    "objective": objective,
-                    "primary_profile_id": primary_profile_id,
-                    "family_id": family_id,
-                    "family_binding_ref": family_binding_ref.to_dict(),
-                    "workspace_key": _workspace_key(workspace),
-                    "task_revision": 1,
-                    "task_revision_ref": revision_ref.to_dict(),
-                    "owner": str(data.get("actor") or "pal"),
-                },
+        create_action = ActionEnvelope(
+            action_type="CREATE_TASK",
+            workflow_id="",
+            aggregate_type=AggregateType.TASK,
+            aggregate_id=task_id,
+            actor=str(data.get("actor") or "pal"),
+            source_channel=str(data.get("source_channel") or "local"),
+            expected_version=0,
+            idempotency_key=f"create-task:{task_id}",
+            payload={
+                "title": title,
+                "objective": objective,
+                "primary_profile_id": primary_profile_id,
+                "family_id": family_id,
+                "family_binding_ref": family_binding_ref.to_dict(),
+                "workspace_key": _workspace_key(workspace),
+                "task_revision": 1,
+                "task_revision_ref": revision_ref.to_dict(),
+                "owner": str(data.get("actor") or "pal"),
+            },
+        )
+        delivery_binding = data.get("delivery_binding")
+        result = (
+            self.repository.dispatch_task_with_delivery(
+                create_action,
+                binding=dict(delivery_binding),
             )
+            if isinstance(delivery_binding, Mapping) and delivery_binding
+            else self.repository.dispatch(create_action)
         )
         return {
             "status": "created",
@@ -171,7 +178,6 @@ class MinionV2WorkflowService:
     def search_task_ledger(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
         actor = str(data.get("actor") or "pal")
-        source_channel = str(data.get("source_channel") or "")
         tasks = self.repository.search_tasks(
             query=str(data.get("query") or ""),
             family_id=str(data.get("family_id") or ""),
@@ -179,12 +185,10 @@ class MinionV2WorkflowService:
             include_archived=bool(data.get("include_archived")),
             limit=int(data.get("limit") or 10),
         )
-        bound_workflow = self.repository.read_channel_workflow(actor_id=actor, channel_id=source_channel)
         items: list[dict[str, Any]] = []
         for task in tasks:
             workflows = self.repository.search_workflows(
                 actor_id=actor,
-                channel_id="",
                 task_id=str(task["task_id"]),
                 include_terminal=True,
                 limit=20,
@@ -199,7 +203,6 @@ class MinionV2WorkflowService:
                         "phase": str(projection.get("current_phase") or ""),
                         "liveness": str(projection.get("liveness") or ""),
                         "waiting_for_user": bool(projection.get("waiting_for_user")),
-                        "bound_to_current_channel": str(workflow["workflow_id"]) == bound_workflow,
                         "updated_at": str(workflow.get("updated_at") or ""),
                     }
                 )
@@ -302,6 +305,7 @@ class MinionV2WorkflowService:
         _validate_start_workflow_shape(data)
         actor = str(data.get("actor") or "pal").strip()
         source_channel = str(data.get("source_channel") or "local").strip()
+        delivery_binding = dict(data.get("delivery_binding") or {})
         operation = str(data.get("operation") or "new_requirement").strip().lower()
         if operation not in ROUTER_OPERATIONS:
             raise ValueError(f"unsupported artifact router operation: {operation}")
@@ -321,10 +325,15 @@ class MinionV2WorkflowService:
         task = self.repository.read_snapshot(AggregateType.TASK, task_id)
         if task is None or task.state != "ACTIVE":
             raise ValueError("start_workflow requires an active task_id")
+        existing_delivery = self.repository.read_task_delivery(task_id)
+        if existing_delivery is None:
+            self.repository.bind_task_delivery(
+                task_id=task_id,
+                binding=delivery_binding,
+            )
         workflow_id = str(data.get("workflow_id") or f"wf_{uuid4().hex}").strip()
         active_for_task = self.repository.search_workflows(
             actor_id=actor,
-            channel_id="",
             task_id=task_id,
             include_terminal=False,
             limit=2,
@@ -436,8 +445,6 @@ class MinionV2WorkflowService:
             "research_mode": research_mode.value,
             "input_artifact_ref": artifact_ref,
             "actor": actor,
-            "source_channel": source_channel,
-            "control_route": dict(data.get("control_route") or {}),
         }
         request_ref = self.artifacts.put_json(
             request_payload,
@@ -469,17 +476,10 @@ class MinionV2WorkflowService:
                     "operation": operation,
                     "research_mode": research_mode.value,
                     "owner": actor,
-                    "active_channel": source_channel,
-                    "control_route": dict(data.get("control_route") or {}),
                     "desired_state": "ACTIVE",
                     "orchestration_contract_version": "6",
                 },
             )
-        )
-        self.repository.bind_channel_workflow(
-            actor_id=actor,
-            channel_id=source_channel,
-            workflow_id=workflow_id,
         )
         task_rows = self.repository.search_tasks(
             task_id=task_id,
@@ -492,7 +492,6 @@ class MinionV2WorkflowService:
             "task_id": task_id,
             "task_name": str(task_rows[0].get("title") or "") if task_rows else "",
             "workflow_name": workflow_name,
-            "bound_to_current_channel": True,
             "state": result.snapshot.state,
             "request_ref": request_ref.to_dict(),
             "next_action": "manager_outbox_tick",
@@ -537,6 +536,7 @@ class MinionV2WorkflowService:
                 "policies": dict(data.get("policies") or {}),
                 "actor": str(data.get("actor") or "pal"),
                 "source_channel": str(data.get("source_channel") or "local"),
+                "delivery_binding": dict(data.get("delivery_binding") or {}),
             }
         )
         return str(created["task_id"])
@@ -620,7 +620,6 @@ class MinionV2WorkflowService:
         if public_name:
             self.repository.bind_artifact_alias(
                 actor_id=str(data.get("actor") or "pal"),
-                channel_id=str(data.get("source_channel") or "local"),
                 alias=public_name,
                 artifact_sha256=ref.sha256,
             )
@@ -657,7 +656,6 @@ class MinionV2WorkflowService:
         *,
         selector: str,
         actor: str,
-        source_channel: str,
         include_terminal: bool,
     ) -> tuple[str, str]:
         """Resolve a public Task name to its single current workflow.
@@ -670,38 +668,21 @@ class MinionV2WorkflowService:
         if query:
             task_id = self.resolve_task_selector(selector=query, actor=actor)
         else:
-            bound = self.repository.read_channel_workflow(
-                actor_id=actor,
-                channel_id=source_channel,
+            active_tasks = self.repository.search_tasks(
+                owner=actor,
+                include_archived=False,
+                limit=2,
             )
-            if bound:
-                snapshot = self.repository.read_snapshot(AggregateType.WORKFLOW, bound)
-                if snapshot is not None:
-                    task_id = str(snapshot.payload.get("task_id") or "")
-            if not task_id:
-                channel_workflows = self.repository.search_workflows(
-                    actor_id=actor,
-                    channel_id=source_channel,
-                    include_terminal=False,
-                    limit=2,
-                )
-                if len(channel_workflows) == 1:
-                    snapshot = self.repository.read_snapshot(
-                        AggregateType.WORKFLOW,
-                        str(channel_workflows[0]["workflow_id"]),
-                    )
-                    task_id = str((snapshot.payload if snapshot else {}).get("task_id") or "")
-                elif len(channel_workflows) > 1:
-                    raise ValueError(
-                        "Current channel has multiple active Tasks; supply the Task title."
-                    )
+            if len(active_tasks) == 1:
+                task_id = str(active_tasks[0].get("task_id") or "")
+            elif len(active_tasks) > 1:
+                raise ValueError("Multiple active Tasks exist; supply the Task title.")
         if not task_id:
-            detail = f" matching {query!r}" if query else " for this channel"
+            detail = f" matching {query!r}" if query else ""
             raise ValueError(f"No active Minion Task{detail}.")
 
         workflows = self.repository.search_workflows(
             actor_id=actor,
-            channel_id="",
             task_id=task_id,
             include_terminal=True,
             limit=20,
@@ -718,22 +699,15 @@ class MinionV2WorkflowService:
             )
         selected = active or (workflows[:1] if include_terminal else ())
         workflow_id = str(selected[0]["workflow_id"]) if selected else ""
-        if workflow_id:
-            self.repository.bind_channel_workflow(
-                actor_id=actor,
-                channel_id=source_channel,
-                workflow_id=workflow_id,
-            )
         return task_id, workflow_id
 
-    def resolve_artifact_name(self, *, name: str, actor: str, source_channel: str) -> dict[str, Any]:
+    def resolve_artifact_name(self, *, name: str, actor: str) -> dict[str, Any]:
         record = self.repository.resolve_artifact_alias(
             actor_id=actor,
-            channel_id=source_channel,
             alias=str(name or "").strip(),
         )
         if record is None:
-            raise ValueError(f"No submitted artifact named {name!r} exists in this channel.")
+            raise ValueError(f"No submitted artifact named {name!r} exists.")
         return _artifact_ref_from_record(record).to_dict()
 
     def workflow_status(self, workflow_id: str, *, view: str = "status") -> dict[str, Any]:
@@ -1023,24 +997,32 @@ class MinionV2WorkflowService:
         if normalized not in action_types:
             raise ValueError("workflow control command must be pause or cancel")
         workflow = self._workflow_snapshot(workflow_id)
-        result = self.repository.dispatch(
-            ActionEnvelope(
-                action_type=action_types[normalized],
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id=workflow_id,
-                actor=actor,
-                source_channel=source_channel,
-                expected_version=workflow.version,
-                idempotency_key=f"control:{workflow_id}:{workflow.version}:{normalized}",
-                payload={"reason": reason},
-            )
-        )
         coordinator = WorkflowCoordinator(self.repository)
-        if normalized == "pause":
-            coordinator.request_workflow_pause(workflow_id=workflow_id)
-        else:
-            coordinator.request_workflow_cancel(workflow_id=workflow_id)
+        with self.repository.transaction() as connection:
+            result = self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_types[normalized],
+                    workflow_id=workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW,
+                    aggregate_id=workflow_id,
+                    actor=actor,
+                    source_channel=source_channel,
+                    expected_version=workflow.version,
+                    idempotency_key=f"control:{workflow_id}:{workflow.version}:{normalized}",
+                    payload={"reason": reason},
+                ),
+                _connection=connection,
+            )
+            if normalized == "pause":
+                coordinator.request_workflow_pause(
+                    workflow_id=workflow_id,
+                    _connection=connection,
+                )
+            else:
+                coordinator.request_workflow_cancel(
+                    workflow_id=workflow_id,
+                    _connection=connection,
+                )
         return {"status": "accepted", "workflow_id": workflow_id, "state": result.snapshot.state}
 
     def restart_execution_from_architecture(
@@ -1050,7 +1032,6 @@ class MinionV2WorkflowService:
         actor: str,
         source_channel: str,
         reason: str,
-        control_route: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         summary = str(reason or "").strip()
         if not summary:
@@ -1080,8 +1061,6 @@ class MinionV2WorkflowService:
             "goal": str(request.get("goal") or ""),
             "research_mode": "none",
             "actor": actor,
-            "source_channel": source_channel,
-            "control_route": dict(control_route or {}),
             "reason": summary,
             "operation": "review_then_execute",
             "reuse_candidates": False,
@@ -1118,21 +1097,24 @@ class MinionV2WorkflowService:
     ) -> dict[str, Any]:
         workflow = self._workflow_snapshot(workflow_id)
         if workflow.state == "PAUSED":
-            result = self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="RESUME",
-                    workflow_id=workflow_id,
-                    aggregate_type=AggregateType.WORKFLOW,
-                    aggregate_id=workflow_id,
-                    actor=actor,
-                    source_channel=source_channel,
-                    expected_version=workflow.version,
-                    idempotency_key=f"resume:{workflow_id}:{workflow.version}",
+            with self.repository.transaction() as connection:
+                result = self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="RESUME",
+                        workflow_id=workflow_id,
+                        aggregate_type=AggregateType.WORKFLOW,
+                        aggregate_id=workflow_id,
+                        actor=actor,
+                        source_channel=source_channel,
+                        expected_version=workflow.version,
+                        idempotency_key=f"resume:{workflow_id}:{workflow.version}",
+                    ),
+                    _connection=connection,
                 )
-            )
-            WorkflowCoordinator(self.repository).resume_workflow(
-                workflow_id=workflow_id
-            )
+                WorkflowCoordinator(self.repository).resume_workflow(
+                    workflow_id=workflow_id,
+                    _connection=connection,
+                )
             return {"status": "resumed", "workflow_id": workflow_id, "state": result.snapshot.state}
         self.triage_orphaned_work_aggregates(
             workflow_id=workflow_id,
@@ -1202,34 +1184,38 @@ class MinionV2WorkflowService:
                     "triage_repair": "restored_imported_architecture_requirements_binding",
                 }
             )
-        result = self.repository.dispatch(
-            ActionEnvelope(
-                action_type="RESOLVE_TRIAGE",
-                workflow_id=workflow_id,
-                aggregate_type=selected.aggregate_type,
-                aggregate_id=selected.aggregate_id,
-                actor=actor,
-                source_channel=source_channel,
-                expected_version=selected.version,
-                idempotency_key=f"manual-resolve-triage:{selected.aggregate_id}:{selected.version}",
-                payload=resolution_payload,
-            )
-        )
         coordinator = WorkflowCoordinator(self.repository)
-        if selected.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
-            coordinator.resolve_triage(
-                workflow_id=workflow_id,
-                plan=True,
-            )
-        elif selected.aggregate_type == AggregateType.DAG_NODE_RUN:
-            coordinator.resolve_triage(
-                workflow_id=workflow_id,
-                node_name=str(
-                    selected.payload.get("module_name")
-                    or selected.payload.get("unit_id")
-                    or ""
+        with self.repository.transaction() as connection:
+            result = self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="RESOLVE_TRIAGE",
+                    workflow_id=workflow_id,
+                    aggregate_type=selected.aggregate_type,
+                    aggregate_id=selected.aggregate_id,
+                    actor=actor,
+                    source_channel=source_channel,
+                    expected_version=selected.version,
+                    idempotency_key=f"manual-resolve-triage:{selected.aggregate_id}:{selected.version}",
+                    payload=resolution_payload,
                 ),
+                _connection=connection,
             )
+            if selected.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+                coordinator.resolve_triage(
+                    workflow_id=workflow_id,
+                    plan=True,
+                    _connection=connection,
+                )
+            elif selected.aggregate_type == AggregateType.DAG_NODE_RUN:
+                coordinator.resolve_triage(
+                    workflow_id=workflow_id,
+                    node_name=str(
+                        selected.payload.get("module_name")
+                        or selected.payload.get("unit_id")
+                        or ""
+                    ),
+                    _connection=connection,
+                )
         return {
             "status": "triage_resolved",
             "workflow_id": workflow_id,
@@ -1279,42 +1265,48 @@ class MinionV2WorkflowService:
                 item.state,
             ):
                 continue
-            result = self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="ENTER_TRIAGE",
-                    workflow_id=workflow_id,
-                    aggregate_type=item.aggregate_type,
-                    aggregate_id=item.aggregate_id,
-                    actor=actor,
-                    source_channel=source_channel,
-                    expected_version=item.version,
-                    idempotency_key=(
-                        f"orphaned-work:{item.aggregate_type.value}:"
-                        f"{item.aggregate_id}:{item.version}"
-                    ),
-                    payload={
-                        "blocker": {
-                            "kind": "orphaned_worker",
-                            "reason": (
-                                "worker-owned state has no live lease, pending outbox "
-                                "effect, or durable role assignment"
-                            ),
-                        }
-                    },
-                )
-            )
             coordinator = WorkflowCoordinator(self.repository)
-            if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
-                coordinator.require_plan_triage(workflow_id=workflow_id)
-            elif item.aggregate_type == AggregateType.DAG_NODE_RUN:
-                coordinator.require_node_triage(
-                    workflow_id=workflow_id,
-                    node_name=str(
-                        item.payload.get("module_name")
-                        or item.payload.get("unit_id")
-                        or ""
+            with self.repository.transaction() as connection:
+                result = self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="ENTER_TRIAGE",
+                        workflow_id=workflow_id,
+                        aggregate_type=item.aggregate_type,
+                        aggregate_id=item.aggregate_id,
+                        actor=actor,
+                        source_channel=source_channel,
+                        expected_version=item.version,
+                        idempotency_key=(
+                            f"orphaned-work:{item.aggregate_type.value}:"
+                            f"{item.aggregate_id}:{item.version}"
+                        ),
+                        payload={
+                            "blocker": {
+                                "kind": "orphaned_worker",
+                                "reason": (
+                                    "worker-owned state has no live lease, pending outbox "
+                                    "effect, or durable role assignment"
+                                ),
+                            }
+                        },
                     ),
+                    _connection=connection,
                 )
+                if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+                    coordinator.require_plan_triage(
+                        workflow_id=workflow_id,
+                        _connection=connection,
+                    )
+                elif item.aggregate_type == AggregateType.DAG_NODE_RUN:
+                    coordinator.require_node_triage(
+                        workflow_id=workflow_id,
+                        node_name=str(
+                            item.payload.get("module_name")
+                            or item.payload.get("unit_id")
+                            or ""
+                        ),
+                        _connection=connection,
+                    )
             normalized.append(
                 {
                     "aggregate_type": result.snapshot.aggregate_type.value,
@@ -1334,13 +1326,11 @@ class MinionV2WorkflowService:
                 raise ValueError("architecture edit requires edit_instruction")
         elif data.get("edit_instruction"):
             raise ValueError("edit_instruction is valid only for decision=edit")
-        self._rebind_human_decision_channel(data)
         token = str(data.get("decision_token") or "")
         if not token:
             token = self.repository.reissue_human_decision_token(
                 workflow_id=str(data.get("workflow_id") or ""),
                 actor_id=str(data.get("actor") or ""),
-                active_channel_id=str(data.get("source_channel") or ""),
             )
         token_record = self.repository.inspect_human_decision_token(token)
         if token_record is None:
@@ -1375,29 +1365,32 @@ class MinionV2WorkflowService:
                 child_refs=((manifest_sha, "revises"),),
             )
             payload["edit_instruction_ref"] = edit_ref.to_dict()
-        result = self.repository.dispatch(
-            ActionEnvelope(
-                action_type=action_types[decision],
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                aggregate_id=revision_id,
-                actor=str(data.get("actor") or ""),
-                source_channel=str(data.get("source_channel") or ""),
-                expected_version=revision.version,
-                idempotency_key=f"human-decision:{token}",
-                payload=payload,
+        with self.repository.transaction() as connection:
+            result = self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_types[decision],
+                    workflow_id=workflow_id,
+                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                    aggregate_id=revision_id,
+                    actor=str(data.get("actor") or ""),
+                    source_channel=str(data.get("source_channel") or ""),
+                    expected_version=revision.version,
+                    idempotency_key=f"human-decision:{token}",
+                    payload=payload,
+                ),
+                _connection=connection,
             )
-        )
-        WorkflowCoordinator(self.repository).transition_plan(
-            workflow_id=workflow_id,
-            action=(
-                CycleAction.HUMAN_ACCEPTED
-                if decision == "accept"
-                else CycleAction.HUMAN_EDITED
-                if decision == "edit"
-                else CycleAction.HUMAN_REJECTED
-            ),
-        )
+            WorkflowCoordinator(self.repository).transition_plan(
+                workflow_id=workflow_id,
+                action=(
+                    CycleAction.HUMAN_ACCEPTED
+                    if decision == "accept"
+                    else CycleAction.HUMAN_EDITED
+                    if decision == "edit"
+                    else CycleAction.HUMAN_REJECTED
+                ),
+                _connection=connection,
+            )
         return {
             "status": "accepted",
             "workflow_id": workflow_id,
@@ -1497,42 +1490,6 @@ class MinionV2WorkflowService:
             "sequence": int(result.snapshot.payload.get("task_revision_sequence") or 0),
             "requirements_ref": dict(result.snapshot.payload["requirements_ref"]),
         }
-
-    def _rebind_human_decision_channel(self, data: Mapping[str, Any]) -> None:
-        workflow_id = str(data.get("workflow_id") or "")
-        actor = str(data.get("actor") or "")
-        source_channel = str(data.get("source_channel") or "")
-        control_route = dict(data.get("control_route") or {})
-        if not workflow_id or not actor or not source_channel or not control_route:
-            return
-        workflow = self._workflow_snapshot(workflow_id)
-        if workflow.state != "ACTIVE":
-            raise ValueError("human decision channel can only be rebound for an active workflow")
-        current_channel = str(workflow.payload.get("active_channel") or "")
-        current_route = dict(workflow.payload.get("control_route") or {})
-        if current_channel == source_channel and current_route == control_route:
-            return
-        route_hash = hashlib.sha256(
-            json.dumps(control_route, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        ).hexdigest()[:16]
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="REBIND_CHANNEL",
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id=workflow_id,
-                actor=actor,
-                source_channel=source_channel,
-                expected_version=workflow.version,
-                idempotency_key=f"rebind-channel:{workflow_id}:{workflow.version}:{source_channel}:{route_hash}",
-                payload={"active_channel": source_channel, "control_route": control_route},
-            )
-        )
-        self.repository.bind_channel_workflow(
-            actor_id=actor,
-            channel_id=source_channel,
-            workflow_id=workflow_id,
-        )
 
     def archive_workflow(self, *, workflow_id: str, actor: str, reason: str = "") -> dict[str, Any]:
         workflow = self._workflow_snapshot(workflow_id)
@@ -1768,10 +1725,9 @@ def _validate_start_workflow_shape(data: Mapping[str, Any]) -> None:
             "V2 workflow input no longer accepts normalized Requirements fields: "
             + ", ".join(sorted(forbidden))
         )
-    for field_name in ("control_route",):
-        value = data.get(field_name)
-        if value is not None and not isinstance(value, Mapping):
-            raise ValueError(f"workflow {field_name} must be an object")
+    delivery_binding = data.get("delivery_binding")
+    if delivery_binding is not None and not isinstance(delivery_binding, Mapping):
+        raise ValueError("workflow delivery_binding must be an object")
     task_spec = data.get("task_spec")
     if task_spec is not None and not isinstance(task_spec, Mapping):
         raise ValueError("workflow task_spec must be an object")

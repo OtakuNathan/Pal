@@ -21,7 +21,6 @@ from pal.execution.file_tool_contracts import (
 from pal.execution.file_edit import FileEditTool
 from pal.execution.file_read import (
     FileReadTool,
-    FileVisibilityCache,
     SessionFileVisibilityCache,
 )
 from pal.execution.file_state import (
@@ -31,7 +30,7 @@ from pal.execution.file_state import (
 )
 from pal.execution.file_write import FileWriteTool
 from pal.execution.path_delete import PathDeleteTool
-from pal.execution.session_state import InMemoryLogicalExecutionState
+from pal.execution.tool_facade import ToolRejectedError
 from pal.execution.tool_semantics import (
     DIRECT_LOCAL_READ,
     DIRECT_LOCAL_WRITE,
@@ -52,46 +51,32 @@ def _tool_capability_result(tool: object, args: dict[str, object]) -> Introspect
 
 
 def _session_file_tools(owner: object, call: IntrospectionCall):
-    runtime = call.meta.get("execution_runtime")
-    if runtime is not None and callable(getattr(runtime, "logical_context_for_turn", None)):
-        context = runtime.logical_context_for_turn(call.meta.get("turn_id"))
-        backend = runtime.logical_state
-        return (
-            SessionFileStateCache(backend=backend, context=context),
-            SessionFileVisibilityCache(backend=backend, context=context),
-            context,
-            True,
-        )
+    _ = owner
     turn_id = str(
         call.meta.get("turn_id")
         or call.meta.get("direct_context_id")
         or ""
     ).strip()
+    runtime = call.meta.get("execution_runtime")
     if not turn_id:
-        state = FileStateCache()
-        visibility = FileVisibilityCache()
-        turn_id = f"unscoped:{id(call)}"
-    else:
-        states = getattr(owner, "_direct_file_states", None)
-        if states is None:
-            states = {}
-            setattr(owner, "_direct_file_states", states)
-        state = states.setdefault(turn_id, FileStateCache())
-        visibility_by_turn = getattr(owner, "_direct_file_visibility", None)
-        if visibility_by_turn is None:
-            visibility_by_turn = {}
-            setattr(owner, "_direct_file_visibility", visibility_by_turn)
-        visibility = visibility_by_turn.setdefault(turn_id, FileVisibilityCache())
-    backend = InMemoryLogicalExecutionState()
-    context = backend.begin_input(
-        logical_session_id=f"direct:{id(owner)}:{turn_id}",
-        input_id=turn_id,
-    )
+        raise ToolRejectedError(
+            "file tools require an explicit logical turn",
+            error_code="missing_execution_lifetime",
+        )
+    if runtime is None or not callable(
+        getattr(runtime, "logical_context_for_turn", None)
+    ):
+        raise ToolRejectedError(
+            "file tools require the ExecutionRuntime logical-state owner",
+            error_code="missing_execution_runtime",
+        )
+    context = runtime.logical_context_for_turn(turn_id)
+    backend = runtime.logical_state
     return (
-        state,
-        visibility,
+        SessionFileStateCache(backend=backend, context=context),
+        SessionFileVisibilityCache(backend=backend, context=context),
         context,
-        False,
+        bool(str(call.meta.get("turn_id") or "").strip()),
     )
 
 
@@ -115,7 +100,7 @@ class FileCapabilityMixin:
                 cache=state,
                 visibility_cache=visibility,
                 visibility_scope=(
-                    f"{context.logical_session_id}:{context.context_epoch}"
+                    f"{context.execution_lifetime_id}:{context.context_epoch}"
                 ),
                 defer_delivery=defer_delivery,
             ),

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_LOCAL_WRITE,
+    INDIRECT_UNSAFE_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     SkillCapabilitiesSkillIntrospectionProviderAssimilateInput,
     SkillCapabilitiesSkillIntrospectionProviderAssimilateOutput,
@@ -207,6 +212,7 @@ class SkillIntrospectionProvider:
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateOutput,
         metadata={"async_required": True},
         aliases=("skill_assimilate",),
+        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
     async def assimilate(self, call: CapabilityCall):
         return await SkillAssimilateTool(service=self.service).ainvoke(call.args)
@@ -220,6 +226,7 @@ class SkillIntrospectionProvider:
         InputModel=SkillCapabilitiesSkillIntrospectionProviderCommitInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderCommitOutput,
         aliases=("skill_commit",),
+        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
     def commit(self, call: CapabilityCall):
         return SkillCommitTool(service=self.service).invoke(call.args)
@@ -233,6 +240,7 @@ class SkillIntrospectionProvider:
         InputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateOutput,
         aliases=("skill_update",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def update(self, call: CapabilityCall):
         return SkillUpdateTool(service=self.service).invoke(call.args)
@@ -246,6 +254,7 @@ class SkillIntrospectionProvider:
         InputModel=SkillCapabilitiesSkillIntrospectionProviderDisableInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderDisableOutput,
         aliases=("skill_disable",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def disable(self, call: CapabilityCall):
         return SkillDisableTool(service=self.service).invoke(call.args)

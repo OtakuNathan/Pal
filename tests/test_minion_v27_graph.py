@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -105,7 +106,7 @@ class GraphCompilerTests(unittest.TestCase):
                     graph,
                 )
 
-    def test_software_contract_edges_are_available_before_implementation_but_sink_waits(self) -> None:
+    def test_software_producers_run_from_contracts_but_sink_checker_waits(self) -> None:
         definition = ArchitectureTemplateCompiler().compile(
             "software_engineering.v1"
         )
@@ -125,6 +126,11 @@ class GraphCompilerTests(unittest.TestCase):
         self.assertEqual(edge.kind, EdgeKind.EXECUTION)
         self.assertEqual(
             set(graph.execution_predecessors(graph.sink)),
+            set(graph.nodes) - {graph.sink},
+        )
+        self.assertEqual(graph.producer_predecessors(graph.sink), ())
+        self.assertEqual(
+            set(graph.checker_predecessors(graph.sink)),
             set(graph.nodes) - {graph.sink},
         )
 
@@ -187,7 +193,7 @@ class GraphCompilerTests(unittest.TestCase):
                 source_ref="architect.yaml",
             )
 
-    def test_software_transitive_contract_graph_compiles_and_sink_waits_for_all(self) -> None:
+    def test_software_transitive_graph_waits_at_sink_checker(self) -> None:
         definition = ArchitectureTemplateCompiler().compile(
             "software_engineering.v1"
         )
@@ -231,6 +237,7 @@ class GraphCompilerTests(unittest.TestCase):
             set(graph.execution_predecessors(graph.sink)),
             set(graph.nodes) - {graph.sink},
         )
+        self.assertEqual(graph.producer_predecessors(graph.sink), ())
 
     def test_contract_only_dependency_is_hashed_but_not_executed(self) -> None:
         definition = ArchitectureTemplateCompiler().compile(
@@ -465,9 +472,122 @@ class GraphExecutionTests(unittest.TestCase):
             source_ref="architect.yaml",
         )
 
-    def test_sink_is_the_only_delivery_exit(self) -> None:
+    def test_all_software_producers_start_but_sink_checker_waits(self) -> None:
         execution = GraphExecution.start(self._graph())
-        self.assertEqual(execution.runnable_nodes(), ("decoder",))
+        self.assertEqual(execution.runnable_nodes(), ("decoder", "delivery"))
+        for name in ("decoder", "delivery"):
+            execution = execution.with_cycle(
+                execution.cycles[name].transition(
+                    CycleAction.START_PRODUCER,
+                    assignment=CycleAssignment(
+                        CycleSlot.PRODUCER,
+                        AssignmentKind.INITIAL,
+                        1,
+                        f"{name}-input",
+                    ),
+                )
+            )
+            execution = execution.with_cycle(
+                execution.cycles[name].transition(
+                    CycleAction.PRODUCER_SUBMITTED,
+                    product_ref=f"{name}-candidate",
+                )
+            )
+        self.assertNotIn("delivery", execution.runnable_nodes())
+        execution = execution.with_cycle(
+            execution.cycles["decoder"].transition(
+                CycleAction.START_CHECKER,
+                assignment=CycleAssignment(
+                    CycleSlot.CHECKER,
+                    AssignmentKind.INITIAL,
+                    1,
+                    "decoder-check",
+                ),
+            )
+        )
+        execution, _ = execution.apply_checker_verdict(
+            current_node="decoder",
+            accepted=True,
+            accepted_product_ref="decoder-accepted",
+        )
+        self.assertIn("delivery", execution.runnable_nodes())
+
+    def test_framepipe_cli_codes_in_parallel_and_only_its_checker_waits(self) -> None:
+        binding = RoleBinding("profile", "worker")
+        nodes = {
+            name: NodeSpec(
+                name=name,
+                responsibility=f"own {name}",
+                satellite_data={"test": True},
+                producer_binding=binding,
+                checker_binding=binding,
+                execution_adapter="software_git.v2",
+                workspace_policy={},
+                output_contract=(f"{name}_output",),
+                is_sink=name == "framepipe_cli",
+            )
+            for name in ("frame_protocol", "hex_codec", "framepipe_cli")
+        }
+        graph = GraphIR(
+            graph_id="framepipe-regression",
+            generation=1,
+            nodes=nodes,
+            edges=tuple(
+                EdgeSpec(
+                    provider,
+                    "framepipe_cli",
+                    EdgeKind.EXECUTION,
+                    f"modules.framepipe_cli.dependencies.{provider}",
+                    (f"{provider}_output",),
+                )
+                for provider in ("frame_protocol", "hex_codec")
+            ),
+            sink="framepipe_cli",
+            source_ref="architect.yaml",
+            source_map_ref="source-map",
+        )
+        execution = GraphExecution.start(graph)
+        self.assertEqual(
+            execution.runnable_nodes(),
+            ("frame_protocol", "framepipe_cli", "hex_codec"),
+        )
+        for name in nodes:
+            execution = execution.with_cycle(
+                execution.cycles[name].transition(
+                    CycleAction.START_PRODUCER,
+                    assignment=CycleAssignment(
+                        CycleSlot.PRODUCER,
+                        AssignmentKind.INITIAL,
+                        1,
+                        f"{name}-input",
+                    ),
+                )
+            )
+            execution = execution.with_cycle(
+                execution.cycles[name].transition(
+                    CycleAction.PRODUCER_SUBMITTED,
+                    product_ref=f"{name}-candidate",
+                )
+            )
+        self.assertNotIn("framepipe_cli", execution.runnable_nodes())
+        for name in ("frame_protocol", "hex_codec"):
+            execution = execution.with_cycle(
+                execution.cycles[name].transition(
+                    CycleAction.START_CHECKER,
+                    assignment=CycleAssignment(
+                        CycleSlot.CHECKER,
+                        AssignmentKind.INITIAL,
+                        1,
+                        f"{name}-check",
+                    ),
+                )
+            )
+            execution, _ = execution.apply_checker_verdict(
+                current_node=name,
+                accepted=True,
+                accepted_product_ref=f"{name}-accepted",
+            )
+        self.assertIn("framepipe_cli", execution.runnable_nodes())
 
     def test_replan_request_does_not_stale_an_active_sibling(self) -> None:
         binding = RoleBinding("profile", "worker")
@@ -625,7 +745,7 @@ class GraphExecutionTests(unittest.TestCase):
             )
             self.assertEqual(
                 installed.execution.cycles[target.sink].state,
-                NodeCycleState.STALE,
+                NodeCycleState.PRODUCER_READY,
             )
             self.assertEqual(
                 installed.execution.state,
@@ -716,6 +836,36 @@ class GraphExecutionTests(unittest.TestCase):
                 execution,
             )
 
+    def test_graph_install_rolls_back_generation_when_execution_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            repository = MinionV2Repository(Path(root))
+            coordinator = WorkflowCoordinator(repository)
+            graph = self._graph()
+
+            with patch.object(
+                repository,
+                "store_graph_execution",
+                side_effect=RuntimeError("crash before execution projection"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "execution projection"):
+                    coordinator.install_graph(
+                        workflow_id=graph.graph_id,
+                        graph=graph,
+                    )
+
+            self.assertIsNone(
+                repository.read_graph_generation(
+                    graph_id=graph.graph_id,
+                    generation=graph.generation,
+                )
+            )
+            self.assertIsNone(
+                repository.read_graph_execution(
+                    workflow_id=graph.graph_id,
+                    generation=graph.generation,
+                )
+            )
+
     def test_coordinator_owns_readiness_and_sink_publication(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             coordinator = WorkflowCoordinator(
@@ -733,7 +883,19 @@ class GraphExecutionTests(unittest.TestCase):
                         workflow_id=graph.graph_id
                     )
                 ),
-                ("decoder",),
+                ("decoder", "delivery"),
+            )
+            coordinator.start_assignment(
+                workflow_id=graph.graph_id,
+                node_name="delivery",
+                slot=CycleSlot.PRODUCER,
+                kind=AssignmentKind.INITIAL,
+                input_fingerprint="delivery-input",
+            )
+            coordinator.producer_submitted(
+                workflow_id=graph.graph_id,
+                node_name="delivery",
+                product_ref="delivery-coder-candidate",
             )
             coordinator.start_assignment(
                 workflow_id=graph.graph_id,
@@ -767,18 +929,6 @@ class GraphExecutionTests(unittest.TestCase):
                     )
                 ),
                 ("delivery",),
-            )
-            coordinator.start_assignment(
-                workflow_id=graph.graph_id,
-                node_name="delivery",
-                slot=CycleSlot.PRODUCER,
-                kind=AssignmentKind.INITIAL,
-                input_fingerprint="delivery-input",
-            )
-            coordinator.producer_submitted(
-                workflow_id=graph.graph_id,
-                node_name="delivery",
-                product_ref="delivery-coder-candidate",
             )
             coordinator.start_assignment(
                 workflow_id=graph.graph_id,

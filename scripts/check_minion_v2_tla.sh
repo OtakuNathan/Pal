@@ -14,6 +14,7 @@ fi
 models=(
     ModuleLifecycle
     ProduceCheckCycle
+    GraphGenerationLifecycle
     GraphExecutionLifecycle
     ProcessCapacityLifecycle
     DagLifecycle
@@ -30,6 +31,9 @@ models=(
     ContractWorkItemLifecycle
     HarnessGenerationLifecycle
     MinionRuntimeAuthority
+    LogicalCoroutineSnapshotLifecycle
+    ResidentMailboxLifecycle
+    TaskDeliveryLifecycle
 )
 
 cd "${repo_root}"

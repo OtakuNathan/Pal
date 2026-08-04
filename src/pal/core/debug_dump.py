@@ -163,7 +163,8 @@ def _core_state_snapshot(state: Any) -> dict[str, Any]:
     return {
         "active_turn_count": len(active_turns),
         "active_turns": [_turn_snapshot(turn_id, continuation) for turn_id, continuation in active_turns.items()],
-        "active_channel_turn_id": str(getattr(state, "active_channel_turn_id", "") or ""),
+        "active_turn_id": str(getattr(state, "active_turn_id", "") or ""),
+        "resident_quiescing": bool(getattr(state, "resident_quiescing", False)),
         "pending_channel_turn_count": _safe_len(getattr(state, "pending_channel_turns", ())),
         "turn_task_count": len(turn_tasks),
         "turn_tasks": [_turn_task_snapshot(turn_id, task) for turn_id, task in turn_tasks.items()],
@@ -203,14 +204,9 @@ def _turn_task_snapshot(turn_id: Any, task: Any) -> dict[str, Any]:
 
 
 def _control_scope_snapshot(key: Any, scope: Any) -> dict[str, Any]:
-    interrupt_task = getattr(scope, "interrupt_task", None)
     return {
         "scope_key": str(key),
-        "active_turn_id": str(getattr(scope, "active_turn_id", "") or ""),
         "pending_request_count": _safe_len(getattr(scope, "pending_requests", {})),
-        "quiescing": bool(getattr(scope, "quiescing", False)),
-        "interrupting_turn_id": str(getattr(scope, "interrupting_turn_id", "") or ""),
-        "interrupt_task_done": bool(interrupt_task.done()) if hasattr(interrupt_task, "done") else None,
     }
 
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_CONTROL,
+)
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -67,7 +71,7 @@ class ControlIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Control snapshot", snapshot.__dict__),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Re-attach control module", aliases=("control_attach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Re-attach control module", aliases=("control_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -79,7 +83,7 @@ class ControlIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Control re-attached", {"mounted": True, "degraded": False}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Degrade control module", aliases=("control_detach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Degrade control module", aliases=("control_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False

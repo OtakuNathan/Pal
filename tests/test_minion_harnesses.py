@@ -4,7 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from pal.minion.harness_request import (
     architect_harness_assignment_fingerprint,
@@ -27,6 +27,9 @@ from plugins.codex_architect_harness.codex_architect_worker import (
     CodexAppServer,
     CodexArchitectWorker,
     _is_same_started_assignment,
+)
+from plugins.codex_architect_harness.codex_architect_harness_runtime import (
+    _codex_harness_priority,
 )
 
 
@@ -89,6 +92,21 @@ class MinionHarnessRegistryTests(unittest.TestCase):
                     },
                 ),
             ).harness_id,
+            PAL_HARNESS_ID,
+        )
+
+    def test_codex_plugin_is_backup_unless_explicitly_selected(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertLess(_codex_harness_priority(), 0)
+        with patch.dict(
+            "os.environ", {"PAL_CODEX_ARCHITECT_PRIMARY": "true"}, clear=True
+        ):
+            self.assertGreater(_codex_harness_priority(), 0)
+
+        registry = MinionHarnessRegistry(include_pal=True)
+        registry.register(_codex_spec(self.root, priority=-100))
+        self.assertEqual(
+            registry.snapshot().select("architect").harness_id,
             PAL_HARNESS_ID,
         )
 

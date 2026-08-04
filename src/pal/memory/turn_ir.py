@@ -104,6 +104,49 @@ class L1TurnIR:
             messages.append(message)
         return replace(self, messages=tuple(messages), revision=self.revision + 1)
 
+    def discard_assistant(self, message_id: str) -> "L1TurnIR":
+        """Discard one unconsumed assistant response from an active turn.
+
+        This is used when a provider reports that the response was truncated.
+        No tool result can have consumed the response yet; rejecting a response
+        after any of its tool calls were consumed would break the L1 protocol.
+        """
+
+        self._require_active()
+        normalized = str(message_id or "").strip()
+        if not normalized:
+            raise L1TurnProtocolError("assistant message id is required")
+        matches = [
+            message
+            for message in self.messages
+            if message.role == MessageRole.ASSISTANT
+            and str(message.message_id or "") == normalized
+        ]
+        if len(matches) != 1:
+            raise L1TurnProtocolError(
+                f"assistant message id must identify exactly one L1 message: {normalized}"
+            )
+        discarded_calls = {
+            part.call_id
+            for part in matches[0].parts
+            if isinstance(part, ToolCallIR)
+        }
+        _, result_ids = _protocol_ids(self.messages)
+        consumed = discarded_calls & result_ids
+        if consumed:
+            raise L1TurnProtocolError(
+                f"cannot discard assistant response with consumed tool calls: {sorted(consumed)}"
+            )
+        messages = tuple(
+            message
+            for message in self.messages
+            if not (
+                message.role == MessageRole.ASSISTANT
+                and str(message.message_id or "") == normalized
+            )
+        )
+        return replace(self, messages=messages, revision=self.revision + 1)
+
     def append_tool_result(self, result: ToolResultIR) -> "L1TurnIR":
         self._require_active()
         if result.call_id not in self.pending_call_ids:

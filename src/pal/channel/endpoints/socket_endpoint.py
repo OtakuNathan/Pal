@@ -130,6 +130,8 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         session = _SocketSession(session_id=session_id, writer=writer)
         session.writer_task = asyncio.create_task(self._writer_loop(session))
         self.sessions[session_id] = session
+        if self.on_ready is not None:
+            self.on_ready()
         logger.info("socket session %s connected (%d active)", session_id, len(self.sessions))
         try:
             while True:

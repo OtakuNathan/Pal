@@ -222,10 +222,9 @@ class GraphIR:
         return tuple(edge for edge in self.edges if edge.producer == node_name)
 
     def execution_predecessors(self, node_name: str) -> tuple[str, ...]:
-        # Software module Coders work from accepted contracts and may run in
-        # parallel. The authored sink is the assembly/delivery boundary, so
-        # it waits for every produced module before its Candidate begins.
-        # Data-oriented adapters retain their authored dependency schedule.
+        # The authored software sink is the assembly/delivery boundary.  Its
+        # checker consumes every produced module even though its producer can
+        # work from contracts in parallel with those modules.
         if (
             node_name == self.sink
             and self.nodes[node_name].execution_adapter == "software_git.v2"
@@ -236,6 +235,18 @@ class GraphIR:
             for edge in self.edges
             if edge.consumer == node_name and edge.kind == EdgeKind.EXECUTION
         )
+
+    def producer_predecessors(self, node_name: str) -> tuple[str, ...]:
+        """Return products that must exist before this producer may start."""
+
+        if self.nodes[node_name].execution_adapter == "software_git.v2":
+            return ()
+        return self.execution_predecessors(node_name)
+
+    def checker_predecessors(self, node_name: str) -> tuple[str, ...]:
+        """Return accepted products required to assemble checker input."""
+
+        return self.execution_predecessors(node_name)
 
     def descendants(self, node_name: str) -> tuple[str, ...]:
         """Return executable descendants used for readiness propagation."""

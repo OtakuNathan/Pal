@@ -22,18 +22,7 @@ class PendingControlRequest:
 
 @dataclass
 class ControlScopeState:
-    active_turn_id: str | None = None
     pending_requests: dict[str, PendingControlRequest] = field(default_factory=dict)
-    transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    interrupt_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    quiescing: bool = False
-    drained_event: asyncio.Event = field(default_factory=asyncio.Event)
-    interrupting_turn_id: str | None = None
-    interrupt_task: asyncio.Task[bool] | None = None
-
-    def __post_init__(self) -> None:
-        if self.active_turn_id is None:
-            self.drained_event.set()
 
 
 @dataclass
@@ -43,11 +32,21 @@ class CoreRuntimeState:
     turn_tasks: dict[str, Any] = field(default_factory=dict)
     turn_scopes: dict[str, str] = field(default_factory=dict)
     control_scopes: dict[str, ControlScopeState] = field(default_factory=dict)
-    active_channel_turn_id: str | None = None
+    active_turn_id: str | None = None
     pending_channel_turns: deque[Any] = field(default_factory=deque)
     channel_turn_transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    resident_interrupt_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    resident_interrupting_turn_id: str | None = None
+    resident_interrupt_task: asyncio.Task[bool] | None = None
+    resident_quiescing: bool = False
+    resident_drained_event: asyncio.Event = field(default_factory=asyncio.Event)
+    resident_execution_lifetime_id: str = "pal:resident"
     prompt_log_enabled: bool = False
     mode: str = "default"
     compaction_user_turn_count: int = 0
     detached_modules: set[str] = field(default_factory=set)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.active_turn_id is None:
+            self.resident_drained_event.set()

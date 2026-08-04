@@ -111,7 +111,19 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                     OutputModel=action_blueprint.OutputModel,
                     guidance=action_blueprint.guidance or _default_guidance(action_blueprint, module_id),
                     execution=action_blueprint.execution or _default_execution(action_blueprint),
-                    search_text=action_blueprint.search_text,
+                    search_text=(
+                        str(action_blueprint.search_text or "").strip()
+                        or " ".join(
+                            value
+                            for value in (
+                                descriptor_name,
+                                action_blueprint.description,
+                                action_blueprint.family,
+                                module_id,
+                            )
+                            if str(value or "").strip()
+                        )
+                    ),
                     examples=_bound_examples(
                         action_blueprint,
                         target,
@@ -308,26 +320,23 @@ def _default_guidance(action_blueprint: CapabilityActionBlueprint, module_id: st
     ).strip()
     return ToolGuidance(
         purpose=purpose,
-        use_when=purpose,
+        use_when="Use when this capability is the precise match for the requested action.",
         do_not_use_when="Do not use when another tool's stated purpose matches the task more precisely.",
         failure_next_steps="Correct invalid input; otherwise follow the returned recovery affordances before retrying.",
     )
 
 
 def _default_execution(action_blueprint: CapabilityActionBlueprint) -> ToolExecutionSemantics:
-    if action_blueprint.namespace == "introspection":
-        effect = EffectKind.LOCAL_READ
-        idempotency = Idempotency.IDEMPOTENT
-        retry = RetryPolicy.AUTOMATIC
-    else:
-        effect = EffectKind.LOCAL_WRITE
-        idempotency = Idempotency.NON_IDEMPOTENT
-        retry = RetryPolicy.RECONCILE_FIRST
+    if action_blueprint.namespace != "introspection":
+        raise TypeError(
+            "operation capability "
+            f"{action_blueprint.handler_name!r} requires explicit execution semantics"
+        )
     return ToolExecutionSemantics(
         invocation_mode=InvocationMode.INDIRECT,
-        effect_kind=effect,
-        idempotency=idempotency,
-        retry_policy=retry,
+        effect_kind=EffectKind.LOCAL_READ,
+        idempotency=Idempotency.IDEMPOTENT,
+        retry_policy=RetryPolicy.AUTOMATIC,
         paging=PagingMode.SUPPORTED,
     )
 

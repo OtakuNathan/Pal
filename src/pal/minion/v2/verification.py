@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sqlite3
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -344,6 +345,7 @@ class VerificationService:
         role_submission_payload_hash: str = "",
         accepted_candidate_ref: ArtifactRef | None = None,
         accepted_candidate_digest: str = "",
+        _connection: sqlite3.Connection | None = None,
     ) -> DispatchResult:
         if bool(accepted_candidate_ref) != bool(accepted_candidate_digest):
             raise ValueError(
@@ -478,6 +480,7 @@ class VerificationService:
             ),
             role_assignment_id=role_assignment_id,
             role_submission_payload_hash=role_submission_payload_hash,
+            _connection=_connection,
         )
 
 
@@ -524,7 +527,7 @@ class DefectPropagationService:
             payload = {"stale_reason_ref": repair_bill_ref.to_dict(), "stale_dependency_node_id": dependency_node_id}
             action_type = (
                 "MARK_STALE"
-                if node.state in {"BLOCKED_BY_DEPS", "QUEUED", "REVIEW_QUEUED", "REPAIR_QUEUED", "ACCEPTED", "CANCELLED"}
+                if node.state in {"BLOCKED_BY_DEPS", "QUEUED", "REVIEW_BLOCKED_BY_DEPS", "REVIEW_QUEUED", "REPAIR_QUEUED", "ACCEPTED", "CANCELLED"}
                 else "REQUEST_STALE"
             )
             self.repository.dispatch(_node_action(node, action_type, actor, payload))

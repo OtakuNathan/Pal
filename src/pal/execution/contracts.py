@@ -66,7 +66,10 @@ class CapabilityDescriptor:
                 )
             if model.model_config.get("strict") is not True:
                 raise ValueError(f"{model.__name__} must set strict=True")
-            if model.model_config.get("extra") != "forbid":
+            if (
+                not bool(getattr(model, "__pydantic_root_model__", False))
+                and model.model_config.get("extra") != "forbid"
+            ):
                 raise ValueError(f"{model.__name__} must set extra='forbid'")
         input_schema = model_validation_schema(self.InputModel)
         if input_schema.get("properties") and not self.examples:

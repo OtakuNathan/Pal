@@ -19,6 +19,16 @@ from pal.minion.harnesses import (
 from pal.plugins.contracts import PluginBuildContext
 
 
+_PRIMARY_ENV = "PAL_CODEX_ARCHITECT_PRIMARY"
+
+
+def _codex_harness_priority() -> int:
+    """Keep Codex opt-in; the built-in Pal harness owns the default route."""
+
+    enabled = str(os.environ.get(_PRIMARY_ENV) or "").strip().lower()
+    return 100 if enabled in {"1", "true", "yes", "on"} else -100
+
+
 def _resolve_codex_binary() -> Path:
     configured = str(os.environ.get("PAL_CODEX_BIN") or "").strip()
     candidates: list[Path] = []
@@ -70,7 +80,7 @@ class CodexArchitectHarnessBundle:
             harness_id=CODEX_ARCHITECT_HARNESS_ID,
             protocol_version=HARNESS_PROTOCOL_VERSION,
             supported_roles=("architect",),
-            priority=100,
+            priority=_codex_harness_priority(),
             launch_kind=HARNESS_LAUNCH_HOST,
             worker_argv=(
                 str(Path(sys.executable).resolve()),

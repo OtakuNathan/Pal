@@ -35,6 +35,29 @@ ROLE_MODES: Mapping[OrchestrationRole, frozenset[RoleMode]] = {
 }
 
 
+def role_session_stage_key(
+    scope_kind: str,
+    subject_key: str,
+    role: OrchestrationRole | str,
+) -> str:
+    """Return the stable identity of one role coroutine.
+
+    A role mode selects the current playbook (for example ``produce`` versus
+    ``repair``); it does not create a new logical coroutine.  Keeping mode out
+    of this key is what lets one coder/verifier pair retain its state for the
+    complete Module lifetime.
+    """
+
+    parts = (
+        str(scope_kind or "").strip(),
+        str(subject_key or "").strip(),
+        OrchestrationRole(str(role)).value,
+    )
+    if not all(parts):
+        raise ValueError("role session stage identity is incomplete")
+    return ":".join(parts)
+
+
 @dataclass(frozen=True)
 class RoleActivation:
     role: OrchestrationRole

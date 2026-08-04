@@ -616,7 +616,7 @@ class TurnExecutor:
         if snapshot_think_levels:
             metadata["think_levels"] = snapshot_think_levels
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
-        metadata["artifact_scope_key"] = continuation.control_scope_key
+        metadata["artifact_scope_key"] = "pal:resident"
         metadata["artifact_turn_id"] = continuation.turn_id
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
         if assembly_context.turn_kind != "failure":
@@ -670,13 +670,19 @@ class TurnExecutor:
             active_messages = list(active_turn.messages)
             if active_messages and active_messages[0].role == MessageRole.USER:
                 active_messages = active_messages[1:]
+            original_active_messages = list(active_messages)
             active_messages = self._project_active_messages_for_prompt(active_messages)
+            self._reconcile_projected_tool_context(
+                continuation,
+                original_messages=original_active_messages,
+                projected_messages=active_messages,
+            )
         prompt_messages = [*base_messages, *active_messages]
         metadata = dict(prompt.metadata)
         if snapshot_think_levels:
             metadata["think_levels"] = snapshot_think_levels
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
-        metadata["artifact_scope_key"] = continuation.control_scope_key
+        metadata["artifact_scope_key"] = "pal:resident"
         metadata["artifact_turn_id"] = continuation.turn_id
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
         metadata["prompt_budget_snapshot"] = self._build_prompt_budget_snapshot(
@@ -846,6 +852,7 @@ class TurnExecutor:
                 if not isinstance(part, ToolResultIR):
                     continue
                 rendered = self._render_tool_preview(part.content)
+                rendered = self._append_replay_affordance(rendered, part.replay_result_ref)
                 total -= len(part.content) - len(rendered)
                 parts[part_index] = replace(part, content=rendered)
             projected[index] = replace(message, parts=tuple(parts))
@@ -858,10 +865,59 @@ class TurnExecutor:
                 if not isinstance(part, ToolResultIR):
                     continue
                 minimal = self._render_minimal_tool_observation(part.content)
+                minimal = self._append_replay_affordance(minimal, part.replay_result_ref)
                 total -= len(part.content) - len(minimal)
                 parts[part_index] = replace(part, content=minimal)
             projected[index] = replace(message, parts=tuple(parts))
         return projected
+
+    def _reconcile_projected_tool_context(
+        self,
+        continuation: Any,
+        *,
+        original_messages: list[LLMMessageIR],
+        projected_messages: list[LLMMessageIR],
+    ) -> None:
+        runtime = getattr(self.context, "execution_runtime", None)
+        reconcile = getattr(runtime, "reconcile_tool_context", None)
+        if not callable(reconcile):
+            return
+
+        def records(messages: list[LLMMessageIR]) -> list[dict[str, Any]]:
+            return [
+                {
+                    "role": "tool",
+                    "tool_call_id": part.call_id,
+                    "content": part.content,
+                }
+                for message in messages
+                for part in message.parts
+                if isinstance(part, ToolResultIR)
+            ]
+
+        deliveries = {
+            part.call_id: dict(part.context_delivery)
+            for message in original_messages
+            for part in message.parts
+            if isinstance(part, ToolResultIR) and part.context_delivery is not None
+        }
+        reconcile(
+            turn_id=str(continuation.turn_id),
+            original_messages=records(original_messages),
+            projected_messages=records(projected_messages),
+            delivery_records=deliveries,
+        )
+
+    @staticmethod
+    def _append_replay_affordance(content: str, result_ref: str) -> str:
+        ref = str(result_ref or "").strip()
+        if not ref:
+            return content
+        return (
+            f"{content.rstrip()}\n\n"
+            "full_result: "
+            f"read_tool_result(result_ref={json.dumps(ref)}, page=1, anchor=\"head\")"
+        )
 
     def _render_tool_preview(self, content: str) -> str:
         if len(content) <= self._config.active_tool_result_preview:
@@ -1080,17 +1136,32 @@ class TurnExecutor:
         if not callable(method):
             return
         content = self._render_tool_result_content(call, result)
-        method(
-            str(continuation.turn_id),
-            ToolResultIR(
+        turn_id = str(continuation.turn_id)
+        previous = getattr(memory_service, "active_l1_turn", lambda _turn_id: None)(
+            turn_id
+        )
+        tool_result = ToolResultIR(
                 call_id=call.call_id,
                 name=call.name,
                 content=content,
                 ok=result.ok,
                 status=str(result.status or ("ok" if result.ok else "error")),
                 structured=dict(result.structured) if result.structured is not None else None,
-            ),
+                context_delivery=(
+                    dict(result.context_delivery)
+                    if isinstance(result.context_delivery, dict)
+                    else None
+                ),
+                replay_result_ref=str(result.replay_result_ref or ""),
         )
+        try:
+            method(turn_id, tool_result)
+        except Exception:
+            self._discard_uncommitted_tool_delivery(
+                turn_id,
+                result.replay_result_ref,
+            )
+            raise
         delivery = getattr(result, "context_delivery", None)
         commit = getattr(
             getattr(self.context, "execution_runtime", None),
@@ -1104,14 +1175,34 @@ class TurnExecutor:
                     context_delivery=dict(delivery),
                 )
             except Exception:
-                # L1 already contains the result; a retired logical session
-                # must not turn an otherwise completed tool call into failure.
-                LOGGER.warning(
-                    "tool delivery commit failed after L1 append: turn_id=%s tool=%s",
-                    continuation.turn_id,
-                    call.name,
-                    exc_info=True,
+                rollback = getattr(memory_service, "rollback_l1_tool_result", None)
+                if previous is None or not callable(rollback):
+                    raise RuntimeError(
+                        "tool delivery commit failed and L1 cannot be rolled back"
+                    )
+                rollback(
+                    turn_id,
+                    previous=previous,
+                    call_id=call.call_id,
                 )
+                self._discard_uncommitted_tool_delivery(
+                    turn_id,
+                    result.replay_result_ref,
+                )
+                raise
+
+    def _discard_uncommitted_tool_delivery(
+        self,
+        turn_id: str,
+        result_ref: str,
+    ) -> None:
+        discard = getattr(
+            getattr(self.context, "execution_runtime", None),
+            "discard_uncommitted_tool_delivery",
+            None,
+        )
+        if callable(discard):
+            discard(turn_id=str(turn_id), result_ref=str(result_ref or ""))
 
     @staticmethod
     def _active_input_id(

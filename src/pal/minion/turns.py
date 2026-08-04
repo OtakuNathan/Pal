@@ -8,7 +8,6 @@ _V2_RUNNER_METADATA_KEYS = frozenset(
         "allow_text_only_completion",
         "agent_session",
         "clarification_answers",
-        "control_route",
         "debug_log",
         "heartbeat_interval_seconds",
         "initial_skill_injections",

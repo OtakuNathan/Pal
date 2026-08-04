@@ -120,6 +120,44 @@ def _build_repl(
 
 
 class SocketSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unsolicited_task_notifications_do_not_consume_turn_response(self) -> None:
+        events = iter(
+            [
+                {
+                    "type": "text_delta",
+                    "request_id": "task-notification:d1",
+                    "text": "Task finished.",
+                },
+                {
+                    "type": "done",
+                    "request_id": "task-notification:d1",
+                    "finish_reason": "stop",
+                },
+                {"type": "text_delta", "request_id": "r1", "text": "reply"},
+                {"type": "done", "request_id": "r1", "finish_reason": "stop"},
+            ]
+        )
+
+        async def read_message(_reader):
+            return next(events)
+
+        session = SocketSession(object(), _FakeWriter(), read_message, lambda: "r1")
+
+        async def collect_notification() -> list[dict[str, object]]:
+            result = []
+            async for payload in session.stream_notifications():
+                result.append(payload)
+                if payload.get("type") == "done":
+                    return result
+            return result
+
+        notification_task = asyncio.create_task(collect_notification())
+        response = [item async for item in session.stream_response("r1")]
+        notification = await notification_task
+
+        self.assertEqual(notification[0]["text"], "Task finished.")
+        self.assertEqual(response[0]["text"], "reply")
+
     async def test_demuxes_requests_and_tool_call_finish_is_not_terminal(self) -> None:
         events = iter(
             [

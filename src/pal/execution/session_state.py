@@ -4,8 +4,8 @@ import hashlib
 import json
 import math
 import threading
-from dataclasses import dataclass, field
-from typing import Any, Protocol
+from dataclasses import dataclass, field, replace
+from typing import Any, Mapping, Protocol
 
 
 DEFAULT_RESULT_RETENTION_USER_TURNS = 5
@@ -13,14 +13,14 @@ DEFAULT_RESULT_RETENTION_USER_TURNS = 5
 
 @dataclass(frozen=True)
 class LogicalExecutionContext:
-    logical_session_id: str
+    execution_lifetime_id: str
     input_id: str
     current_user_turn: int
     context_epoch: int
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "logical_session_id": self.logical_session_id,
+            "execution_lifetime_id": self.execution_lifetime_id,
             "input_id": self.input_id,
             "current_user_turn": self.current_user_turn,
             "context_epoch": self.context_epoch,
@@ -29,7 +29,7 @@ class LogicalExecutionContext:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "LogicalExecutionContext":
         return cls(
-            logical_session_id=str(value.get("logical_session_id") or ""),
+            execution_lifetime_id=str(value.get("execution_lifetime_id") or ""),
             input_id=str(value.get("input_id") or ""),
             current_user_turn=max(0, int(value.get("current_user_turn") or 0)),
             context_epoch=max(1, int(value.get("context_epoch") or 1)),
@@ -58,7 +58,7 @@ class FileDeliverySpan:
         }
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "FileDeliverySpan":
+    def from_dict(cls, value: Mapping[str, Any]) -> "FileDeliverySpan":
         start_offset = max(0, int(value.get("start_offset") or 0))
         end_offset = max(0, int(value.get("end_offset") or 0))
         line_length = max(
@@ -93,6 +93,7 @@ class FileDeliveryManifest:
     spans: tuple[FileDeliverySpan, ...] = ()
     empty_file: bool = False
     empty_marker: str = "(empty file)"
+    replay_result_ref: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,10 +104,11 @@ class FileDeliveryManifest:
             "spans": [span.to_dict() for span in self.spans],
             "empty_file": self.empty_file,
             "empty_marker": self.empty_marker,
+            "replay_result_ref": self.replay_result_ref,
         }
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any] | None) -> "FileDeliveryManifest | None":
+    def from_dict(cls, value: Mapping[str, Any] | None) -> "FileDeliveryManifest | None":
         payload = dict(value or {})
         if payload.get("kind") != "file_lines":
             return None
@@ -115,12 +117,13 @@ class FileDeliveryManifest:
             digest=str(payload.get("digest") or ""),
             total_lines=max(0, int(payload.get("total_lines") or 0)),
             spans=tuple(
-                FileDeliverySpan.from_dict(dict(item))
+                FileDeliverySpan.from_dict(item)
                 for item in list(payload.get("spans") or ())
-                if isinstance(item, dict)
+                if isinstance(item, Mapping)
             ),
             empty_file=bool(payload.get("empty_file")),
             empty_marker=str(payload.get("empty_marker") or "(empty file)"),
+            replay_result_ref=str(payload.get("replay_result_ref") or ""),
         )
 
     def slice(self, start_offset: int, end_offset: int) -> "FileDeliveryManifest | None":
@@ -159,13 +162,14 @@ class FileDeliveryManifest:
             spans=tuple(selected),
             empty_file=empty_visible,
             empty_marker=self.empty_marker,
+            replay_result_ref=self.replay_result_ref,
         )
 
 
 @dataclass(frozen=True)
 class PagerHandleManifest:
     result_ref: str
-    logical_session_id: str
+    execution_lifetime_id: str
     tool_name: str
     status: str
     ok: bool
@@ -178,7 +182,6 @@ class PagerHandleManifest:
     rendered: str
     origin: dict[str, Any] = field(default_factory=dict)
     delivery_manifest: dict[str, Any] = field(default_factory=dict)
-    backing_path: str = ""
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -193,13 +196,12 @@ class PagerHandleManifest:
     def to_dict(self, *, include_payload: bool = True) -> dict[str, Any]:
         payload = {
             **self.public_dict(),
-            "logical_session_id": self.logical_session_id,
+            "execution_lifetime_id": self.execution_lifetime_id,
             "tool_name": self.tool_name,
             "status": self.status,
             "ok": self.ok,
             "origin": dict(self.origin),
             "delivery_manifest": dict(self.delivery_manifest),
-            "backing_path": self.backing_path,
         }
         if include_payload:
             payload["output_json"] = self.output_json
@@ -210,7 +212,7 @@ class PagerHandleManifest:
     def from_dict(cls, value: dict[str, Any]) -> "PagerHandleManifest":
         return cls(
             result_ref=str(value.get("result_ref") or ""),
-            logical_session_id=str(value.get("logical_session_id") or ""),
+            execution_lifetime_id=str(value.get("execution_lifetime_id") or ""),
             tool_name=str(value.get("tool_name") or ""),
             status=str(value.get("status") or ""),
             ok=bool(value.get("ok", True)),
@@ -223,7 +225,6 @@ class PagerHandleManifest:
             rendered=str(value.get("rendered") or ""),
             origin=dict(value.get("origin") or {}),
             delivery_manifest=dict(value.get("delivery_manifest") or {}),
-            backing_path=str(value.get("backing_path") or ""),
         )
 
 
@@ -257,6 +258,35 @@ class FileGrant:
             return self.empty_file
         return any(start <= 1 and end >= self.total_lines for start, end in self.covered_ranges)
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "file_key": self.file_key,
+            "digest": self.digest,
+            "total_lines": self.total_lines,
+            "covered_ranges": [list(item) for item in self.covered_ranges],
+            "empty_file": self.empty_file,
+            "line_fragments": [list(item) for item in self.line_fragments],
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "FileGrant":
+        return cls(
+            file_key=str(value.get("file_key") or ""),
+            digest=str(value.get("digest") or ""),
+            total_lines=max(0, int(value.get("total_lines") or 0)),
+            covered_ranges=tuple(
+                (int(item[0]), int(item[1]))
+                for item in list(value.get("covered_ranges") or ())
+                if isinstance(item, (list, tuple)) and len(item) == 2
+            ),
+            empty_file=bool(value.get("empty_file")),
+            line_fragments=tuple(
+                (int(item[0]), int(item[1]), int(item[2]), int(item[3]))
+                for item in list(value.get("line_fragments") or ())
+                if isinstance(item, (list, tuple)) and len(item) == 4
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class FileSnapshot:
@@ -267,6 +297,7 @@ class FileSnapshot:
     created_user_turn: int
     expires_at_user_turn: int
     source: str = "delivery"
+    replay_result_ref: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -277,6 +308,7 @@ class FileSnapshot:
             "created_user_turn": self.created_user_turn,
             "expires_at_user_turn": self.expires_at_user_turn,
             "source": self.source,
+            "replay_result_ref": self.replay_result_ref,
         }
 
     @classmethod
@@ -293,6 +325,7 @@ class FileSnapshot:
                 if str(value.get("source") or "") == "mutation"
                 else "delivery"
             ),
+            replay_result_ref=str(value.get("replay_result_ref") or ""),
         )
 
 
@@ -300,19 +333,19 @@ class LogicalExecutionStateBackend(Protocol):
     def begin_input(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         input_id: str,
         retention_user_turns: int = DEFAULT_RESULT_RETENTION_USER_TURNS,
     ) -> LogicalExecutionContext:
         ...
 
-    def context(self, logical_session_id: str) -> LogicalExecutionContext:
+    def context(self, execution_lifetime_id: str) -> LogicalExecutionContext:
         ...
 
     def reconcile_projection(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         projection: tuple[str, ...],
         deliveries: tuple[dict[str, Any], ...],
     ) -> LogicalExecutionContext:
@@ -321,7 +354,7 @@ class LogicalExecutionStateBackend(Protocol):
     def record_delivery(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         delivery: dict[str, Any],
     ) -> LogicalExecutionContext:
         """Commit one tool-result delivery without changing the projection."""
@@ -333,7 +366,7 @@ class LogicalExecutionStateBackend(Protocol):
     def read_pager(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         result_ref: str,
         page: int,
         page_size: int | None,
@@ -341,10 +374,13 @@ class LogicalExecutionStateBackend(Protocol):
     ) -> PagerRead:
         ...
 
+    def pager_lifetime(self, result_ref: str) -> str | None:
+        ...
+
     def file_grant(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         file_key: str,
         digest: str,
     ) -> FileGrant | None:
@@ -353,7 +389,7 @@ class LogicalExecutionStateBackend(Protocol):
     def file_snapshot(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         file_key: str,
         digest: str,
     ) -> FileSnapshot | None:
@@ -362,7 +398,7 @@ class LogicalExecutionStateBackend(Protocol):
     def set_file_snapshot(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         file_key: str,
         digest: str,
         total_lines: int,
@@ -371,10 +407,10 @@ class LogicalExecutionStateBackend(Protocol):
     ) -> None:
         ...
 
-    def invalidate_file(self, *, logical_session_id: str, file_key: str) -> None:
+    def invalidate_file(self, *, execution_lifetime_id: str, file_key: str) -> None:
         ...
 
-    def retire_session(self, logical_session_id: str) -> None:
+    def retire_session(self, execution_lifetime_id: str) -> None:
         ...
 
 
@@ -386,6 +422,7 @@ class _SessionState:
     retention_user_turns: int = DEFAULT_RESULT_RETENTION_USER_TURNS
     projection: tuple[str, ...] = ()
     handles: dict[str, PagerHandleManifest] = field(default_factory=dict)
+    expired_handles: dict[str, PagerHandleManifest] = field(default_factory=dict)
     snapshots: dict[str, FileSnapshot] = field(default_factory=dict)
     grants: dict[tuple[int, str], FileGrant] = field(default_factory=dict)
     retired: bool = False
@@ -401,11 +438,11 @@ class InMemoryLogicalExecutionState:
     def begin_input(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         input_id: str,
         retention_user_turns: int = DEFAULT_RESULT_RETENTION_USER_TURNS,
     ) -> LogicalExecutionContext:
-        session_id = _required(logical_session_id, "logical_session_id")
+        session_id = _required(execution_lifetime_id, "execution_lifetime_id")
         semantic_input = _required(input_id, "input_id")
         with self._lock:
             state = self._sessions.setdefault(session_id, _SessionState())
@@ -418,8 +455,8 @@ class InMemoryLogicalExecutionState:
             self._expire_handles(state)
             return self._context(session_id, semantic_input, state)
 
-    def context(self, logical_session_id: str) -> LogicalExecutionContext:
-        session_id = _required(logical_session_id, "logical_session_id")
+    def context(self, execution_lifetime_id: str) -> LogicalExecutionContext:
+        session_id = _required(execution_lifetime_id, "execution_lifetime_id")
         with self._lock:
             state = self._sessions.setdefault(session_id, _SessionState())
             return self._context(session_id, "", state)
@@ -427,25 +464,20 @@ class InMemoryLogicalExecutionState:
     def reconcile_projection(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         projection: tuple[str, ...],
         deliveries: tuple[dict[str, Any], ...],
     ) -> LogicalExecutionContext:
-        session_id = _required(logical_session_id, "logical_session_id")
+        session_id = _required(execution_lifetime_id, "execution_lifetime_id")
         normalized_projection = tuple(str(item) for item in projection)
         with self._lock:
             state = self._sessions.setdefault(session_id, _SessionState())
             if state.retired:
                 raise RuntimeError("logical execution session is retired")
             previous = state.projection
-            append_only = len(normalized_projection) >= len(previous) and normalized_projection[: len(previous)] == previous
-            if previous and not append_only:
+            if normalized_projection != previous:
                 state.context_epoch += 1
-                state.grants = {
-                    key: grant
-                    for key, grant in state.grants.items()
-                    if key[0] == state.context_epoch
-                }
+                state.grants = {}
             state.projection = normalized_projection
             for delivery in deliveries:
                 self._apply_delivery(state, dict(delivery))
@@ -454,12 +486,12 @@ class InMemoryLogicalExecutionState:
     def record_delivery(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         delivery: dict[str, Any],
     ) -> LogicalExecutionContext:
         """Commit a just-delivered result while preserving projection state."""
 
-        session_id = _required(logical_session_id, "logical_session_id")
+        session_id = _required(execution_lifetime_id, "execution_lifetime_id")
         with self._lock:
             state = self._sessions.setdefault(session_id, _SessionState())
             if state.retired:
@@ -469,9 +501,11 @@ class InMemoryLogicalExecutionState:
 
     def store_pager(self, manifest: PagerHandleManifest) -> PagerHandleManifest:
         with self._lock:
-            state = self._sessions.setdefault(manifest.logical_session_id, _SessionState())
+            state = self._sessions.setdefault(manifest.execution_lifetime_id, _SessionState())
             if state.retired:
                 raise RuntimeError("logical execution session is retired")
+            if manifest.result_ref in state.expired_handles:
+                raise ValueError("result_ref belongs to a retired pager handle")
             existing = state.handles.get(manifest.result_ref)
             if existing is not None:
                 old_hash = hashlib.sha256(
@@ -489,21 +523,25 @@ class InMemoryLogicalExecutionState:
     def read_pager(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         result_ref: str,
         page: int,
         page_size: int | None,
         anchor: str,
     ) -> PagerRead:
         with self._lock:
-            state = self._sessions.get(logical_session_id)
+            state = self._sessions.get(execution_lifetime_id)
             if state is None:
                 return PagerRead(state="unknown_handle")
+            self._expire_handles(state)
             manifest = state.handles.get(str(result_ref))
             if manifest is None:
+                expired = state.expired_handles.get(str(result_ref))
+                if expired is not None:
+                    return PagerRead(state="expired_handle", manifest=expired)
                 return PagerRead(state="unknown_handle")
-            if state.retired or state.current_user_turn >= manifest.expires_at_user_turn:
-                return PagerRead(state="expired_handle", manifest=manifest)
+            if state.retired:
+                return PagerRead(state="expired_handle")
             size = max(256, int(page_size or manifest.page_size))
             text = manifest.rendered
             page_count = max(1, math.ceil(len(text) / size))
@@ -538,15 +576,29 @@ class InMemoryLogicalExecutionState:
                 delivery_manifest=sliced.to_dict() if sliced is not None else {},
             )
 
+    def pager_lifetime(self, result_ref: str) -> str | None:
+        """Resolve an exact globally unambiguous handle for direct callers."""
+
+        normalized = str(result_ref or "").strip()
+        if not normalized:
+            return None
+        with self._lock:
+            matches = [
+                execution_lifetime_id
+                for execution_lifetime_id, state in self._sessions.items()
+                if normalized in state.handles or normalized in state.expired_handles
+            ]
+        return matches[0] if len(matches) == 1 else None
+
     def file_grant(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         file_key: str,
         digest: str,
     ) -> FileGrant | None:
         with self._lock:
-            state = self._sessions.get(logical_session_id)
+            state = self._sessions.get(execution_lifetime_id)
             if state is None or state.retired:
                 return None
             grant = state.grants.get((state.context_epoch, str(file_key)))
@@ -557,12 +609,12 @@ class InMemoryLogicalExecutionState:
     def file_snapshot(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         file_key: str,
         digest: str,
     ) -> FileSnapshot | None:
         with self._lock:
-            state = self._sessions.get(logical_session_id)
+            state = self._sessions.get(execution_lifetime_id)
             if state is None or state.retired:
                 return None
             snapshot = state.snapshots.get(str(file_key))
@@ -577,7 +629,7 @@ class InMemoryLogicalExecutionState:
     def set_file_snapshot(
         self,
         *,
-        logical_session_id: str,
+        execution_lifetime_id: str,
         file_key: str,
         digest: str,
         total_lines: int,
@@ -585,7 +637,7 @@ class InMemoryLogicalExecutionState:
         source: str = "mutation",
     ) -> None:
         with self._lock:
-            state = self._sessions.setdefault(logical_session_id, _SessionState())
+            state = self._sessions.setdefault(execution_lifetime_id, _SessionState())
             total = max(0, int(total_lines))
             state.snapshots[str(file_key)] = FileSnapshot(
                 file_key=str(file_key),
@@ -599,26 +651,263 @@ class InMemoryLogicalExecutionState:
                 source=(
                     "mutation" if str(source) == "mutation" else "delivery"
                 ),
+                replay_result_ref="",
             )
 
-    def invalidate_file(self, *, logical_session_id: str, file_key: str) -> None:
+    def invalidate_file(self, *, execution_lifetime_id: str, file_key: str) -> None:
         with self._lock:
-            state = self._sessions.get(logical_session_id)
+            state = self._sessions.get(execution_lifetime_id)
             if state is None:
                 return
             state.snapshots.pop(str(file_key), None)
             for key in [candidate for candidate in state.grants if candidate[1] == str(file_key)]:
                 state.grants.pop(key, None)
 
-    def retire_session(self, logical_session_id: str) -> None:
+    def retire_session(self, execution_lifetime_id: str) -> None:
         with self._lock:
-            state = self._sessions.setdefault(str(logical_session_id), _SessionState())
-            state.retired = True
+            # Preserve only a tombstone so late work cannot resurrect the
+            # logical coroutine. Pager payloads, file snapshots, and grants
+            # all die at the same ownership boundary.
+            self._sessions[str(execution_lifetime_id)] = _SessionState(
+                retired=True
+            )
+
+    def snapshot_state(self) -> dict[str, Any]:
+        """Serialize the execution lifetime without exposing live locks."""
+
+        with self._lock:
+            return {
+                "sessions": {
+                    session_id: {
+                        "current_user_turn": state.current_user_turn,
+                        "context_epoch": state.context_epoch,
+                        "input_ids": dict(state.input_ids),
+                        "retention_user_turns": state.retention_user_turns,
+                        "projection": list(state.projection),
+                        "handles": {
+                            key: manifest.to_dict(include_payload=True)
+                            for key, manifest in state.handles.items()
+                        },
+                        "expired_handles": {
+                            key: manifest.to_dict(include_payload=False)
+                            for key, manifest in state.expired_handles.items()
+                        },
+                        "snapshots": {
+                            key: snapshot.to_dict()
+                            for key, snapshot in state.snapshots.items()
+                        },
+                        "grants": [
+                            {
+                                "context_epoch": epoch,
+                                "file_key": file_key,
+                                "grant": grant.to_dict(),
+                            }
+                            for (epoch, file_key), grant in state.grants.items()
+                        ],
+                        "retired": state.retired,
+                    }
+                    for session_id, state in self._sessions.items()
+                }
+            }
+
+    def prepare_restore_state(self, payload: dict[str, Any]) -> dict[str, _SessionState]:
+        raw_sessions = payload.get("sessions")
+        if not isinstance(raw_sessions, dict):
+            raise ValueError("execution runtime snapshot sessions must be an object")
+        restored: dict[str, _SessionState] = {}
+        for session_id, raw in raw_sessions.items():
+            normalized_session_id = str(session_id or "").strip()
+            if not normalized_session_id or not isinstance(raw, dict):
+                raise ValueError("execution runtime snapshot contains an invalid session")
+            allowed_fields = {
+                "current_user_turn",
+                "context_epoch",
+                "input_ids",
+                "retention_user_turns",
+                "projection",
+                "handles",
+                "expired_handles",
+                "snapshots",
+                "grants",
+                "retired",
+            }
+            if extras := sorted(set(raw) - allowed_fields):
+                raise ValueError(
+                    f"execution runtime snapshot session has unknown fields: {extras}"
+                )
+            current_user_turn = max(0, int(raw.get("current_user_turn") or 0))
+            input_ids = {
+                str(key): int(value)
+                for key, value in dict(raw.get("input_ids") or {}).items()
+            }
+            if any(
+                not key or value <= 0 or value > current_user_turn
+                for key, value in input_ids.items()
+            ):
+                raise ValueError(
+                    "execution runtime snapshot contains an invalid semantic input"
+                )
+            raw_handles = dict(raw.get("handles") or {})
+            raw_expired_handles = dict(raw.get("expired_handles") or {})
+            handles = {
+                str(key): PagerHandleManifest.from_dict(dict(value))
+                for key, value in raw_handles.items()
+                if isinstance(value, dict)
+            }
+            expired_handles = {
+                str(key): PagerHandleManifest.from_dict(dict(value))
+                for key, value in raw_expired_handles.items()
+                if isinstance(value, dict)
+            }
+            if len(handles) != len(raw_handles) or len(expired_handles) != len(
+                raw_expired_handles
+            ):
+                raise ValueError("execution runtime snapshot contains an invalid pager")
+            if set(handles) & set(expired_handles):
+                raise ValueError("execution runtime snapshot pager state overlaps")
+            for result_ref, manifest in {**handles, **expired_handles}.items():
+                if (
+                    not result_ref
+                    or manifest.result_ref != result_ref
+                    or manifest.execution_lifetime_id != normalized_session_id
+                    or manifest.expires_at_user_turn < manifest.created_user_turn
+                ):
+                    raise ValueError(
+                        "execution runtime snapshot pager identity mismatch"
+                    )
+            raw_snapshots = dict(raw.get("snapshots") or {})
+            snapshots = {
+                str(key): FileSnapshot.from_dict(dict(value))
+                for key, value in raw_snapshots.items()
+                if isinstance(value, dict)
+            }
+            if len(snapshots) != len(raw_snapshots) or any(
+                not key or snapshot.file_key != key
+                for key, snapshot in snapshots.items()
+            ):
+                raise ValueError(
+                    "execution runtime snapshot file snapshot identity mismatch"
+                )
+            state = _SessionState(
+                current_user_turn=current_user_turn,
+                context_epoch=max(1, int(raw.get("context_epoch") or 1)),
+                input_ids=input_ids,
+                retention_user_turns=max(
+                    1,
+                    int(
+                        raw.get("retention_user_turns")
+                        or DEFAULT_RESULT_RETENTION_USER_TURNS
+                    ),
+                ),
+                projection=tuple(str(item) for item in list(raw.get("projection") or ())),
+                handles=handles,
+                expired_handles=expired_handles,
+                snapshots=snapshots,
+                retired=bool(raw.get("retired")),
+            )
+            for item in list(raw.get("grants") or ()):
+                if not isinstance(item, dict) or not isinstance(item.get("grant"), dict):
+                    raise ValueError("execution runtime snapshot contains an invalid file grant")
+                epoch = max(1, int(item.get("context_epoch") or 1))
+                file_key = str(item.get("file_key") or "")
+                grant = FileGrant.from_dict(dict(item["grant"]))
+                if not file_key or grant.file_key != file_key:
+                    raise ValueError("execution runtime snapshot file grant identity mismatch")
+                if epoch != state.context_epoch:
+                    raise ValueError("execution runtime snapshot file grant epoch mismatch")
+                state.grants[(epoch, file_key)] = grant
+            if state.retired and (
+                state.input_ids
+                or state.projection
+                or state.handles
+                or state.expired_handles
+                or state.snapshots
+                or state.grants
+            ):
+                raise ValueError(
+                    "retired execution lifetime retained owned runtime state"
+                )
+            restored[normalized_session_id] = state
+        for state in restored.values():
+            self._expire_handles(state)
+        return restored
+
+    def install_prepared_state(self, prepared: dict[str, _SessionState]) -> None:
+        with self._lock:
+            self._sessions = prepared
+
+    def retire_pagers(
+        self,
+        *,
+        execution_lifetime_id: str,
+        result_refs: tuple[str, ...],
+    ) -> tuple[PagerHandleManifest, ...]:
+        with self._lock:
+            state = self._sessions.get(str(execution_lifetime_id))
+            if state is None:
+                return ()
+            retired = tuple(
+                manifest
+                for result_ref in result_refs
+                if (manifest := state.handles.pop(str(result_ref), None)) is not None
+            )
+            for manifest in retired:
+                state.expired_handles[manifest.result_ref] = replace(
+                    manifest,
+                    output_json="",
+                    rendered="",
+                    origin={},
+                    delivery_manifest={},
+                )
+            retired_refs = {manifest.result_ref for manifest in retired}
+            remaining_file_keys = {
+                str(manifest.delivery_manifest.get("file_key") or "")
+                for manifest in state.handles.values()
+                if manifest.delivery_manifest
+            }
+            state.grants = {
+                key: grant
+                for key, grant in state.grants.items()
+                if not any(
+                    str(manifest.delivery_manifest.get("file_key") or "")
+                    == grant.file_key
+                    and grant.file_key not in remaining_file_keys
+                    for manifest in retired
+                    if manifest.result_ref in retired_refs
+                )
+            }
+            for file_key, snapshot in tuple(state.snapshots.items()):
+                if snapshot.replay_result_ref in retired_refs:
+                    state.snapshots.pop(file_key, None)
+            return retired
+
+    def expire_pagers(
+        self,
+        *,
+        execution_lifetime_id: str,
+    ) -> tuple[PagerHandleManifest, ...]:
+        with self._lock:
+            state = self._sessions.get(str(execution_lifetime_id))
+            if state is None:
+                return ()
+            expired_refs = tuple(
+                result_ref
+                for result_ref, manifest in state.handles.items()
+                if state.current_user_turn >= manifest.expires_at_user_turn
+            )
+        return self.retire_pagers(
+            execution_lifetime_id=execution_lifetime_id,
+            result_refs=expired_refs,
+        )
+
+    def reset_state(self) -> None:
+        with self._lock:
+            self._sessions.clear()
 
     @staticmethod
     def _context(session_id: str, input_id: str, state: _SessionState) -> LogicalExecutionContext:
         return LogicalExecutionContext(
-            logical_session_id=session_id,
+            execution_lifetime_id=session_id,
             input_id=input_id,
             current_user_turn=state.current_user_turn,
             context_epoch=state.context_epoch,
@@ -626,9 +915,56 @@ class InMemoryLogicalExecutionState:
 
     @staticmethod
     def _expire_handles(state: _SessionState) -> None:
-        # Keep manifests so callers can distinguish an expired handle from an
-        # unknown or cross-session reference and produce a safe affordance.
-        _ = state
+        expired_refs = tuple(
+            result_ref
+            for result_ref, manifest in state.handles.items()
+            if state.current_user_turn >= manifest.expires_at_user_turn
+        )
+        if not expired_refs:
+            state.snapshots = {
+                key: snapshot
+                for key, snapshot in state.snapshots.items()
+                if state.current_user_turn < snapshot.expires_at_user_turn
+            }
+            return
+        expired = {
+            result_ref: state.handles.pop(result_ref)
+            for result_ref in expired_refs
+        }
+        for result_ref, manifest in expired.items():
+            state.expired_handles[result_ref] = replace(
+                manifest,
+                output_json="",
+                rendered="",
+                origin={},
+                delivery_manifest={},
+            )
+        expired_file_keys = {
+            str(manifest.delivery_manifest.get("file_key") or "")
+            for manifest in expired.values()
+            if manifest.delivery_manifest
+        }
+        remaining_file_keys = {
+            str(manifest.delivery_manifest.get("file_key") or "")
+            for manifest in state.handles.values()
+            if manifest.delivery_manifest
+        }
+        state.grants = {
+            key: grant
+            for key, grant in state.grants.items()
+            if not (
+                grant.file_key in expired_file_keys
+                and grant.file_key not in remaining_file_keys
+            )
+        }
+        state.snapshots = {
+            key: snapshot
+            for key, snapshot in state.snapshots.items()
+            if (
+                state.current_user_turn < snapshot.expires_at_user_turn
+                and snapshot.replay_result_ref not in expired
+            )
+        }
 
     @staticmethod
     def _apply_delivery(state: _SessionState, delivery: dict[str, Any]) -> None:
@@ -709,6 +1045,7 @@ class InMemoryLogicalExecutionState:
                 state.current_user_turn + state.retention_user_turns
             ),
             source="delivery",
+            replay_result_ref=manifest.replay_result_ref,
         )
 
 

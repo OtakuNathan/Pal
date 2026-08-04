@@ -7,6 +7,7 @@ import subprocess
 
 from pal.minion.v2.architecture_templates import ArchitectureTemplateCompiler
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType
+from pal.minion.v2.graph_protocol import graph_ir_from_mapping
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.minion.v2.role_gateway import (
@@ -14,6 +15,7 @@ from pal.minion.v2.role_gateway import (
     RoleGatewayArtifactStore,
 )
 from pal.minion.v2.role_protocol import RoleAssignmentRequest
+from pal.minion.v2.workflow_runtime import WorkflowCoordinator
 
 
 class MinionV2RoleGatewayTests(unittest.TestCase):
@@ -35,10 +37,25 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
             {"module": "router", "contract": "route deterministically"},
             artifact_type="ModuleWorkViewArtifact",
         )
+        self.bound_input_path = self.runtime_root / "input.json"
+        self.bound_input_path.write_text(
+            '{"module":"router","contract":"route deterministically"}\n',
+            encoding="utf-8",
+        )
         self.prompt_ref = self.service.artifacts.put_json(
             {
                 "instruction": "implement router",
                 "workspace": {"repo_path": str(self.workspace)},
+                "metadata": {
+                    "requirements_brief": {
+                        "references": [
+                            {
+                                "name": "module_work_view",
+                                "path": str(self.bound_input_path),
+                            }
+                        ]
+                    }
+                },
             },
             artifact_type="RolePromptPackArtifact",
         )
@@ -137,10 +154,15 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
             {"access_token": self.access_token, **params},
         )
 
-    def test_gateway_rejects_legacy_bound_input_receipt_methods(self) -> None:
-        for method in ("bound_input_read", "bound_input_json"):
-            with self.subTest(method=method), self.assertRaisesRegex(ValueError, "not allowed"):
-                self.call(method, name="module_work_view")
+    def test_gateway_rejects_legacy_bound_input_receipt_method(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not allowed"):
+            self.call("bound_input_read", name="module_work_view")
+
+    def test_gateway_reads_authenticated_bound_input_json(self) -> None:
+        # The normal worker prompt stores a projected /pal path, while the
+        # Manager keeps the source path in its authenticated prompt metadata.
+        value = self.call("bound_input_json", name="module_work_view")
+        self.assertEqual(value["value"]["module"], "router")
 
     def test_gateway_persists_harness_continuation_by_logical_session(self) -> None:
         written = self.call(
@@ -165,85 +187,27 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
                 state={"value": "x" * (65 * 1024)},
             )
 
-    def test_gateway_persists_execution_clock_and_pager_by_role_session(
+    def test_gateway_rejects_worker_owned_execution_state_methods(
         self,
     ) -> None:
-        first = self.call(
+        for method in (
+            "execution_context",
             "execution_begin_input",
-            logical_session_id="session-router",
-            input_id="assignment-router",
-            retention_user_turns=5,
-        )
-        replay = self.call(
-            "execution_begin_input",
-            logical_session_id="session-router",
-            input_id="assignment-router",
-            retention_user_turns=5,
-        )
-        self.assertEqual(first["context"]["current_user_turn"], 1)
-        self.assertEqual(replay["context"]["current_user_turn"], 1)
-
-        stored = self.call(
+            "execution_reconcile_projection",
+            "execution_record_delivery",
             "execution_store_pager",
-            manifest={
-                "result_ref": "result-router",
-                "logical_session_id": "session-router",
-                "tool_name": "read_file",
-                "status": "ok",
-                "ok": True,
-                "page_size": 256,
-                "original_size": 11,
-                "page_count": 1,
-                "created_user_turn": 999,
-                "expires_at_user_turn": 999,
-                "output_json": '{"value":1}',
-                "rendered": "hello world",
-            },
-        )
-        self.assertEqual(stored["manifest"]["created_user_turn"], 1)
-        self.assertEqual(stored["manifest"]["expires_at_user_turn"], 6)
-        page = self.call(
             "execution_read_pager",
-            logical_session_id="session-router",
-            result_ref="result-router",
-            page=1,
-            anchor="head",
-        )
-        self.assertEqual(page["state"], "ok")
-        self.assertEqual(page["content"], "hello world")
-
-        session = self.service.repository.read_role_session("session-router")
-        self.assertIn("result-router", session["execution_state"]["handles"])
-        payload_ref = session["execution_state"]["handles"]["result-router"][
-            "payload_ref"
-        ]
-        self.assertEqual(
-            self.service.artifacts.read_json(payload_ref)["rendered"],
-            "hello world",
-        )
-        for index in range(2, 7):
-            self.call(
-                "execution_begin_input",
-                logical_session_id="session-router",
-                input_id=f"assignment-router-{index}",
-                retention_user_turns=5,
-            )
-        expired = self.call(
-            "execution_read_pager",
-            logical_session_id="session-router",
-            result_ref="result-router",
-            page=1,
-            anchor="head",
-        )
-        self.assertEqual(expired["state"], "expired_handle")
-
-    def test_gateway_rejects_cross_session_execution_state_access(self) -> None:
-        with self.assertRaisesRegex(ValueError, "authenticated role session"):
-            self.call(
-                "execution_context",
-                logical_session_id="some-other-session",
-            )
-
+            "execution_file_grant",
+            "execution_file_snapshot",
+            "execution_set_file_snapshot",
+            "execution_invalidate_file",
+            "execution_retire",
+        ):
+            with self.subTest(method=method), self.assertRaisesRegex(
+                ValueError,
+                "not allowed",
+            ):
+                self.call(method)
     def test_gateway_owns_draft_cas_artifact_publish_and_submission_receipt(self) -> None:
         first = self.call("draft_read", context=self.context, seed={"checks": []})
         self.assertEqual(first["snapshot"]["version"], 0)
@@ -374,6 +338,21 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         self.assertEqual(stored["contract_schema"], "general.v1")
         self.assertEqual(stored["source"], "architect.yaml")
         self.assertNotIn("contract_schema", stored["contract"])
+        # The authored architecture is revision 2 because revision 1 was
+        # superseded before any graph was installed.  The first accepted graph
+        # must nevertheless occupy GraphIR generation 1.
+        self.assertEqual(stored["graph_ir"]["generation"], 1)
+        graph = graph_ir_from_mapping(stored["graph_ir"])
+        WorkflowCoordinator(self.service.repository).install_graph(
+            workflow_id="workflow-router",
+            graph=graph,
+        )
+        self.assertEqual(
+            self.service.repository.read_graph_generation(
+                graph_id="workflow-router"
+            ).generation,
+            1,
+        )
         self.assertEqual(
             self.service.repository.read_role_assignment(
                 assignment
@@ -466,26 +445,38 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         self,
         family_binding_sha: str,
     ) -> tuple[str, str, str, int, str]:
+        architecture_revision_id = "architecture-router-revision-2"
+        self.service.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_ARCHITECTURE_REVISION",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=architecture_revision_id,
+                actor="test",
+                expected_version=0,
+                payload={"revision_number": 2},
+            )
+        )
         session_id = "session-architect"
         self.service.repository.ensure_role_session(
             session_id=session_id,
             workflow_id="workflow-router",
-            aggregate_type=AggregateType.DAG_NODE_RUN,
-            aggregate_id="node-router",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id=architecture_revision_id,
             role="architect",
             mode="author",
             role_profile_id="general.architect",
             family_binding_sha=family_binding_sha,
-            scope_kind=AggregateType.DAG_NODE_RUN.value,
-            subject_key="node-router",
+            scope_kind=AggregateType.ARCHITECTURE_REVISION.value,
+            subject_key=architecture_revision_id,
         )
         assignment = self.service.repository.create_role_assignment(
             RoleAssignmentRequest(
                 assignment_key="architecture-cycle-1",
                 session_id=session_id,
                 workflow_id="workflow-router",
-                aggregate_type=AggregateType.DAG_NODE_RUN.value,
-                aggregate_id="node-router",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
+                aggregate_id=architecture_revision_id,
                 role="architect",
                 mode="author",
                 role_profile_id="general.architect",

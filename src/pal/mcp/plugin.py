@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_CONTROL,
+    INDIRECT_LOCAL_WRITE,
+    INDIRECT_UNSAFE_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     McpPluginMcpManagerPluginProviderAttachInput,
     McpPluginMcpManagerPluginProviderDetachInput,
@@ -121,7 +127,7 @@ class McpManagerPluginProvider:
         result = self._request_or_error("read_server", {"server_id": str(call.args.get("server_id") or "")})
         return _introspection_from_rpc("MCP server", result)
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="attach", description="Attach MCP manager", aliases=("mcp_attach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="attach", description="Attach MCP manager", aliases=("mcp_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         try:
@@ -145,7 +151,7 @@ class McpManagerPluginProvider:
             llm_text=render_titled_structured_for_llm(text, payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="detach", description="Detach MCP manager", aliases=("mcp_detach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="detach", description="Detach MCP manager", aliases=("mcp_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         self._stop_manager()
@@ -159,7 +165,7 @@ class McpManagerPluginProvider:
             llm_text=render_titled_structured_for_llm("MCP manager detached", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan MCP server configs and refresh projection", aliases=("mcp_rescan",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan MCP server configs and refresh projection", aliases=("mcp_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         try:
@@ -179,6 +185,7 @@ class McpManagerPluginProvider:
         description="Attach one configured MCP server inside the manager",
         InputModel=McpPluginMcpManagerPluginProviderAttachInput,
         aliases=("mcp_server_attach",),
+        execution=INDIRECT_CONTROL,
     )
     def attach_server(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -198,6 +205,7 @@ class McpManagerPluginProvider:
         description="Detach one MCP server inside the manager",
         InputModel=McpPluginMcpManagerPluginProviderDetachInput,
         aliases=("mcp_server_detach",),
+        execution=INDIRECT_CONTROL,
     )
     def detach_server(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
@@ -216,6 +224,7 @@ class McpManagerPluginProvider:
         description="Prepare an image artifact/path/url for external MCP tool arguments as URL, local path, or base64 data",
         InputModel=McpPluginMcpManagerPluginProviderImagePrepareInput,
         aliases=("mcp_image_prepare",),
+        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
     def image_prepare(self, call: CapabilityCall) -> CapabilityResult:
         try:

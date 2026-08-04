@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pal.minion.config import MINION_DB_FILENAME
 from pal.minion.catalog import MinionCatalogService
-from pal.minion.cutover import cutover_minion_runtime_v27
+from pal.minion.cutover import cutover_minion_runtime
 from pal.minion.ipc import minion_runtime_dir
 from pal.minion.v2.schema import (
     MINION_V2_SCHEMA_VERSION,
@@ -15,8 +15,8 @@ from pal.minion.v2.schema import (
 )
 
 
-class MinionV27CutoverTests(unittest.TestCase):
-    def test_fresh_schema_is_v27_and_legacy_schema_is_rejected(self) -> None:
+class MinionCurrentCutoverTests(unittest.TestCase):
+    def test_fresh_schema_is_current_and_legacy_schema_is_rejected(self) -> None:
         with sqlite3.connect(":memory:") as connection:
             ensure_minion_v2_schema(connection)
             version = connection.execute(
@@ -60,7 +60,7 @@ class MinionV27CutoverTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = cutover_minion_runtime_v27(runtime_root)
+            result = cutover_minion_runtime(runtime_root)
 
             self.assertEqual(result.status, "archived_and_initialized")
             self.assertEqual(result.previous_version, 24)
@@ -112,7 +112,7 @@ class MinionV27CutoverTests(unittest.TestCase):
             invalid.write_text("[]", encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "JSON object"):
-                cutover_minion_runtime_v27(runtime_root)
+                cutover_minion_runtime(runtime_root)
 
             self.assertTrue(source.is_dir())
             self.assertFalse((runtime_root / "data" / "minion-archive").exists())
@@ -126,7 +126,7 @@ class MinionV27CutoverTests(unittest.TestCase):
                 connection.execute("CREATE TABLE legacy_worker_state(value TEXT)")
                 connection.execute("INSERT INTO legacy_worker_state VALUES ('kept')")
 
-            result = cutover_minion_runtime_v27(runtime_root)
+            result = cutover_minion_runtime(runtime_root)
 
             self.assertEqual(result.status, "archived_and_initialized")
             self.assertEqual(result.previous_version, -1)

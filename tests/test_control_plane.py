@@ -1320,16 +1320,15 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.core.expire_pending_control_requests_async()
         self.assertNotIn("reset_confirm", scope_state.pending_requests)
 
-    async def test_quiescing_scope_does_not_create_background_turn_task(self) -> None:
-        scope_state = self.core._ensure_scope_state(self.route.control_scope_key)
-        scope_state.quiescing = True
+    async def test_resident_quiesce_queues_new_turn_without_starting_it(self) -> None:
+        self.core.state.resident_quiescing = True
         envelope = self._make_channel_envelope(turn_id="turn-quiescing", request_id="req-1")
 
         await self.core.schedule_channel_turn_async(envelope)
 
         self.assertNotIn(envelope.event.event_id, self.core.state.turn_tasks)
-        self.assertTrue(self.endpoint.has_queued_replies())
-        self.assertEqual(self.endpoint.outbox[-1].text, "This scope is resetting. Please retry in a moment.")
+        self.assertEqual(len(self.core.state.pending_channel_turns), 1)
+        self.assertFalse(self.endpoint.has_queued_replies())
         self.assertTrue(self.endpoint.has_queued_status())
         self.assertEqual(self.endpoint.status_outbox[-1].kind, "working_stop")
 
@@ -1445,7 +1444,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         statuses = list(self.channel_runtime.status_outbox)
         self.assertGreaterEqual(len(statuses), 2)
         self.assertEqual(statuses[-2].kind, "interactive_resolve")
-        self.assertEqual(statuses[-2].payload["spec"].text, "No active turn to interrupt in this scope.")
+        self.assertEqual(statuses[-2].payload["spec"].text, "No active turn to interrupt.")
         self.assertEqual(statuses[-1].kind, "working_stop")
 
     async def test_control_panel_buttons_are_driven_by_command_specs(self) -> None:
@@ -1525,9 +1524,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.core.state.active_turns["turn-1"] = continuation
         self.core.state.turn_scopes["turn-1"] = scope_key
-        scope_state = self.core._ensure_scope_state(scope_key)
-        scope_state.active_turn_id = "turn-1"
-        scope_state.drained_event.clear()
+        self.core.state.active_turn_id = "turn-1"
+        self.core.state.resident_drained_event.clear()
         self.endpoint.queue_stream_update(
             ChannelStreamUpdate(kind="text_delta", text="hello"),
             response_handle=response_handle,
@@ -1579,7 +1577,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         continuation.emitted_reply_texts.append("I found a runtime clue before interruption.")
 
-        interrupted = await self.core.turn_manager.interrupt_by_scope(scope_key)
+        interrupted = await self.core.turn_manager.interrupt_active_turn()
 
         self.assertTrue(interrupted)
         self.assertTrue(continuation.interrupted)
@@ -1661,17 +1659,16 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.core.state.active_turns["turn-2"] = continuation
         self.core.state.turn_scopes["turn-2"] = scope_key
-        scope_state = self.core._ensure_scope_state(scope_key)
-        scope_state.active_turn_id = "turn-2"
-        scope_state.drained_event.clear()
+        self.core.state.active_turn_id = "turn-2"
+        self.core.state.resident_drained_event.clear()
         task = asyncio.create_task(asyncio.sleep(10))
         self.core.state.turn_tasks["turn-2"] = task
         handle = _BlockingInterruptHandle()
         self.core.context.execution_runtime.register_interrupt_handle("turn-2", handle)
 
-        first = asyncio.create_task(self.core.turn_manager.interrupt_by_scope(scope_key))
+        first = asyncio.create_task(self.core.turn_manager.interrupt_active_turn())
         await handle.started.wait()
-        second = asyncio.create_task(self.core.turn_manager.interrupt_by_scope(scope_key))
+        second = asyncio.create_task(self.core.turn_manager.interrupt_active_turn())
         await asyncio.sleep(0)
 
         self.assertEqual(handle.calls, 1)
@@ -1679,8 +1676,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(await first)
         self.assertTrue(await second)
-        self.assertIsNone(scope_state.interrupt_task)
-        self.assertIsNone(scope_state.interrupting_turn_id)
+        self.assertIsNone(self.core.state.resident_interrupt_task)
+        self.assertIsNone(self.core.state.resident_interrupting_turn_id)
         with self.assertRaises(asyncio.CancelledError):
             await task
 
@@ -1710,9 +1707,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(first_started.wait(), timeout=1.0)
         await self.core.schedule_channel_turn_async(second)
 
-        scope_state = self.core._ensure_scope_state(self.route.control_scope_key)
-        self.assertEqual(scope_state.active_turn_id, "turn-queue-1")
-        self.assertEqual(self.core.state.active_channel_turn_id, "turn-queue-1")
+        self.assertEqual(self.core.state.active_turn_id, "turn-queue-1")
         self.assertEqual(len(self.core.state.pending_channel_turns), 1)
         self.assertNotIn("turn-queue-2", self.core.state.turn_tasks)
         self.assertEqual(self.endpoint.status_outbox[-1].kind, "working_stop")
@@ -1721,8 +1716,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(second_started.wait(), timeout=1.0)
 
         self.assertEqual(started, ["turn-queue-1", "turn-queue-2"])
-        self.assertEqual(scope_state.active_turn_id, "turn-queue-2")
-        self.assertEqual(self.core.state.active_channel_turn_id, "turn-queue-2")
+        self.assertEqual(self.core.state.active_turn_id, "turn-queue-2")
         self.assertEqual(len(self.core.state.pending_channel_turns), 0)
         self.assertIn("turn-queue-2", self.core.state.turn_tasks)
         self.assertTrue(any(item.kind == "typing_start" for item in self.endpoint.status_outbox))
@@ -1731,9 +1725,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         second_release.set()
         await asyncio.wait_for(second_task, timeout=1.0)
         await asyncio.sleep(0)
-        self.assertIsNone(scope_state.active_turn_id)
-        self.assertIsNone(self.core.state.active_channel_turn_id)
-        self.assertTrue(scope_state.drained_event.is_set())
+        self.assertIsNone(self.core.state.active_turn_id)
+        self.assertTrue(self.core.state.resident_drained_event.is_set())
 
     async def test_different_scopes_share_single_personality_turn_queue(self) -> None:
         first_started = asyncio.Event()
@@ -1761,19 +1754,14 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.core.schedule_channel_turn_async(second)
         await asyncio.wait_for(first_started.wait(), timeout=1.0)
 
-        first_scope = self.core._ensure_scope_state(self.core._derive_channel_control_scope_key(first))
-        second_scope = self.core._ensure_scope_state(self.core._derive_channel_control_scope_key(second))
-        self.assertEqual(first_scope.active_turn_id, "turn-scope-1")
-        self.assertIsNone(second_scope.active_turn_id)
-        self.assertEqual(self.core.state.active_channel_turn_id, "turn-scope-1")
+        self.assertEqual(self.core.state.active_turn_id, "turn-scope-1")
         self.assertEqual(len(self.core.state.pending_channel_turns), 1)
         self.assertNotIn("turn-scope-2", self.core.state.turn_tasks)
 
         first_release.set()
         await asyncio.wait_for(second_started.wait(), timeout=1.0)
         self.assertEqual(started, ["turn-scope-1", "turn-scope-2"])
-        self.assertEqual(second_scope.active_turn_id, "turn-scope-2")
-        self.assertEqual(self.core.state.active_channel_turn_id, "turn-scope-2")
+        self.assertEqual(self.core.state.active_turn_id, "turn-scope-2")
 
         second_task = self.core.state.turn_tasks["turn-scope-2"]
         second_release.set()
@@ -1855,7 +1843,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(running_task.done())
         release.set()
 
-    async def test_reset_clears_global_pending_turn_queue(self) -> None:
+    async def test_reset_preserves_and_resumes_global_pending_turn_queue(self) -> None:
         first_started = asyncio.Event()
         release = asyncio.Event()
 
@@ -1893,8 +1881,9 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(self.core.state.pending_channel_turns), 0)
-        self.assertNotIn("turn-reset-2", self.core.state.turn_tasks)
+        self.assertIn("turn-reset-2", self.core.state.turn_tasks)
         release.set()
+        await asyncio.wait_for(self.core.state.turn_tasks["turn-reset-2"], timeout=1.0)
 
 
 class TelegramControlBoundaryTests(unittest.IsolatedAsyncioTestCase):

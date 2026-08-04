@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pal.core.runtime_config import RuntimeConfig
 from pal.llm.contracts import LLMPreflightRequest
+from pal.llm.endpoint import ShapeEndpointInvoker
 from pal.llm.ir import (
     GenerationPolicyIR,
     LLMFinishReason,
@@ -18,14 +19,20 @@ from pal.llm.ir import (
     TextPartIR,
 )
 from pal.llm.models import LLMEndpointModel
+from pal.llm.response_hooks import ProviderResponseHookError
 from pal.llm.repository import RuntimeSettingRepository
 from pal.llm.runtime import EndpointResolver, LLMRuntime
 
 
-def _endpoint(endpoint_id: str = "ep", *, model_id: str = "test-model") -> LLMEndpointModel:
+def _endpoint(
+    endpoint_id: str = "ep",
+    *,
+    model_id: str = "test-model",
+    provider: str = "test",
+) -> LLMEndpointModel:
     return LLMEndpointModel(
         endpoint_id=endpoint_id,
-        provider="test",
+        provider=provider,
         model_id=model_id,
         display_name="Test",
         wire_shape="openai_completion",
@@ -94,7 +101,38 @@ class _Invoker:
         raise RuntimeError("connection dropped")
 
 
+class _ResponseHookFailingInvoker:
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def invoke(self, endpoint, request, **kwargs):
+        self.attempts += 1
+        raise ProviderResponseHookError("DeepSeek DSML response is malformed")
+
+
+class _SequenceInvoker:
+    def __init__(self, responses: list[LLMResponseIR]) -> None:
+        self.responses = list(responses)
+        self.attempts = 0
+
+    def invoke(self, endpoint, request, **kwargs):
+        response = self.responses[self.attempts]
+        self.attempts += 1
+        return response, ()
+
+
 class LLMRuntimeIRTests(unittest.TestCase):
+    def test_initial_and_recovery_passes_share_one_response_hook_registry(self) -> None:
+        runtime = LLMRuntime(
+            EndpointResolver(endpoints=(_endpoint(provider="deepseek"),)),
+            _Settings(),  # type: ignore[arg-type]
+            config=RuntimeConfig(runtime_root=Path(tempfile.mkdtemp())),
+        )
+
+        invoker = runtime.endpoint_invoker
+        self.assertIsInstance(invoker, ShapeEndpointInvoker)
+        self.assertIs(runtime.provider_response_hooks, invoker.response_hooks)
+
     def test_db_thinking_enum_drives_request_without_provider_heuristics(self) -> None:
         invoker = _Invoker()
         settings = _Settings()
@@ -155,6 +193,80 @@ def adjust_messages(messages):
 
         self.assertEqual(str(advice.status), "compact_required")
         self.assertGreater(advice.breakdown["estimated_input_tokens"], 9_000)
+
+    def test_provider_response_hook_error_is_bounded_and_not_a_success(self) -> None:
+        invoker = _ResponseHookFailingInvoker()
+        runtime = LLMRuntime(
+            EndpointResolver(endpoints=(_endpoint(),)),
+            _Settings(),  # type: ignore[arg-type]
+            endpoint_invoker=invoker,  # type: ignore[arg-type]
+            config=RuntimeConfig(
+                runtime_root=Path(tempfile.mkdtemp()),
+                llm_endpoint_retry_attempts=2,
+            ),
+        )
+
+        result = runtime.generate(_request())
+
+        self.assertEqual(invoker.attempts, 2)
+        self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
+        self.assertIn("kind=response_error", result.text)
+        self.assertNotIn("DSML response is malformed", result.text)
+
+    def test_output_recovery_is_normalized_after_dsml_fragments_are_merged(self) -> None:
+        token = "｜DSML｜"
+        first_text = (
+            f"<{token}tool_calls>\n"
+            f'<{token}invoke name="search_tools">\n'
+            f'<{token}parameter name="query" string="true">deepseek'
+        )
+        second_text = (
+            f" parser</{token}parameter>\n"
+            f"</{token}invoke>\n"
+            f"</{token}tool_calls>"
+        )
+        responses = [
+            LLMResponseIR(
+                LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR(first_text),)),
+                LLMFinishReason.LENGTH,
+            ),
+            LLMResponseIR(
+                LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR(second_text),)),
+                LLMFinishReason.STOP,
+            ),
+        ]
+        invoker = _SequenceInvoker(responses)
+        endpoint = _endpoint(provider="deepseek")
+        endpoint.capabilities_blob = {
+            "max_output_recovery": {
+                "enabled": True,
+                "upper_limit": 1_000,
+                "max_continuations": 1,
+            }
+        }
+        runtime = LLMRuntime(
+            EndpointResolver(endpoints=(endpoint,)),
+            _Settings(),  # type: ignore[arg-type]
+            endpoint_invoker=invoker,  # type: ignore[arg-type]
+            config=RuntimeConfig(
+                runtime_root=Path(tempfile.mkdtemp()),
+                llm_endpoint_retry_attempts=1,
+                llm_max_output_recovery_attempts=1,
+            ),
+        )
+        request = LLMRequestIR(
+            messages=_request().messages,
+            tools=(),
+            policy=GenerationPolicyIR(max_output_tokens=1_000),
+        )
+
+        result = runtime.generate(request)
+
+        self.assertEqual(invoker.attempts, 2)
+        self.assertEqual(result.finish_reason, LLMFinishReason.TOOL_CALLS)
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.tool_calls[0].name, "search_tools")
+        self.assertEqual(result.tool_calls[0].args, {"query": "deepseek parser"})
 
 
 if __name__ == "__main__":

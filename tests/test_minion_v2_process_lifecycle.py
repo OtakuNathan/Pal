@@ -169,6 +169,35 @@ class WorkerProcessOwnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(semaphore.active_count, 0)
         self.assertEqual(events, ["started", "registered", "unregistered"])
 
+    async def test_role_shell_consumes_preacquired_permit_without_second_admission(self) -> None:
+        events: list[str] = []
+        owner = self.owner(
+            invocation_id="preacquired-shell",
+            script="pass",
+            events=events,
+        )
+        semaphore = CoroutineRunSemaphore(1)
+        permit = await semaphore.acquire("admitted-attempt")
+        shell = RoleProcessShell(
+            owner=owner,
+            semaphore=semaphore,
+            run_id="worker-run-id",
+            preacquired_permit=permit,
+        )
+
+        async with shell as running:
+            self.assertEqual(
+                semaphore.active_run_ids,
+                frozenset({"admitted-attempt"}),
+            )
+            process = running.process
+            self.assertIsNotNone(process)
+            await process.wait()
+
+        self.assertTrue(permit.released)
+        self.assertEqual(semaphore.active_count, 0)
+        self.assertEqual(events, ["started", "registered", "unregistered"])
+
 
 class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:

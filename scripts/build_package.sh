@@ -115,7 +115,6 @@ required_wheel_paths=(
   "pal/minion/v2/cycle_protocol.py"
   "pal/minion/v2/delivery.py"
   "pal/minion/v2/execution.py"
-  "pal/minion/v2/execution_state.py"
   "pal/minion/v2/graph_compiler.py"
   "pal/minion/v2/graph_executor.py"
   "pal/minion/v2/graph_protocol.py"

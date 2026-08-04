@@ -164,8 +164,10 @@ class MinionManager:
         config = effective_minion_runtime_config(Path(self.runtime_root))
         configured = config.get("max_parallel_llm_nodes", config.get("max_parallel_modules", _DEFAULT_MAX_PARALLEL_NODES))
         self.max_parallel_modules = max(1, int(self.max_parallel_modules or configured or _DEFAULT_MAX_PARALLEL_NODES))
-        self.events = MinionEventDelivery()
         self.v2_service = MinionV2WorkflowService(Path(self.runtime_root))
+        self.events = MinionEventDelivery(
+            load_backlog=self._pending_task_delivery_events,
+        )
         self.role_gateway = RoleAssignmentGateway(self.v2_service)
         self.harness_registry = MinionHarnessRegistry(include_pal=True)
         self.v2_semantic_orchestrator = SemanticOrchestrator(
@@ -435,6 +437,50 @@ class MinionManager:
                 workflow_id=str(params.get("workflow_id") or ""),
                 view=str(params.get("view") or "status"),
             )
+        if method == "v2_start_workflow":
+            result = self.v2_service.start_workflow(params)
+            self._v2_wake_event.set()
+            return result
+        if method == "v2_rebind_task_delivery":
+            result = self.v2_service.repository.rebind_task_delivery(
+                task_id=str(params.get("task_id") or ""),
+                binding=dict(params.get("binding") or {}),
+            )
+            if bool(result.get("changed")):
+                self._replay_waiting_task_deliveries(
+                    str(params.get("task_id") or ""),
+                    binding_version=int(result.get("binding_version") or 0),
+                )
+            self._v2_wake_event.set()
+            return result
+        if method == "v2_ack_task_delivery":
+            return {
+                "acknowledged": self.v2_service.repository.acknowledge_task_delivery(
+                    str(params.get("delivery_id") or "")
+                )
+            }
+        if method == "v2_list_task_delivery_parts":
+            return {
+                "parts": list(
+                    self.v2_service.repository.delivered_task_delivery_parts(
+                        str(params.get("delivery_id") or "")
+                    )
+                )
+            }
+        if method == "v2_ack_task_delivery_part":
+            return {
+                "acknowledged": self.v2_service.repository.acknowledge_task_delivery_part(
+                    str(params.get("delivery_id") or ""),
+                    str(params.get("part_key") or ""),
+                )
+            }
+        if method == "v2_defer_task_delivery":
+            return {
+                "deferred": self.v2_service.repository.defer_task_delivery(
+                    str(params.get("delivery_id") or ""),
+                    error=str(params.get("error") or ""),
+                )
+            }
         if method == "list_runs":
             return {"items": [item.summary() for item in sorted(self.runs.values(), key=lambda run: run.started_at)]}
         if method == "read_run":
@@ -538,45 +584,38 @@ class MinionManager:
 
     async def _publish_v2_human_review(self, payload: Mapping[str, Any]) -> None:
         standalone = bool(payload.get("standalone_review_id"))
-        self.events.queue_event(
-            {
-                "event_kind": "standalone_review_completed" if standalone else "architecture_review_pending",
-                "minion_id": "",
-                "run_id": "",
-                "workflow_id": str(payload.get("workflow_id") or ""),
-                "minion_profile": "minion_v2.reviewer",
-                "role_mode": "standalone" if standalone else "architecture",
-                "payload": {**dict(payload), "minion_v2": True, **({"status": "completed"} if standalone else {})},
-                "created_at": utc_now(),
-            }
+        event = {
+            "event_kind": "standalone_review_completed" if standalone else "architecture_review_pending",
+            "minion_id": "",
+            "run_id": "",
+            "workflow_id": str(payload.get("workflow_id") or ""),
+            "minion_profile": "minion_v2.reviewer",
+            "role_mode": "standalone" if standalone else "architecture",
+            "payload": {**dict(payload), "minion_v2": True, **({"status": "completed"} if standalone else {})},
+            "created_at": utc_now(),
+        }
+        self._queue_task_delivery_event(
+            event,
+            dedup_key=(
+                f"human-review:{event['workflow_id']}:"
+                f"{payload.get('architecture_revision_id') or payload.get('standalone_review_id') or ''}"
+            ),
         )
 
     async def _publish_v2_worker_event(self, event: Mapping[str, Any]) -> None:
         item = dict(event)
+        delivery_attempt_id = str(item.pop("_attempt_id", "") or "")
         run_id = str(item.get("run_id") or "")
         state = self.runs.get(run_id)
         if state is not None:
             payload = dict(item.get("payload") or {})
+            payload.pop("route", None)
+            payload.pop("control_route", None)
             kind = str(item.get("event_kind") or "")
             binding = dict(dict(state.pack.metadata or {}).get("minion_v2") or {})
             workflow_id = str(binding.get("workflow_id") or "")
             if workflow_id and not item.get("workflow_id"):
                 item["workflow_id"] = workflow_id
-            if kind in {"approval_requested", "clarification_requested"}:
-                control_route = dict(binding.get("control_route") or {})
-                if workflow_id:
-                    workflow = self.v2_service.repository.read_snapshot(
-                        AggregateType.WORKFLOW,
-                        workflow_id,
-                    )
-                    if workflow is not None:
-                        current_route = dict(
-                            workflow.payload.get("control_route") or {}
-                        )
-                        if current_route:
-                            control_route = current_route
-                if control_route:
-                    payload["control_route"] = control_route
             item["payload"] = payload
             if kind == "approval_requested":
                 state.pending_approval = payload
@@ -599,7 +638,104 @@ class MinionManager:
             state.last_event = item
             state.last_event_at = str(item.get("created_at") or utc_now())
         self.v2_service.repository.record_worker_event(item)
-        self.events.queue_event(item)
+        kind = str(item.get("event_kind") or "")
+        if kind in {"approval_requested", "clarification_requested", "terminal"}:
+            event_payload = dict(item.get("payload") or {})
+            self._queue_task_delivery_event(
+                item,
+                dedup_key="|".join(
+                    (
+                        kind,
+                        str(item.get("workflow_id") or ""),
+                        str(item.get("invocation_id") or item.get("run_id") or ""),
+                        delivery_attempt_id,
+                        str(event_payload.get("approval_id") or item.get("approval_id") or ""),
+                        str(event_payload.get("clarification_id") or item.get("clarification_id") or ""),
+                        str(event_payload.get("status") or item.get("status") or ""),
+                    )
+                ),
+            )
+        else:
+            self.events.queue_event(item)
+
+    def _queue_task_delivery_event(
+        self,
+        event: Mapping[str, Any],
+        *,
+        dedup_key: str,
+    ) -> None:
+        item = dict(event)
+        workflow_id = str(item.get("workflow_id") or "")
+        workflow = self.v2_service.repository.read_snapshot(
+            AggregateType.WORKFLOW,
+            workflow_id,
+        )
+        task_id = str((workflow.payload if workflow is not None else {}).get("task_id") or "")
+        if not task_id:
+            self.logger.error(
+                "cannot deliver Minion event without Task binding: workflow=%s kind=%s",
+                workflow_id,
+                item.get("event_kind"),
+            )
+            return
+        row = self.v2_service.repository.enqueue_task_delivery(
+            task_id=task_id,
+            workflow_id=workflow_id,
+            event_kind=str(item.get("event_kind") or ""),
+            payload=item,
+            dedup_key=str(dedup_key),
+        )
+        self.events.queue_event(_delivery_event_from_row(row))
+
+    def _pending_task_delivery_events(self) -> list[dict[str, Any]]:
+        return [
+            _delivery_event_from_row(row)
+            for row in self.v2_service.repository.list_pending_task_deliveries(limit=200)
+        ]
+
+    def _replay_waiting_task_deliveries(
+        self,
+        task_id: str,
+        *,
+        binding_version: int,
+    ) -> None:
+        candidates: set[tuple[str, str]] = {
+            (workflow_id, "architecture_review_pending")
+            for workflow_id in self.v2_service.repository.pending_human_review_workflows(
+                task_id
+            )
+        }
+        for state in self.runs.values():
+            if not state.pending_clarification and not state.pending_approval:
+                continue
+            binding = dict(dict(state.pack.metadata or {}).get("minion_v2") or {})
+            workflow_id = str(binding.get("workflow_id") or "")
+            workflow = self.v2_service.repository.read_snapshot(
+                AggregateType.WORKFLOW,
+                workflow_id,
+            )
+            if str((workflow.payload if workflow is not None else {}).get("task_id") or "") != task_id:
+                continue
+            if state.pending_clarification:
+                candidates.add((workflow_id, "clarification_requested"))
+            if state.pending_approval:
+                candidates.add((workflow_id, "approval_requested"))
+        for workflow_id, event_kind in sorted(candidates):
+            source = self.v2_service.repository.latest_task_delivery(
+                task_id=task_id,
+                workflow_id=workflow_id,
+                event_kind=event_kind,
+            )
+            if source is None or str(source.get("status") or "") == "pending":
+                continue
+            replay = self.v2_service.repository.replay_task_delivery(
+                delivery_id=str(source["delivery_id"]),
+                dedup_key=(
+                    f"rebind-replay:{task_id}:{binding_version}:"
+                    f"{source['delivery_id']}"
+                ),
+            )
+            self.events.queue_event(_delivery_event_from_row(replay))
 
     def _register_v2_broker_run(
         self,
@@ -676,16 +812,6 @@ class MinionManager:
         )
         if task_revision:
             clarification["task_revision"] = task_revision
-        agent_session = dict(
-            dict(state.pack.metadata or {}).get("agent_session") or {}
-        )
-        logical_session_id = str(agent_session.get("session_id") or "").strip()
-        if logical_session_id:
-            await asyncio.to_thread(
-                self.v2_service.repository.begin_role_execution_input,
-                logical_session_id,
-                input_id=f"clarification:{clarification_id}",
-            )
         if not await self.v2_semantic_orchestrator.send_worker_control(
             state.run_id,
             {"type": "clarification", "clarification": clarification},
@@ -1154,3 +1280,10 @@ class MinionManager:
                     loop.remove_signal_handler(sig)
 
         return remove
+
+
+def _delivery_event_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    event = dict(row.get("payload") or {})
+    event["delivery_id"] = str(row.get("delivery_id") or "")
+    event["task_id"] = str(row.get("task_id") or "")
+    return event

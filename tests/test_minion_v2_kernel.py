@@ -58,6 +58,12 @@ from pal.minion.v2.formal import (
 )
 from pal.minion.v2.semantic_orchestration import SemanticOrchestrator, SEMANTIC_EFFECT_TYPES
 from pal.minion.v2.role_protocol import RoleAssignmentRequest
+from pal.minion.v2.workflow_runtime import WorkflowCoordinator
+from pal.minion.checkpoint import (
+    LogicalCoroutineCheckpointStore,
+    open_agent_session_checkpoint,
+    seal_agent_session_checkpoint,
+)
 
 
 class MinionV2TransitionKernelTests(unittest.TestCase):
@@ -315,76 +321,37 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["status"], "completed")
 
-    def test_role_session_suspends_and_resumes_with_same_continuation(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="pal_v2_role_session_"))
+    def test_role_session_suspends_and_resumes_from_dedicated_checkpoint(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="pal_v2_role_session_v28_"))
         self.addCleanup(shutil.rmtree, root, True)
         repository = MinionV2Repository(root)
-        store = ContentAddressedArtifactStore(root, repository)
-        prompt = store.put_json({"prompt": "initial"}, artifact_type="RolePromptPackArtifact")
-        continuation = store.put_json(
-            {
-                "schema_version": "6",
-                "session_id": "inv-session",
-                "llm_round_count": 7,
-                "l1_turns": [
-                    {
-                        "turn_id": "turn-1",
-                        "state": "settled",
-                        "revision": 1,
-                        "metadata": {},
-                        "messages": [
-                        {
-                            "role": "user",
-                            "parts": [
-                                {
-                                    "kind": "text",
-                                    "text": "inspect the current candidate",
-                                }
-                            ],
-                            "message_id": "message-user-1",
-                            "state": "complete",
-                            "semantic_kind": "user_request",
-                            "replay": None,
-                            "metadata": {},
-                        },
-                        {
-                            "role": "assistant",
-                            "parts": [
-                                {
-                                    "kind": "text",
-                                    "text": "candidate inspected",
-                                }
-                            ],
-                            "message_id": "message-assistant-1",
-                            "state": "complete",
-                            "semantic_kind": "assistant_reply",
-                            "replay": None,
-                            "metadata": {},
-                        },
-                        ],
-                    }
-                ],
-            },
-            artifact_type="AgentSessionContinuationArtifact",
-        )
+        artifacts = ContentAddressedArtifactStore(root, repository)
         repository.ensure_role_session(
-            session_id="inv-session",
-            workflow_id="wf-session",
+            session_id="inv-session-v28",
+            workflow_id="wf-session-v28",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-            aggregate_id="arch-session",
+            aggregate_id="arch-session-v28",
             role="architect",
             mode="author",
             role_profile_id="software_engineering.v2_architect",
             family_binding_sha="binding",
-            scope_kind="architecture_revision",
-            subject_key="arch-session",
+            scope_kind="architecture_cycle",
+            subject_key="arch-session-v28",
         )
-        lease = repository.claim_lease("architecture:arch-session:architect", "inv-session", ttl_seconds=60)
+        lease = repository.claim_lease(
+            "architecture:arch-session-v28:architect",
+            "inv-session-v28",
+            ttl_seconds=60,
+        )
+        prompt = artifacts.put_json(
+            {"prompt": "initial"},
+            artifact_type="RolePromptPackArtifact",
+        )
         repository.record_role_invocation(
-            invocation_id="inv-session",
-            workflow_id="wf-session",
+            invocation_id="inv-session-v28",
+            workflow_id="wf-session-v28",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-            aggregate_id="arch-session",
+            aggregate_id="arch-session-v28",
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
             role="architect",
@@ -394,95 +361,54 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt.to_dict(),
         )
+        identity = {
+            "logical_coroutine_id": "inv-session-v28",
+            "workflow_id": "wf-session-v28",
+            "stage_key": "architecture_cycle:arch-session-v28:architect",
+            "sequence": 1,
+            "producer_fencing_token": lease.fencing_token,
+            "runtime_spec_hash": "spec-v28",
+        }
+        checkpoint = seal_agent_session_checkpoint(
+            root,
+            {
+                **identity,
+                "coroutine_state": {
+                    "llm_round_count": 7,
+                    "tool_call_count": 2,
+                },
+                "runtime_snapshot": {
+                    "schema_version": "1",
+                    **identity,
+                    "modules": {},
+                },
+            },
+        )
+        LogicalCoroutineCheckpointStore(root).publish(
+            checkpoint,
+            expected_logical_coroutine_id="inv-session-v28",
+            current_fencing_token=lease.fencing_token,
+        )
         repository.suspend_role_invocation(
-            invocation_id="inv-session",
+            invocation_id="inv-session-v28",
             fencing_token=lease.fencing_token,
-            continuation_ref=continuation.to_dict(),
         )
-        repository.release_lease(lease.resource_key, lease.owner_id, lease.fencing_token)
-
-        resumed_lease = repository.claim_lease(lease.resource_key, "inv-session", ttl_seconds=60)
-        resumed_prompt = store.put_json({"prompt": "review response"}, artifact_type="RolePromptPackArtifact")
-        repository.record_role_invocation(
-            invocation_id="inv-session",
-            workflow_id="wf-session",
-            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-            aggregate_id="arch-session-revision",
-            lease_resource_key=resumed_lease.resource_key,
-            fencing_token=resumed_lease.fencing_token,
-            role="architect",
-            mode="revision",
-            role_profile_id="software_engineering.v2_architect",
-            family_binding_sha="binding",
-            authoring_contract_version=AUTHORING_CONTRACT_VERSION,
-            prompt_pack_ref=resumed_prompt.to_dict(),
-        )
-
-        invocation = repository.read_role_invocation("inv-session")
-        self.assertEqual(invocation["status"], "running")
-        self.assertEqual(invocation["aggregate_id"], "arch-session-revision")
-        self.assertEqual(invocation["continuation_ref"]["sha256"], continuation.sha256)
-        self.assertEqual(invocation["prompt_pack_ref"]["sha256"], resumed_prompt.sha256)
+        invocation = repository.read_role_invocation("inv-session-v28")
+        self.assertEqual(invocation["status"], "suspended")
+        self.assertNotIn("continuation_ref", invocation)
 
         worker = SemanticOrchestrator(MinionV2WorkflowService(root))
-        restore_path, checkpoint_path = worker._prepare_agent_session_attempt(
-            session_id="inv-session",
-            attempt_id="attempt-after-local-loss",
+        restore_path, output_path = worker._prepare_agent_session_attempt(
+            session_id="inv-session-v28",
+            attempt_id="attempt-v28",
         )
         self.assertIsNotNone(restore_path)
-        restored = json.loads(Path(restore_path).read_text(encoding="utf-8"))
-        self.assertEqual(restored["schema_version"], "6")
-        self.assertNotIn("l1_items", restored)
-        self.assertEqual(len(restored["l1_turns"]), 1)
-        self.assertEqual(restored["l1_turns"][0]["state"], "settled")
-        self.assertIn(
-            "inspect the current candidate",
-            json.dumps(restored["l1_turns"]),
-        )
-        self.assertEqual(restored["scope_kind"], "architecture_revision")
-        self.assertEqual(restored["subject_key"], "arch-session")
-        self.assertFalse(checkpoint_path.exists())
-
-        checkpoint_payload = {
-            **restored,
-            "fencing_token": resumed_lease.fencing_token,
-        }
-        checkpoint_path.write_text(
-            json.dumps(checkpoint_payload),
-            encoding="utf-8",
-        )
-        published = worker._publish_agent_session_checkpoint(
-            "inv-session",
-            resumed_lease.fencing_token,
-            checkpoint_path,
-        )
-        self.assertIsNotNone(published)
-        self.assertEqual(
-            store.read_json(published)["subject_key"],
-            "arch-session",
-        )
-
-        checkpoint_path.write_text(
-            json.dumps({**checkpoint_payload, "fencing_token": resumed_lease.fencing_token - 1}),
-            encoding="utf-8",
-        )
-        with self.assertRaisesRegex(RuntimeError, "stale fencing token"):
-            worker._publish_agent_session_checkpoint(
-                "inv-session",
-                resumed_lease.fencing_token,
-                checkpoint_path,
-            )
-
-        checkpoint_path.write_text(
-            json.dumps({**checkpoint_payload, "subject_key": "different-subject"}),
-            encoding="utf-8",
-        )
-        with self.assertRaisesRegex(RuntimeError, "wrong subject"):
-            worker._publish_agent_session_checkpoint(
-                "inv-session",
-                resumed_lease.fencing_token,
-                checkpoint_path,
-            )
+        restored_envelope = json.loads(restore_path.read_text(encoding="utf-8"))
+        self.assertEqual(restored_envelope["schema_version"], "8")
+        self.assertNotIn("runtime_snapshot", restored_envelope)
+        restored = open_agent_session_checkpoint(root, restored_envelope)
+        self.assertEqual(restored["coroutine_state"]["llm_round_count"], 7)
+        self.assertFalse(output_path.exists())
 
     def test_role_session_ids_are_stable_across_response_effects(self) -> None:
         self.assertEqual(
@@ -1473,6 +1399,90 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 ),
             )
 
+    def test_candidate_waits_for_verification_dependencies_before_review(self) -> None:
+        snapshotting = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node_sink",
+            workflow_id="wf_test",
+            state=DagNodeRunState.SNAPSHOTTING,
+            version=5,
+            payload={
+                "node_kind": "unit",
+                "workspace_fingerprint": "tree",
+                "dependency_node_ids": ["node_protocol", "node_codec"],
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        blocked = self.engine.transition(
+            snapshotting,
+            self.action(
+                "CANDIDATE_SNAPSHOTTED",
+                AggregateType.DAG_NODE_RUN,
+                "node_sink",
+                payload={
+                    "candidate_ref": {"sha256": "candidate"},
+                    "candidate_digest": "deadbeef",
+                    "workspace_fingerprint": "tree",
+                },
+                expected_version=5,
+            ),
+        )
+        self.assertEqual(
+            blocked.snapshot.state,
+            DagNodeRunState.REVIEW_BLOCKED_BY_DEPS,
+        )
+        self.assertEqual(
+            [effect.effect_type for effect in blocked.effects],
+            ["schedule_ready_nodes"],
+        )
+        with self.assertRaises(UnknownTransitionError):
+            self.engine.transition(
+                blocked.snapshot,
+                self.action(
+                    "START_REVIEW",
+                    AggregateType.DAG_NODE_RUN,
+                    "node_sink",
+                    payload={"fencing_token": 2},
+                    expected_version=6,
+                ),
+            )
+        with self.assertRaises(TransitionGuardError):
+            self.engine.transition(
+                blocked.snapshot,
+                self.action(
+                    "VERIFICATION_DEPENDENCIES_ACCEPTED",
+                    AggregateType.DAG_NODE_RUN,
+                    "node_sink",
+                    payload={
+                        "accepted_dependency_node_ids": ["node_protocol"],
+                        "epoch_frozen": False,
+                    },
+                    expected_version=6,
+                ),
+            )
+        ready = self.engine.transition(
+            blocked.snapshot,
+            self.action(
+                "VERIFICATION_DEPENDENCIES_ACCEPTED",
+                AggregateType.DAG_NODE_RUN,
+                "node_sink",
+                payload={
+                    "accepted_dependency_node_ids": [
+                        "node_protocol",
+                        "node_codec",
+                    ],
+                    "epoch_frozen": False,
+                },
+                expected_version=6,
+            ),
+        )
+        self.assertEqual(ready.snapshot.state, DagNodeRunState.REVIEW_QUEUED)
+        self.assertEqual(
+            [effect.effect_type for effect in ready.effects],
+            ["admit_verifier_role"],
+        )
+
     def test_architect_submission_quiesces_before_manager_snapshot_and_review(self) -> None:
         running = AggregateSnapshot(
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -1790,6 +1800,14 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 "active_worker_id": "inv_reviewer",
                 "fencing_token": 9,
                 "lease_resource_key": "architecture:arch_human_review:review",
+                "finding_artifact_ref": {"sha256": "resolved-finding"},
+                "findings": [
+                    {
+                        "finding_key": "finding_resolved",
+                        "priority": "p1",
+                        "summary": "Already repaired before this passing review.",
+                    }
+                ],
             },
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-01T00:00:00+00:00",
@@ -1811,6 +1829,9 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertNotIn("active_worker_id", waiting.payload)
         self.assertNotIn("fencing_token", waiting.payload)
         self.assertNotIn("lease_resource_key", waiting.payload)
+        self.assertNotIn("finding_artifact_ref", waiting.payload)
+        self.assertNotIn("findings", waiting.payload)
+        self.assertEqual(waiting.payload["review_artifact_ref"], {"sha256": "review"})
 
         published = self.engine.transition(
             waiting,
@@ -1953,6 +1974,44 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertEqual(projection["current_phase"], "created")
         self.assertEqual(projection["liveness"], "outbox")
 
+    def test_outbox_effect_carries_the_state_and_owner_that_created_it(self) -> None:
+        result = self.repository.dispatch(
+            self.action("CREATE_WORKFLOW", version=0, key="causal-context")
+        )
+
+        claimed = self.repository.claim_outbox("outbox-worker", limit=1)
+        self.assertEqual(claimed[0]["effect_id"], result.outbox_effect_ids[0])
+        causal = claimed[0]["payload"]["_causal_context"]
+        self.assertEqual(causal["aggregate_version"], 1)
+        self.assertEqual(causal["target_state"], "CREATED")
+        self.assertEqual(causal["active_worker_id"], "")
+        self.assertEqual(causal["lease_resource_key"], "")
+        self.assertEqual(causal["fencing_token"], 0)
+
+    def test_aggregate_and_cycle_projection_rollback_as_one_transaction(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "crash before commit"):
+            with self.repository.transaction() as connection:
+                self.repository.dispatch(
+                    self.action(
+                        "CREATE_WORKFLOW",
+                        version=0,
+                        key="atomic-cycle-create",
+                    ),
+                    _connection=connection,
+                )
+                WorkflowCoordinator(self.repository).ensure_plan_cycle(
+                    workflow_id="wf_1",
+                    _connection=connection,
+                )
+                raise RuntimeError("crash before commit")
+
+        self.assertIsNone(
+            self.repository.read_snapshot(AggregateType.WORKFLOW, "wf_1")
+        )
+        self.assertIsNone(
+            self.repository.read_plan_cycle(workflow_id="wf_1")
+        )
+
     def test_bare_queued_state_without_outbox_is_orphaned(self) -> None:
         self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="queued-create"))
         self.repository.dispatch(self.action("START_WORKFLOW", version=1, key="queued-start"))
@@ -2037,11 +2096,13 @@ class MinionV2PersistenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.repository.dispatch(self.action("CREATE_WORKFLOW", version=None, key="same", payload={"different": True}))
 
-    def test_idempotent_action_replay_ignores_later_cas_version(self) -> None:
+    def test_idempotent_action_replay_includes_cas_version_in_request_identity(self) -> None:
         first = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="replay"))
-        replay = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=99, key="replay"))
+        replay = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="replay"))
         self.assertTrue(replay.duplicate)
         self.assertEqual(replay.snapshot.version, first.snapshot.version)
+        with self.assertRaisesRegex(ValueError, "different action request"):
+            self.repository.dispatch(self.action("CREATE_WORKFLOW", version=99, key="replay"))
 
     def test_outbox_receipt_prevents_duplicate_completion(self) -> None:
         result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="create"))

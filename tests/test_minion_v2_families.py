@@ -19,7 +19,7 @@ from pal.minion.scoped_execution import (
 from pal.minion.workspace_tools import _normalized_reference_paths
 from pal.execution.contracts import CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
-from pal.execution.tool_facade import EmptyToolInput, ProviderPayloadOutput, ToolGuidance
+from pal.execution.tool_facade import EmptyToolInput, StructuredToolOutput, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_EXTERNAL_READ
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.adapters import prepare_v2_role_workspace, prepare_v2_workspace_environment
@@ -318,6 +318,7 @@ workspace_policy: {}
             ExecutionRuntime(),
             ["op_minion_artifact_write"],
             workspace={
+                "run_id": "artifact-guard-test",
                 "repo_path": str(repo),
                 "artifact_dir": str(self.root / "guard-artifacts"),
                 "artifact_stage_dir": str(self.root / "guard-stage"),
@@ -515,6 +516,7 @@ workspace_policy: {}
             ExecutionRuntime(),
             ["op_minion_verification_submit"],
             workspace={
+                "run_id": "verification-submit-test",
                 "artifact_dir": str(self.root / "artifacts"),
                 "artifact_stage_dir": str(self.root / "artifact-stage"),
             },
@@ -631,6 +633,28 @@ workspace_policy: {}
         self.assertIn("op_file_edit", software.allowed_capabilities)
         self.assertEqual(software.workspace.get("workspace_policy", {}).get("mode"), "writable_git_branch")
 
+    def test_scoped_tool_execution_rejects_missing_logical_lifetime(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        scoped = MinionScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_file_read"],
+            workspace={"repo_path": str(self.root)},
+        )
+
+        result = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="read_file",
+                    args={"file_path": str(self.root / "missing.txt")},
+                )
+            )
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.structured["reason"], "missing_execution_lifetime")
+
     def test_file_reader_uses_sandbox_visible_path_without_reference_selector(self) -> None:
         bound = self.root / "workflow-request.json"
         bound.write_text('{"goal":"bounded"}\n', encoding="utf-8")
@@ -641,7 +665,10 @@ workspace_policy: {}
         generic_reader = MinionScopedExecutionRuntime(
             core.context.execution_runtime,
             ["op_file_read"],
-            workspace={"repo_path": str(self.root)},
+            workspace={
+                "run_id": "file-reader-test",
+                "repo_path": str(self.root),
+            },
         )
         spec = generic_reader.get_capability_spec("op_file_read")
         assert spec is not None
@@ -677,6 +704,7 @@ workspace_policy: {}
             core.context.execution_runtime,
             ["op_file_write"],
             workspace={
+                "run_id": "file-write-guard-test",
                 "repo_path": str(repo),
                 "write_path_scopes": [
                     {"kind": "directory", "path": "src"},
@@ -758,6 +786,7 @@ workspace_policy: {}
             core.context.execution_runtime,
             ["op_exec_shell"],
             workspace={
+                "run_id": "verifier-shell-test",
                 "repo_path": str(self.root),
                 "minion_v2": {"role": "verifier"},
             },
@@ -1072,6 +1101,17 @@ workspace_policy: {}
                 "behavior_fragment"
             ]
         )
+        architecture_review_playbook = {
+            str(item["key"]): dict(item)
+            for item in self._pack("software_engineering.v2_reviewer")
+            .resolved_profile["role"]["playbook"]["steps"]
+        }
+        public_surface = architecture_review_playbook["public_surface_consistency"]
+        self.assertIn("parameters, defaults, overload participation", public_surface["instruction"])
+        self.assertIn("smallest real positive or negative consumer", public_surface["instruction"])
+        representation = architecture_review_playbook["representation_invariants"]
+        self.assertIn("unique meaning of each field", representation["instruction"])
+        self.assertIn("raw-versus-normalized forms", representation["instruction"])
         self.assertIn(
             "required production platform/API/backend must remain explicit",
             architecture_review_behavior,
@@ -1351,7 +1391,7 @@ workspace_policy: {}
                 family="web",
                 source="test",
                 InputModel=EmptyToolInput,
-                OutputModel=ProviderPayloadOutput,
+                OutputModel=StructuredToolOutput,
                 guidance=ToolGuidance(
                     purpose="generic web description",
                     use_when="generic web description",
@@ -1475,6 +1515,12 @@ workspace_policy: {}
         )
         service.start_workflow(
             {
+                "delivery_binding": {
+                    "channel_id": "socket_test",
+                    "channel_kind": "socket",
+                    "reply_target": {"session_id": "test-session", "request_id": "test-request"},
+                    "control_scope_key": "socket:socket_test:test-session",
+                },
                 "workflow_id": "nutrition-workflow",
                 "task_id": "nutrition-task",
                 "operation": "new_requirement",
@@ -1601,6 +1647,12 @@ workspace_policy: {}
         )
         service.start_workflow(
             {
+                "delivery_binding": {
+                    "channel_id": "socket_test",
+                    "channel_kind": "socket",
+                    "reply_target": {"session_id": "test-session", "request_id": "test-request"},
+                    "control_scope_key": "socket:socket_test:test-session",
+                },
                 "workflow_id": "nutritionist-e2e-workflow",
                 "task_id": created["task_id"],
                 "operation": "new_requirement",

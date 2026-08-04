@@ -18,12 +18,18 @@ not a second DAG scheduler or semantic lifecycle owner.
 - `ProduceCheckCycle.tla` models the shared producer/checker protocol used by
   both planning and graph nodes, including generation-bound products and
   verdicts, human review, and triage resumption at an assignment boundary.
-- `GraphExecutionLifecycle.tla` models an authored terminal sink, parallel
-  non-sink work, checker acceptance, dependency-finding reverse propagation,
-  repair barriers, and publication only from the accepted sink.
-- `ProcessCapacityLifecycle.tla` proves that capacity counts only materialized
-  OS-process incarnations. Durable logical sessions consume no slot, and a
-  permit cannot be released before process-group reap and checkpoint closure.
+- `GraphGenerationLifecycle.tla` separates authored architecture revisions
+  from installed GraphIR generations. Superseded human-edit revisions consume
+  no graph generation; every candidate targets the next append-only slot and
+  installation preserves a gap-free `1..N` history.
+- `GraphExecutionLifecycle.tla` models an authored terminal sink whose producer
+  runs in parallel from accepted contracts while its checker waits for accepted
+  dependency products, plus checker acceptance, dependency-finding reverse
+  propagation, repair barriers, and publication only from the accepted sink.
+- `ProcessCapacityLifecycle.tla` proves that capacity and concrete-attempt
+  leases count only materialized OS-process incarnations. Durable logical
+  sessions consume neither, and both remain owned through process-group reap
+  and checkpoint closure.
 - `DagLifecycle.tla` models dependency readiness, graph-wide pause/cancel, and
   architecture-defect freeze/replan propagation.
 - `ArchitectureLifecycle.tla` models Architect/Reviewer sessions that survive
@@ -32,12 +38,14 @@ not a second DAG scheduler or semantic lifecycle owner.
 - `StandaloneReviewLifecycle.tla` models review-only execution, report
   publication, pause/cancel, and triage recovery.
 - `OrchestrationLifecycle.tla` composes Workflow, Execution Epoch, parallel
-  module nodes, and the authored terminal sink. It checks
+  module producers, dependency-gated acceptance/checking, and the authored
+  terminal sink. It checks
   hierarchical control ownership, replan freeze, stale propagation, and
   completion safety.
 - `DurableEffects.tla` models Action deduplication, atomic event/outbox writes,
-  at-least-once effects, receipts, leases, fencing, worker settlement, and
-  manager crashes.
+  atomic aggregate/cycle business projections, receipt lag across Manager
+  crashes, at-least-once delivery without double advancement, leases,
+  fencing, and worker settlement.
 - `RoleAssignmentRecovery.tla` models logical-effect assignment reuse across
   regenerated attempt inputs, expired active-attempt recovery, recovery-scan
   ownership, and settlement by the terminal's immutable receipt identity. It
@@ -47,10 +55,23 @@ not a second DAG scheduler or semantic lifecycle owner.
   process group, Manager run registration, and exclusive worktree ownership.
   A terminal IPC receipt or leader exit cannot release ownership; replacement
   starts only after the complete process group is reaped and accounting closes.
-- `ContinuationLifecycle.tla` models fresh-v27 checkpoint admission. Only a v6
-  `l1_turns` payload may start a worker; v5 and malformed checkpoints are
+- `ContinuationLifecycle.tla` models fresh-v29 checkpoint admission. Only a v8
+  encrypted logical-coroutine payload may start a worker; v7 and malformed checkpoints are
   rejected with visible deterministic errors, while only transient worker
   failures may consume retry budget.
+- `LogicalCoroutineSnapshotLifecycle.tla` models worker-owned composite runtime
+  state, opaque Manager routing, closed-boundary checkpoint replacement,
+  crash/restore with a new fence, and joint N+5 retirement of pager/file state.
+- `ResidentMailboxLifecycle.tla` models one Pal-wide mailbox and active turn.
+  Reset requests cancellation, waits for the active turn to exit, keeps queued
+  messages, and models a timeout without lying about resident state; it never
+  creates channel-scoped personas.
+- `TaskDeliveryLifecycle.tla` models Manager-owned Task delivery bindings.
+  Explicit rebind changes only the current reply target; delivery moves through
+  Pending -> InFlight -> Delivered (provider accepted), with failures returning
+  to Pending.
+  Dead targets fall back to a live recovery socket, otherwise the durable
+  delivery remains pending.
 - `ReplanReuseLifecycle.tla` models replan as a mechanical
   preserve/create/delete classification over stable node identities. Unchanged
   responsibility preserves the worktree, sessions, and corpus; acceptance is

@@ -5,14 +5,15 @@ CONSTANTS Workers, Capacity
 
 ProcessStates == {"None", "Running", "Reaped"}
 
-VARIABLES logical, processState, permits, reapedEver, checkpointed, released
+VARIABLES logical, processState, permits, attemptLeases, reapedEver, checkpointed, released
 
-vars == <<logical, processState, permits, reapedEver, checkpointed, released>>
+vars == <<logical, processState, permits, attemptLeases, reapedEver, checkpointed, released>>
 
 Init ==
     /\ logical = {}
     /\ processState = [w \in Workers |-> "None"]
     /\ permits = {}
+    /\ attemptLeases = {}
     /\ reapedEver = {}
     /\ checkpointed = {}
     /\ released = {}
@@ -20,7 +21,7 @@ Init ==
 CreateLogical(w) ==
     /\ w \in Workers \ logical
     /\ logical' = logical \union {w}
-    /\ UNCHANGED <<processState, permits, reapedEver, checkpointed, released>>
+    /\ UNCHANGED <<processState, permits, attemptLeases, reapedEver, checkpointed, released>>
 
 Spawn(w) ==
     /\ w \in logical
@@ -29,6 +30,7 @@ Spawn(w) ==
     /\ Cardinality(permits) < Capacity
     /\ processState' = [processState EXCEPT ![w] = "Running"]
     /\ permits' = permits \union {w}
+    /\ attemptLeases' = attemptLeases \union {w}
     /\ UNCHANGED <<logical, reapedEver, checkpointed, released>>
 
 ReapGroup(w) ==
@@ -36,13 +38,13 @@ ReapGroup(w) ==
     /\ w \in permits
     /\ processState' = [processState EXCEPT ![w] = "Reaped"]
     /\ reapedEver' = reapedEver \union {w}
-    /\ UNCHANGED <<logical, permits, checkpointed, released>>
+    /\ UNCHANGED <<logical, permits, attemptLeases, checkpointed, released>>
 
 Checkpoint(w) ==
     /\ processState[w] = "Reaped"
     /\ w \in permits
     /\ checkpointed' = checkpointed \union {w}
-    /\ UNCHANGED <<logical, processState, permits, reapedEver, released>>
+    /\ UNCHANGED <<logical, processState, permits, attemptLeases, reapedEver, released>>
 
 Release(w) ==
     /\ processState[w] = "Reaped"
@@ -50,6 +52,7 @@ Release(w) ==
     /\ w \in checkpointed
     /\ processState' = [processState EXCEPT ![w] = "None"]
     /\ permits' = permits \ {w}
+    /\ attemptLeases' = attemptLeases \ {w}
     /\ released' = released \union {w}
     /\ UNCHANGED <<logical, reapedEver, checkpointed>>
 
@@ -58,7 +61,7 @@ RetireLogical(w) ==
     /\ processState[w] = "None"
     /\ w \notin permits
     /\ logical' = logical \ {w}
-    /\ UNCHANGED <<processState, permits, reapedEver, checkpointed, released>>
+    /\ UNCHANGED <<processState, permits, attemptLeases, reapedEver, checkpointed, released>>
 
 Next ==
     \/ \E w \in Workers : CreateLogical(w)
@@ -74,6 +77,7 @@ TypeOK ==
     /\ logical \subseteq Workers
     /\ processState \in [Workers -> ProcessStates]
     /\ permits \subseteq Workers
+    /\ attemptLeases \subseteq Workers
     /\ reapedEver \subseteq Workers
     /\ checkpointed \subseteq Workers
     /\ released \subseteq Workers
@@ -82,6 +86,8 @@ CapacityBound == Cardinality(permits) <= Capacity
 
 PermitExactlyMaterialized ==
     \A w \in Workers : (w \in permits) <=> (processState[w] \in {"Running", "Reaped"})
+
+AttemptLeaseExactlyMaterialized == attemptLeases = permits
 
 ReleaseRequiresReapAndCheckpoint ==
     released \subseteq (reapedEver \intersect checkpointed)

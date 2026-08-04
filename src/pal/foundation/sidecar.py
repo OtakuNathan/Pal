@@ -14,15 +14,22 @@ from uuid import uuid4
 import msgpack
 
 
+MAX_SIDECAR_FRAME_BYTES = 16 * 1024 * 1024
+SIDECAR_READ_CHUNK_BYTES = 64 * 1024
+
+
 def pack_sidecar_message(payload: dict[str, Any]) -> bytes:
     packed = msgpack.packb(payload, use_bin_type=True)
+    if len(packed) > MAX_SIDECAR_FRAME_BYTES:
+        raise ValueError("sidecar payload exceeds the 16 MiB frame limit")
     return len(packed).to_bytes(4, "big") + packed
 
 
 async def read_sidecar_message(reader) -> dict[str, Any]:
     raw_size = await reader.readexactly(4)
     size = int.from_bytes(raw_size, "big")
-    payload = await reader.readexactly(size)
+    _validate_sidecar_frame_size(size)
+    payload = await _read_sidecar_payload(reader, size)
     decoded = msgpack.unpackb(payload, raw=False)
     if not isinstance(decoded, dict):
         raise ValueError("sidecar payload must decode to an object")
@@ -34,13 +41,37 @@ def read_sidecar_message_sync(stream) -> dict[str, Any]:
     if len(raw_size or b"") != 4:
         raise EOFError("sidecar stream ended before frame size")
     size = int.from_bytes(raw_size, "big")
-    payload = stream.read(size)
-    if len(payload or b"") != size:
-        raise EOFError("sidecar stream ended before frame payload")
+    _validate_sidecar_frame_size(size)
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = stream.read(min(remaining, SIDECAR_READ_CHUNK_BYTES))
+        if not chunk:
+            raise EOFError("sidecar stream ended before frame payload")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    payload = b"".join(chunks)
     decoded = msgpack.unpackb(payload, raw=False)
     if not isinstance(decoded, dict):
         raise ValueError("sidecar payload must decode to an object")
     return decoded
+
+
+def _validate_sidecar_frame_size(size: int) -> None:
+    if size < 0 or size > MAX_SIDECAR_FRAME_BYTES:
+        raise ValueError("sidecar frame exceeds the 16 MiB limit")
+
+
+async def _read_sidecar_payload(reader: Any, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunks.append(
+            await reader.readexactly(min(remaining, SIDECAR_READ_CHUNK_BYTES))
+        )
+        remaining -= len(chunks[-1])
+        await asyncio.sleep(0)
+    return b"".join(chunks)
 
 
 class SidecarRpcError(RuntimeError):

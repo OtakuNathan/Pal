@@ -66,7 +66,6 @@ class TurnManager:
             reply_target=channel_envelope.response_handle.reply_target,
             payload=channel_envelope.event.payload if isinstance(channel_envelope.event.payload, dict) else {},
         )
-        scope_state = self._ensure_scope_state(control_scope_key)
         continuation = TurnContinuation(
             turn_id=turn_id,
             channel_envelope=channel_envelope,
@@ -77,7 +76,7 @@ class TurnManager:
         )
         self.state.active_turns[turn_id] = continuation
         self.state.turn_scopes[turn_id] = control_scope_key
-        self._remember_active_turn(scope_state, turn_id)
+        self._remember_active_turn(turn_id)
         return continuation
 
     def _resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int:
@@ -114,35 +113,29 @@ class TurnManager:
             self._mark_turn_exited(continuation.turn_id)
             return outcome
 
-    async def interrupt_by_scope(self, control_scope_key: str, *, reason: str = "interrupted") -> bool:
-        turn_id = self.latest_active_turn_id(control_scope_key)
-        interrupt_scope_key = control_scope_key
+    async def interrupt_active_turn(self, *, reason: str = "interrupted") -> bool:
+        turn_id = self.latest_active_turn_id()
         if not turn_id:
-            turn_id = self.latest_active_channel_turn_id()
-            if not turn_id:
-                return False
-            interrupt_scope_key = self.state.turn_scopes.get(turn_id) or control_scope_key
-        scope_state = self._ensure_scope_state(interrupt_scope_key)
-        async with scope_state.interrupt_lock:
+            return False
+        async with self.state.resident_interrupt_lock:
             if not self._is_turn_live(turn_id):
                 return False
-            in_flight = scope_state.interrupt_task
-            if scope_state.interrupting_turn_id == turn_id and in_flight is not None and not in_flight.done():
+            in_flight = self.state.resident_interrupt_task
+            if (
+                self.state.resident_interrupting_turn_id == turn_id
+                and in_flight is not None
+                and not in_flight.done()
+            ):
                 interrupt_task = in_flight
             else:
                 interrupt_task = asyncio.create_task(
-                    self._interrupt_turn_async(
-                        interrupt_scope_key,
-                        turn_id,
-                        reason=reason,
-                    )
+                    self._interrupt_turn_async(turn_id, reason=reason)
                 )
-                scope_state.interrupting_turn_id = turn_id
-                scope_state.interrupt_task = interrupt_task
+                self.state.resident_interrupting_turn_id = turn_id
+                self.state.resident_interrupt_task = interrupt_task
         return await interrupt_task
 
-    async def _interrupt_turn_async(self, control_scope_key: str, turn_id: str, *, reason: str) -> bool:
-        scope_state = self._ensure_scope_state(control_scope_key)
+    async def _interrupt_turn_async(self, turn_id: str, *, reason: str) -> bool:
         current_task = asyncio.current_task()
         try:
             continuation = self.state.active_turns.get(turn_id)
@@ -165,11 +158,11 @@ class TurnManager:
                 task.cancel()
             return True
         finally:
-            async with scope_state.interrupt_lock:
-                if scope_state.interrupt_task is current_task:
-                    scope_state.interrupt_task = None
-                    if scope_state.interrupting_turn_id == turn_id:
-                        scope_state.interrupting_turn_id = None
+            async with self.state.resident_interrupt_lock:
+                if self.state.resident_interrupt_task is current_task:
+                    self.state.resident_interrupt_task = None
+                    if self.state.resident_interrupting_turn_id == turn_id:
+                        self.state.resident_interrupting_turn_id = None
 
     def cleanup_interrupted(self, turn_id: str, *, reason: str = "interrupted") -> None:
         continuation = self.state.active_turns.pop(turn_id, None)
@@ -246,27 +239,18 @@ class TurnManager:
             "prompt_log_enabled": bool(self.state.prompt_log_enabled),
         }
 
-    def latest_active_turn_id(self, control_scope_key: str) -> str | None:
-        scope_state = self._ensure_scope_state(control_scope_key)
-        turn_id = scope_state.active_turn_id
+    def latest_active_turn_id(self) -> str | None:
+        turn_id = self.state.active_turn_id
         if turn_id and self._is_turn_live(turn_id):
-            scope_state.drained_event.clear()
+            self.state.resident_drained_event.clear()
             return turn_id
-        scope_state.active_turn_id = None
-        scope_state.drained_event.set()
+        self.state.active_turn_id = None
+        self.state.resident_drained_event.set()
         return None
 
-    def latest_active_channel_turn_id(self) -> str | None:
-        turn_id = self.state.active_channel_turn_id
-        if turn_id and self._is_turn_live(turn_id):
-            return turn_id
-        self.state.active_channel_turn_id = None
-        return None
-
-    def _remember_active_turn(self, scope_state, turn_id: str) -> None:
-        scope_state.active_turn_id = turn_id
-        scope_state.drained_event.clear()
-        self.state.active_channel_turn_id = turn_id
+    def _remember_active_turn(self, turn_id: str) -> None:
+        self.state.active_turn_id = turn_id
+        self.state.resident_drained_event.clear()
 
     def _is_turn_live(self, turn_id: str) -> bool:
         task = self.state.turn_tasks.get(turn_id)
@@ -274,25 +258,11 @@ class TurnManager:
             return True
         return turn_id in self.state.active_turns
 
-    def _ensure_scope_state(self, control_scope_key: str):
-        scope_state = self.state.control_scopes.get(control_scope_key)
-        if scope_state is None:
-            from pal.core.contracts import ControlScopeState
-
-            scope_state = ControlScopeState()
-            self.state.control_scopes[control_scope_key] = scope_state
-        return scope_state
-
     def _mark_turn_exited(self, turn_id: str) -> None:
-        if self.state.active_channel_turn_id == turn_id:
-            self.state.active_channel_turn_id = None
-        control_scope_key = self.state.turn_scopes.pop(turn_id, None)
-        if not control_scope_key:
-            return
-        scope_state = self._ensure_scope_state(control_scope_key)
-        if scope_state.active_turn_id == turn_id:
-            scope_state.active_turn_id = None
-            scope_state.drained_event.set()
+        if self.state.active_turn_id == turn_id:
+            self.state.active_turn_id = None
+            self.state.resident_drained_event.set()
+        self.state.turn_scopes.pop(turn_id, None)
 
 
 @dataclass
@@ -435,6 +405,9 @@ class CoreTurnIOPort:
 
     def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
         return self.core.artifact_scope_for_turn(turn_id)
+
+    def capture_delivery_binding(self, turn_id: str | None) -> dict[str, Any]:
+        return self.core.capture_delivery_binding(turn_id)
 
 
 @dataclass
@@ -628,7 +601,6 @@ class PalCore:
         self,
         channel_envelope: ChannelEnvelope,
         control_scope_key: str,
-        scope_state,
     ) -> asyncio.Task[Any]:
         turn_id = channel_envelope.event.event_id
         self.context.turn_event_bus.emit("turn.start", {
@@ -638,7 +610,7 @@ class PalCore:
             "channel_kind": channel_envelope.endpoint.channel_kind,
             "reply_target": dict(channel_envelope.response_handle.reply_target),
         })
-        self.turn_manager._remember_active_turn(scope_state, turn_id)
+        self.turn_manager._remember_active_turn(turn_id)
         self.state.turn_scopes[turn_id] = control_scope_key
         task = asyncio.create_task(self._background_channel_turn_runner_async(channel_envelope))
         self.state.turn_tasks[turn_id] = task
@@ -647,7 +619,9 @@ class PalCore:
 
     async def _start_next_queued_turn_async(self) -> None:
         async with self.state.channel_turn_transition_lock:
-            if self.turn_manager.latest_active_channel_turn_id() is not None:
+            if self.state.resident_quiescing:
+                return
+            if self.turn_manager.latest_active_turn_id() is not None:
                 return
             while self.state.pending_channel_turns:
                 next_envelope = self.state.pending_channel_turns.popleft()
@@ -655,45 +629,26 @@ class PalCore:
                 if self._turn_task_running(next_turn_id):
                     continue
                 control_scope_key = self._derive_channel_control_scope_key(next_envelope)
-                scope_state = self._ensure_scope_state(control_scope_key)
-                if scope_state.quiescing:
-                    continue
                 self._start_channel_turn_task_locked(
                     next_envelope,
                     control_scope_key,
-                    scope_state,
                 )
                 return
 
     async def schedule_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
         control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
-        channel_envelope = await self._prepare_channel_artifacts_async(channel_envelope, control_scope_key)
-        scope_state = self._ensure_scope_state(control_scope_key)
+        channel_envelope = await self._prepare_channel_artifacts_async(channel_envelope)
         turn_id = channel_envelope.event.event_id
-        should_reject = False
         should_stop_only = False
         should_queue = False
         async with self.state.channel_turn_transition_lock:
-            if scope_state.quiescing:
-                should_reject = True
-            elif self._turn_task_running(turn_id) or self._channel_turn_is_pending(turn_id):
+            if self._turn_task_running(turn_id) or self._channel_turn_is_pending(turn_id):
                 should_stop_only = True
-            elif self.turn_manager.latest_active_channel_turn_id() is not None:
+            elif self.state.resident_quiescing or self.turn_manager.latest_active_turn_id() is not None:
                 self.state.pending_channel_turns.append(channel_envelope)
                 should_queue = True
             else:
-                self._start_channel_turn_task_locked(channel_envelope, control_scope_key, scope_state)
-        if should_reject:
-            await self._reply_to_route_async(
-                self._route_from_channel_envelope(channel_envelope),
-                "This scope is resetting. Please retry in a moment.",
-            )
-            await self._status_to_route_async(
-                self._route_from_channel_envelope(channel_envelope),
-                "working_stop",
-                {},
-            )
-            return
+                self._start_channel_turn_task_locked(channel_envelope, control_scope_key)
         if should_stop_only or should_queue:
             await self._status_to_route_async(
                 self._route_from_channel_envelope(channel_envelope),
@@ -706,10 +661,8 @@ class PalCore:
         return asyncio.run(self.process_channel_turn_async(channel_envelope))
 
     async def process_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> TurnOutcome:
-        control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
-        scope_state = self._ensure_scope_state(control_scope_key)
-        if scope_state.quiescing:
-            raise RuntimeError("scope is quiescing")
+        if self.state.resident_quiescing:
+            raise RuntimeError("resident runtime is quiescing")
         # The hot path is: start turn -> interpret yielded effects -> resume
         # until the generator returns a TurnOutcome.
         continuation = self.turn_manager.start(channel_envelope)
@@ -738,7 +691,7 @@ class PalCore:
             return
         begin(
             turn_id=continuation.turn_id,
-            scope_key=continuation.control_scope_key,
+            scope_key=self.state.resident_execution_lifetime_id,
             input_id=continuation.turn_id,
             retention_user_turns=getattr(self.config, "tool_result_pager_retention_user_turns", 5),
         )
@@ -784,15 +737,23 @@ class PalCore:
             task.result()
         self.notify_ready()
 
-    async def handle_control_action_async(self, action: ControlAction) -> None:
+    async def handle_control_action_async(
+        self,
+        action: ControlAction,
+        *,
+        require_provider: bool = False,
+    ) -> bool | None:
         await self.expire_pending_control_requests_async()
         status_route = action.route or (action.delivery.route if action.delivery is not None else None)
         with contextlib.suppress(Exception):
             await self._status_to_route_async(status_route, "typing_start", {})
         try:
             if action.delivery is not None:
-                await self._deliver_control_delivery_async(action.delivery, fallback_route=action.route)
-                return
+                return await self._deliver_control_delivery_async(
+                    action.delivery,
+                    fallback_route=action.route,
+                    require_provider=require_provider,
+                )
             if action.action_kind == "show_panel":
                 await self._handle_show_panel_async(action)
                 return
@@ -1165,15 +1126,26 @@ class PalCore:
         normalized = str(turn_id or "").strip()
         if not normalized:
             return None
+        if normalized in self.state.active_turns or normalized in self.state.turn_scopes:
+            return self.state.resident_execution_lifetime_id
+        return None
+
+    def capture_delivery_binding(self, turn_id: str | None) -> dict[str, Any]:
+        normalized = str(turn_id or "").strip()
         continuation = self.state.active_turns.get(normalized)
-        if isinstance(continuation, TurnContinuation):
-            return continuation.control_scope_key
-        return self.state.turn_scopes.get(normalized)
+        if not isinstance(continuation, TurnContinuation):
+            return {}
+        route = route_from_channel_envelope(continuation.channel_envelope)
+        return {
+            "channel_id": route.endpoint_id,
+            "channel_kind": route.channel_kind,
+            "reply_target": dict(route.reply_target),
+            "control_scope_key": route.control_scope_key,
+        }
 
     async def _prepare_channel_artifacts_async(
         self,
         channel_envelope: ChannelEnvelope,
-        control_scope_key: str,
     ) -> ChannelEnvelope:
         payload = channel_envelope.event.payload
         if not isinstance(payload, dict):
@@ -1190,7 +1162,7 @@ class PalCore:
             try:
                 ref = register_ingested(
                     item,
-                    scope_key=control_scope_key,
+                    scope_key=self.state.resident_execution_lifetime_id,
                     turn_id=channel_envelope.event.event_id,
                     source_channel=channel_envelope.endpoint.channel_kind,
                     metadata={
@@ -1246,8 +1218,8 @@ class PalCore:
         route = action.route
         if route is None:
             return
-        interrupted = await self.turn_manager.interrupt_by_scope(route.control_scope_key, reason="interrupted")
-        message = "Interrupted the current turn." if interrupted else "No active turn to interrupt in this scope."
+        interrupted = await self.turn_manager.interrupt_active_turn(reason="interrupted")
+        message = "Interrupted the current turn." if interrupted else "No active turn to interrupt."
         await self._complete_action_reply_async(action, message)
 
     async def _handle_open_reset_confirm_async(self, action: ControlAction) -> None:
@@ -1298,40 +1270,66 @@ class PalCore:
             scope_state.pending_requests.pop("reset_confirm", None)
             await self._notify_expired_request_async(request)
             return
-        await self._execute_soft_reset_async(scope_state, request)
+        reset_applied = await self._execute_soft_reset_async(request)
         scope_state.pending_requests.pop("reset_confirm", None)
         await self._complete_action_reply_async(
             action,
-            "Soft reset complete. L1/L2 and working memory projection were cleared.",
+            (
+                "Soft reset complete. L1/L2 and working memory projection were cleared."
+                if reset_applied
+                else "Soft reset was not applied: the active turn did not drain before the timeout."
+            ),
         )
 
-    async def _execute_soft_reset_async(self, scope_state, request) -> None:
+    async def _execute_soft_reset_async(self, request) -> bool:
+        """Reset only after the active logical turn has actually exited.
+
+        Interrupting a worker task is a request, not proof that its cleanup is
+        complete.  If the resident does not drain within the bounded wait,
+        leave its runtime state intact and let its own exit path resume the
+        queued turn later.
+        """
         async with self.state.channel_turn_transition_lock:
-            if scope_state.quiescing:
-                return
-            scope_state.quiescing = True
-            scope_state.drained_event = asyncio.Event()
-            self.state.pending_channel_turns.clear()
-            current_turn_id = self.turn_manager.latest_active_channel_turn_id()
-            wait_scope_key = self.state.turn_scopes.get(current_turn_id or "") or request.control_scope_key
-            wait_scope_state = self._ensure_scope_state(wait_scope_key)
+            if self.state.resident_quiescing:
+                return False
+            self.state.resident_quiescing = True
+            self.state.resident_drained_event = asyncio.Event()
+            current_turn_id = self.turn_manager.latest_active_turn_id()
             if current_turn_id is None:
-                scope_state.drained_event.set()
+                self.state.resident_drained_event.set()
         if current_turn_id is not None:
-            await self.turn_manager.interrupt_by_scope(request.control_scope_key, reason="reset")
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(wait_scope_state.drained_event.wait(), timeout=2.0)
-        memory_service = self.context.require_port("memory:memory")
-        soft_reset = getattr(memory_service, "asoft_reset", None)
-        if callable(soft_reset):
-            await soft_reset()
-        else:
-            sync_reset = getattr(memory_service, "soft_reset", None)
-            if callable(sync_reset):
-                await asyncio.to_thread(sync_reset)
-        async with self.state.channel_turn_transition_lock:
-            scope_state.quiescing = False
-            scope_state.drained_event.set()
+            await self.turn_manager.interrupt_active_turn(reason="reset")
+        try:
+            try:
+                await asyncio.wait_for(
+                    self.state.resident_drained_event.wait(),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                return False
+            from pal.core.runtime_state import RuntimeSnapshotCoordinator
+
+            coordinator = RuntimeSnapshotCoordinator(self.context.module_registry)
+            if any(
+                handle.runtime_state_port is not None
+                for handle in self.context.module_registry.modules.values()
+            ):
+                await coordinator.reset("soft_reset")
+            else:
+                memory_service = self.context.require_port("memory:memory")
+                soft_reset = getattr(memory_service, "asoft_reset", None)
+                if callable(soft_reset):
+                    await soft_reset()
+                else:
+                    sync_reset = getattr(memory_service, "soft_reset", None)
+                    if callable(sync_reset):
+                        await asyncio.to_thread(sync_reset)
+            return True
+        finally:
+            async with self.state.channel_turn_transition_lock:
+                self.state.resident_quiescing = False
+                self.state.resident_drained_event.set()
+            await self._start_next_queued_turn_async()
 
     async def _handle_compact_memory_async(self, action: ControlAction) -> None:
         if action.route is None:
@@ -1436,18 +1434,21 @@ class PalCore:
         delivery: ControlDelivery,
         *,
         fallback_route: ControlRoute | None = None,
-    ) -> None:
+        require_provider: bool = False,
+    ) -> bool:
         route = delivery.route or fallback_route
         if delivery.delivery_kind == "reply":
             text = delivery.text or str(delivery.payload.get("text") or "")
             if text:
-                await self._reply_to_route_async(route, text)
-            return
+                return await self._reply_to_route_async(
+                    route, text, require_provider=require_provider
+                )
+            return True
         if delivery.delivery_kind == "endpoint_status":
             channel_runtime = self.context.port_registry.get("channel:channel")
             queue_endpoint_status = getattr(channel_runtime, "queue_endpoint_status", None)
             if not callable(queue_endpoint_status):
-                return
+                return not require_provider
             endpoint_id = delivery.endpoint_id or (route.endpoint_id if route is not None else "")
             status_kind = str(delivery.payload.get("status_kind") or "").strip()
             status_payload = delivery.payload.get("payload")
@@ -1458,19 +1459,27 @@ class PalCore:
                     if key not in {"status_kind", "payload"}
                 }
             if endpoint_id and status_kind:
-                queue_endpoint_status(endpoint_id, status_kind, payload=dict(status_payload))
-            return
+                if require_provider:
+                    endpoint = channel_runtime.get_endpoint(endpoint_id)
+                    if endpoint is None or not endpoint.attached or not endpoint.enabled:
+                        return False
+                result = queue_endpoint_status(endpoint_id, status_kind, payload=dict(status_payload))
+                return result is not None or not require_provider
+            return not require_provider
         if delivery.delivery_kind == "attachment":
-            envelope = self._route_to_channel_envelope(route)
+            envelope = self._route_to_channel_envelope(
+                route,
+                require_provider=require_provider,
+            )
             if envelope is None:
-                return
+                return False
             path = Path(str(delivery.payload.get("path") or "")).expanduser()
             if not path.is_file():
-                return
+                return False
             channel_runtime = self.context.port_registry.get("channel:channel")
             queue_attachment = getattr(channel_runtime, "queue_attachment", None)
             if not callable(queue_attachment):
-                return
+                return not require_provider
             queue_attachment(
                 envelope,
                 AttachmentSpec(
@@ -1480,40 +1489,83 @@ class PalCore:
                     mime_type=str(delivery.payload.get("mime_type") or ""),
                 ),
             )
-            return
+            return True
         if delivery.delivery_kind in control_interactions.INTERACTIVE_DELIVERY_KINDS:
             if delivery.interaction is None:
                 if delivery.text:
-                    await self._reply_to_route_async(route, delivery.text)
-                return
+                    return await self._reply_to_route_async(
+                        route,
+                        delivery.text,
+                        require_provider=require_provider,
+                    )
+                return True
             payload = dict(delivery.payload)
             payload["spec"] = delivery.interaction
             if delivery.text:
                 payload["text"] = delivery.text
-            await self._status_to_route_async(route, delivery.delivery_kind, payload)
+            return await self._status_to_route_async(
+                route,
+                delivery.delivery_kind,
+                payload,
+                require_provider=require_provider,
+            )
+        return True
 
-    async def _reply_to_route_async(self, route: ControlRoute | None, text: str) -> None:
-        envelope = self._route_to_channel_envelope(route)
+    async def _reply_to_route_async(
+        self,
+        route: ControlRoute | None,
+        text: str,
+        *,
+        require_provider: bool = False,
+    ) -> bool:
+        envelope = self._route_to_channel_envelope(
+            route,
+            require_provider=require_provider,
+        )
         if envelope is None:
-            return
+            return False
         channel_runtime = self.context.require_port("channel:channel")
         channel_runtime.queue_reply(envelope, text)
+        return True
 
-    async def _status_to_route_async(self, route: ControlRoute | None, kind: str, payload: dict[str, Any]) -> None:
-        envelope = self._route_to_channel_envelope(route)
+    async def _status_to_route_async(
+        self,
+        route: ControlRoute | None,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        require_provider: bool = False,
+    ) -> bool:
+        envelope = self._route_to_channel_envelope(
+            route,
+            require_provider=require_provider,
+        )
         if envelope is None:
-            return
+            return False
         channel_runtime = self.context.require_port("channel:channel")
         channel_runtime.queue_status(envelope, kind, payload=payload)
+        return True
 
     def _route_from_channel_envelope(self, channel_envelope: ChannelEnvelope) -> ControlRoute:
         return route_from_channel_envelope(channel_envelope)
 
-    def _route_to_channel_envelope(self, route: ControlRoute | None) -> ChannelEnvelope | None:
+    def _route_to_channel_envelope(
+        self,
+        route: ControlRoute | None,
+        *,
+        require_provider: bool = False,
+    ) -> ChannelEnvelope | None:
         if route is None:
             return None
         channel_runtime = self.context.port_registry.get("channel:channel")
         endpoint = channel_runtime.get_endpoint(route.endpoint_id) if channel_runtime is not None else None
+        if require_provider:
+            if endpoint is None or not endpoint.attached or not endpoint.enabled:
+                return None
+            inspect_health = getattr(endpoint, "inspect_health", None)
+            health = inspect_health() if callable(inspect_health) else {}
+            if isinstance(health, dict) and health.get("healthy") is False:
+                return None
         endpoint_config = endpoint.endpoint if endpoint is not None else None
         if endpoint_config is None:
             from pal.shared import EndpointConfig, ResponseHandle

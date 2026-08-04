@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_LOCAL_READ,
+    INDIRECT_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput,
     ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput,
@@ -98,6 +103,7 @@ class ArtifactIntrospectionProvider:
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListOutput,
         metadata={"async_required": True},
         aliases=("list_artifacts",),
+        execution=INDIRECT_LOCAL_READ,
     )
     async def list_artifacts(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactListTool(service=self.service).ainvoke(
@@ -114,6 +120,7 @@ class ArtifactIntrospectionProvider:
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoOutput,
         metadata={"async_required": True},
         aliases=("artifact_info",),
+        execution=INDIRECT_LOCAL_READ,
     )
     async def info(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactInfoTool(service=self.service).ainvoke(
@@ -130,6 +137,7 @@ class ArtifactIntrospectionProvider:
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput,
         metadata={"async_required": True},
         aliases=("read_artifact",),
+        execution=INDIRECT_LOCAL_READ,
     )
     async def read(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactReadTool(service=self.service).ainvoke(
@@ -146,6 +154,7 @@ class ArtifactIntrospectionProvider:
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput,
         metadata={"async_required": True},
         aliases=("search_artifacts",),
+        execution=INDIRECT_LOCAL_READ,
     )
     async def search(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactSearchTool(service=self.service).ainvoke(
@@ -162,6 +171,7 @@ class ArtifactIntrospectionProvider:
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput,
         metadata={"async_required": True},
         aliases=("artifact_select",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     async def select(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactSelectTool(service=self.service).ainvoke(
@@ -181,6 +191,7 @@ class ArtifactIntrospectionProvider:
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput,
         metadata={"async_required": True},
         aliases=("artifact_grep",),
+        execution=INDIRECT_LOCAL_READ,
     )
     async def content_search(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactContentSearchTool(service=self.service).ainvoke(
@@ -197,6 +208,7 @@ class ArtifactIntrospectionProvider:
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput,
         metadata={"async_required": True},
         aliases=("artifact_transcribe",),
+        execution=INDIRECT_LOCAL_READ,
     )
     async def transcribe(self, call: CapabilityCall) -> CapabilityResult:
         return await ArtifactTranscribeTool(service=self.service).ainvoke(

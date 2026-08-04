@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import base64
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -15,11 +16,6 @@ from pal.minion.v2.artifacts import ArtifactRef
 from pal.minion.v2.contract_protocol import (
     ARCHITECT_FILENAME,
     validate_contract_payload,
-)
-from pal.minion.v2.contracts import AggregateType
-from pal.minion.v2.execution_state import (
-    ManagerLogicalExecutionState,
-    pager_read_to_dict,
 )
 from pal.minion.v2.graph_compiler import (
     GraphCompileBindings,
@@ -139,143 +135,88 @@ class RoleAssignmentGateway:
             return self._draft_mutate(authenticated, payload)
         if method == "draft_submit":
             return self._draft_submit(authenticated, payload)
+        if method == "bound_input_json":
+            return self._bound_input_json(authenticated, payload)
         if method == "artifact_put":
             return self._artifact_put(authenticated, payload)
         if method == "git_read":
             return self._git_read(authenticated, payload)
-        if method == "execution_context":
-            return {
-                "context": self._execution_state(
-                    authenticated, payload
-                ).context().to_dict()
-            }
-        if method == "execution_begin_input":
-            return {
-                "context": self._execution_state(
-                    authenticated, payload
-                ).begin_input(
-                    input_id=str(payload.get("input_id") or ""),
-                    retention_user_turns=int(
-                        payload.get("retention_user_turns") or 5
-                    ),
-                ).to_dict()
-            }
-        if method == "execution_reconcile_projection":
-            return {
-                "context": self._execution_state(
-                    authenticated, payload
-                ).reconcile_projection(
-                    projection=tuple(
-                        str(item)
-                        for item in list(payload.get("projection") or ())
-                    ),
-                    deliveries=tuple(
-                        dict(item)
-                        for item in list(payload.get("deliveries") or ())
-                        if isinstance(item, Mapping)
-                    ),
-                ).to_dict()
-            }
-        if method == "execution_record_delivery":
-            return {
-                "context": self._execution_state(
-                    authenticated, payload
-                ).record_delivery(
-                    delivery=dict(payload.get("delivery") or {}),
-                ).to_dict()
-            }
-        if method == "execution_store_pager":
-            from pal.execution.session_state import PagerHandleManifest
-
-            state = self._execution_state(authenticated, payload)
-            manifest = PagerHandleManifest.from_dict(
-                dict(payload.get("manifest") or {})
-            )
-            stored = state.store_pager(manifest)
-            return {"manifest": stored.to_dict(include_payload=False)}
-        if method == "execution_read_pager":
-            state = self._execution_state(authenticated, payload)
-            return pager_read_to_dict(
-                state.read_pager(
-                    result_ref=str(payload.get("result_ref") or ""),
-                    page=int(payload.get("page") or 1),
-                    page_size=(
-                        int(payload["page_size"])
-                        if payload.get("page_size") is not None
-                        else None
-                    ),
-                    anchor=str(payload.get("anchor") or "head"),
-                )
-            )
-        if method == "execution_file_grant":
-            grant = self._execution_state(
-                authenticated, payload
-            ).file_grant(
-                file_key=str(payload.get("file_key") or ""),
-                digest=str(payload.get("digest") or ""),
-            )
-            return {
-                "grant": (
-                    {
-                        "file_key": grant.file_key,
-                        "digest": grant.digest,
-                        "total_lines": grant.total_lines,
-                        "covered_ranges": [
-                            list(item) for item in grant.covered_ranges
-                        ],
-                        "empty_file": grant.empty_file,
-                        "line_fragments": [
-                            list(item) for item in grant.line_fragments
-                        ],
-                    }
-                    if grant is not None
-                    else None
-                )
-            }
-        if method == "execution_file_snapshot":
-            snapshot = self._execution_state(
-                authenticated, payload
-            ).file_snapshot(
-                file_key=str(payload.get("file_key") or ""),
-                digest=str(payload.get("digest") or ""),
-            )
-            return {
-                "snapshot": (
-                    snapshot.to_dict() if snapshot is not None else None
-                )
-            }
-        if method == "execution_set_file_snapshot":
-            self._execution_state(authenticated, payload).set_file_snapshot(
-                file_key=str(payload.get("file_key") or ""),
-                digest=str(payload.get("digest") or ""),
-                total_lines=int(payload.get("total_lines") or 0),
-                complete=bool(payload.get("complete")),
-                source=str(payload.get("source") or "mutation"),
-            )
-            return {"ok": True}
-        if method == "execution_invalidate_file":
-            self._execution_state(authenticated, payload).invalidate_file(
-                file_key=str(payload.get("file_key") or "")
-            )
-            return {"ok": True}
-        if method == "execution_retire":
-            self._execution_state(authenticated, payload).retire()
-            return {"ok": True}
         raise ValueError(f"role gateway method is not allowed: {method}")
 
-    def _execution_state(
+    def _bound_input_json(
         self,
         authenticated: Mapping[str, Any],
         params: Mapping[str, Any],
-    ) -> ManagerLogicalExecutionState:
-        assignment = dict(authenticated["assignment"])
-        session_id = str(assignment.get("session_id") or "")
-        requested = str(params.get("logical_session_id") or session_id)
-        if not session_id or requested != session_id:
-            raise ValueError(
-                "logical execution state does not match the authenticated role session"
+    ) -> dict[str, Any]:
+        """Return one immutable prompt input through the Manager boundary.
+
+        Worker prompt packs deliberately expose projected ``/pal/references``
+        paths.  Those paths only exist inside the worker's bwrap namespace, so
+        submission validation cannot dereference them from the Manager
+        process (and a resumed worker may not have the same projection yet).
+        Resolve by the authenticated reference *name* instead.  The name is
+        looked up in the authenticated prompt pack; callers cannot supply an
+        arbitrary host path.
+        """
+
+        name = str(params.get("name") or "").strip()
+        if not name:
+            raise ValueError("bound input name is required")
+        prompt_pack = self._authenticated_prompt_pack(authenticated)
+        metadata = dict(prompt_pack.get("metadata") or {})
+        brief = dict(metadata.get("requirements_brief") or {})
+        references = [
+            dict(item or {})
+            for item in list(brief.get("references") or [])
+            if isinstance(item, Mapping)
+        ]
+        reference = next(
+            (item for item in references if str(item.get("name") or "") == name),
+            None,
+        )
+        # Older prompt packs may not carry requirements_brief.  The sandbox
+        # bind manifest still contains the Manager-side source path and is
+        # authenticated as part of the same prompt pack.
+        if reference is None:
+            sandbox = dict(metadata.get("sandbox") or {})
+            binds = [
+                dict(item or {})
+                for item in list(sandbox.get("reference_binds") or [])
+                if isinstance(item, Mapping)
+            ]
+            bind = next(
+                (item for item in binds if str(item.get("name") or "") == name),
+                None,
             )
-        return ManagerLogicalExecutionState(self.service, session_id)
+            if bind is not None:
+                reference = {
+                    "name": name,
+                    "path": bind.get("source_path"),
+                    "include": list(bind.get("include") or []),
+                }
+        if reference is None:
+            raise ValueError(f"bound input {name!r} is not part of the authenticated prompt")
+
+        root = Path(str(reference.get("path") or "")).expanduser()
+        includes = [
+            str(item).replace("\\", "/").strip()
+            for item in list(reference.get("include") or [])
+            if str(item).strip()
+        ]
+        candidate = root
+        if candidate.is_dir() and len(includes) == 1 and not any(
+            character in includes[0] for character in "*?["
+        ):
+            candidate = candidate / includes[0]
+        if not candidate.is_file():
+            raise ValueError(f"bound input {name!r} is unavailable at {candidate}")
+        try:
+            value = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"bound input {name!r} is not valid JSON") from exc
+        if not isinstance(value, Mapping):
+            raise ValueError(f"bound input {name!r} must contain a JSON object")
+        return {"value": dict(value)}
 
     def _submission_status(
         self,
@@ -479,15 +420,19 @@ class RoleAssignmentGateway:
                 dict(prompt_pack.get("metadata") or {}).get("minion_v2") or {}
             ),
         }
-        aggregate = self.repository.read_snapshot(
-            AggregateType(str(assignment["aggregate_type"])),
-            str(assignment["aggregate_id"]),
+        # Architecture revisions and installed GraphIR generations are
+        # independent sequences.  A human edit may supersede any number of
+        # authored revisions before one is accepted, and those discarded
+        # revisions must not consume GraphIR generations.  Compile the
+        # candidate against the next append-only GraphIR slot; installation
+        # still performs the transactional gap/identity check.
+        previous_graph = self.repository.read_graph_generation(
+            graph_id=str(assignment["workflow_id"]),
         )
-        graph_generation = max(
-            1,
-            int(dict((aggregate or {}).payload if aggregate else {}).get(
-                "revision_number"
-            ) or 1),
+        graph_generation = (
+            int(previous_graph.generation) + 1
+            if previous_graph is not None
+            else 1
         )
         source_map = (
             build_yaml_source_map(

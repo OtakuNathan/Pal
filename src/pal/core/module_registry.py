@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from pal.shared import IntrospectionPort, PromptFragmentProvider
 
 if TYPE_CHECKING:
+    from pal.core.runtime_state import RuntimeStatePort
     from pal.shared import MountedSubtreeHandle
 
 
@@ -34,6 +35,7 @@ class ModuleHandle:
     cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)
     shutdown_sync: Callable[[], None] | None = None
     shutdown_async: Callable[[], Awaitable[None]] | None = None
+    runtime_state_port: "RuntimeStatePort | None" = None
 
 
 @dataclass

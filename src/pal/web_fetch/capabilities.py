@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_CONTROL,
+    INDIRECT_LOCAL_WRITE,
+    INDIRECT_UNSAFE_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
     WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput,
@@ -211,6 +217,7 @@ class WebFetchIntrospectionProvider:
         description="Set the configured active web fetch provider",
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput,
         aliases=("web_fetch_set_active_provider",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("active_provider_id") or "").strip()
@@ -303,6 +310,7 @@ class WebFetchIntrospectionProvider:
         OutputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput,
         metadata={"canonical_path": "op_web_screenshot", "omit_family_in_canonical": True, "async_required": True},
         aliases=("screenshot_web",),
+        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
     async def screenshot(self, call: IntrospectionCall) -> IntrospectionResult:
         return await WebScreenshotTool(
@@ -320,6 +328,7 @@ class WebFetchIntrospectionProvider:
         action_name="enable",
         description="Enable a web fetch provider",
         aliases=("web_fetch_provider_enable",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=True)
@@ -331,6 +340,7 @@ class WebFetchIntrospectionProvider:
         action_name="disable",
         description="Disable a web fetch provider",
         aliases=("web_fetch_provider_disable",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=False)
@@ -343,6 +353,7 @@ class WebFetchIntrospectionProvider:
         description="Update web fetch provider auth material without exposing secrets",
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetAuthMaterialInput,
         aliases=("web_fetch_provider_set_auth_material",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -371,6 +382,7 @@ class WebFetchIntrospectionProvider:
         description="Merge config into a web fetch provider settings blob",
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetConfigInput,
         aliases=("web_fetch_provider_set_config",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_config(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -390,7 +402,7 @@ class WebFetchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web fetch provider config updated", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach web fetch module", aliases=("web_fetch_attach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach web fetch module", aliases=("web_fetch_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -398,7 +410,7 @@ class WebFetchIntrospectionProvider:
         payload = {"mounted": True, "degraded": False}
         return IntrospectionResult(status=RuntimeStatus.OK, text="web fetch attached", structured=payload, llm_text=render_titled_structured_for_llm("Web fetch attached", payload))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach web fetch module", aliases=("web_fetch_detach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach web fetch module", aliases=("web_fetch_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.service.shutdown_sync()

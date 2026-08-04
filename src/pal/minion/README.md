@@ -32,8 +32,11 @@ Interaction rule:
   readiness, traversal, repair routing, replan reuse, and sink publication
 - planning is Architect producer -> Architecture Reviewer checker -> Human.
   Every executable graph node, including the authored sink, is a Coder
-  producer -> Verifier checker cycle. The sink Coder owns assembly and the sink
-  Verifier owns end-to-end, system, and delivery verification
+  producer -> Verifier checker cycle. Software Coders run in parallel from
+  accepted contracts; the sink Coder owns the source-level entrypoint and
+  composition, while Manager waits for accepted dependency Candidates before
+  assembling the sink checker worktree. The sink Verifier owns end-to-end,
+  system, and delivery verification
 - one module identity owns one reusable worktree and its Coder/Verifier logical
   sessions. The roles share the same Git baseline but have distinct writable
   developer/verifier test directories. Replan preserves the worktree and both
@@ -67,18 +70,31 @@ Interaction rule:
   compaction calls do not advance it
 - one logical role session owns file snapshots and pager handles; they expire
   at semantic input `N+5` and become inaccessible when that role session exits
-- checkpoint schema v6 serializes the complete current L1 working set, the L2
-  hot cache, request settings, clocks, registry generation hash, and the exact
-  active provider tool protocol required to resume an unfinished logical turn.
-  That protocol is transient resume state rather than a second semantic truth
-  source, and it is cleared when the logical turn closes
+- checkpoint schema v8 stores a non-sensitive routing/fencing header plus one
+  authenticated encrypted logical-process payload. Module-owned state is
+  serialized behind that envelope; Manager routes it opaquely and only the
+  target worker decrypts it. Older plaintext checkpoint schemas are rejected
+- the encrypted coroutine payload also owns assignment-local artifact/evidence
+  lists, memory candidates, and resource-budget counters. Native-process
+  restart restores them only when the Manager input key is unchanged; a new
+  semantic assignment mechanically starts those invocation-local fields empty
+- checkpoints atomically replace the latest encrypted payload at every closed
+  tool-protocol safe point, including role-stage entry, structured terminal
+  boundaries, and cooperative restart. A hard crash therefore resumes from
+  the latest closed boundary plus durable worktree, checklist, findings, and
+  pending Manager input; no in-flight tool batch is checkpointed
 - closed tool calls and results enter L1 incrementally. Compaction reads only
   that frozen L1; role contracts, checklists, task fallback, and memory recall
   remain independently projected authority
 - compaction retires the active provider prompt projection. It does not advance
   the independent semantic-input pager clock or expire an `N+5` pager handle
-- Minion runtime schema v27 is a fresh cutover. Older or unrecognized runtime
+- Minion runtime schema v29 is a fresh cutover. Older or unrecognized runtime
   databases are archived atomically; only explicit profile and family
   overrides are copied after validation
-- legacy workflow state, aliases, managed seed migrations, and checkpoint
-  schemas through v5 are not migrated in place
+- legacy workflow state, aliases, managed seed migrations, and plaintext
+  checkpoint schemas through v7 are not migrated in place
+- Manager records one origin/current delivery binding on the Task, outside
+  `task.yaml`, `GraphIR`, workflow payloads, and worker context. Ordinary input
+  from another channel never changes it; `minion_rebind_task_delivery` changes
+  only that reply target. A dead target falls back to a connected recovery
+  socket, otherwise the durable notification remains pending

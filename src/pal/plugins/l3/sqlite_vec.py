@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_CONTROL,
+    INDIRECT_EXTERNAL_READ,
+    INDIRECT_EXTERNAL_WRITE,
+    INDIRECT_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     PluginsL3SqliteVecSQLiteVecL3PluginDeleteInput,
     PluginsL3SqliteVecSQLiteVecL3PluginRecallInput,
@@ -268,6 +275,7 @@ class SQLiteVecL3Plugin:
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginRecallInput,
         aliases=("memory_provider_recall",),
+        execution=INDIRECT_EXTERNAL_READ,
     )
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
         task_id = _read_task_id(call.args)
@@ -314,6 +322,7 @@ class SQLiteVecL3Plugin:
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginWriteInput,
         aliases=("memory_provider_write",),
+        execution=INDIRECT_EXTERNAL_WRITE,
     )
     def commit_write(self, call: IntrospectionCall) -> IntrospectionResult:
         kind = str(call.args.get("kind") or "").strip()
@@ -380,6 +389,7 @@ class SQLiteVecL3Plugin:
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginUpdateInput,
         aliases=("memory_provider_update",),
+        execution=INDIRECT_EXTERNAL_WRITE,
     )
     def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
@@ -428,6 +438,7 @@ class SQLiteVecL3Plugin:
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginDeleteInput,
         aliases=("memory_provider_delete",),
+        execution=INDIRECT_EXTERNAL_WRITE,
     )
     def delete_memory(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
@@ -445,7 +456,7 @@ class SQLiteVecL3Plugin:
             llm_text=render_mutation_result_for_llm("delete", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider", aliases=("memory_provider_attach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider", aliases=("memory_provider_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -456,7 +467,7 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("Memory provider attached", {"mounted": True}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider", aliases=("memory_provider_detach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider", aliases=("memory_provider_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
@@ -476,6 +487,7 @@ class SQLiteVecL3Plugin:
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginRefreshIndexesInput,
         aliases=("memory_provider_refresh_indexes",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def refresh_indexes_action(self, call: IntrospectionCall) -> IntrospectionResult:
         limit = int(call.args.get("limit") or 8)

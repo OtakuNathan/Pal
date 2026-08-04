@@ -498,6 +498,10 @@ class MinionV2ReplanTests(unittest.TestCase):
                     "workspace_fingerprint": f"tree-{node_id}",
                 },
             ),
+            (
+                "VERIFICATION_DEPENDENCIES_ACCEPTED",
+                {"accepted_dependency_node_ids": [], "epoch_frozen": False},
+            ),
             ("START_REVIEW", {"fencing_token": 2, "active_worker_id": worker}),
             (
                 "SUBMIT_SEMANTIC_VERIFICATION",

@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import base64
-import getpass
-import hashlib
-import socket
 import subprocess
+import socket
 import sys
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -124,13 +121,13 @@ def _derive_fernet_key(
     reboot or network changes.
     """
 
-    parts = []
-    if include_hostname:
-        parts.append(socket.gethostname())
-    parts.extend([getpass.getuser(), runtime_root, salt_extra])
-    material = ":".join(parts)
-    digest = hashlib.pbkdf2_hmac("sha256", material.encode(), b"pal_v2_secret_salt", 200_000)
-    return base64.urlsafe_b64encode(digest)
+    from pal.foundation.encryption import derive_runtime_fernet_key
+
+    return derive_runtime_fernet_key(
+        runtime_root=runtime_root,
+        purpose=salt_extra,
+        include_hostname=include_hostname,
+    )
 
 
 class EncryptedFileSecretStore:

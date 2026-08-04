@@ -145,86 +145,46 @@ Current defaults:
 - MCP server request timeout: 300 seconds
 - Pal-to-manager IPC timeout: 300 seconds
 
-## Minion (V1 history)
+## Minion V2
 
-> The Minion text below is a retained V1 implementation history, not a current
-> contract. The canonical V2 implementation is
-> [minion_v2_contract_orchestration.md](minion_v2_contract_orchestration.md);
-> new code must not infer plan-builder, work-order, or FamilyBinding v2 behavior
-> from this historical section.
+Minion is a detachable first-party plugin backed by a manager sidecar. PalCore
+sees only the sidecar port, an event source, and control handlers; the manager
+owns Task/workflow persistence, graph execution, role leases, and process-shell
+lifecycle. A Task has one current workflow, addressed publicly by Task name;
+workflow and aggregate identifiers remain manager-owned.
 
-Minion is a detachable first-party builtin plugin. The plugin manifest is provisioned under `runtime_root/plugins/_builtin/minion`; plugin-owned runtime configuration lives under `runtime_root/plugins/minion`.
+The Architect receives the original requirements and family-specialized
+`architect.yaml` template, designs the graph and module contracts, then writes
+the family-defined graph document. The manager validates and compiles that
+document to GraphIR. Executors and checkers consume their bound module view,
+contract, checklist, and Git baseline; `task.yaml` is only their final fallback
+source. A role is a logical coroutine backed by a short-lived process shell;
+its serialized runtime state is the resume boundary. Independent ready graph
+nodes may run concurrently under the manager semaphore, while each node keeps
+its own worker/checker pair and worktree.
 
-Minion is a detachable first-party subsystem backed by a manager sidecar and the shared sidecar foundation.
+Manager task notifications are durable outbox rows. The Pal-side provider
+buffers them and drains them through the Core event loop. The event remains
+in-flight until Core reports that the concrete channel endpoint accepted the
+reply/interaction/attachment into its provider queue; only then is the manager
+row ACKed. Provider failure releases the reservation and defers the same row.
+The current Task delivery binding is manager-owned and can be rebound by Task
+name; the public result reports only Task, destination channel, and `changed`.
+If the current endpoint is unavailable, the manager may use the live socket
+recovery route. No channel receipt or remote business response is required for
+the ACK boundary.
 
-PalCore only sees:
+Compaction is shared infrastructure with separate Pal/Minion policies. It
+operates on a frozen L1 snapshot and commits atomically; closed tool protocol
+and external module views remain authoritative. A reset likewise waits for the
+active logical turn to exit. A bounded timeout reports that reset was not
+applied and preserves the active turn rather than clearing live state.
 
-- a minion event source
-- minion capabilities
-- control action handlers for `minion_approval_decision` and `minion_lesson_decision`
-
-Minion owns tasks, work orders, milestones, checkpoints, ledger, and lesson candidates in its own repository. `op_minion_decision_send` is not exposed to the LLM surface; approval decisions arrive through Control interactions and are routed to the minion module handler.
-
-The manager sidecar pushes events through the `subscribe_events` IPC stream. The Pal-side provider buffers pushed events and calls `core.notify_ready()`. The event source still drains the buffered events through the core loop, but delivery no longer depends on a user turn polling the manager.
-
-Current capability surface:
-
-- `task_search`
-- `task_read`
-- `work_order_search`
-- `work_order_read`
-- `work_order_draft_search`
-- `work_order_draft_read`
-- `minion_list`
-- `minion_read`
-- `minion_profile_list`
-- `minion_profile_read`
-- `minion_plan_search`
-- `minion_plan_read`
-- `minion_attach`
-- `minion_detach`
-- `minion_configure`
-- `minion_dispatch_workflow`
-- `minion_review_gate_submit`
-- `minion_draft_work_order`
-- `minion_promote_work_order_draft`
-- `minion_kill`
-- `minion_finalize`
-- `minion_tick_parent_dag`
-- `minion_submit_repair_bill`
-- `minion_pause_work_order`
-- `minion_recover_work_order`
-- `minion_destroy_work_order_run`
-
-Work order drafts are minion-owned planning artifacts for user brainstorming and module-boundary discussion. They are searchable, but they are not progress truth. Drafts can be promoted explicitly through `minion_promote_work_order_draft`; normal new delegation should use `minion_dispatch_workflow`, which starts the architect/profile workflow and lets the manager own plan review, plan acceptance control, and downstream dispatch.
-
-Planning is plan-first. The software architect profile uses the structured `plan_*` builder tools: begin a draft, add constraints/decisions/modules/milestones/acceptance criteria, validate, and submit a frozen draft for `plan_acceptance`. Reviewer minions inspect that draft through plan read/find/get handles and return handle-targeted fixes. Revision architects check out the prior draft and update/delete specific plan nodes instead of rebuilding the whole plan.
-
-Checkpoint is the milestone cursor fact. Completed checkpoints advance the derived current milestone; partial or blocked checkpoints do not.
-
-Progress and checkpoint events are manager/tasking telemetry. They are written to the minion ledger and checkpoint tables, but they are not direct chat notifications. Pal should answer progress questions by inspecting active runs and work order snapshots. Terminal events are the user-facing completion notification path and also synchronize a recent completion observation into Pal's prompt context.
-
-Minion deliverables are file-first. Coder profiles keep their Git project repo/work-order branch and write reports under `.minion/artifacts/{work_order_id}`. Architect, reviewer, generic, and other one-shot profiles get a manager-allocated folder workspace under `data/minion/workspaces/{run_id}_{profile}` with `work_order.json`, `metadata.json`, `logs/`, and `deliverables/`. The runner exposes `artifact_write`, scoped only to `workspace.artifact_dir`, for report-style deliverables. Software architect profiles use `plan_*` builder tools instead of hand-writing JSON; `plan_finalize` compiles the draft into the normal primary `plan.json` artifact. Terminal/checkpoint payloads carry `artifacts[]` plus `primary_artifact`. Large reports should be read from those files instead of being pushed as chat text.
-
-Terminal event summaries are cleaned before display: `Task Lesson` and `System Lesson` sections are extracted into structured fields and removed from the final completion text. When lessons are present, Pal opens a separate `minion_lesson_approval` interaction with `Accept`, `Reject`, and `Edit` buttons. Accept stores task lessons as tasking continuity, stores system lessons as accepted candidates, and attempts a durable memory commit through `memory_write` when it is available. Reject discards them. Edit pauses absorption and asks for revised lesson text. Pure terminal `memory_candidates` use Pal's generic `memory_candidate_approval` interaction and are committed only after `memory_candidate_decision` approval.
-
-Core owns one shared compaction engine for Pal and Minion. It captures an immutable snapshot, trims only complete atomic history units, performs local preflight without spending a model attempt, allows at most three independent compaction model attempts through standard `agenerate`, validates the host schema, and commits only a validated or explicitly degraded checkpoint. Memory owns only the atomic L1 replacement, dependent L2 cleanup, and rollback boundary. Automatic compact remains context-budget driven; clocks annotate work order and hot-tail position but do not trigger fixed-round compaction.
-
-Pal keeps `pal.compaction.pal.v2` and its memory-candidate approval flow. Minion uses `pal.compaction.minion.v3` and records only the precise work cursor: `technical_route`, `active_work`, `active_errors`, `active_issues`, and `next_actions`. It does not copy private chain-of-thought or generate `memory_candidates`. Architect/Architecture Reviewer continue to receive complete `task.yaml` authority, while Coder/Module Verifier receive their bound work view, module contracts, and checklist mechanically on every prompt; compaction never rewrites these first-hand role inputs. Closed tool protocol enters L1 incrementally, frozen L1 is the sole compaction source, and checkpoint schema v5 persists the complete L1 working set plus the independent L2 hot cache and successful consumable LLM-round clock.
-
-Coder minion task execution is Git-backed by design. A task owns or resolves a project repo/workspace named by `project_name`; each work order runs on its own branch, and each completed milestone should correspond to a commit on that branch. The final inspectable project lives at `data/minion/repos/{parent_work_order_id}/{project_name}` while module execution worktrees live under `.minion/worktrees/{module_name}` and artifacts live under `.minion/artifacts/{work_order_id}`. A completed checkpoint should carry the milestone index, commit SHA, and artifact references. User acceptance/finalization can later squash milestone commits and merge/apply them to the target branch.
-
-Module execution is DAG-shaped with a default global LLM-node concurrency limit of `max_parallel_llm_nodes=5` (`max_parallel_modules` is a compatibility alias). Accepted plans compile into repository-persisted `plan_execution.dag_state` guarded by `dag_revision`; storage uses canonical `node_*` fields and runtime views may render those nodes as modules for software-engineering profiles. `dag_advancer` owns the typed graph/state transition logic while the manager owns resource policy, IPC, and notification. One execution node holds one slot across mutually exclusive phases: architect plus plan review share the plan-production slot, and a module coder plus its gate reviewer share the module slot. `max_parallel_llm_nodes=1` gives automatic serial progression without manual DAG tick prompts; larger values can run independent ready nodes concurrently when the scheduler and resources allow it. On startup, the manager releases stale `running_module` children with no active runner back to ready state and auto-schedules ready parents after the manager socket is listening; set `PAL_MINION_AUTO_RESUME_READY_MODULES=0` to require explicit `tick_parent_dag` after startup recovery. Local Git baselines use worktrees where possible to avoid cloning the same repo repeatedly. Running module worktrees contain full checkouts of their baseline; after parent completion, Pal publishes the final/join branch to the project-root work-order branch, removes module and temporary integration worktrees under `.minion`, and keeps `.minion/artifacts` plus the common Git store for audit/recovery.
-
-Minion profiles and families are owned by the attached sidecar. Builtins are declarative package TOML templates; explicit user overrides are sidecar-managed JSON under `runtime_root/data/minion/catalog/` and are modified only through catalog IPC capabilities. The Wizard and Pal process do not seed or refresh profile files. Sidecar startup archives legacy `plugins/minion/profiles` and `plugins/minion/families` copies so stale managed seeds cannot override package builtins. A workflow pins the full resolved profile definitions and family manifest in `FamilyBindingArtifact v2`; later catalog changes affect only newly created workflows. Builtin profiles use either `profile_only` or `inherit_filtered` capability policy depending on their role; inherit-filtered profiles start from Pal's current capability registry, add profile defaults/provider hooks, then apply the minion deny policy. `core_minion_read` includes scoped discovery/read/call and read-only `memory_recall`; `web_research` ensures `web_search` and `web_read` are available when the slim runner runtime supports them.
-
-Runner capability exposure has a default deny policy. The runner can use task tools, report through events, and request approval, but it does not see `intro_*`, `op_minion_*`, memory-write, behavior/skill mutation, channel/plugin management, or lifecycle attach/detach/rescan style operations. This keeps recursive minion spawning and Pal state mutation out of the runner context.
-
-Minion runners may be launched through the sandbox layer. Linux uses `bubblewrap` when available; unsupported hosts record an unavailable sandbox marker. The sandbox keeps network open, scrubs secret-like environment variables, routes LLM calls through the host broker, assigns run-local HOME/TMP/cache paths under `/tmp/pal/minion/sandbox/runs/{run_id}` by default, and falls back to `data/minion/sandbox/runs/{run_id}` when the temp scratch root is unavailable or below its free-space threshold. It mounts only the required runtime/workspace paths and replaces high-risk host commands with resident-tool guidance wrappers. Sandbox isolation complements profile/capability policy; it does not replace scoped tool exposure.
-
-The internal allowed pool can be broad, but the LLM-facing tool surface stays small. Normal minion runs expose scoped discovery/read/call plus direct work tools when allowed: `read_file`, `edit_file`, `write_file`, `delete_path`, `git`, `search`, `run_shell` (including bounded `tree`/`find` listings), `artifact_write`/`artifact_edit`, semantic builder tools, web tools, memory recall, and LSP/code-intelligence tools. Immutable references are mounted read-only at stable `/pal/references/<name>` paths inside the Minion sandbox. Discovery and read are backed by a scoped runtime view that returns only allowed and non-denied capabilities.
-
-The runner prompt requires `memory_recall` after a failed tool/capability call when recall is allowed, before retrying, debugging further, or reporting the milestone blocked.
+Minion capabilities use the current V2 Task/workflow surface and scoped role
+tools. Legacy work-order/plan-builder/artifact-report APIs are historical and
+must not be inferred from this document. Sandbox policy and capability policy
+remain independent: the process shell is constrained by bwrap where available,
+while the role's published capability registry enforces what the LLM can call.
 
 ## Capability Boundary
 

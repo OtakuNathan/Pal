@@ -28,9 +28,10 @@ if TYPE_CHECKING:
     from pal.core.main_context import MainContext
 
 
-# Singleton file-state cache shared by FileEditTool and future file-read tools.
+# Isolated cache factory for direct business-tool tests and adapters. Runtime
+# capabilities use ExecutionRuntime-owned logical state instead.
 def get_file_state_cache() -> FileStateCache:
-    """Return the module-level singleton :class:`FileStateCache`."""
+    """Return a fresh :class:`FileStateCache`."""
     return _get_file_state_cache()
 
 
@@ -96,6 +97,8 @@ def inspect_execution(provider: ExecutionIntrospectionProvider) -> ExecutionSnap
 
 
 def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = None) -> ModuleHandle:
+    from pal.execution.runtime_state import ExecutionRuntimeStatePort
+
     resolved_runtime = runtime or context.execution_runtime
     provider = ExecutionIntrospectionProvider(runtime=resolved_runtime)
     handle = ModuleHandle(
@@ -105,6 +108,7 @@ def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = 
         introspection_provider=provider,
         ports={"execution": resolved_runtime},
         shutdown_sync=resolved_runtime.shutdown,
+        runtime_state_port=ExecutionRuntimeStatePort(resolved_runtime),
     )
     context.register_module(handle)
     return handle

@@ -36,6 +36,7 @@ from pal.llm.ir import (
     MessageState,
     TextPartIR,
     ThinkingLevel,
+    WireShape,
 )
 from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.models import LLMEndpointModel
@@ -49,6 +50,10 @@ from pal.llm.output_recovery import (
     with_recovery_stage,
 )
 from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
+from pal.llm.response_hooks import (
+    ProviderResponseHookError,
+    ProviderResponseHookRegistry,
+)
 from pal.llm.usage import LLMUsageLedger
 from pal.shared import LLMPreflightStatus
 from pal.shared.json_values import thaw_json
@@ -183,11 +188,13 @@ def build_default_endpoint_invoker(
     *,
     credentials: LLMCredentialResolver | None = None,
     runtime_root: str | Path | None = None,
+    response_hooks: ProviderResponseHookRegistry | None = None,
 ) -> ShapeEndpointInvoker:
     _ = runtime_root
     resolver = credentials or LLMCredentialResolver()
     return ShapeEndpointInvoker(
         credential_resolver=resolver.resolve_api_key,
+        response_hooks=response_hooks or ProviderResponseHookRegistry.builtin(),
     )
 
 
@@ -207,12 +214,21 @@ class LLMRuntime(LLMRuntimePort):
     event_sink: Callable[[dict[str, Any]], None] | None = None
     usage_ledger: LLMUsageLedger = field(default_factory=LLMUsageLedger, repr=False)
     model_hooks: ModelHookRegistry = field(init=False)
+    provider_response_hooks: ProviderResponseHookRegistry = field(init=False)
 
     def __post_init__(self) -> None:
         runtime_root = Path(getattr(self.config, "runtime_root", None) or ".")
         self.model_hooks = ModelHookRegistry.load(runtime_root)
+        self.provider_response_hooks = ProviderResponseHookRegistry.builtin()
         if self.endpoint_invoker is None:
-            self.endpoint_invoker = build_default_endpoint_invoker(runtime_root=runtime_root)
+            self.endpoint_invoker = build_default_endpoint_invoker(
+                runtime_root=runtime_root,
+                response_hooks=self.provider_response_hooks,
+            )
+        elif isinstance(self.endpoint_invoker, ShapeEndpointInvoker):
+            # Initial decoding and post-continuation normalization are two
+            # passes through one immutable provider-response pipeline.
+            self.provider_response_hooks = self.endpoint_invoker.response_hooks
         self.endpoint_retry_attempts = max(
             1,
             int(getattr(self.config, "llm_endpoint_retry_attempts", self.endpoint_retry_attempts) or 1),
@@ -444,7 +460,17 @@ class LLMRuntime(LLMRuntimePort):
                         stream=False,
                         timeout_seconds=self._timeout_seconds(effective),
                     )
-                    response = self._recover_length(endpoint, effective, response)
+                    if response.finish_reason == LLMFinishReason.LENGTH:
+                        response = self._recover_length(endpoint, effective, response)
+                        # Recovery merges multiple already-decoded pieces, so
+                        # the merged response crosses the same provider
+                        # decorator once more. Non-recovered responses were
+                        # normalized by the endpoint iterator already.
+                        response = self._normalize_completed_response(
+                            endpoint,
+                            effective,
+                            response,
+                        )
                     if response.finish_reason == LLMFinishReason.ERROR:
                         raise LLMEndpointResponseError(
                             f"endpoint {endpoint.endpoint_id} returned finish_reason=error"
@@ -528,6 +554,11 @@ class LLMRuntime(LLMRuntimePort):
                             effective,
                             completed,
                             allow_discarded_retry=False,
+                        )
+                        recovered = self._normalize_completed_response(
+                            endpoint,
+                            effective,
+                            recovered,
                         )
                         if recovered.finish_reason == LLMFinishReason.ERROR:
                             raise LLMEndpointResponseError(
@@ -848,6 +879,33 @@ class LLMRuntime(LLMRuntimePort):
         )
         return exhausted
 
+    def _normalize_completed_response(
+        self,
+        endpoint: LLMEndpointModel,
+        request: LLMRequestIR,
+        response: LLMResponseIR,
+    ) -> LLMResponseIR:
+        updates = tuple(
+            self.provider_response_hooks.normalize(
+                endpoint_id=str(endpoint.endpoint_id),
+                provider_id=str(endpoint.provider),
+                model_id=str(endpoint.model_id),
+                wire_shape=WireShape(str(endpoint.wire_shape)),
+                request=request,
+                updates=(
+                    LLMResponseUpdate(
+                        response=response,
+                        delta_kind=LLMResponseDeltaKind.STATE,
+                    ),
+                ),
+            )
+        )
+        if not updates:
+            raise ProviderResponseHookError(
+                f"provider response hook produced no output for {endpoint.endpoint_id}"
+            )
+        return updates[-1].response
+
     def _success(self, endpoint: LLMEndpointModel, response: LLMResponseIR) -> LLMGenerationResult:
         self.last_endpoint_id = endpoint.endpoint_id
         self.last_model_id = endpoint.model_id
@@ -932,6 +990,8 @@ def _classify_retry_error(exc: Exception) -> str:
     if isinstance(exc, LLMRequestPreparationError):
         return "request"
     if isinstance(exc, LLMEndpointResponseError):
+        return "response_error"
+    if isinstance(exc, ProviderResponseHookError):
         return "response_error"
     message = str(exc).lower()
     error_type = type(exc).__name__.lower()

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+from collections import deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -38,6 +41,7 @@ class TtyRepl:
         self._interaction_selector = interaction_selector
         self._renderer = renderer
         self._console = console
+        self._pending_interactions: deque[TtyInteraction] = deque()
 
     async def run(
         self,
@@ -74,6 +78,10 @@ class TtyRepl:
         )
         await renderer.connection_ready(self._socket_path)
         await renderer.help_hint()
+        notification_task = asyncio.create_task(
+            self._render_notifications(session, renderer),
+            name="pal-tty-task-notifications",
+        )
 
         async def read_input(prompt: str) -> str:
             if input_fn is not None:
@@ -95,6 +103,17 @@ class TtyRepl:
                     continue
                 if text in {"/exit", "/quit"}:
                     break
+                pending_result = await self._handle_pending_interaction(
+                    session,
+                    renderer,
+                    text,
+                    read_input=read_input,
+                    interaction_selector=interaction_selector,
+                )
+                if pending_result is not None:
+                    if pending_result:
+                        break
+                    continue
                 if await self._handle_turn(
                     session,
                     renderer,
@@ -104,7 +123,102 @@ class TtyRepl:
                 ):
                     break
         finally:
+            notification_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await notification_task
             await session.aclose()
+
+    async def _render_notifications(
+        self,
+        session: SocketSession,
+        renderer: TtyRenderer,
+    ) -> None:
+        text_by_request: dict[str, list[str]] = {}
+        try:
+            async for payload in session.stream_notifications():
+                request_id = str(payload.get("request_id") or "")
+                payload_type = str(payload.get("type") or "")
+                interaction = TtyInteraction.from_payload(payload)
+                if interaction is not None:
+                    if interaction.state in {"interactive_open", "interactive_update"}:
+                        self._remember_pending_interaction(interaction)
+                    elif interaction.state in {"interactive_resolve", "interactive_expire"}:
+                        self._forget_pending_interaction(interaction.interaction_id)
+                    await renderer.interaction(interaction)
+                    continue
+                if payload_type == "text_delta":
+                    text_by_request.setdefault(request_id, []).append(
+                        str(payload.get("text") or "")
+                    )
+                    continue
+                if payload_type in {"done", "llm_done"}:
+                    text = "".join(text_by_request.pop(request_id, []))
+                    if text.strip():
+                        await renderer.notification(text)
+                    continue
+                if payload_type in {"error", "llm_error"}:
+                    await renderer.error(
+                        "protocol",
+                        str(payload.get("error_text") or "Task notification failed."),
+                    )
+        except (SocketDisconnected, SocketProtocolError):
+            return
+
+    def _remember_pending_interaction(self, interaction: TtyInteraction) -> None:
+        self._forget_pending_interaction(interaction.interaction_id)
+        self._pending_interactions.append(interaction)
+
+    def _forget_pending_interaction(self, interaction_id: str) -> None:
+        normalized = str(interaction_id or "").strip()
+        if not normalized:
+            return
+        self._pending_interactions = deque(
+            item
+            for item in self._pending_interactions
+            if item.interaction_id != normalized
+        )
+
+    async def _handle_pending_interaction(
+        self,
+        session: SocketSession,
+        renderer: TtyRenderer,
+        text: str,
+        *,
+        read_input: Callable[[str], Awaitable[str]],
+        interaction_selector: (
+            Callable[[TtyInteraction], Awaitable[str | None]] | None
+        ),
+    ) -> bool | None:
+        """Apply a simple FIFO background interaction without a second prompt.
+
+        A numeric choice or ``/cancel`` is consumed by the oldest pending
+        interaction.  Any other text remains an ordinary user message.
+        """
+        if not self._pending_interactions:
+            return None
+        interaction = self._pending_interactions[0]
+        if text.lower() == "/cancel":
+            self._pending_interactions.popleft()
+            return False
+        try:
+            selected_index = int(text)
+        except ValueError:
+            return None
+        if selected_index < 1 or selected_index > len(interaction.options):
+            return None
+        self._pending_interactions.popleft()
+        request_id = await session.send_interaction_result(
+            interaction_id=interaction.interaction_id,
+            button_token=interaction.options[selected_index - 1].token,
+        )
+        return await self._handle_response_loop(
+            session,
+            renderer,
+            request_id,
+            render_as_markdown=True,
+            read_input=read_input,
+            interaction_selector=interaction_selector,
+        )
 
     async def _handle_turn(
         self,
@@ -119,7 +233,34 @@ class TtyRepl:
     ) -> bool:
         try:
             request_id = await session.send(text)
-            render_as_markdown = not text.startswith("/")
+            return await self._handle_response_loop(
+                session,
+                renderer,
+                request_id,
+                render_as_markdown=not text.startswith("/"),
+                read_input=read_input,
+                interaction_selector=interaction_selector,
+            )
+        except (SocketDisconnected, SocketProtocolError) as exc:
+            await renderer.error("connection", str(exc))
+            return True
+        except KeyboardInterrupt:
+            await renderer.error("connection", "interrupted")
+            return False
+
+    async def _handle_response_loop(
+        self,
+        session: SocketSession,
+        renderer: TtyRenderer,
+        request_id: str,
+        *,
+        render_as_markdown: bool,
+        read_input: Callable[[str], Awaitable[str]],
+        interaction_selector: (
+            Callable[[TtyInteraction], Awaitable[str | None]] | None
+        ),
+    ) -> bool:
+        try:
             while True:
                 body = renderer.new_respondent(
                     render_as_markdown=render_as_markdown,

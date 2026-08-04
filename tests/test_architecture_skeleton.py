@@ -45,13 +45,14 @@ from pal.execution.tool_facade import (
     Idempotency,
     InvocationMode,
     PagingMode,
-    ProviderPayloadOutput,
+    StructuredToolOutput,
     RetryPolicy,
     StrictToolModel,
     ToolExecutionSemantics,
     ToolGuidance,
     ToolHandlerResult,
 )
+from pal.execution.tool_semantics import INDIRECT_NONE
 from pal.core.pal_compaction import PalCompactionPolicy
 from tests.capability_fixture import mount_test_capability
 from pal.failure import (
@@ -249,7 +250,7 @@ def register_test_tool(runtime, tool) -> str:
             alias=alias,
             canonical_path=canonical_path,
             InputModel=FixtureToolInput,
-            OutputModel=ProviderPayloadOutput,
+            OutputModel=StructuredToolOutput,
             guidance=ToolGuidance(
                 purpose=str(tool.description),
                 use_when="running this focused runtime test",
@@ -440,6 +441,40 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 ROOT / relative_path,
                 forbidden_fragments=("pal.execution.runtime",),
             )
+
+    def test_operation_capabilities_declare_execution_semantics(self) -> None:
+        missing: list[str] = []
+        for path in (ROOT / "src" / "pal").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for decorator in node.decorator_list:
+                    if not isinstance(decorator, ast.Call):
+                        continue
+                    name = (
+                        decorator.func.id
+                        if isinstance(decorator.func, ast.Name)
+                        else decorator.func.attr
+                        if isinstance(decorator.func, ast.Attribute)
+                        else ""
+                    )
+                    if name != "capability_action":
+                        continue
+                    keywords = {
+                        keyword.arg: keyword.value
+                        for keyword in decorator.keywords
+                        if keyword.arg
+                    }
+                    namespace = keywords.get("namespace")
+                    if not (
+                        isinstance(namespace, ast.Name)
+                        and namespace.id == "OPERATION_NAMESPACE"
+                    ):
+                        continue
+                    if "execution" not in keywords:
+                        missing.append(f"{path.relative_to(ROOT)}:{node.lineno}:{node.name}")
+        self.assertEqual(missing, [])
 
     def test_minion_does_not_depend_on_user_facing_channel_modules(self) -> None:
         for relative_path in (
@@ -709,6 +744,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 family="operation",
                 action_name="ping",
                 aliases=("demo_ping",),
+                execution=INDIRECT_NONE,
             )
             def ping(self, call: CapabilityCall) -> CapabilityResult:
                 _ = call
@@ -849,12 +885,18 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             register_execution_with_core(core.context)
             core.publish_module_capabilities("execution")
 
-            read = core.context.execution_runtime.execute(CapabilityCall(name="op_file_read", args={"file_path": str(path)}))
-            state = core.context.execution_runtime.execute(CapabilityCall(name="op_file_state", args={"file_path": str(path)}))
+            direct_meta = {"direct_context_id": "test-file-lifetime"}
+            read = core.context.execution_runtime.execute(
+                CapabilityCall(name="op_file_read", args={"file_path": str(path)}, meta=direct_meta)
+            )
+            state = core.context.execution_runtime.execute(
+                CapabilityCall(name="op_file_state", args={"file_path": str(path)}, meta=direct_meta)
+            )
             edit = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="op_file_edit",
                     args={"file_path": str(path), "old_string": "hello", "new_string": "goodbye"},
+                    meta=direct_meta,
                 )
             )
 
@@ -866,18 +908,24 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             created_path = Path(temp_dir) / "created.txt"
             write = core.context.execution_runtime.execute(
-                CapabilityCall(name="op_file_write", args={"file_path": str(created_path), "content": "draft\n"})
+                CapabilityCall(
+                    name="op_file_write",
+                    args={"file_path": str(created_path), "content": "draft\n"},
+                    meta=direct_meta,
+                )
             )
             update = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="op_file_write",
                     args={"file_path": str(created_path), "content": "draft\ntail\n"},
+                    meta=direct_meta,
                 )
             )
             edit_created = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="op_file_edit",
                     args={"file_path": str(created_path), "old_string": "draft", "new_string": "final"},
+                    meta=direct_meta,
                 )
             )
 
@@ -885,6 +933,24 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(update.status, "ok")
             self.assertEqual(edit_created.status, "ok")
             self.assertEqual(created_path.read_text(encoding="utf-8"), "final\ntail\n")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_file_capabilities_reject_missing_logical_lifetime(self) -> None:
+        temp_dir = tempfile.mkdtemp()
+        try:
+            path = Path(temp_dir) / "sample.txt"
+            path.write_text("hello\n", encoding="utf-8")
+            core = PalCore()
+            register_execution_with_core(core.context)
+            core.publish_module_capabilities("execution")
+
+            result = core.context.execution_runtime.execute(
+                CapabilityCall(name="op_file_read", args={"file_path": str(path)})
+            )
+
+            self.assertEqual(result.status, "invalid")
+            self.assertEqual(result.structured["error_code"], "missing_execution_lifetime")
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -3155,7 +3221,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("[preview only:", tool_messages[0].parts[0].content)
         self.assertNotIn("[preview only:", tool_messages[1].parts[0].content)
 
-    def test_execution_runtime_pages_large_tool_results_to_ephemeral_backing_file(self) -> None:
+    def test_execution_runtime_pages_large_tool_results_in_memory(self) -> None:
         core = PalCore()
         with tempfile.TemporaryDirectory() as tmpdir:
             core.context.execution_runtime.runtime_root = Path(tmpdir)
@@ -3807,7 +3873,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
         self.assertTrue(result.ok)
-        self.assertEqual(result.structured["payload"]["hit_count"], 10)
+        self.assertEqual(result.structured["hit_count"], 10)
         self.assertLess(len(str(result.llm_text)), 12_000)
 
     def test_minimal_operating_rules_prompt_omits_route_specific_tools(self) -> None:

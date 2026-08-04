@@ -213,25 +213,35 @@ class MinionV2OutboxProcessor:
             error = f"{exc.__class__.__name__}: {exc}"
             if isinstance(exc, PermanentEffectError):
                 triage_action = self._failed_effect_triage_action(effect, exc)
-                self.repository.fail_outbox_effect(
-                    effect_id,
-                    worker_id=self.worker_id,
-                    error=error,
-                    triage_action=triage_action,
-                )
-                self._sync_cycle_triage(triage_action)
+                with self.repository.transaction() as connection:
+                    self.repository.fail_outbox_effect(
+                        effect_id,
+                        worker_id=self.worker_id,
+                        error=error,
+                        triage_action=triage_action,
+                        _connection=connection,
+                    )
+                    self._sync_cycle_triage(
+                        triage_action,
+                        _connection=connection,
+                    )
             else:
                 triage_action = None
                 if int(effect.get("attempt_count") or 0) >= int(effect.get("max_attempts") or 1):
                     triage_action = self._failed_effect_triage_action(effect, exc)
-                self.repository.retry_outbox_effect(
-                    effect_id,
-                    worker_id=self.worker_id,
-                    error=error,
-                    retry_after_seconds=5,
-                    triage_action=triage_action,
-                )
-                self._sync_cycle_triage(triage_action)
+                with self.repository.transaction() as connection:
+                    self.repository.retry_outbox_effect(
+                        effect_id,
+                        worker_id=self.worker_id,
+                        error=error,
+                        retry_after_seconds=5,
+                        triage_action=triage_action,
+                        _connection=connection,
+                    )
+                    self._sync_cycle_triage(
+                        triage_action,
+                        _connection=connection,
+                    )
             self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
             self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
             return "failed"
@@ -245,18 +255,24 @@ class MinionV2OutboxProcessor:
     def _sync_cycle_triage(
         self,
         action: ActionEnvelope | None,
+        *,
+        _connection=None,
     ) -> None:
         if action is None:
             return
         coordinator = WorkflowCoordinator(self.repository)
         if action.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
-            coordinator.require_plan_triage(workflow_id=action.workflow_id)
+            coordinator.require_plan_triage(
+                workflow_id=action.workflow_id,
+                _connection=_connection,
+            )
             return
         if action.aggregate_type != AggregateType.DAG_NODE_RUN:
             return
         node = self.repository.read_snapshot(
             AggregateType.DAG_NODE_RUN,
             action.aggregate_id,
+            _connection=_connection,
         )
         if node is None:
             return
@@ -267,6 +283,7 @@ class MinionV2OutboxProcessor:
                 or node.payload.get("unit_id")
                 or ""
             ),
+            _connection=_connection,
         )
 
     async def _heartbeat(self, effect_id: str) -> None:
@@ -802,7 +819,16 @@ class MinionV2OutboxProcessor:
                 aggregate_type=snapshot.aggregate_type,
                 aggregate_id=snapshot.aggregate_id,
                 actor="minion-v2-outbox",
-                expected_version=snapshot.version,
+                # Effects are replayed from the same causative domain event.
+                # Pin the request to that event's resulting version so a crash
+                # retry hashes as the same business action after the first
+                # attempt has already advanced the snapshot.
+                expected_version=(
+                    self.repository.read_domain_event_aggregate_version(
+                        str(effect.get("event_id") or "")
+                    )
+                    or snapshot.version
+                ),
                 idempotency_key=f"effect:{effect['effect_key']}",
                 causation_id=str(effect["event_id"]),
                 payload=dict(payload.get("action_payload") or {}),
@@ -835,114 +861,153 @@ class MinionV2OutboxProcessor:
         request = workflow_request_from_snapshot(self.service, workflow)
         operation = str(request.get("operation") or "new_requirement")
         if operation == "new_requirement":
-            WorkflowCoordinator(self.repository).ensure_plan_cycle(
-                workflow_id=workflow.workflow_id,
-            )
             revision_id = _derived_id("arch", str(effect["effect_key"]))
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="CREATE_ARCHITECTURE_REVISION",
+            with self.repository.transaction() as connection:
+                WorkflowCoordinator(self.repository).ensure_plan_cycle(
                     workflow_id=workflow.workflow_id,
-                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                    aggregate_id=revision_id,
-                    actor="minion-v2-router",
-                    expected_version=0,
-                    idempotency_key=f"effect:{effect['effect_key']}:revision",
-                    payload={
-                        "request_ref": dict(workflow.payload["request_ref"]),
-                        "requirements_ref": dict(request["requirements_ref"]),
-                        "architecture_cycle_id": revision_id,
-                        "research_mode": str(request.get("research_mode") or "local_only"),
-                        "revision_number": 1,
-                    },
+                    _connection=connection,
                 )
-            )
-            self._link_workflow(workflow.workflow_id, "LINK_ARCHITECTURE_REVISION", {"architecture_revision_id": revision_id}, str(effect["effect_key"]))
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="CREATE_ARCHITECTURE_REVISION",
+                        workflow_id=workflow.workflow_id,
+                        aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                        aggregate_id=revision_id,
+                        actor="minion-v2-router",
+                        expected_version=0,
+                        idempotency_key=f"effect:{effect['effect_key']}:revision",
+                        payload={
+                            "request_ref": dict(workflow.payload["request_ref"]),
+                            "requirements_ref": dict(request["requirements_ref"]),
+                            "architecture_cycle_id": revision_id,
+                            "research_mode": str(request.get("research_mode") or "local_only"),
+                            "revision_number": 1,
+                        },
+                    ),
+                    _connection=connection,
+                )
+                self._link_workflow(
+                    workflow.workflow_id,
+                    "LINK_ARCHITECTURE_REVISION",
+                    {"architecture_revision_id": revision_id},
+                    str(effect["effect_key"]),
+                    _connection=connection,
+                )
             return {}
         artifact_ref = dict(request.get("input_artifact_ref") or {})
         if operation == "execute_trusted":
             return self._compile_execution(workflow_id=workflow.workflow_id, manifest_ref=artifact_ref, causation_key=str(effect["effect_key"]))
         if operation == "review_then_execute":
             revision_id = _derived_id("arch", str(effect["effect_key"]))
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="IMPORT_ARCHITECTURE_REVISION",
-                    workflow_id=workflow.workflow_id,
-                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                    aggregate_id=revision_id,
-                    actor="minion-v2-router",
-                    expected_version=0,
-                    idempotency_key=f"effect:{effect['effect_key']}:import",
-                    payload={
-                        "architecture_manifest_ref": artifact_ref,
-                        "requirements_ref": dict(request.get("requirements_ref") or {}),
-                        "architecture_cycle_id": revision_id,
-                        "revision_number": 1,
-                    },
+            with self.repository.transaction() as connection:
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="IMPORT_ARCHITECTURE_REVISION",
+                        workflow_id=workflow.workflow_id,
+                        aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                        aggregate_id=revision_id,
+                        actor="minion-v2-router",
+                        expected_version=0,
+                        idempotency_key=f"effect:{effect['effect_key']}:import",
+                        payload={
+                            "architecture_manifest_ref": artifact_ref,
+                            "requirements_ref": dict(request.get("requirements_ref") or {}),
+                            "architecture_cycle_id": revision_id,
+                            "revision_number": 1,
+                        },
+                    ),
+                    _connection=connection,
                 )
-            )
-            self._link_workflow(workflow.workflow_id, "LINK_ARCHITECTURE_REVISION", {"architecture_revision_id": revision_id}, str(effect["effect_key"]))
+                self._link_workflow(
+                    workflow.workflow_id,
+                    "LINK_ARCHITECTURE_REVISION",
+                    {"architecture_revision_id": revision_id},
+                    str(effect["effect_key"]),
+                    _connection=connection,
+                )
             return {}
         review_id = _derived_id("review", str(effect["effect_key"]))
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_STANDALONE_REVIEW",
-                workflow_id=workflow.workflow_id,
-                aggregate_type=AggregateType.STANDALONE_REVIEW,
-                aggregate_id=review_id,
-                actor="minion-v2-router",
-                expected_version=0,
-                idempotency_key=f"effect:{effect['effect_key']}:review",
-                payload={"review_request_ref": artifact_ref, "review_mode": operation},
+        with self.repository.transaction() as connection:
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="CREATE_STANDALONE_REVIEW",
+                    workflow_id=workflow.workflow_id,
+                    aggregate_type=AggregateType.STANDALONE_REVIEW,
+                    aggregate_id=review_id,
+                    actor="minion-v2-router",
+                    expected_version=0,
+                    idempotency_key=f"effect:{effect['effect_key']}:review",
+                    payload={"review_request_ref": artifact_ref, "review_mode": operation},
+                ),
+                _connection=connection,
             )
-        )
-        review = self.repository.read_snapshot(AggregateType.STANDALONE_REVIEW, review_id)
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="QUEUE_REVIEW",
-                workflow_id=workflow.workflow_id,
-                aggregate_type=AggregateType.STANDALONE_REVIEW,
-                aggregate_id=review_id,
-                actor="minion-v2-router",
-                expected_version=review.version,
-                idempotency_key=f"effect:{effect['effect_key']}:queue-review",
+            review = self.repository.read_snapshot(
+                AggregateType.STANDALONE_REVIEW,
+                review_id,
+                _connection=connection,
             )
-        )
-        self._link_workflow(workflow.workflow_id, "LINK_STANDALONE_REVIEW", {"standalone_review_id": review_id}, str(effect["effect_key"]))
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="QUEUE_REVIEW",
+                    workflow_id=workflow.workflow_id,
+                    aggregate_type=AggregateType.STANDALONE_REVIEW,
+                    aggregate_id=review_id,
+                    actor="minion-v2-router",
+                    expected_version=review.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:queue-review",
+                ),
+                _connection=connection,
+            )
+            self._link_workflow(
+                workflow.workflow_id,
+                "LINK_STANDALONE_REVIEW",
+                {"standalone_review_id": review_id},
+                str(effect["effect_key"]),
+                _connection=connection,
+            )
         return {}
 
     def _create_revision(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         previous = self._effect_snapshot(effect)
-        WorkflowCoordinator(self.repository).begin_plan_revision(
-            workflow_id=previous.workflow_id,
-        )
         revision_id = _derived_id("arch", str(effect["effect_key"]))
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_ARCHITECTURE_REVISION",
+        with self.repository.transaction() as connection:
+            WorkflowCoordinator(self.repository).begin_plan_revision(
                 workflow_id=previous.workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                aggregate_id=revision_id,
-                actor="minion-v2-router",
-                expected_version=0,
-                idempotency_key=f"effect:{effect['effect_key']}:revision",
-                payload={
-                    "request_ref": previous.payload.get("request_ref"),
-                    "requirements_ref": previous.payload.get("requirements_ref"),
-                    "parent_revision_id": previous.aggregate_id,
-                    "architecture_cycle_id": str(
-                        previous.payload.get("architecture_cycle_id")
-                        or previous.payload.get("root_architecture_revision_id")
-                        or previous.aggregate_id
-                    ),
-                    "revision_number": int(previous.payload.get("revision_number") or 1) + 1,
-                    "edit_instruction_ref": previous.payload.get("edit_instruction_ref"),
-                    "base_architecture_manifest_ref": previous.payload.get("architecture_manifest_ref"),
-                    "research_mode": previous.payload.get("research_mode", "local_only"),
-                },
+                _connection=connection,
             )
-        )
-        self._link_workflow(previous.workflow_id, "LINK_ARCHITECTURE_REVISION", {"architecture_revision_id": revision_id}, str(effect["effect_key"]))
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="CREATE_ARCHITECTURE_REVISION",
+                    workflow_id=previous.workflow_id,
+                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                    aggregate_id=revision_id,
+                    actor="minion-v2-router",
+                    expected_version=0,
+                    idempotency_key=f"effect:{effect['effect_key']}:revision",
+                    payload={
+                        "request_ref": previous.payload.get("request_ref"),
+                        "requirements_ref": previous.payload.get("requirements_ref"),
+                        "parent_revision_id": previous.aggregate_id,
+                        "architecture_cycle_id": str(
+                            previous.payload.get("architecture_cycle_id")
+                            or previous.payload.get("root_architecture_revision_id")
+                            or previous.aggregate_id
+                        ),
+                        "revision_number": int(previous.payload.get("revision_number") or 1) + 1,
+                        "edit_instruction_ref": previous.payload.get("edit_instruction_ref"),
+                        "base_architecture_manifest_ref": previous.payload.get("architecture_manifest_ref"),
+                        "research_mode": previous.payload.get("research_mode", "local_only"),
+                    },
+                ),
+                _connection=connection,
+            )
+            self._link_workflow(
+                previous.workflow_id,
+                "LINK_ARCHITECTURE_REVISION",
+                {"architecture_revision_id": revision_id},
+                str(effect["effect_key"]),
+                _connection=connection,
+            )
         return {}
 
     def _request_epoch_replan(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1125,51 +1190,60 @@ class MinionV2OutboxProcessor:
         generation = int(epoch.payload.get("replan_generation") or 0)
         revision_id = _derived_id("arch", f"replan:{epoch.aggregate_id}:{generation}")
         batch_ref = dict(epoch.payload.get("replan_finding_batch_ref") or {})
-        plan_cycle = WorkflowCoordinator(self.repository).begin_plan_revision(
-            workflow_id=epoch.workflow_id,
-        )
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="CREATE_ARCHITECTURE_REVISION",
+        with self.repository.transaction() as connection:
+            plan_cycle = WorkflowCoordinator(self.repository).begin_plan_revision(
                 workflow_id=epoch.workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                aggregate_id=revision_id,
-                actor="minion-v2-manager",
-                expected_version=0,
-                idempotency_key=f"replan-revision:{epoch.aggregate_id}:{generation}",
-                payload={
-                    "request_ref": workflow.payload.get("request_ref"),
-                    "requirements_ref": dict(epoch.payload.get("requirements_ref") or {}),
-                    "base_architecture_manifest_ref": dict(epoch.payload.get("architecture_manifest_ref") or {}),
-                    "replan_finding_batch_ref": batch_ref,
-                    "architecture_cycle_id": revision_id,
-                    "source_execution_epoch_id": epoch.aggregate_id,
-                    "replan_generation": generation,
-                    "research_mode": "local_only",
-                    "revision_number": plan_cycle.generation,
-                },
+                _connection=connection,
             )
-        )
-        latest = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
-        if latest is not None and latest.state == "REPLAN_REQUIRED":
             self.repository.dispatch(
                 ActionEnvelope(
-                    action_type="REPLAN_REVISION_LINKED",
+                    action_type="CREATE_ARCHITECTURE_REVISION",
                     workflow_id=epoch.workflow_id,
-                    aggregate_type=AggregateType.EXECUTION_EPOCH,
-                    aggregate_id=epoch.aggregate_id,
+                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                    aggregate_id=revision_id,
                     actor="minion-v2-manager",
-                    expected_version=latest.version,
-                    idempotency_key=f"replan-revision-linked:{epoch.aggregate_id}:{generation}",
-                    payload={"active_replan_revision_id": revision_id},
-                )
+                    expected_version=0,
+                    idempotency_key=f"replan-revision:{epoch.aggregate_id}:{generation}",
+                    payload={
+                        "request_ref": workflow.payload.get("request_ref"),
+                        "requirements_ref": dict(epoch.payload.get("requirements_ref") or {}),
+                        "base_architecture_manifest_ref": dict(epoch.payload.get("architecture_manifest_ref") or {}),
+                        "replan_finding_batch_ref": batch_ref,
+                        "architecture_cycle_id": revision_id,
+                        "source_execution_epoch_id": epoch.aggregate_id,
+                        "replan_generation": generation,
+                        "research_mode": "local_only",
+                        "revision_number": plan_cycle.generation,
+                    },
+                ),
+                _connection=connection,
             )
-        self._link_workflow(
-            epoch.workflow_id,
-            "LINK_ARCHITECTURE_REVISION",
-            {"architecture_revision_id": revision_id},
-            f"replan:{epoch.aggregate_id}:{generation}",
-        )
+            latest = self.repository.read_snapshot(
+                AggregateType.EXECUTION_EPOCH,
+                epoch.aggregate_id,
+                _connection=connection,
+            )
+            if latest is not None and latest.state == "REPLAN_REQUIRED":
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="REPLAN_REVISION_LINKED",
+                        workflow_id=epoch.workflow_id,
+                        aggregate_type=AggregateType.EXECUTION_EPOCH,
+                        aggregate_id=epoch.aggregate_id,
+                        actor="minion-v2-manager",
+                        expected_version=latest.version,
+                        idempotency_key=f"replan-revision-linked:{epoch.aggregate_id}:{generation}",
+                        payload={"active_replan_revision_id": revision_id},
+                    ),
+                    _connection=connection,
+                )
+            self._link_workflow(
+                epoch.workflow_id,
+                "LINK_ARCHITECTURE_REVISION",
+                {"architecture_revision_id": revision_id},
+                f"replan:{epoch.aggregate_id}:{generation}",
+                _connection=connection,
+            )
         return {"architecture_revision_id": revision_id, "result_artifact_ref": batch_ref}
 
     def _epoch_nodes(self, epoch: AggregateSnapshot) -> list[AggregateSnapshot]:
@@ -1294,8 +1368,7 @@ class MinionV2OutboxProcessor:
                     "goal": str(request.get("goal") or ""),
                     "research_mode": str(request.get("research_mode") or "none"),
                     "actor": str(request.get("actor") or "pal"),
-                    "source_channel": str(request.get("source_channel") or "local"),
-                    "control_route": dict(request.get("control_route") or {}),
+                    "source_channel": "minion-v2-manager",
                 }
             )
             replacement = self.repository.read_snapshot(
@@ -1317,7 +1390,7 @@ class MinionV2OutboxProcessor:
                         workflow_id=replacement.aggregate_id,
                         command="cancel",
                         actor="minion-v2-manager",
-                        source_channel=str(request.get("source_channel") or "local"),
+                        source_channel="minion-v2-manager",
                         reason="execution restart was cancelled before replacement activation",
                     )
             self.repository.dispatch(
@@ -1596,8 +1669,14 @@ class MinionV2OutboxProcessor:
         action_type: str,
         payload: Mapping[str, Any],
         causation_key: str,
+        *,
+        _connection=None,
     ) -> None:
-        workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        workflow = self.repository.read_snapshot(
+            AggregateType.WORKFLOW,
+            workflow_id,
+            _connection=_connection,
+        )
         if workflow is None:
             raise ValueError("workflow does not exist")
         self.repository.dispatch(
@@ -1610,7 +1689,8 @@ class MinionV2OutboxProcessor:
                 expected_version=workflow.version,
                 idempotency_key=f"link:{causation_key}:{action_type}",
                 payload=dict(payload),
-            )
+            ),
+            _connection=_connection,
         )
 
     def _effect_snapshot(self, effect: Mapping[str, Any]) -> AggregateSnapshot:

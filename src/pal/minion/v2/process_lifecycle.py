@@ -212,13 +212,20 @@ class RoleProcessShell:
     owner: WorkerProcessOwner
     semaphore: CoroutineRunSemaphore
     run_id: str
+    preacquired_permit: CoroutineRunPermit | None = None
     _permit: CoroutineRunPermit | None = field(default=None, init=False)
     _entered: bool = field(default=False, init=False)
 
     async def __aenter__(self) -> WorkerProcessOwner:
         if self._entered:
             raise RuntimeError("role process shell cannot be entered twice")
-        self._permit = await self.semaphore.acquire(self.run_id)
+        permit = self.preacquired_permit
+        if permit is not None:
+            if permit.released:
+                raise RuntimeError("preacquired coroutine run permit is already released")
+            self._permit = permit
+        else:
+            self._permit = await self.semaphore.acquire(self.run_id)
         try:
             result = await self.owner.__aenter__()
         except BaseException:

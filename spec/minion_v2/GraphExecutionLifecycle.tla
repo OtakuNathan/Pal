@@ -16,7 +16,7 @@ vars == <<graphState, nodeState, productReady, publishedSink, repairBarrier, rep
 
 Init ==
     /\ graphState = "Running"
-    /\ nodeState = [n \in Nodes |-> IF n = Sink THEN "Blocked" ELSE "ProducerReady"]
+    /\ nodeState = [n \in Nodes |-> "ProducerReady"]
     /\ productReady = [n \in Nodes |-> FALSE]
     /\ publishedSink = FALSE
     /\ repairBarrier = [n \in Nodes |-> FALSE]
@@ -42,6 +42,9 @@ StartChecker(n) ==
     /\ n \in Nodes
     /\ nodeState[n] = "CheckerReady"
     /\ productReady[n]
+    /\ IF n = Sink
+          THEN \A m \in NonSink : nodeState[m] = "Accepted"
+          ELSE TRUE
     /\ nodeState' = [nodeState EXCEPT ![n] = "Checking"]
     /\ UNCHANGED <<graphState, productReady, publishedSink, repairBarrier, repairs>>
 
@@ -55,14 +58,6 @@ AcceptNode(n) ==
     /\ nodeState' = [nodeState EXCEPT ![n] = "Accepted"]
     /\ publishedSink' = IF n = Sink THEN TRUE ELSE publishedSink
     /\ UNCHANGED <<graphState, productReady, repairBarrier, repairs>>
-
-ReadySink ==
-    /\ graphState = "Running"
-    /\ nodeState[Sink] \in {"Blocked", "Stale"}
-    /\ \A n \in NonSink : nodeState[n] = "Accepted"
-    /\ ~repairBarrier[Sink]
-    /\ nodeState' = [nodeState EXCEPT ![Sink] = "ProducerReady"]
-    /\ UNCHANGED <<graphState, productReady, publishedSink, repairBarrier, repairs>>
 
 DependencyFinding ==
     /\ graphState = "Running"
@@ -81,7 +76,8 @@ ReleaseRepairBarriers ==
     /\ nodeState[A] = "Accepted"
     /\ repairBarrier[B]
     /\ repairBarrier' = [repairBarrier EXCEPT ![B] = FALSE, ![Sink] = FALSE]
-    /\ nodeState' = [nodeState EXCEPT ![B] = "ProducerReady"]
+    /\ nodeState' = [nodeState EXCEPT
+        ![B] = "ProducerReady", ![Sink] = "ProducerReady"]
     /\ UNCHANGED <<graphState, productReady, publishedSink, repairs>>
 
 ArchitectureFinding(n) ==
@@ -107,7 +103,6 @@ Next ==
     \/ \E n \in Nodes : SubmitProduct(n)
     \/ \E n \in Nodes : StartChecker(n)
     \/ \E n \in Nodes : AcceptNode(n)
-    \/ ReadySink
     \/ DependencyFinding
     \/ ReleaseRepairBarriers
     \/ \E n \in Nodes : ArchitectureFinding(n)
@@ -122,9 +117,12 @@ TypeOK ==
     /\ repairBarrier \in [Nodes -> BOOLEAN]
     /\ repairs \in 0..MaxRepairs
 
-SinkStartsAfterAllModules ==
-    nodeState[Sink] \in {"Producing", "CheckerReady", "Checking", "Accepted"} =>
+SinkCheckerStartsAfterAllModules ==
+    nodeState[Sink] \in {"Checking", "Accepted"} =>
         \A n \in NonSink : nodeState[n] = "Accepted"
+
+SinkProducerNeverDependencyBlocked ==
+    nodeState[Sink] # "Blocked"
 
 PublishedOnlyFromAcceptedSink ==
     publishedSink => nodeState[Sink] = "Accepted"

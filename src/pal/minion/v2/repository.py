@@ -8,10 +8,11 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, TypeVar
+from typing import Any, Iterator, Mapping
 from uuid import uuid4
 
 from pal.foundation import utc_now
+from pal.minion.checkpoint import LogicalCoroutineCheckpointStore
 from pal.minion.config import minion_db_path
 from pal.minion.v2.artifacts import ArtifactRef
 from pal.minion.v2.contracts import (
@@ -62,26 +63,28 @@ _QUEUED_STATES = {
 _HUMAN_WAIT_STATES = {"HUMAN_REVIEW"}
 _TERMINAL_WORKFLOW_STATES = {"COMPLETED", "REJECTED", "CANCELLED"}
 _TASK_FTS_INDEX_VERSION = "jieba-v1"
-_T = TypeVar("_T")
-
-
 @dataclass
 class MinionV2Repository:
     runtime_root: Path
     engine: TransitionEngine = field(default_factory=build_default_transition_engine)
+    _schema_ready: bool = field(default=False, init=False, repr=False)
 
     @property
     def db_path(self) -> Path:
         return minion_db_path(Path(self.runtime_root))
 
     def ensure_schema(self) -> None:
+        if self._schema_ready:
+            return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path)) as connection:
+        with sqlite3.connect(str(self.db_path), timeout=30.0) as connection:
             connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=30000")
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA foreign_keys=ON")
             ensure_minion_v2_schema(connection)
             self._ensure_task_fts_index_locked(connection)
+        self._schema_ready = True
 
     def dispatch(
         self,
@@ -176,6 +179,19 @@ class MinionV2Repository:
                 effect_id = f"eff_{uuid4().hex}"
                 effect_key = f"{event_id}:{index}"
                 payload = dict(effect.payload)
+                payload["_causal_context"] = {
+                    "aggregate_version": outcome.snapshot.version,
+                    "target_state": outcome.snapshot.state,
+                    "active_worker_id": str(
+                        outcome.snapshot.payload.get("active_worker_id") or ""
+                    ),
+                    "lease_resource_key": str(
+                        outcome.snapshot.payload.get("lease_resource_key") or ""
+                    ),
+                    "fencing_token": int(
+                        outcome.snapshot.payload.get("fencing_token") or 0
+                    ),
+                }
                 effect_request_hash = _stable_hash({"effect_type": effect.effect_type, "payload": payload})
                 connection.execute(
                     """
@@ -242,10 +258,73 @@ class MinionV2Repository:
                 self._rebuild_workflow_projection_locked(connection, action.workflow_id, events[-1].event_id if events else "")
             return result
 
-    def read_snapshot(self, aggregate_type: AggregateType, aggregate_id: str) -> AggregateSnapshot | None:
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Open one repository transaction for an aggregate plus its projections.
+
+        Callers may pass the yielded connection back to ``dispatch`` and the
+        cycle projection methods.  Nothing becomes visible to the outbox
+        processor until the complete business transition commits.
+        """
+
         self.ensure_schema()
-        with self._connect() as connection:
+        with self._transaction() as connection:
+            yield connection
+
+    def read_snapshot(
+        self,
+        aggregate_type: AggregateType,
+        aggregate_id: str,
+        *,
+        _connection: sqlite3.Connection | None = None,
+    ) -> AggregateSnapshot | None:
+        if _connection is None:
+            self.ensure_schema()
+        connection_scope = self._connect() if _connection is None else nullcontext(_connection)
+        with connection_scope as connection:
             return self._read_snapshot_locked(connection, aggregate_type, aggregate_id)
+
+    def dispatch_task_with_delivery(
+        self,
+        action: ActionEnvelope,
+        *,
+        binding: Mapping[str, Any],
+    ) -> DispatchResult:
+        """Create one Task and its delivery binding in the same DB commit."""
+
+        if action.aggregate_type != AggregateType.TASK or action.action_type != "CREATE_TASK":
+            raise ValueError("atomic Task delivery binding requires CREATE_TASK")
+        self.ensure_schema()
+        normalized = _normalize_delivery_binding(binding)
+        with self._transaction() as connection:
+            result = self.dispatch(action, _connection=connection)
+            existing = connection.execute(
+                "SELECT * FROM minion_v2_task_delivery_bindings WHERE task_id = ?",
+                (action.aggregate_id,),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO minion_v2_task_delivery_bindings(
+                        task_id, origin_binding_json, current_binding_json,
+                        binding_version, created_at, updated_at
+                    ) VALUES (?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        action.aggregate_id,
+                        _json(normalized),
+                        _json(normalized),
+                        action.created_at,
+                        action.created_at,
+                    ),
+                )
+            else:
+                origin = json.loads(str(existing["origin_binding_json"]))
+                if origin != normalized:
+                    raise ValueError(
+                        "Task delivery origin differs from the idempotent creation request"
+                    )
+        return result
 
     def list_workflow_snapshots(self, workflow_id: str) -> tuple[AggregateSnapshot, ...]:
         self.ensure_schema()
@@ -344,45 +423,322 @@ class MinionV2Repository:
             ).fetchall()
         return tuple(dict(row) for row in rows)
 
-    def bind_channel_workflow(self, *, actor_id: str, channel_id: str, workflow_id: str) -> None:
+    def bind_task_delivery(
+        self,
+        *,
+        task_id: str,
+        binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Capture the immutable origin and initial reply target for one Task."""
+
         self.ensure_schema()
-        actor = str(actor_id or "").strip()
-        channel = str(channel_id or "").strip()
-        workflow = str(workflow_id or "").strip()
-        if not actor or not channel or not workflow:
-            raise ValueError("channel workflow binding requires actor, channel, and workflow")
+        normalized_task_id = str(task_id or "").strip()
+        normalized = _normalize_delivery_binding(binding)
+        if not normalized_task_id:
+            raise ValueError("task delivery binding requires task_id")
+        now = utc_now()
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT 1 FROM minion_v2_aggregate_snapshots WHERE aggregate_type = ? AND aggregate_id = ?",
-                (AggregateType.WORKFLOW.value, workflow),
+                "SELECT 1 FROM minion_v2_task_projection WHERE task_id = ?",
+                (normalized_task_id,),
             ).fetchone()
             if row is None:
-                raise ValueError("channel workflow binding requires an existing workflow")
+                raise ValueError("task delivery binding requires an existing Task")
+            existing = connection.execute(
+                "SELECT * FROM minion_v2_task_delivery_bindings WHERE task_id = ?",
+                (normalized_task_id,),
+            ).fetchone()
+            if existing is not None:
+                current = json.loads(str(existing["current_binding_json"]))
+                if current != normalized:
+                    raise ValueError(
+                        "Task delivery is already bound; use the explicit rebind operation"
+                    )
+                return _delivery_binding_row(existing)
             connection.execute(
                 """
-                INSERT INTO minion_v2_channel_bindings(actor_id, channel_id, workflow_id, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(actor_id, channel_id) DO UPDATE SET
-                    workflow_id = excluded.workflow_id,
-                    updated_at = excluded.updated_at
+                INSERT INTO minion_v2_task_delivery_bindings(
+                    task_id, origin_binding_json, current_binding_json,
+                    binding_version, created_at, updated_at
+                ) VALUES (?, ?, ?, 1, ?, ?)
                 """,
-                (actor, channel, workflow, utc_now()),
+                (normalized_task_id, _json(normalized), _json(normalized), now, now),
             )
+        return self.read_task_delivery(normalized_task_id) or {}
 
-    def read_channel_workflow(self, *, actor_id: str, channel_id: str) -> str:
+    def read_task_delivery(self, task_id: str) -> dict[str, Any] | None:
         self.ensure_schema()
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT workflow_id FROM minion_v2_channel_bindings WHERE actor_id = ? AND channel_id = ?",
-                (str(actor_id or "").strip(), str(channel_id or "").strip()),
+                "SELECT * FROM minion_v2_task_delivery_bindings WHERE task_id = ?",
+                (str(task_id or "").strip(),),
             ).fetchone()
-        return str(row["workflow_id"]) if row is not None else ""
+        return _delivery_binding_row(row) if row is not None else None
+
+    def rebind_task_delivery(
+        self,
+        *,
+        task_id: str,
+        binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Replace only the Task reply target; workflow state is untouched."""
+
+        self.ensure_schema()
+        normalized_task_id = str(task_id or "").strip()
+        normalized = _normalize_delivery_binding(binding)
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM minion_v2_task_delivery_bindings WHERE task_id = ?",
+                (normalized_task_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Task has no delivery binding")
+            current = json.loads(str(row["current_binding_json"]))
+            if current == normalized:
+                return {**_delivery_binding_row(row), "changed": False}
+            version = int(row["binding_version"]) + 1
+            now = utc_now()
+            connection.execute(
+                """
+                UPDATE minion_v2_task_delivery_bindings
+                SET current_binding_json = ?, binding_version = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (_json(normalized), version, now, normalized_task_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM minion_v2_task_delivery_bindings WHERE task_id = ?",
+                (normalized_task_id,),
+            ).fetchone()
+        return {**_delivery_binding_row(updated), "changed": True}
+
+    def enqueue_task_delivery(
+        self,
+        *,
+        task_id: str,
+        workflow_id: str,
+        event_kind: str,
+        payload: Mapping[str, Any],
+        dedup_key: str,
+    ) -> dict[str, Any]:
+        """Persist one user-visible Task event until Core accepts its delivery."""
+
+        self.ensure_schema()
+        normalized_task_id = str(task_id or "").strip()
+        normalized_kind = str(event_kind or "").strip()
+        normalized_workflow_id = str(workflow_id or "").strip()
+        normalized_key = str(dedup_key or "").strip()
+        if not normalized_task_id or not normalized_kind or not normalized_key:
+            raise ValueError("task delivery requires task_id, event_kind, and dedup_key")
+        now = utc_now()
+        delivery_id = f"delivery_{uuid4().hex}"
+        with self._transaction() as connection:
+            binding = connection.execute(
+                "SELECT 1 FROM minion_v2_task_delivery_bindings WHERE task_id = ?",
+                (normalized_task_id,),
+            ).fetchone()
+            if binding is None:
+                raise ValueError("task delivery requires an existing delivery binding")
+            connection.execute(
+                """
+                INSERT INTO minion_v2_delivery_outbox(
+                    delivery_id, dedup_key, task_id, workflow_id, event_kind,
+                    payload_json, status, attempt_count, next_attempt_at,
+                    last_error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, '', ?, ?)
+                ON CONFLICT(dedup_key) DO NOTHING
+                """,
+                (
+                    delivery_id,
+                    normalized_key,
+                    normalized_task_id,
+                    normalized_workflow_id,
+                    normalized_kind,
+                    _json(dict(payload or {})),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM minion_v2_delivery_outbox WHERE dedup_key = ?",
+                (normalized_key,),
+            ).fetchone()
+            if row is not None:
+                same_request = (
+                    str(row["task_id"]) == normalized_task_id
+                    and str(row["workflow_id"]) == normalized_workflow_id
+                    and str(row["event_kind"]) == normalized_kind
+                    and json.loads(str(row["payload_json"])) == dict(payload or {})
+                )
+                if not same_request:
+                    raise ValueError(
+                        f"delivery dedup key collision with different request: {normalized_key}"
+                    )
+        return _delivery_outbox_row(row)
+
+    def list_pending_task_deliveries(self, *, limit: int = 50) -> tuple[dict[str, Any], ...]:
+        self.ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT d.*, b.current_binding_json, b.binding_version
+                FROM minion_v2_delivery_outbox AS d
+                JOIN minion_v2_task_delivery_bindings AS b ON b.task_id = d.task_id
+                WHERE d.status = 'pending' AND d.next_attempt_at <= ?
+                ORDER BY d.created_at, d.delivery_id
+                LIMIT ?
+                """,
+                (utc_now(), max(1, min(int(limit), 500))),
+            ).fetchall()
+        return tuple(_delivery_outbox_row(row) for row in rows)
+
+    def acknowledge_task_delivery(self, delivery_id: str) -> bool:
+        self.ensure_schema()
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minion_v2_delivery_outbox
+                SET status = 'delivered', updated_at = ?
+                WHERE delivery_id = ? AND status = 'pending'
+                """,
+                (utc_now(), str(delivery_id or "").strip()),
+            )
+        return cursor.rowcount == 1
+
+    def delivered_task_delivery_parts(self, delivery_id: str) -> tuple[str, ...]:
+        """Return durable sub-deliveries already accepted by the channel."""
+
+        self.ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT part_key FROM minion_v2_delivery_parts
+                WHERE delivery_id = ?
+                ORDER BY part_key
+                """,
+                (str(delivery_id or "").strip(),),
+            ).fetchall()
+        return tuple(str(row["part_key"]) for row in rows)
+
+    def acknowledge_task_delivery_part(
+        self,
+        delivery_id: str,
+        part_key: str,
+    ) -> bool:
+        """Durably mark one stable part of a composite delivery as accepted."""
+
+        self.ensure_schema()
+        normalized_delivery_id = str(delivery_id or "").strip()
+        normalized_part_key = str(part_key or "").strip()
+        if not normalized_delivery_id or not normalized_part_key:
+            raise ValueError("delivery_id and part_key are required")
+        with self._transaction() as connection:
+            pending = connection.execute(
+                """
+                SELECT 1 FROM minion_v2_delivery_outbox
+                WHERE delivery_id = ? AND status = 'pending'
+                """,
+                (normalized_delivery_id,),
+            ).fetchone()
+            if pending is None:
+                return False
+            connection.execute(
+                """
+                INSERT INTO minion_v2_delivery_parts(
+                    delivery_id, part_key, delivered_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(delivery_id, part_key) DO NOTHING
+                """,
+                (normalized_delivery_id, normalized_part_key, utc_now()),
+            )
+        return True
+
+    def defer_task_delivery(self, delivery_id: str, *, error: str = "") -> bool:
+        self.ensure_schema()
+        now = _utc_datetime()
+        retry_at = (now + timedelta(seconds=1)).isoformat()
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE minion_v2_delivery_outbox
+                SET attempt_count = attempt_count + 1,
+                    next_attempt_at = ?, last_error = ?, updated_at = ?
+                WHERE delivery_id = ? AND status = 'pending'
+                """,
+                (
+                    retry_at,
+                    str(error or "")[:1000],
+                    now.isoformat(),
+                    str(delivery_id or "").strip(),
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def latest_task_delivery(
+        self,
+        *,
+        task_id: str,
+        workflow_id: str,
+        event_kind: str,
+    ) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM minion_v2_delivery_outbox
+                WHERE task_id = ? AND workflow_id = ? AND event_kind = ?
+                ORDER BY created_at DESC, delivery_id DESC
+                LIMIT 1
+                """,
+                (str(task_id), str(workflow_id), str(event_kind)),
+            ).fetchone()
+        return _delivery_outbox_row(row) if row is not None else None
+
+    def replay_task_delivery(
+        self,
+        *,
+        delivery_id: str,
+        dedup_key: str,
+    ) -> dict[str, Any]:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM minion_v2_delivery_outbox WHERE delivery_id = ?",
+                (str(delivery_id),),
+            ).fetchone()
+        if row is None:
+            raise ValueError("delivery replay source does not exist")
+        source = _delivery_outbox_row(row)
+        return self.enqueue_task_delivery(
+            task_id=source["task_id"],
+            workflow_id=source["workflow_id"],
+            event_kind=source["event_kind"],
+            payload=source["payload"],
+            dedup_key=dedup_key,
+        )
+
+    def pending_human_review_workflows(self, task_id: str) -> tuple[str, ...]:
+        self.ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT h.workflow_id
+                FROM minion_v2_human_decisions AS h
+                JOIN minion_v2_aggregate_snapshots AS w
+                  ON w.aggregate_type = ? AND w.aggregate_id = h.workflow_id
+                WHERE h.status = 'issued'
+                  AND json_extract(w.payload_json, '$.task_id') = ?
+                ORDER BY h.workflow_id
+                """,
+                (AggregateType.WORKFLOW.value, str(task_id)),
+            ).fetchall()
+        return tuple(str(row["workflow_id"]) for row in rows)
 
     def search_workflows(
         self,
         *,
         actor_id: str,
-        channel_id: str,
         task_id: str = "",
         query: str = "",
         include_terminal: bool = False,
@@ -391,9 +747,6 @@ class MinionV2Repository:
         self.ensure_schema()
         clauses = ["s.aggregate_type = ?", "json_extract(s.payload_json, '$.owner') = ?"]
         parameters: list[Any] = [AggregateType.WORKFLOW.value, str(actor_id or "").strip()]
-        if channel_id:
-            clauses.append("json_extract(s.payload_json, '$.active_channel') = ?")
-            parameters.append(str(channel_id).strip())
         if task_id:
             clauses.append("json_extract(s.payload_json, '$.task_id') = ?")
             parameters.append(str(task_id).strip())
@@ -429,17 +782,15 @@ class MinionV2Repository:
         self,
         *,
         actor_id: str,
-        channel_id: str,
         alias: str,
         artifact_sha256: str,
     ) -> None:
         self.ensure_schema()
         actor = str(actor_id or "").strip()
-        channel = str(channel_id or "").strip()
         name = str(alias or "").strip()
         digest = str(artifact_sha256 or "").removeprefix("sha256:")
-        if not actor or not channel or not name or not digest:
-            raise ValueError("artifact alias requires actor, channel, name, and artifact")
+        if not actor or not name or not digest:
+            raise ValueError("artifact alias requires actor, name, and artifact")
         with self._transaction() as connection:
             row = connection.execute(
                 "SELECT durable FROM minion_v2_artifacts WHERE sha256 = ?",
@@ -449,25 +800,25 @@ class MinionV2Repository:
                 raise ValueError("artifact alias requires a durable artifact")
             connection.execute(
                 """
-                INSERT INTO minion_v2_artifact_aliases(actor_id, channel_id, alias, artifact_sha256, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(actor_id, channel_id, alias) DO UPDATE SET
+                INSERT INTO minion_v2_artifact_aliases(actor_id, alias, artifact_sha256, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(actor_id, alias) DO UPDATE SET
                     artifact_sha256 = excluded.artifact_sha256,
                     updated_at = excluded.updated_at
                 """,
-                (actor, channel, name, digest, utc_now()),
+                (actor, name, digest, utc_now()),
             )
 
-    def resolve_artifact_alias(self, *, actor_id: str, channel_id: str, alias: str) -> dict[str, Any] | None:
+    def resolve_artifact_alias(self, *, actor_id: str, alias: str) -> dict[str, Any] | None:
         self.ensure_schema()
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT a.* FROM minion_v2_artifacts AS a
                 JOIN minion_v2_artifact_aliases AS x ON x.artifact_sha256 = a.sha256
-                WHERE x.actor_id = ? AND x.channel_id = ? AND x.alias = ?
+                WHERE x.actor_id = ? AND x.alias = ?
                 """,
-                (str(actor_id or "").strip(), str(channel_id or "").strip(), str(alias or "").strip()),
+                (str(actor_id or "").strip(), str(alias or "").strip()),
             ).fetchone()
         if row is None:
             return None
@@ -491,6 +842,38 @@ class MinionV2Repository:
                 (str(workflow_id),),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def read_domain_event_aggregate_version(self, event_id: str) -> int | None:
+        """Return the snapshot version that produced a durable outbox effect."""
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT aggregate_version FROM minion_v2_domain_events WHERE event_id = ?",
+                (str(event_id or "").strip(),),
+            ).fetchone()
+        return int(row["aggregate_version"]) if row is not None else None
+
+    def read_domain_event_effect_context(self, event_id: str) -> dict[str, Any]:
+        """Recover causal state for outbox rows created before context embedding."""
+
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT aggregate_version, payload_json "
+                "FROM minion_v2_domain_events WHERE event_id = ?",
+                (str(event_id or "").strip(),),
+            ).fetchone()
+        if row is None:
+            return {}
+        event_payload = json.loads(str(row["payload_json"] or "{}"))
+        action_payload = dict(event_payload.get("action_payload") or {})
+        return {
+            "aggregate_version": int(row["aggregate_version"]),
+            "target_state": str(event_payload.get("target_state") or ""),
+            "active_worker_id": str(action_payload.get("active_worker_id") or ""),
+            "lease_resource_key": str(action_payload.get("lease_resource_key") or ""),
+            "fencing_token": int(action_payload.get("fencing_token") or 0),
+        }
 
     def search_tasks(
         self,
@@ -815,10 +1198,13 @@ class MinionV2Repository:
         error: str,
         retry_after_seconds: int = 5,
         triage_action: ActionEnvelope | None = None,
+        _connection: sqlite3.Connection | None = None,
     ) -> str:
-        self.ensure_schema()
+        if _connection is None:
+            self.ensure_schema()
         now = _utc_datetime()
-        with self._transaction() as connection:
+        transaction = self._transaction() if _connection is None else nullcontext(_connection)
+        with transaction as connection:
             row = connection.execute(
                 "SELECT status, locked_by, attempt_count, max_attempts FROM minion_v2_outbox WHERE effect_id = ?",
                 (str(effect_id),),
@@ -908,10 +1294,13 @@ class MinionV2Repository:
         worker_id: str,
         error: str,
         triage_action: ActionEnvelope | None = None,
+        _connection: sqlite3.Connection | None = None,
     ) -> DispatchResult | None:
-        self.ensure_schema()
+        if _connection is None:
+            self.ensure_schema()
         now = utc_now()
-        with self._transaction() as connection:
+        transaction = self._transaction() if _connection is None else nullcontext(_connection)
+        with transaction as connection:
             row = connection.execute(
                 "SELECT status, locked_by FROM minion_v2_outbox WHERE effect_id = ?",
                 (str(effect_id),),
@@ -1360,14 +1749,12 @@ class MinionV2Repository:
         architecture_revision_id: str,
         manifest_sha: str,
         actor_id: str,
-        active_channel_id: str,
     ) -> str:
         required = {
             "workflow_id": workflow_id,
             "architecture_revision_id": architecture_revision_id,
             "manifest_sha": manifest_sha,
             "actor_id": actor_id,
-            "active_channel_id": active_channel_id,
         }
         missing = [key for key, value in required.items() if not str(value or "").strip()]
         if missing:
@@ -1395,8 +1782,8 @@ class MinionV2Repository:
                 """
                 INSERT INTO minion_v2_human_decisions(
                     token_hash, workflow_id, architecture_revision_id, manifest_sha,
-                    actor_id, active_channel_id, expires_at, issued_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    actor_id, expires_at, issued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     token_hash,
@@ -1404,7 +1791,6 @@ class MinionV2Repository:
                     architecture_revision_id,
                     str(manifest_sha).removeprefix("sha256:"),
                     actor_id,
-                    active_channel_id,
                     "",
                     now.isoformat(),
                 ),
@@ -1448,14 +1834,12 @@ class MinionV2Repository:
         *,
         workflow_id: str,
         actor_id: str,
-        active_channel_id: str,
     ) -> str:
         """Replace the unique pending card token for a semantic/manual decision path."""
 
         required = {
             "workflow_id": workflow_id,
             "actor_id": actor_id,
-            "active_channel_id": active_channel_id,
         }
         missing = [key for key, value in required.items() if not str(value or "").strip()]
         if missing:
@@ -1509,8 +1893,8 @@ class MinionV2Repository:
                 """
                 INSERT INTO minion_v2_human_decisions(
                     token_hash, workflow_id, architecture_revision_id, manifest_sha,
-                    actor_id, active_channel_id, expires_at, issued_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    actor_id, expires_at, issued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     token_hash,
@@ -1518,7 +1902,6 @@ class MinionV2Repository:
                     architecture_revision_id,
                     manifest_sha,
                     str(actor_id),
-                    str(active_channel_id),
                     "",
                     now.isoformat(),
                 ),
@@ -1659,103 +2042,6 @@ class MinionV2Repository:
                 (str(session_id),),
             ).fetchone()
         return _decode_role_session(row) if row is not None else None
-
-    def read_role_execution_state(self, session_id: str) -> dict[str, Any]:
-        """Read Manager-owned logical execution state for one role session."""
-
-        self.ensure_schema()
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT status, execution_state_json
-                FROM minion_v2_role_sessions
-                WHERE session_id = ?
-                """,
-                (str(session_id),),
-            ).fetchone()
-        if row is None:
-            raise KeyError(f"unknown role session: {session_id}")
-        state = _decode_role_execution_state(str(row["execution_state_json"] or "{}"))
-        if str(row["status"]) in {
-            RoleSessionState.COMPLETED.value,
-            RoleSessionState.CANCELLED.value,
-        }:
-            state["retired"] = True
-        return state
-
-    def mutate_role_execution_state(
-        self,
-        session_id: str,
-        mutator: Callable[[dict[str, Any]], tuple[dict[str, Any], _T]],
-    ) -> _T:
-        """Atomically mutate logical execution state under the role-session row."""
-
-        self.ensure_schema()
-        with self._transaction() as connection:
-            row = connection.execute(
-                """
-                SELECT status, execution_state_json
-                FROM minion_v2_role_sessions
-                WHERE session_id = ?
-                """,
-                (str(session_id),),
-            ).fetchone()
-            if row is None:
-                raise KeyError(f"unknown role session: {session_id}")
-            state = _decode_role_execution_state(
-                str(row["execution_state_json"] or "{}")
-            )
-            if str(row["status"]) in {
-                RoleSessionState.COMPLETED.value,
-                RoleSessionState.CANCELLED.value,
-            }:
-                state["retired"] = True
-            next_state, result = mutator(state)
-            connection.execute(
-                """
-                UPDATE minion_v2_role_sessions
-                SET execution_state_json = ?, updated_at = ?
-                WHERE session_id = ?
-                """,
-                (_json(dict(next_state)), utc_now(), str(session_id)),
-            )
-            return result
-
-    def begin_role_execution_input(
-        self,
-        session_id: str,
-        *,
-        input_id: str,
-        retention_user_turns: int = 5,
-    ) -> dict[str, Any]:
-        """Advance the semantic user-turn clock exactly once per input ID."""
-
-        normalized_input = str(input_id or "").strip()
-        if not normalized_input:
-            raise ValueError("logical execution input_id is required")
-
-        def mutate(state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-            if bool(state.get("retired")):
-                raise RuntimeError("logical execution session is retired")
-            input_ids = dict(state.get("input_ids") or {})
-            current = max(0, int(state.get("current_user_turn") or 0))
-            if normalized_input not in input_ids:
-                current += 1
-                input_ids[normalized_input] = current
-            state.update(
-                {
-                    "current_user_turn": current,
-                    "input_ids": input_ids,
-                    "retention_user_turns": max(
-                        1, int(retention_user_turns or 5)
-                    ),
-                }
-            )
-            return state, _role_execution_context(
-                str(session_id), normalized_input, state
-            )
-
-        return self.mutate_role_execution_state(str(session_id), mutate)
 
     def complete_workflow_role_sessions(
         self,
@@ -2012,6 +2298,27 @@ class MinionV2Repository:
                     identifier,
                     now,
                     str(assignment_id),
+                ),
+            )
+            # The session is the logical coroutine while an attempt is only
+            # its current process shell.  Pin the shell that actually claimed
+            # the assignment, not merely the harness that was preferred when
+            # the session was first created.  A fallback may select Pal after
+            # an optional harness fails; later registry refreshes must then
+            # restore the Pal-authored checkpoint with that same generation.
+            connection.execute(
+                """
+                UPDATE minion_v2_role_sessions
+                SET preferred_harness_id = ?,
+                    preferred_harness_generation = ?,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    str(harness_id or "pal"),
+                    str(harness_generation or ""),
+                    now,
+                    str(assignment["session_id"]),
                 ),
             )
             return _decode_role_attempt(
@@ -2741,6 +3048,37 @@ class MinionV2Repository:
             ).fetchone()
             return _decode_role_attempt(row) if row is not None else None
 
+    def read_latest_completed_role_harness_attempt(
+        self,
+        *,
+        session_id: str,
+        harness_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the process shell that authored the resumable session state."""
+
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT attempt.*
+                FROM minion_v2_role_attempts AS attempt
+                JOIN minion_v2_role_assignments AS assignment
+                  ON assignment.assignment_id = attempt.assignment_id
+                WHERE assignment.session_id = ?
+                  AND attempt.harness_id = ?
+                  AND attempt.status = ?
+                ORDER BY attempt.finished_at DESC, attempt.started_at DESC,
+                         attempt.attempt_index DESC
+                LIMIT 1
+                """,
+                (
+                    str(session_id),
+                    str(harness_id),
+                    RoleAttemptState.COMPLETED.value,
+                ),
+            ).fetchone()
+        return _decode_role_attempt(row) if row is not None else None
+
     def read_role_harness_continuation(
         self,
         *,
@@ -2953,9 +3291,8 @@ class MinionV2Repository:
         if row is None:
             return None
         value = dict(row)
-        for key in ("prompt_pack_ref_json", "continuation_ref_json"):
-            raw = str(value.pop(key, "{}") or "{}")
-            value[key.removesuffix("_json")] = json.loads(raw)
+        raw = str(value.pop("prompt_pack_ref_json", "{}") or "{}")
+        value["prompt_pack_ref"] = json.loads(raw)
         return value
 
     def suspend_role_invocation(
@@ -2963,7 +3300,6 @@ class MinionV2Repository:
         *,
         invocation_id: str,
         fencing_token: int,
-        continuation_ref: Mapping[str, Any],
         status: str = "suspended",
     ) -> None:
         normalized = str(status or "suspended").strip().lower()
@@ -2983,29 +3319,20 @@ class MinionV2Repository:
                 str(invocation_id),
                 int(fencing_token),
             )
-            self._assert_artifact_refs_durable(connection, continuation_ref)
             now = utc_now()
             connection.execute(
                 """
                 UPDATE minion_v2_role_invocations
-                SET status = ?, continuation_ref_json = ?, updated_at = ?
+                SET status = ?, updated_at = ?
                 WHERE invocation_id = ?
                 """,
-                (normalized, _json(dict(continuation_ref)), now, str(invocation_id)),
+                (normalized, now, str(invocation_id)),
             )
             self._transition_role_session_locked(
                 connection,
                 str(invocation_id),
                 RoleSessionAction.SUSPEND,
                 now=now,
-            )
-            connection.execute(
-                """
-                UPDATE minion_v2_role_sessions
-                SET continuation_ref_json = ?, updated_at = ?
-                WHERE session_id = ?
-                """,
-                (_json(dict(continuation_ref)), now, str(invocation_id)),
             )
             self._rebuild_workflow_projection_locked(connection, str(invocation["workflow_id"]), "")
 
@@ -3014,6 +3341,7 @@ class MinionV2Repository:
         if normalized not in {"completed", "cancelled"}:
             raise ValueError("role session completion status must be completed or cancelled")
         self.ensure_schema()
+        completed = False
         with self._transaction() as connection:
             invocation = connection.execute(
                 "SELECT * FROM minion_v2_role_invocations WHERE invocation_id = ?",
@@ -3024,62 +3352,71 @@ class MinionV2Repository:
                 (str(session_id),),
             ).fetchone()
             if invocation is None and session is None:
-                return False
-            if (
+                completed = False
+            elif (
                 (invocation is None or str(invocation["status"]) == normalized)
                 and (session is None or str(session["status"]) == normalized)
             ):
-                return True
-            owner = session if session is not None else invocation
-            assignments = connection.execute(
-                "SELECT state FROM minion_v2_role_assignments WHERE session_id = ?",
-                (str(session_id),),
-            ).fetchall()
-            states = {str(row["state"]) for row in assignments}
-            if states - {
-                RoleAssignmentState.SETTLED.value,
-                RoleAssignmentState.CANCELLED.value,
-            }:
-                raise ValueError("role session cannot complete with a non-terminal assignment")
-            if session is not None:
-                self._assert_role_session_scope_terminal_locked(
-                    connection,
-                    session,
-                    cancelled=normalized == RoleSessionState.CANCELLED.value,
-                )
+                completed = True
             else:
-                snapshot = self._read_snapshot_locked(
-                    connection,
-                    AggregateType(str(owner["aggregate_type"])),
-                    str(owner["aggregate_id"]),
-                )
-                if snapshot is None or snapshot.state not in {
-                    "ACCEPTED",
-                    "REJECTED",
-                    "CANCELLED",
+                owner = session if session is not None else invocation
+                assignments = connection.execute(
+                    "SELECT state FROM minion_v2_role_assignments WHERE session_id = ?",
+                    (str(session_id),),
+                ).fetchall()
+                states = {str(row["state"]) for row in assignments}
+                if states - {
+                    RoleAssignmentState.SETTLED.value,
+                    RoleAssignmentState.CANCELLED.value,
                 }:
-                    raise ValueError(
-                        "legacy role invocation cannot complete before its aggregate is terminal"
+                    raise ValueError("role session cannot complete with a non-terminal assignment")
+                if session is not None:
+                    self._assert_role_session_scope_terminal_locked(
+                        connection,
+                        session,
+                        cancelled=normalized == RoleSessionState.CANCELLED.value,
                     )
-            now = utc_now()
-            if invocation is not None:
-                connection.execute(
-                    "UPDATE minion_v2_role_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
-                    (normalized, now, str(session_id)),
-                )
-            if session is not None:
-                self._transition_role_session_locked(
-                    connection,
-                    str(session_id),
-                    (
-                        RoleSessionAction.COMPLETE
-                        if normalized == RoleSessionState.COMPLETED.value
-                        else RoleSessionAction.CANCEL
-                    ),
-                    now=now,
-                )
-            self._rebuild_workflow_projection_locked(connection, str(owner["workflow_id"]), "")
-            return True
+                else:
+                    snapshot = self._read_snapshot_locked(
+                        connection,
+                        AggregateType(str(owner["aggregate_type"])),
+                        str(owner["aggregate_id"]),
+                    )
+                    if snapshot is None or snapshot.state not in {
+                        "ACCEPTED",
+                        "REJECTED",
+                        "CANCELLED",
+                    }:
+                        raise ValueError(
+                            "legacy role invocation cannot complete before its aggregate is terminal"
+                        )
+                now = utc_now()
+                if invocation is not None:
+                    connection.execute(
+                        "UPDATE minion_v2_role_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
+                        (normalized, now, str(session_id)),
+                    )
+                if session is not None:
+                    self._transition_role_session_locked(
+                        connection,
+                        str(session_id),
+                        (
+                            RoleSessionAction.COMPLETE
+                            if normalized == RoleSessionState.COMPLETED.value
+                            else RoleSessionAction.CANCEL
+                        ),
+                        now=now,
+                    )
+                self._rebuild_workflow_projection_locked(connection, str(owner["workflow_id"]), "")
+                completed = True
+        # The database transition is the durable authority. Delete the
+        # encrypted worker payload only after COMMIT succeeds, so a failed
+        # transition cannot strand an otherwise resumable coroutine.
+        if completed:
+            LogicalCoroutineCheckpointStore(self.runtime_root).delete(
+                str(session_id)
+            )
+        return completed
 
     def _assert_role_session_scope_terminal_locked(
         self,
@@ -3212,27 +3549,6 @@ class MinionV2Repository:
             "UPDATE minion_v2_role_sessions SET status = ?, updated_at = ? WHERE session_id = ?",
             (target.value, str(now), str(session_id)),
         )
-        if target in {RoleSessionState.COMPLETED, RoleSessionState.CANCELLED}:
-            row = connection.execute(
-                """
-                SELECT execution_state_json
-                FROM minion_v2_role_sessions
-                WHERE session_id = ?
-                """,
-                (str(session_id),),
-            ).fetchone()
-            state = _decode_role_execution_state(
-                str(row["execution_state_json"] or "{}") if row is not None else "{}"
-            )
-            state["retired"] = True
-            connection.execute(
-                """
-                UPDATE minion_v2_role_sessions
-                SET execution_state_json = ?
-                WHERE session_id = ?
-                """,
-                (_json(state), str(session_id)),
-            )
         return target
 
     def record_worker_event(self, event: Mapping[str, Any]) -> None:
@@ -3545,8 +3861,6 @@ class MinionV2Repository:
             mismatches.append("manifest_sha")
         if str(row["actor_id"]) != action.actor:
             mismatches.append("actor_id")
-        if str(row["active_channel_id"]) != action.source_channel:
-            mismatches.append("active_channel_id")
         if mismatches:
             raise ValueError(f"stale human decision binding: {', '.join(mismatches)}")
         cursor = connection.execute(
@@ -3878,13 +4192,16 @@ class MinionV2Repository:
         workflow_id: str,
         graph: GraphIR,
         status: str = "compiled",
+        _connection: sqlite3.Connection | None = None,
     ) -> GraphIR:
         """Persist one immutable compiled GraphIR generation idempotently."""
 
-        self.ensure_schema()
+        if _connection is None:
+            self.ensure_schema()
         now = utc_now()
         payload = graph.to_dict()
-        with self._transaction() as connection:
+        transaction = self._transaction() if _connection is None else nullcontext(_connection)
+        with transaction as connection:
             existing = connection.execute(
                 "SELECT graph_ir_json, workflow_id FROM minion_v2_graph_generations "
                 "WHERE graph_id = ? AND generation = ?",
@@ -3936,9 +4253,12 @@ class MinionV2Repository:
         *,
         graph_id: str,
         generation: int | None = None,
+        _connection: sqlite3.Connection | None = None,
     ) -> GraphIR | None:
-        self.ensure_schema()
-        with self._connect() as connection:
+        if _connection is None:
+            self.ensure_schema()
+        connection_scope = self._connect() if _connection is None else nullcontext(_connection)
+        with connection_scope as connection:
             if generation is None:
                 row = connection.execute(
                     "SELECT graph_ir_json FROM minion_v2_graph_generations "
@@ -3960,11 +4280,14 @@ class MinionV2Repository:
         *,
         workflow_id: str,
         cycle: PlanCycle,
+        _connection: sqlite3.Connection | None = None,
     ) -> None:
-        self.ensure_schema()
+        if _connection is None:
+            self.ensure_schema()
         now = utc_now()
         payload = _cycle_payload(cycle)
-        with self._transaction() as connection:
+        transaction = self._transaction() if _connection is None else nullcontext(_connection)
+        with transaction as connection:
             connection.execute(
                 """
                 INSERT INTO minion_v2_plan_cycles(
@@ -3988,9 +4311,16 @@ class MinionV2Repository:
                 ),
             )
 
-    def read_plan_cycle(self, *, workflow_id: str) -> PlanCycle | None:
-        self.ensure_schema()
-        with self._connect() as connection:
+    def read_plan_cycle(
+        self,
+        *,
+        workflow_id: str,
+        _connection: sqlite3.Connection | None = None,
+    ) -> PlanCycle | None:
+        if _connection is None:
+            self.ensure_schema()
+        connection_scope = self._connect() if _connection is None else nullcontext(_connection)
+        with connection_scope as connection:
             row = connection.execute(
                 "SELECT payload_json FROM minion_v2_plan_cycles "
                 "WHERE workflow_id = ?",
@@ -4045,9 +4375,12 @@ class MinionV2Repository:
         *,
         workflow_id: str,
         graph_generation: int | None = None,
+        _connection: sqlite3.Connection | None = None,
     ) -> dict[str, NodeCycle]:
-        self.ensure_schema()
-        with self._connect() as connection:
+        if _connection is None:
+            self.ensure_schema()
+        connection_scope = self._connect() if _connection is None else nullcontext(_connection)
+        with connection_scope as connection:
             if graph_generation is None:
                 graph = connection.execute(
                     "SELECT MAX(graph_generation) AS generation "
@@ -4072,12 +4405,15 @@ class MinionV2Repository:
         *,
         workflow_id: str,
         execution: GraphExecution,
+        _connection: sqlite3.Connection | None = None,
     ) -> None:
         """Atomically replace every cycle projection for one graph generation."""
 
-        self.ensure_schema()
+        if _connection is None:
+            self.ensure_schema()
         now = utc_now()
-        with self._transaction() as connection:
+        transaction = self._transaction() if _connection is None else nullcontext(_connection)
+        with transaction as connection:
             graph_row = connection.execute(
                 "SELECT workflow_id, generation_hash "
                 "FROM minion_v2_graph_generations "
@@ -4144,9 +4480,12 @@ class MinionV2Repository:
         *,
         workflow_id: str,
         generation: int | None = None,
+        _connection: sqlite3.Connection | None = None,
     ) -> GraphExecution | None:
-        self.ensure_schema()
-        with self._connect() as connection:
+        if _connection is None:
+            self.ensure_schema()
+        connection_scope = self._connect() if _connection is None else nullcontext(_connection)
+        with connection_scope as connection:
             if generation is None:
                 row = connection.execute(
                     "SELECT graph_ir_json, status, execution_json "
@@ -4167,6 +4506,7 @@ class MinionV2Repository:
         cycles = self.read_node_cycles(
             workflow_id=workflow_id,
             graph_generation=graph.generation,
+            _connection=_connection,
         )
         if not cycles:
             return None
@@ -4208,7 +4548,7 @@ class MinionV2Repository:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(str(self.db_path), timeout=30)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA foreign_keys=ON")
         try:
             yield connection
@@ -4219,7 +4559,7 @@ class MinionV2Repository:
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(str(self.db_path), timeout=30, isolation_level=None)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -4252,73 +4592,13 @@ def _action_request_payload(action: ActionEnvelope) -> dict[str, Any]:
         "aggregate_type": action.aggregate_type.value,
         "aggregate_id": action.aggregate_id,
         "actor": action.actor,
-        "source_channel": action.source_channel,
+        "expected_version": action.expected_version,
         "payload": dict(action.payload),
-        "correlation_id": action.correlation_id,
-        "causation_id": action.causation_id,
     }
 
 
 def _decode_role_session(row: sqlite3.Row) -> dict[str, Any]:
-    value = dict(row)
-    value["continuation_ref"] = json.loads(
-        str(value.pop("continuation_ref_json", "{}") or "{}")
-    )
-    value["execution_state"] = _decode_role_execution_state(
-        str(value.pop("execution_state_json", "{}") or "{}")
-    )
-    return value
-
-
-def _decode_role_execution_state(value: str) -> dict[str, Any]:
-    try:
-        decoded = json.loads(str(value or "{}"))
-    except json.JSONDecodeError:
-        decoded = {}
-    state = dict(decoded) if isinstance(decoded, Mapping) else {}
-    return {
-        "schema_version": 1,
-        "current_user_turn": max(0, int(state.get("current_user_turn") or 0)),
-        "context_epoch": max(1, int(state.get("context_epoch") or 1)),
-        "input_ids": dict(state.get("input_ids") or {}),
-        "retention_user_turns": max(
-            1, int(state.get("retention_user_turns") or 5)
-        ),
-        "projection": [
-            str(item) for item in list(state.get("projection") or ())
-        ],
-        "handles": {
-            str(key): dict(item)
-            for key, item in dict(state.get("handles") or {}).items()
-            if str(key) and isinstance(item, Mapping)
-        },
-        "snapshots": {
-            str(key): dict(item)
-            for key, item in dict(state.get("snapshots") or {}).items()
-            if str(key) and isinstance(item, Mapping)
-        },
-        "grants": {
-            str(key): dict(item)
-            for key, item in dict(state.get("grants") or {}).items()
-            if str(key) and isinstance(item, Mapping)
-        },
-        "retired": bool(state.get("retired")),
-    }
-
-
-def _role_execution_context(
-    session_id: str,
-    input_id: str,
-    state: Mapping[str, Any],
-) -> dict[str, Any]:
-    return {
-        "logical_session_id": str(session_id),
-        "input_id": str(input_id),
-        "current_user_turn": max(
-            0, int(state.get("current_user_turn") or 0)
-        ),
-        "context_epoch": max(1, int(state.get("context_epoch") or 1)),
-    }
+    return dict(row)
 
 
 def _decode_role_assignment(row: sqlite3.Row) -> dict[str, Any]:
@@ -4527,6 +4807,66 @@ def _decode_json_columns(row: sqlite3.Row, columns: Mapping[str, str]) -> dict[s
     for source, target in columns.items():
         result[target] = json.loads(str(result.pop(source)))
     result["waiting_for_user"] = bool(result.get("waiting_for_user"))
+    return result
+
+
+def _normalize_delivery_binding(value: Mapping[str, Any]) -> dict[str, Any]:
+    binding = dict(value or {})
+    channel_id = str(binding.get("channel_id") or "").strip()
+    channel_kind = str(binding.get("channel_kind") or "").strip()
+    reply_target = binding.get("reply_target")
+    if not channel_id or not channel_kind or not isinstance(reply_target, Mapping):
+        raise ValueError(
+            "delivery binding requires channel_id, channel_kind, and reply_target"
+        )
+    normalized_target = {
+        str(key): item
+        for key, item in dict(reply_target).items()
+        if str(key).strip()
+    }
+    if not normalized_target:
+        raise ValueError("delivery binding requires a non-empty reply_target")
+    return {
+        "channel_id": channel_id,
+        "channel_kind": channel_kind,
+        "reply_target": normalized_target,
+        "control_scope_key": str(
+            binding.get("control_scope_key")
+            or normalized_target.get("control_scope_key")
+            or f"{channel_kind}:{channel_id}"
+        ),
+    }
+
+
+def _delivery_binding_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "task_id": str(row["task_id"]),
+        "origin": json.loads(str(row["origin_binding_json"])),
+        "current": json.loads(str(row["current_binding_json"])),
+        "binding_version": int(row["binding_version"]),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _delivery_outbox_row(row: sqlite3.Row) -> dict[str, Any]:
+    result = {
+        "delivery_id": str(row["delivery_id"]),
+        "dedup_key": str(row["dedup_key"]),
+        "task_id": str(row["task_id"]),
+        "workflow_id": str(row["workflow_id"]),
+        "event_kind": str(row["event_kind"]),
+        "payload": json.loads(str(row["payload_json"])),
+        "status": str(row["status"]),
+        "attempt_count": int(row["attempt_count"]),
+        "next_attempt_at": str(row["next_attempt_at"]),
+        "last_error": str(row["last_error"]),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+    if "current_binding_json" in row.keys():
+        result["binding"] = json.loads(str(row["current_binding_json"]))
+        result["binding_version"] = int(row["binding_version"])
     return result
 
 

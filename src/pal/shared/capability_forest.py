@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
 from pal.execution.tool_facade import (
     EmptyToolInput,
-    ProviderPayloadOutput,
+    StructuredToolOutput,
     ToolExecutionSemantics,
     ToolGuidance,
 )
@@ -47,7 +47,7 @@ class CapabilityActionBlueprint:
     description: str = ""
     aliases: tuple[str, ...] = ()
     InputModel: type[BaseModel] = EmptyToolInput
-    OutputModel: type[BaseModel] = ProviderPayloadOutput
+    OutputModel: type[BaseModel] = StructuredToolOutput
     guidance: ToolGuidance | None = None
     execution: ToolExecutionSemantics | None = None
     search_text: str = ""
@@ -143,7 +143,7 @@ def capability_action(
     description: str = "",
     aliases: tuple[str, ...] = (),
     InputModel: type[BaseModel] = EmptyToolInput,
-    OutputModel: type[BaseModel] = ProviderPayloadOutput,
+    OutputModel: type[BaseModel] = StructuredToolOutput,
     guidance: ToolGuidance | None = None,
     execution: ToolExecutionSemantics | None = None,
     search_text: str = "",

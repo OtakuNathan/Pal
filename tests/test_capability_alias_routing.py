@@ -8,6 +8,7 @@ from pal.core import PalCore as _PalCoreBootstrap
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.execution.capability_compiler import compile_provider_subtree
 from pal.execution.runtime import ExecutionRuntime
+from pal.execution.tool_semantics import INDIRECT_NONE
 from pal.execution.tool_facade import (
     CompleteResult,
     EffectKind,
@@ -98,6 +99,7 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
                 namespace=OPERATION_NAMESPACE,
                 scope="test",
                 action_name="ping",
+                execution=INDIRECT_NONE,
             )
             def ping(self, call: CapabilityCall) -> CapabilityResult:
                 return echo_handler(EchoInput(value=str(call.args.get("value") or "")))
@@ -115,6 +117,7 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
                 scope="test",
                 action_name="ping",
                 aliases=("ping", "legacy_ping"),
+                execution=INDIRECT_NONE,
             )
             def ping(self, call: CapabilityCall) -> CapabilityResult:
                 return echo_handler(EchoInput(value=str(call.args.get("value") or "")))

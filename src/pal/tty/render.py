@@ -141,6 +141,16 @@ class TtyRenderer:
             )
         )
 
+    async def notification(self, text: str) -> None:
+        body = str(text or "").strip()
+        if body:
+            await self._output.render(
+                Group(
+                    Text("[task notification]", style="bold cyan"),
+                    self._markdown_factory(body),
+                )
+            )
+
     async def thinking_delta(self, text: str) -> None:
         if not self._reasoning_open:
             self._reasoning_open = True

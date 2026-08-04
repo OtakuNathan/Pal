@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_CONTROL,
+    INDIRECT_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     ChannelCapabilitiesChannelIntrospectionProviderAttachInput,
     ChannelCapabilitiesChannelIntrospectionProviderDetachInput,
@@ -370,6 +375,7 @@ class ChannelIntrospectionProvider:
         description="Enable a channel endpoint",
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderEnableInput,
         aliases=("channel_enable",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=True)
@@ -382,6 +388,7 @@ class ChannelIntrospectionProvider:
         description="Disable a channel endpoint",
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderDisableInput,
         aliases=("channel_disable",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=False)
@@ -394,6 +401,7 @@ class ChannelIntrospectionProvider:
         description="Attach a channel endpoint",
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderAttachInput,
         aliases=("channel_attach",),
+        execution=INDIRECT_CONTROL,
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._attach_endpoint_provider(str(call.args.get("target_id") or "").strip())
@@ -406,6 +414,7 @@ class ChannelIntrospectionProvider:
         description="Detach a channel endpoint",
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderDetachInput,
         aliases=("channel_detach",),
+        execution=INDIRECT_CONTROL,
     )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_attached(call, attached=False)
@@ -418,6 +427,7 @@ class ChannelIntrospectionProvider:
         description="Rescan channel providers and update the channel provider registry.",
         aliases=("channel_provider_rescan",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderRescanInput,
+        execution=INDIRECT_CONTROL,
     )
     def rescan_providers(self, call: IntrospectionCall) -> IntrospectionResult:
         attach_enabled = bool(call.args.get("attach_enabled_endpoints", False))
@@ -441,6 +451,7 @@ class ChannelIntrospectionProvider:
         ),
         aliases=("channel_reload_provider",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput,
+        execution=INDIRECT_CONTROL,
     )
     def reload_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._restart_endpoint(str(call.args.get("target_id") or "").strip())
@@ -487,6 +498,7 @@ class ChannelIntrospectionProvider:
         description="Apply endpoint authorization material without exposing secrets",
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderSetAuthMaterialInput,
         aliases=("channel_endpoint_set_auth_material",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)

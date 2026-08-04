@@ -10,6 +10,7 @@ import os
 import re
 import signal
 import shutil
+import sqlite3
 import subprocess
 import sys
 import yaml
@@ -21,6 +22,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from pal.minion.profiles import resolve_pinned_minion_pack
 from pal.minion.checkpoint import (
     AgentSessionCheckpointError,
+    LogicalCoroutineCheckpointStore,
     normalize_agent_session_checkpoint,
 )
 from pal.minion.harnesses import (
@@ -148,6 +150,7 @@ from pal.minion.v2.verification import (
     VerificationStatus,
     aggregate_verification_status,
     historical_repair_checklist_items,
+    no_progress_detected,
     repair_bill_semantic_view,
     repair_checklist_items,
     validate_verification_case_order,
@@ -170,6 +173,7 @@ from pal.minion.v2.role_contracts import (
     RoleActivation,
     RoleMode,
     family_execution_adapter,
+    role_session_stage_key,
     validate_family_binding_payload,
 )
 from pal.minion.v2.semantic_orchestration.architecture import ARCHITECTURE_EFFECT_ROUTES
@@ -201,14 +205,13 @@ EPHEMERAL_ROLE_INPUT_NAMES = frozenset({"workspace_preparation"})
 
 
 def _role_input_is_semantic(name: str, *, role: str, mode: str = "") -> bool:
-    return (
-        str(name) not in EPHEMERAL_ROLE_INPUT_NAMES
-        or str(role or "").strip() == OrchestrationRole.VERIFIER.value
-        or (
-            str(role or "").strip() == OrchestrationRole.REVIEWER.value
-            and str(mode or "").strip() == RoleMode.STANDALONE.value
-        )
-    )
+    # Workspace preparation is an attempt-local observation. It may contain
+    # paths, scanned-file counts, and optional LSP observations that naturally
+    # change when a verifier writes a corpus case or a process is restarted.
+    # Those changes must not create a new logical assignment or invalidate the
+    # durable role Draft. Evidence records carry their own environment
+    # fingerprint when that distinction matters.
+    return str(name) not in EPHEMERAL_ROLE_INPUT_NAMES
 
 
 def _semantic_role_input_refs(
@@ -527,6 +530,38 @@ def _select_attempt_harness(
     )
 
 
+def _assignment_input_fingerprint(assignment: Mapping[str, Any]) -> str:
+    """Return the immutable authoring fingerprint pinned by an assignment."""
+
+    value = str(assignment.get("input_fingerprint") or "").strip()
+    if not value:
+        raise SubmissionInvariantError(
+            "role assignment has no immutable input fingerprint"
+        )
+    return value
+
+
+def _assignment_has_durable_submission(assignment: Mapping[str, Any]) -> bool:
+    """Return whether a role result crossed its immutable receipt boundary."""
+
+    return (
+        str(assignment.get("state") or "")
+        in {
+            RoleAssignmentState.RESULT_RECORDED.value,
+            RoleAssignmentState.SETTLED.value,
+        }
+        and bool(dict(assignment.get("submission_artifact_ref") or {}))
+        and bool(str(assignment.get("submission_payload_hash") or "").strip())
+    )
+
+
+def _is_transient_sqlite_lock(error: BaseException) -> bool:
+    return isinstance(error, sqlite3.OperationalError) and any(
+        marker in str(error).lower()
+        for marker in ("database is locked", "database table is locked")
+    )
+
+
 def _contract_submit_idempotency_key(
     architecture_revision_id: str,
     source_version: int,
@@ -690,6 +725,34 @@ class SemanticOrchestrator:
         route = SEMANTIC_EFFECT_ROUTES.get(effect_type)
         if route is None:
             raise RuntimeError(f"semantic effect is not implemented: {effect_type}")
+        snapshot = self._effect_snapshot(effect)
+        causal = self._effect_causal_context(effect)
+        target_state = str(causal.get("target_state") or "")
+        causal_version = int(causal.get("aggregate_version") or 0)
+        if target_state and snapshot.state != target_state:
+            return {
+                "status": "superseded",
+                "aggregate_state": snapshot.state,
+                "causal_target_state": target_state,
+            }
+        if causal_version and snapshot.version != causal_version:
+            causal_owner = str(causal.get("active_worker_id") or "")
+            same_owner = bool(
+                causal_owner
+                and causal_owner
+                == str(snapshot.payload.get("active_worker_id") or "")
+                and str(causal.get("lease_resource_key") or "")
+                == str(snapshot.payload.get("lease_resource_key") or "")
+                and int(causal.get("fencing_token") or 0)
+                == int(snapshot.payload.get("fencing_token") or 0)
+            )
+            if not same_owner:
+                return {
+                    "status": "superseded",
+                    "aggregate_state": snapshot.state,
+                    "aggregate_version": snapshot.version,
+                    "causal_aggregate_version": causal_version,
+                }
         mode = self._effect_role_mode(effect)
         if mode and route.modes and RoleMode(mode) not in route.modes:
             raise ValueError(f"{effect_type} does not support role mode {mode}")
@@ -700,6 +763,17 @@ class SemanticOrchestrator:
         if inspect.isawaitable(result):
             result = await result
         return dict(result)
+
+    def _effect_causal_context(
+        self,
+        effect: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        embedded = dict(dict(effect.get("payload") or {}).get("_causal_context") or {})
+        if embedded:
+            return embedded
+        return self.repository.read_domain_event_effect_context(
+            str(effect.get("event_id") or "")
+        )
 
     def _admit_implementation_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         mode = RoleMode(self._effect_role_mode(effect))
@@ -819,41 +893,44 @@ class SemanticOrchestrator:
             raise ValueError(
                 "null execution node has no GraphIR contract hash"
             )
-        accepted = self.repository.dispatch(
-            ActionEnvelope(
-                action_type="ACCEPT_NULL_EXECUTION",
-                workflow_id=node.workflow_id,
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=node.aggregate_id,
-                actor="minion-v2-manager",
-                expected_version=node.version,
-                idempotency_key=(
-                    f"effect:{effect['effect_key']}:null-execution"
-                ),
-                payload={
-                    "candidate_ref": candidate_ref.to_dict(),
-                    "candidate_digest": candidate_digest,
-                    "verification_artifact_ref": (
-                        verification_ref.to_dict()
-                    ),
-                    "graph_contract_hash": graph_contract_hash,
-                    "output_hashes": {},
-                    "null_execution": True,
-                },
-            )
-        ).snapshot
         module_name = str(
             node.payload.get("module_name")
             or node.payload.get("unit_id")
             or ""
         )
         coordinator = WorkflowCoordinator(self.repository)
-        coordinator.accept_null_node(
-            workflow_id=node.workflow_id,
-            node_name=module_name,
-            product_ref=candidate_ref.sha256,
-            input_fingerprint=str(effect["effect_key"]),
-        )
+        with self.repository.transaction() as connection:
+            accepted = self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="ACCEPT_NULL_EXECUTION",
+                    workflow_id=node.workflow_id,
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node.aggregate_id,
+                    actor="minion-v2-manager",
+                    expected_version=node.version,
+                    idempotency_key=(
+                        f"effect:{effect['effect_key']}:null-execution"
+                    ),
+                    payload={
+                        "candidate_ref": candidate_ref.to_dict(),
+                        "candidate_digest": candidate_digest,
+                        "verification_artifact_ref": (
+                            verification_ref.to_dict()
+                        ),
+                        "graph_contract_hash": graph_contract_hash,
+                        "output_hashes": {},
+                        "null_execution": True,
+                    },
+                ),
+                _connection=connection,
+            ).snapshot
+            coordinator.accept_null_node(
+                workflow_id=node.workflow_id,
+                node_name=module_name,
+                product_ref=candidate_ref.sha256,
+                input_fingerprint=str(effect["effect_key"]),
+                _connection=connection,
+            )
         return {
             "status": "accepted",
             "node_run_id": accepted.aggregate_id,
@@ -1073,6 +1150,19 @@ class SemanticOrchestrator:
                     self._release_background_business_lease(effect)
                     await asyncio.sleep(5.0)
                     continue
+                if (
+                    _assignment_has_durable_submission(assignment)
+                    and _is_transient_sqlite_lock(exc)
+                ):
+                    # The model output is already durable and recovery can
+                    # replay it without another LLM turn.  A transient
+                    # repository lock after that boundary is reconciliation
+                    # debt, not evidence that the role failed.
+                    self._release_background_business_lease(effect)
+                    return {
+                        "provider_request_id": assignment_id,
+                        "status": "reconciliation_deferred",
+                    }
                 self._release_background_business_lease(effect)
                 return self._settle_background_role_failure(
                     effect,
@@ -1173,9 +1263,38 @@ class SemanticOrchestrator:
 
         effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
         assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
-        if not assignment_id:
-            return None
-        assignment = self.repository.read_role_assignment(assignment_id)
+        assignment = (
+            self.repository.read_role_assignment(assignment_id)
+            if assignment_id
+            else None
+        )
+        if assignment is None and effect_key:
+            # The effect-to-assignment index is intentionally an in-memory
+            # accelerator.  After a manager restart the durable assignment is
+            # still the logical coroutine's owner, so recover it from the
+            # execution spec instead of creating a second assignment in the
+            # same role session.
+            candidates: list[dict[str, Any]] = []
+            for candidate in self.repository.list_role_assignments(
+                workflow_id=snapshot.workflow_id
+            ):
+                execution_spec = dict(candidate.get("execution_spec") or {})
+                if str(
+                    execution_spec.get("effect_key")
+                    or execution_spec.get("effect_id")
+                    or ""
+                ) != effect_key:
+                    continue
+                candidates.append(dict(candidate))
+            if len(candidates) > 1:
+                raise SubmissionInvariantError(
+                    "logical role effect has multiple durable assignments"
+                )
+            if candidates:
+                assignment = candidates[0]
+                assignment_id = str(assignment.get("assignment_id") or "")
+                if assignment_id:
+                    self._assignment_ids_by_effect[effect_key] = assignment_id
         if assignment is None:
             return None
         expected = (
@@ -1497,38 +1616,43 @@ class SemanticOrchestrator:
                 }
             try:
                 failure_generation = max(0, int(snapshot.version))
-                self.repository.dispatch(
-                    ActionEnvelope(
-                        action_type="ROLE_FAILED",
-                        workflow_id=snapshot.workflow_id,
-                        aggregate_type=snapshot.aggregate_type,
-                        aggregate_id=snapshot.aggregate_id,
-                        actor="minion-v2-worker-supervisor",
-                        expected_version=snapshot.version,
-                        # One durable receipt may be replayed after an operator
-                        # resolves triage.  Deduplicate retries inside the
-                        # current aggregate generation without mistaking a
-                        # later recovery cycle for the already-settled failure.
-                        idempotency_key=(
-                            f"worker-failed:{assignment_id}:"
-                            f"generation-{failure_generation}"
-                        ),
-                        payload={
-                            "failure_artifact_ref": failure_ref.to_dict(),
-                            "blocker": {
-                                "kind": "role_failure",
-                                "summary": error_text,
-                                "role": str(current_assignment.get("role") or ""),
-                                "attempt_count": len(attempts),
+                with self.repository.transaction() as connection:
+                    self.repository.dispatch(
+                        ActionEnvelope(
+                            action_type="ROLE_FAILED",
+                            workflow_id=snapshot.workflow_id,
+                            aggregate_type=snapshot.aggregate_type,
+                            aggregate_id=snapshot.aggregate_id,
+                            actor="minion-v2-worker-supervisor",
+                            expected_version=snapshot.version,
+                            # One durable receipt may be replayed after an operator
+                            # resolves triage.  Deduplicate retries inside the
+                            # current aggregate generation without mistaking a
+                            # later recovery cycle for the already-settled failure.
+                            idempotency_key=(
+                                f"worker-failed:{assignment_id}:"
+                                f"generation-{failure_generation}"
+                            ),
+                            payload={
+                                "failure_artifact_ref": failure_ref.to_dict(),
+                                "blocker": {
+                                    "kind": "role_failure",
+                                    "summary": error_text,
+                                    "role": str(current_assignment.get("role") or ""),
+                                    "attempt_count": len(attempts),
+                                },
                             },
-                        },
-                    ),
-                    role_assignment_id=assignment_id,
-                    role_submission_payload_hash=str(
-                        current_assignment["submission_payload_hash"]
-                    ),
-                )
-                self._require_cycle_triage(snapshot)
+                        ),
+                        role_assignment_id=assignment_id,
+                        role_submission_payload_hash=str(
+                            current_assignment["submission_payload_hash"]
+                        ),
+                        _connection=connection,
+                    )
+                    self._require_cycle_triage(
+                        snapshot,
+                        _connection=connection,
+                    )
                 return {
                     "provider_request_id": assignment_id,
                     "status": "triage_required",
@@ -1537,11 +1661,17 @@ class SemanticOrchestrator:
                 continue
         raise DeferredEffectError("role failure receipt settlement lost repeated CAS races")
 
-    def _require_cycle_triage(self, snapshot: AggregateSnapshot) -> None:
+    def _require_cycle_triage(
+        self,
+        snapshot: AggregateSnapshot,
+        *,
+        _connection=None,
+    ) -> None:
         coordinator = WorkflowCoordinator(self.repository)
         if snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
             coordinator.require_plan_triage(
-                workflow_id=snapshot.workflow_id
+                workflow_id=snapshot.workflow_id,
+                _connection=_connection,
             )
         elif snapshot.aggregate_type == AggregateType.DAG_NODE_RUN:
             coordinator.require_node_triage(
@@ -1551,6 +1681,7 @@ class SemanticOrchestrator:
                     or snapshot.payload.get("unit_id")
                     or ""
                 ),
+                _connection=_connection,
             )
 
     async def recover_background_assignments(self) -> int:
@@ -1729,24 +1860,38 @@ class SemanticOrchestrator:
         }
         if implementation:
             payload["candidate_cycle"] = cycle
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type=action_type,
-                workflow_id=node.workflow_id,
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=node.aggregate_id,
-                actor="minion-v2-scheduler",
-                expected_version=node.version,
-                idempotency_key=f"effect:{effect['effect_key']}:admit",
-                payload=payload,
-            )
-        )
-        self._start_graph_cycle_assignment(
-            node=node,
-            effect=effect,
-            action_type=action_type,
-            implementation=implementation,
-        )
+        try:
+            with self.repository.transaction() as connection:
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type=action_type,
+                        workflow_id=node.workflow_id,
+                        aggregate_type=AggregateType.DAG_NODE_RUN,
+                        aggregate_id=node.aggregate_id,
+                        actor="minion-v2-scheduler",
+                        expected_version=node.version,
+                        idempotency_key=f"effect:{effect['effect_key']}:admit",
+                        payload=payload,
+                    ),
+                    _connection=connection,
+                )
+                self._start_graph_cycle_assignment(
+                    node=node,
+                    effect=effect,
+                    action_type=action_type,
+                    implementation=implementation,
+                    _connection=connection,
+                )
+        except BaseException:
+            try:
+                self.repository.release_lease(
+                    lease_resource,
+                    invocation_id,
+                    lease.fencing_token,
+                )
+            except (LeaseConflict, StaleFencingToken):
+                pass
+            raise
         return {"provider_request_id": invocation_id}
 
     def _start_graph_cycle_assignment(
@@ -1756,6 +1901,7 @@ class SemanticOrchestrator:
         effect: Mapping[str, Any],
         action_type: str,
         implementation: bool,
+        _connection=None,
     ) -> None:
         module_name = str(
             node.payload.get("module_name")
@@ -1764,7 +1910,8 @@ class SemanticOrchestrator:
         )
         coordinator = WorkflowCoordinator(self.repository)
         cycle = coordinator.execution(
-            workflow_id=node.workflow_id
+            workflow_id=node.workflow_id,
+            _connection=_connection,
         ).cycles[module_name]
         coordinator.start_assignment(
             workflow_id=node.workflow_id,
@@ -1783,6 +1930,7 @@ class SemanticOrchestrator:
                 else AssignmentKind.INITIAL
             ),
             input_fingerprint=str(effect["effect_key"]),
+            _connection=_connection,
         )
 
     def _install_verifier_tests_for_repair(
@@ -1998,26 +2146,37 @@ class SemanticOrchestrator:
                 "workspace_path": str(workspace),
             },
         )
-        rebound = self.repository.dispatch(
-            ActionEnvelope(
-                action_type=action_type,
-                workflow_id=node.workflow_id,
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=node.aggregate_id,
-                actor="minion-v2-recovery",
-                expected_version=node.version,
-                idempotency_key=f"rebind:{node.aggregate_id}:{action_type}:{lease.fencing_token}",
-                payload={
-                    "fencing_token": lease.fencing_token,
-                    "active_worker_id": invocation_id,
-                    "lease_resource_key": lease_resource,
-                    "active_role": activation.role.value,
-                    "active_role_mode": activation.mode.value,
-                },
-            )
-        ).snapshot
-        await self._ensure_node_snapshot_lock(rebound)
-        return rebound
+        try:
+            rebound = self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=node.workflow_id,
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node.aggregate_id,
+                    actor="minion-v2-recovery",
+                    expected_version=node.version,
+                    idempotency_key=f"rebind:{node.aggregate_id}:{action_type}:{lease.fencing_token}",
+                    payload={
+                        "fencing_token": lease.fencing_token,
+                        "active_worker_id": invocation_id,
+                        "lease_resource_key": lease_resource,
+                        "active_role": activation.role.value,
+                        "active_role_mode": activation.mode.value,
+                    },
+                )
+            ).snapshot
+            await self._ensure_node_snapshot_lock(rebound)
+            return rebound
+        except BaseException:
+            try:
+                self.repository.release_lease(
+                    lease_resource,
+                    invocation_id,
+                    lease.fencing_token,
+                )
+            except (LeaseConflict, StaleFencingToken):
+                pass
+            raise
 
     async def _ensure_node_snapshot_lock(self, node: AggregateSnapshot) -> None:
         if node.state != "SNAPSHOTTING" or self._worktree_locks.is_held(node.aggregate_id):
@@ -2049,24 +2208,35 @@ class SemanticOrchestrator:
                 "mode": RoleMode.STANDALONE.value,
             },
         )
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="START_REVIEW",
-                workflow_id=review.workflow_id,
-                aggregate_type=AggregateType.STANDALONE_REVIEW,
-                aggregate_id=review.aggregate_id,
-                actor="minion-v2-scheduler",
-                expected_version=review.version,
-                idempotency_key=f"effect:{effect['effect_key']}:start",
-                payload={
-                    "fencing_token": lease.fencing_token,
-                    "active_worker_id": invocation_id,
-                    "lease_resource_key": lease_resource,
-                    "active_role": OrchestrationRole.REVIEWER.value,
-                    "active_role_mode": RoleMode.STANDALONE.value,
-                },
+        try:
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="START_REVIEW",
+                    workflow_id=review.workflow_id,
+                    aggregate_type=AggregateType.STANDALONE_REVIEW,
+                    aggregate_id=review.aggregate_id,
+                    actor="minion-v2-scheduler",
+                    expected_version=review.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:start",
+                    payload={
+                        "fencing_token": lease.fencing_token,
+                        "active_worker_id": invocation_id,
+                        "lease_resource_key": lease_resource,
+                        "active_role": OrchestrationRole.REVIEWER.value,
+                        "active_role_mode": RoleMode.STANDALONE.value,
+                    },
+                )
             )
-        )
+        except BaseException:
+            try:
+                self.repository.release_lease(
+                    lease_resource,
+                    invocation_id,
+                    lease.fencing_token,
+                )
+            except (LeaseConflict, StaleFencingToken):
+                pass
+            raise
         return {"provider_request_id": invocation_id}
 
     async def _run_implementation(self, effect: Mapping[str, Any], *, repair: bool) -> Mapping[str, Any]:
@@ -2465,37 +2635,57 @@ class SemanticOrchestrator:
                 self._worktree_locks.release(node.aggregate_id)
         else:
             raise ValueError(f"unsupported candidate adapter: {adapter}")
-        current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="CANDIDATE_SNAPSHOTTED",
-                workflow_id=node.workflow_id,
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=node.aggregate_id,
-                actor="minion-v2-manager",
-                expected_version=current.version,
-                idempotency_key=f"candidate:{candidate_ref.sha256}",
-                payload={
-                    "candidate_ref": candidate_ref.to_dict(),
-                    "candidate_digest": candidate_digest,
-                    "workspace_fingerprint": str(node.payload.get("workspace_fingerprint") or ""),
-                    "historical_repair_bill_refs": _append_ref(
-                        node.payload.get("historical_repair_bill_refs"),
-                        node.payload.get("repair_bill_ref"),
+        try:
+            with self.repository.transaction() as connection:
+                current = self.repository.read_snapshot(
+                    AggregateType.DAG_NODE_RUN,
+                    node.aggregate_id,
+                    _connection=connection,
+                )
+                if current is None:
+                    raise SubmissionInvariantError(
+                        "candidate node disappeared before atomic publication"
+                    )
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="CANDIDATE_SNAPSHOTTED",
+                        workflow_id=node.workflow_id,
+                        aggregate_type=AggregateType.DAG_NODE_RUN,
+                        aggregate_id=node.aggregate_id,
+                        actor="minion-v2-manager",
+                        expected_version=current.version,
+                        idempotency_key=f"candidate:{candidate_ref.sha256}",
+                        payload={
+                            "candidate_ref": candidate_ref.to_dict(),
+                            "candidate_digest": candidate_digest,
+                            "workspace_fingerprint": str(node.payload.get("workspace_fingerprint") or ""),
+                            "historical_repair_bill_refs": _append_ref(
+                                node.payload.get("historical_repair_bill_refs"),
+                                node.payload.get("repair_bill_ref"),
+                            ),
+                        },
                     ),
-                },
-            )
-        )
-        WorkflowCoordinator(self.repository).producer_submitted(
-            workflow_id=node.workflow_id,
-            node_name=str(
-                node.payload.get("module_name")
-                or node.payload.get("unit_id")
-                or ""
-            ),
-            product_ref=candidate_ref.sha256,
-        )
-        self.repository.release_lease(lease_resource, invocation_id, fencing_token)
+                    _connection=connection,
+                )
+                WorkflowCoordinator(self.repository).producer_submitted(
+                    workflow_id=node.workflow_id,
+                    node_name=str(
+                        node.payload.get("module_name")
+                        or node.payload.get("unit_id")
+                        or ""
+                    ),
+                    product_ref=candidate_ref.sha256,
+                    _connection=connection,
+                )
+        finally:
+            try:
+                self.repository.release_lease(
+                    lease_resource,
+                    invocation_id,
+                    fencing_token,
+                )
+            except (LeaseConflict, StaleFencingToken):
+                pass
         return {"result_artifact_ref": candidate_ref.to_dict()}
 
     async def _run_verification(
@@ -2931,6 +3121,20 @@ class SemanticOrchestrator:
         invocation_id = str(pending.get("invocation_id") or "")
         lease_resource = str(pending.get("lease_resource_key") or "")
         fencing_token = int(pending.get("fencing_token") or 0)
+        claimed_rebind = False
+
+        def release_rebind() -> None:
+            if not claimed_rebind:
+                return
+            try:
+                self.repository.release_lease(
+                    lease_resource,
+                    invocation_id,
+                    fencing_token,
+                )
+            except (LeaseConflict, StaleFencingToken):
+                pass
+
         try:
             self.repository.assert_fencing_token(
                 lease_resource,
@@ -2954,22 +3158,27 @@ class SemanticOrchestrator:
                 },
             )
             fencing_token = rebound.fencing_token
+            claimed_rebind = True
         self._revoked_tokens.add((invocation_id, fencing_token))
         lease = self.repository.read_lease(lease_resource)
         process_group = int(
             dict((lease or {}).get("metadata") or {}).get("process_group_id") or 0
         )
-        await self._close_owned_process(
-            invocation_id,
-            process_group=process_group,
-            worker_label="verifier",
-        )
         review_workspace = Path(str(pending.get("review_workspace") or ""))
-        await self._release_managed_lsp_workspace(review_workspace)
-        _raise_if_workspace_held(
-            review_workspace,
-            "a live process still holds the verifier worktree",
-        )
+        try:
+            await self._close_owned_process(
+                invocation_id,
+                process_group=process_group,
+                worker_label="verifier",
+            )
+            await self._release_managed_lsp_workspace(review_workspace)
+            _raise_if_workspace_held(
+                review_workspace,
+                "a live process still holds the verifier worktree",
+            )
+        except BaseException:
+            release_rebind()
+            raise
         lock_key = f"verification:{node.aggregate_id}"
         self._worktree_locks.release(lock_key)
         lock_path = self._worktree_locks.acquire(lock_key, review_workspace)
@@ -2989,6 +3198,7 @@ class SemanticOrchestrator:
                 )
         except BaseException:
             self._worktree_locks.release(lock_key)
+            release_rebind()
             raise
         current = self.repository.read_snapshot(
             AggregateType.DAG_NODE_RUN,
@@ -2996,25 +3206,31 @@ class SemanticOrchestrator:
         )
         if current is None:
             self._worktree_locks.release(lock_key)
+            release_rebind()
             raise SubmissionInvariantError("verification node disappeared while quiescing")
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="VERIFIER_QUIESCED",
-                workflow_id=current.workflow_id,
-                aggregate_type=AggregateType.DAG_NODE_RUN,
-                aggregate_id=current.aggregate_id,
-                actor="minion-v2-manager",
-                expected_version=current.version,
-                idempotency_key=f"effect:{effect['effect_key']}:quiesced",
-                payload={
-                    "fencing_token": fencing_token,
-                    "process_group_reaped": True,
-                    "exclusive_workspace_lock": True,
-                    "workspace_fingerprint": fingerprint,
-                    "workspace_lock_path": str(lock_path),
-                },
+        try:
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="VERIFIER_QUIESCED",
+                    workflow_id=current.workflow_id,
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=current.aggregate_id,
+                    actor="minion-v2-manager",
+                    expected_version=current.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:quiesced",
+                    payload={
+                        "fencing_token": fencing_token,
+                        "process_group_reaped": True,
+                        "exclusive_workspace_lock": True,
+                        "workspace_fingerprint": fingerprint,
+                        "workspace_lock_path": str(lock_path),
+                    },
+                )
             )
-        )
+        except BaseException:
+            self._worktree_locks.release(lock_key)
+            release_rebind()
+            raise
         return {}
 
     def _snapshot_semantic_verification(
@@ -3272,87 +3488,141 @@ class SemanticOrchestrator:
         if current is None:
             raise SubmissionInvariantError("verification node disappeared before verdict")
         unknown_policy = _manager_unknown_policy(node)
-        verdict_result = VerificationService(
-            self.repository,
-            self.service.artifacts,
-        ).submit_verdict(
-            node=current,
-            verification_ref=report_ref,
-            status=status,
-            actor=invocation_id,
-            unknown_policy=unknown_policy,
-            repair_bill_ref=repair_ref,
-            finding_fingerprint_value=fingerprint if repair_ref is not None else "",
-            candidate_tree_hash=_candidate_tree_fingerprint(
-                accepted_candidate,
-                fallback=accepted_candidate_digest,
-            ),
-            defect_kind=defect_kind,
-            dependency_node_id=(
-                repair_node_ids[0]
-                if repair_node_ids and defect_kind == DefectKind.DEPENDENCY
-                else ""
-            ),
-            dependency_node_ids=(
-                repair_node_ids
-                if defect_kind == DefectKind.DEPENDENCY
-                else ()
-            ),
-            module_node_id=module_node_id,
-            module_node_ids=(repair_node_ids if module_node_id else ()),
-            system_fingerprint="",
-            accepted_candidate_ref=(
-                accepted_candidate_ref
-                if not scratch_only
-                and accepted_candidate_digest != candidate_digest
-                else None
-            ),
-            accepted_candidate_digest=(
-                accepted_candidate_digest
-                if not scratch_only
-                and accepted_candidate_digest != candidate_digest
-                else ""
-            ),
-        )
         coordinator = WorkflowCoordinator(self.repository)
         node_name = str(
             node.payload.get("module_name")
             or node.payload.get("unit_id")
             or ""
         )
-        if verdict_result.snapshot.state == "TRIAGE_REQUIRED":
-            coordinator.require_node_triage(
-                workflow_id=node.workflow_id,
-                node_name=node_name,
+        # The node action below publishes effects which may be consumed by a
+        # separate Manager loop immediately.  Advance the graph-cycle cursor
+        # before dispatching that action; otherwise a REVIEW_FAILED effect can
+        # start repair while the cycle still says CHECKER_READY.  This is a
+        # prediction of the same mechanical branch used by VerificationService
+        # (unknown policy and no-progress are the only blocking branches), not
+        # a second semantic verdict.
+        failure_history = list(current.payload.get("failure_history") or [])
+        if status == VerificationStatus.FAIL:
+            failure_history.append(
+                {
+                    "finding_fingerprint": fingerprint,
+                    "candidate_tree_hash": _candidate_tree_fingerprint(
+                        accepted_candidate,
+                        fallback=accepted_candidate_digest,
+                    ),
+                }
             )
-        else:
-            coordinator.checker_verdict(
-                workflow_id=node.workflow_id,
-                node_name=node_name,
-                accepted=verdict_result.snapshot.state == "ACCEPTED",
-                finding_refs=(
-                    (repair_ref.sha256,)
-                    if repair_ref is not None
-                    else ()
-                ),
-                finding_class=(
-                    None
-                    if verdict_result.snapshot.state == "ACCEPTED"
-                    else FindingClass(defect_kind.value)
-                ),
-                dependency_node=(
-                    target_modules[0]
-                    if target_modules
-                    and defect_kind == DefectKind.DEPENDENCY
-                    else ""
-                ),
-                accepted_product_ref=(
-                    accepted_candidate_ref.sha256
-                    if verdict_result.snapshot.state == "ACCEPTED"
-                    else ""
-                ),
-            )
-        self.repository.release_lease(lease_resource, invocation_id, fencing_token)
+        blocking_unknown = (
+            status == VerificationStatus.UNKNOWN and not unknown_policy.allows()
+        )
+        blocking_no_progress = (
+            status == VerificationStatus.FAIL
+            and no_progress_detected(failure_history)
+        )
+        try:
+            with self.repository.transaction() as connection:
+                if blocking_unknown or blocking_no_progress:
+                    coordinator.require_node_triage(
+                        workflow_id=node.workflow_id,
+                        node_name=node_name,
+                        _connection=connection,
+                    )
+                else:
+                    coordinator.checker_verdict(
+                        workflow_id=node.workflow_id,
+                        node_name=node_name,
+                        accepted=(
+                            status in {
+                                VerificationStatus.PASS,
+                                VerificationStatus.NOT_APPLICABLE,
+                            }
+                            or status == VerificationStatus.UNKNOWN
+                        ),
+                        finding_refs=(
+                            (repair_ref.sha256,)
+                            if repair_ref is not None
+                            else ()
+                        ),
+                        finding_class=(
+                            None
+                            if status
+                            in {
+                                VerificationStatus.PASS,
+                                VerificationStatus.NOT_APPLICABLE,
+                                VerificationStatus.UNKNOWN,
+                            }
+                            else FindingClass(defect_kind.value)
+                        ),
+                        dependency_node=(
+                            target_modules[0]
+                            if target_modules
+                            and defect_kind == DefectKind.DEPENDENCY
+                            else ""
+                        ),
+                        accepted_product_ref=(
+                            accepted_candidate_ref.sha256
+                            if status
+                            in {
+                                VerificationStatus.PASS,
+                                VerificationStatus.NOT_APPLICABLE,
+                                VerificationStatus.UNKNOWN,
+                            }
+                            else ""
+                        ),
+                        _connection=connection,
+                    )
+                verdict_result = VerificationService(
+                    self.repository,
+                    self.service.artifacts,
+                ).submit_verdict(
+                    node=current,
+                    verification_ref=report_ref,
+                    status=status,
+                    actor=invocation_id,
+                    unknown_policy=unknown_policy,
+                    repair_bill_ref=repair_ref,
+                    finding_fingerprint_value=fingerprint if repair_ref is not None else "",
+                    candidate_tree_hash=_candidate_tree_fingerprint(
+                        accepted_candidate,
+                        fallback=accepted_candidate_digest,
+                    ),
+                    defect_kind=defect_kind,
+                    dependency_node_id=(
+                        repair_node_ids[0]
+                        if repair_node_ids and defect_kind == DefectKind.DEPENDENCY
+                        else ""
+                    ),
+                    dependency_node_ids=(
+                        repair_node_ids
+                        if defect_kind == DefectKind.DEPENDENCY
+                        else ()
+                    ),
+                    module_node_id=module_node_id,
+                    module_node_ids=(repair_node_ids if module_node_id else ()),
+                    system_fingerprint="",
+                    accepted_candidate_ref=(
+                        accepted_candidate_ref
+                        if not scratch_only
+                        and accepted_candidate_digest != candidate_digest
+                        else None
+                    ),
+                    accepted_candidate_digest=(
+                        accepted_candidate_digest
+                        if not scratch_only
+                        and accepted_candidate_digest != candidate_digest
+                        else ""
+                    ),
+                    _connection=connection,
+                )
+        finally:
+            try:
+                self.repository.release_lease(
+                    lease_resource,
+                    invocation_id,
+                    fencing_token,
+                )
+            except (LeaseConflict, StaleFencingToken):
+                pass
         return {
             "provider_request_id": invocation_id,
             "result_artifact_ref": report_ref.to_dict(),
@@ -3420,26 +3690,29 @@ class SemanticOrchestrator:
         )
         if confirm:
             action_type = "CANCEL_CONFIRMED" if cancel or current.state == "CANCEL_REQUESTED" else "PAUSE_CONFIRMED"
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type=action_type,
-                    workflow_id=node.workflow_id,
-                    aggregate_type=AggregateType.DAG_NODE_RUN,
-                    aggregate_id=node.aggregate_id,
-                    actor="minion-v2-manager",
-                    expected_version=current.version,
-                    idempotency_key=f"effect:{effect['effect_key']}:stopped",
+            with self.repository.transaction() as connection:
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type=action_type,
+                        workflow_id=node.workflow_id,
+                        aggregate_type=AggregateType.DAG_NODE_RUN,
+                        aggregate_id=node.aggregate_id,
+                        actor="minion-v2-manager",
+                        expected_version=current.version,
+                        idempotency_key=f"effect:{effect['effect_key']}:stopped",
+                    ),
+                    _connection=connection,
                 )
-            )
-            WorkflowCoordinator(self.repository).confirm_node_control(
-                workflow_id=node.workflow_id,
-                node_name=str(
-                    node.payload.get("module_name")
-                    or node.payload.get("unit_id")
-                    or ""
-                ),
-                cancel=action_type == "CANCEL_CONFIRMED",
-            )
+                WorkflowCoordinator(self.repository).confirm_node_control(
+                    workflow_id=node.workflow_id,
+                    node_name=str(
+                        node.payload.get("module_name")
+                        or node.payload.get("unit_id")
+                        or ""
+                    ),
+                    cancel=action_type == "CANCEL_CONFIRMED",
+                    _connection=connection,
+                )
         fencing_token = int(node.payload.get("fencing_token") or 0)
         if lease_resource and invocation_id and fencing_token:
             try:
@@ -3483,22 +3756,25 @@ class SemanticOrchestrator:
         if confirm:
             current = self.repository.read_snapshot(snapshot.aggregate_type, snapshot.aggregate_id)
             action_type = "CANCEL_CONFIRMED" if cancel else "PAUSE_CONFIRMED"
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type=action_type,
-                    workflow_id=snapshot.workflow_id,
-                    aggregate_type=snapshot.aggregate_type,
-                    aggregate_id=snapshot.aggregate_id,
-                    actor="minion-v2-manager",
-                    expected_version=current.version,
-                    idempotency_key=f"effect:{effect['effect_key']}:stopped",
+            with self.repository.transaction() as connection:
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type=action_type,
+                        workflow_id=snapshot.workflow_id,
+                        aggregate_type=snapshot.aggregate_type,
+                        aggregate_id=snapshot.aggregate_id,
+                        actor="minion-v2-manager",
+                        expected_version=current.version,
+                        idempotency_key=f"effect:{effect['effect_key']}:stopped",
+                    ),
+                    _connection=connection,
                 )
-            )
-            if snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
-                WorkflowCoordinator(self.repository).confirm_plan_control(
-                    workflow_id=snapshot.workflow_id,
-                    cancel=cancel,
-                )
+                if snapshot.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
+                    WorkflowCoordinator(self.repository).confirm_plan_control(
+                        workflow_id=snapshot.workflow_id,
+                        cancel=cancel,
+                        _connection=connection,
+                    )
         fencing_token = int(snapshot.payload.get("fencing_token") or 0)
         if lease_resource and invocation_id and fencing_token:
             try:
@@ -3965,24 +4241,35 @@ class SemanticOrchestrator:
                 "role": "reviewer",
             },
         )
-        return self.repository.dispatch(
-            ActionEnvelope(
-                action_type="REBIND_REVIEWER",
-                workflow_id=review.workflow_id,
-                aggregate_type=AggregateType.STANDALONE_REVIEW,
-                aggregate_id=review.aggregate_id,
-                actor="minion-v2-recovery",
-                expected_version=review.version,
-                idempotency_key=f"rebind:{review.aggregate_id}:reviewer:{lease.fencing_token}",
-                payload={
-                    "fencing_token": lease.fencing_token,
-                    "active_worker_id": invocation_id,
-                    "lease_resource_key": lease_resource,
-                    "active_role": OrchestrationRole.REVIEWER.value,
-                    "active_role_mode": RoleMode.STANDALONE.value,
-                },
-            )
-        ).snapshot
+        try:
+            return self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="REBIND_REVIEWER",
+                    workflow_id=review.workflow_id,
+                    aggregate_type=AggregateType.STANDALONE_REVIEW,
+                    aggregate_id=review.aggregate_id,
+                    actor="minion-v2-recovery",
+                    expected_version=review.version,
+                    idempotency_key=f"rebind:{review.aggregate_id}:reviewer:{lease.fencing_token}",
+                    payload={
+                        "fencing_token": lease.fencing_token,
+                        "active_worker_id": invocation_id,
+                        "lease_resource_key": lease_resource,
+                        "active_role": OrchestrationRole.REVIEWER.value,
+                        "active_role_mode": RoleMode.STANDALONE.value,
+                    },
+                )
+            ).snapshot
+        except BaseException:
+            try:
+                self.repository.release_lease(
+                    lease_resource,
+                    invocation_id,
+                    lease.fencing_token,
+                )
+            except (LeaseConflict, StaleFencingToken):
+                pass
+            raise
 
     async def _publish_standalone_report(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         review = self._effect_snapshot(effect)
@@ -3996,7 +4283,6 @@ class SemanticOrchestrator:
                     "workflow_id": review.workflow_id,
                     "standalone_review_id": review.aggregate_id,
                     "report_ref": report_ref,
-                    "route": dict(workflow.payload.get("control_route") or {}),
                     "summary": _compile_standalone_review_markdown(report),
                 }
             )
@@ -4088,9 +4374,13 @@ class SemanticOrchestrator:
         workflow_id: str,
         effect: Mapping[str, Any],
         slot: CycleSlot,
+        _connection=None,
     ) -> None:
         coordinator = WorkflowCoordinator(self.repository)
-        cycle = coordinator.ensure_plan_cycle(workflow_id=workflow_id)
+        cycle = coordinator.ensure_plan_cycle(
+            workflow_id=workflow_id,
+            _connection=_connection,
+        )
         coordinator.start_plan_assignment(
             workflow_id=workflow_id,
             slot=slot,
@@ -4100,6 +4390,7 @@ class SemanticOrchestrator:
                 else AssignmentKind.INITIAL
             ),
             input_fingerprint=str(effect["effect_key"]),
+            _connection=_connection,
         )
 
     async def _run_architecture_stage(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -4149,49 +4440,43 @@ class SemanticOrchestrator:
             },
         )
         try:
-            if start_action in self.repository.engine.legal_actions(AggregateType.ARCHITECTURE_REVISION, revision.state):
-                revision = self.repository.dispatch(
-                    ActionEnvelope(
-                        action_type=start_action,
-                        workflow_id=revision.workflow_id,
-                        aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                        aggregate_id=revision.aggregate_id,
-                        actor=invocation_id,
-                        expected_version=revision.version,
-                        idempotency_key=f"effect:{effect['effect_key']}:start",
-                        payload={
-                            "fencing_token": lease.fencing_token,
-                            "active_worker_id": invocation_id,
-                            "lease_resource_key": lease_resource,
-                            "active_role": OrchestrationRole.ARCHITECT.value,
-                            "active_role_mode": activation.mode.value,
-                        },
-                    )
-                ).snapshot
-            elif revision.state == running_state:
-                revision = self.repository.dispatch(
-                    ActionEnvelope(
-                        action_type=rebind_action,
-                        workflow_id=revision.workflow_id,
-                        aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                        aggregate_id=revision.aggregate_id,
-                        actor=invocation_id,
-                        expected_version=revision.version,
-                        idempotency_key=f"effect:{effect['effect_key']}:rebind:{lease.fencing_token}",
-                        payload={
-                            "fencing_token": lease.fencing_token,
-                            "active_worker_id": invocation_id,
-                            "lease_resource_key": lease_resource,
-                            "active_role": OrchestrationRole.ARCHITECT.value,
-                            "active_role_mode": activation.mode.value,
-                        },
-                    )
-                ).snapshot
-            self._start_plan_cycle_assignment(
-                workflow_id=revision.workflow_id,
-                effect=effect,
-                slot=CycleSlot.PRODUCER,
+            action_type = (
+                start_action
+                if start_action in self.repository.engine.legal_actions(
+                    AggregateType.ARCHITECTURE_REVISION,
+                    revision.state,
+                )
+                else rebind_action
             )
+            with self.repository.transaction() as connection:
+                revision = self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type=action_type,
+                        workflow_id=revision.workflow_id,
+                        aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                        aggregate_id=revision.aggregate_id,
+                        actor=invocation_id,
+                        expected_version=revision.version,
+                        idempotency_key=(
+                            f"effect:{effect['effect_key']}:{action_type.lower()}:"
+                            f"{lease.fencing_token}"
+                        ),
+                        payload={
+                            "fencing_token": lease.fencing_token,
+                            "active_worker_id": invocation_id,
+                            "lease_resource_key": lease_resource,
+                            "active_role": OrchestrationRole.ARCHITECT.value,
+                            "active_role_mode": activation.mode.value,
+                        },
+                    ),
+                    _connection=connection,
+                ).snapshot
+                self._start_plan_cycle_assignment(
+                    workflow_id=revision.workflow_id,
+                    effect=effect,
+                    slot=CycleSlot.PRODUCER,
+                    _connection=connection,
+                )
             prompt, reference_refs = self._architecture_stage_prompt(stage, revision)
             terminal, prompt_ref, terminal_ref = await self._run_profile(
                 effect=effect,
@@ -4267,35 +4552,38 @@ class SemanticOrchestrator:
                 },
                 child_refs=((result_ref.sha256, "architecture_contract"),),
             )
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="DATA_ARCHITECT_COMPLETED",
+            with self.repository.transaction() as connection:
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="DATA_ARCHITECT_COMPLETED",
+                        workflow_id=revision.workflow_id,
+                        aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                        aggregate_id=revision.aggregate_id,
+                        actor="minion-v2-architect",
+                        expected_version=current.version,
+                        idempotency_key=f"architect-output:{revision.aggregate_id}:{result_ref.sha256}",
+                        payload={
+                            "requirements_ref": requirements_ref.to_dict(),
+                            "architecture_manifest_ref": result_ref.to_dict(),
+                            "architect_checklist_ref": checklist_ref.to_dict(),
+                            **(
+                                {"revision_base_manifest_ref": revision_base_manifest_ref.to_dict()}
+                                if revision_base_manifest_ref is not None
+                                else {}
+                            ),
+                        },
+                    ),
+                    **self._role_submission_settlement(
+                        effect,
+                        assignment_id=self._terminal_role_assignment_id(terminal),
+                    ),
+                    _connection=connection,
+                )
+                WorkflowCoordinator(self.repository).submit_plan_product(
                     workflow_id=revision.workflow_id,
-                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                    aggregate_id=revision.aggregate_id,
-                    actor="minion-v2-architect",
-                    expected_version=current.version,
-                    idempotency_key=f"architect-output:{revision.aggregate_id}:{result_ref.sha256}",
-                    payload={
-                        "requirements_ref": requirements_ref.to_dict(),
-                        "architecture_manifest_ref": result_ref.to_dict(),
-                        "architect_checklist_ref": checklist_ref.to_dict(),
-                        **(
-                            {"revision_base_manifest_ref": revision_base_manifest_ref.to_dict()}
-                            if revision_base_manifest_ref is not None
-                            else {}
-                        ),
-                    },
-                ),
-                **self._role_submission_settlement(
-                    effect,
-                    assignment_id=self._terminal_role_assignment_id(terminal),
-                ),
-            )
-            WorkflowCoordinator(self.repository).submit_plan_product(
-                workflow_id=revision.workflow_id,
-                product_ref=result_ref.sha256,
-            )
+                    product_ref=result_ref.sha256,
+                    _connection=connection,
+                )
             self._record_role_turn(
                 terminal=terminal,
                 invocation_id=invocation_id,
@@ -4425,46 +4713,49 @@ class SemanticOrchestrator:
                 in self.repository.engine.legal_actions(AggregateType.ARCHITECTURE_REVISION, revision.state)
                 else "REBIND_ARCHITECT"
             )
-            revision = self.repository.dispatch(
-                ActionEnvelope(
-                    action_type=start_action,
-                    workflow_id=revision.workflow_id,
-                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                    aggregate_id=revision.aggregate_id,
-                    actor=invocation_id,
-                    expected_version=revision.version,
-                    idempotency_key=f"effect:{effect['effect_key']}:{start_action.lower()}:{lease.fencing_token}",
-                    payload={
-                        "fencing_token": lease.fencing_token,
-                        "active_worker_id": invocation_id,
-                        "lease_resource_key": lease_resource,
-                        "active_role": OrchestrationRole.ARCHITECT.value,
-                        "active_role_mode": (
-                            RoleMode.REVISION.value
-                            if revision_scope is not None
-                            else RoleMode.AUTHOR.value
-                        ),
-                        "architecture_workspace_path": str(architecture_workspace.worktree),
-                        "architecture_common_git_dir": str(architecture_workspace.common_git_dir),
-                        "architecture_base_sha": architecture_workspace.base_sha,
-                        "architecture_base_tree_sha": architecture_workspace.base_tree_sha,
-                        "architecture_repository_layout": {
-                            "project_name": architecture_workspace.project_name,
-                            "project_key": architecture_workspace.project_key,
-                            "workflow_name": architecture_workspace.workflow_name,
-                            "workflow_key": architecture_workspace.workflow_key,
-                            "workflow_branch": architecture_workspace.workflow_branch,
+            with self.repository.transaction() as connection:
+                revision = self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type=start_action,
+                        workflow_id=revision.workflow_id,
+                        aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                        aggregate_id=revision.aggregate_id,
+                        actor=invocation_id,
+                        expected_version=revision.version,
+                        idempotency_key=f"effect:{effect['effect_key']}:{start_action.lower()}:{lease.fencing_token}",
+                        payload={
+                            "fencing_token": lease.fencing_token,
+                            "active_worker_id": invocation_id,
+                            "lease_resource_key": lease_resource,
+                            "active_role": OrchestrationRole.ARCHITECT.value,
+                            "active_role_mode": (
+                                RoleMode.REVISION.value
+                                if revision_scope is not None
+                                else RoleMode.AUTHOR.value
+                            ),
+                            "architecture_workspace_path": str(architecture_workspace.worktree),
+                            "architecture_common_git_dir": str(architecture_workspace.common_git_dir),
+                            "architecture_base_sha": architecture_workspace.base_sha,
+                            "architecture_base_tree_sha": architecture_workspace.base_tree_sha,
+                            "architecture_repository_layout": {
+                                "project_name": architecture_workspace.project_name,
+                                "project_key": architecture_workspace.project_key,
+                                "workflow_name": architecture_workspace.workflow_name,
+                                "workflow_key": architecture_workspace.workflow_key,
+                                "workflow_branch": architecture_workspace.workflow_branch,
+                            },
+                            "architecture_branch": architecture_workspace.architecture_branch,
+                            "workspace_snapshot_ref": architecture_workspace.workspace_snapshot_ref.to_dict(),
                         },
-                        "architecture_branch": architecture_workspace.architecture_branch,
-                        "workspace_snapshot_ref": architecture_workspace.workspace_snapshot_ref.to_dict(),
-                    },
+                    ),
+                    _connection=connection,
+                ).snapshot
+                self._start_plan_cycle_assignment(
+                    workflow_id=revision.workflow_id,
+                    effect=effect,
+                    slot=CycleSlot.PRODUCER,
+                    _connection=connection,
                 )
-            ).snapshot
-            self._start_plan_cycle_assignment(
-                workflow_id=revision.workflow_id,
-                effect=effect,
-                slot=CycleSlot.PRODUCER,
-            )
             references: dict[str, ArtifactRef] = {"task": requirements_ref}
             if finding_value:
                 references["revision_finding"] = self._publish_architecture_finding_view(
@@ -4717,35 +5008,46 @@ class SemanticOrchestrator:
                 "workspace_path": str(workspace),
             },
         )
-        rebound = self.repository.dispatch(
-            ActionEnvelope(
-                action_type=action_type,
-                workflow_id=revision.workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                aggregate_id=revision.aggregate_id,
-                actor="minion-v2-recovery",
-                expected_version=revision.version,
-                idempotency_key=f"architecture-rebind:{revision.aggregate_id}:{action_type}:{lease.fencing_token}",
-                payload={
-                    "fencing_token": lease.fencing_token,
-                    "active_worker_id": invocation_id,
-                    "lease_resource_key": lease_resource,
-                    "active_role": OrchestrationRole.ARCHITECT.value,
-                    "active_role_mode": (
-                        RoleMode.REVISION.value
-                        if self._revision_input_base_manifest_ref(revision) is not None
-                        else RoleMode.AUTHOR.value
-                    ),
-                },
-            )
-        ).snapshot
-        if rebound.state == "ARCHITECT_SNAPSHOTTING" and not self._worktree_locks.is_held(revision.aggregate_id):
-            expected = str(rebound.payload.get("workspace_fingerprint") or "")
-            current = workspace_content_fingerprint(workspace)
-            if not expected or current != expected:
-                raise RuntimeError("architecture worktree changed while snapshot worker was unavailable")
-            self._worktree_locks.acquire(revision.aggregate_id, workspace)
-        return rebound
+        try:
+            rebound = self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=revision.workflow_id,
+                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                    aggregate_id=revision.aggregate_id,
+                    actor="minion-v2-recovery",
+                    expected_version=revision.version,
+                    idempotency_key=f"architecture-rebind:{revision.aggregate_id}:{action_type}:{lease.fencing_token}",
+                    payload={
+                        "fencing_token": lease.fencing_token,
+                        "active_worker_id": invocation_id,
+                        "lease_resource_key": lease_resource,
+                        "active_role": OrchestrationRole.ARCHITECT.value,
+                        "active_role_mode": (
+                            RoleMode.REVISION.value
+                            if self._revision_input_base_manifest_ref(revision) is not None
+                            else RoleMode.AUTHOR.value
+                        ),
+                    },
+                )
+            ).snapshot
+            if rebound.state == "ARCHITECT_SNAPSHOTTING" and not self._worktree_locks.is_held(revision.aggregate_id):
+                expected = str(rebound.payload.get("workspace_fingerprint") or "")
+                current = workspace_content_fingerprint(workspace)
+                if not expected or current != expected:
+                    raise RuntimeError("architecture worktree changed while snapshot worker was unavailable")
+                self._worktree_locks.acquire(revision.aggregate_id, workspace)
+            return rebound
+        except BaseException:
+            try:
+                self.repository.release_lease(
+                    lease_resource,
+                    invocation_id,
+                    lease.fencing_token,
+                )
+            except (LeaseConflict, StaleFencingToken):
+                pass
+            raise
 
     async def _quiesce_architect_role(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         revision = await self._ensure_architecture_effect_lease(
@@ -4998,59 +5300,97 @@ class SemanticOrchestrator:
                     (finding_ref.sha256, "snapshot_finding"),
                 ),
             )
-            current = self.repository.read_snapshot(
-                AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id
-            )
-            self.repository.dispatch(
-                ActionEnvelope(
-                    action_type="ARCHITECTURE_SNAPSHOT_REJECTED",
-                    workflow_id=revision.workflow_id,
-                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                    aggregate_id=revision.aggregate_id,
-                    actor="minion-v2-manager",
-                    expected_version=current.version,
-                    idempotency_key=(
-                        f"architecture-snapshot-rejected:{revision.aggregate_id}:{finding_ref.sha256}"
-                    ),
-                    payload={
-                        "finding_artifact_ref": finding_ref.to_dict(),
-                        "architecture_repair_baseline_ref": repair_baseline_ref.to_dict(),
-                    },
-                )
-            )
-            WorkflowCoordinator(self.repository).reject_plan_product(
-                workflow_id=revision.workflow_id,
-            )
-            self._worktree_locks.release(revision.aggregate_id)
-            self.repository.release_lease(lease_resource, invocation_id, fencing_token)
+            try:
+                with self.repository.transaction() as connection:
+                    current = self.repository.read_snapshot(
+                        AggregateType.ARCHITECTURE_REVISION,
+                        revision.aggregate_id,
+                        _connection=connection,
+                    )
+                    if current is None:
+                        raise SubmissionInvariantError(
+                            "architecture revision disappeared before rejection"
+                        )
+                    self.repository.dispatch(
+                        ActionEnvelope(
+                            action_type="ARCHITECTURE_SNAPSHOT_REJECTED",
+                            workflow_id=revision.workflow_id,
+                            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                            aggregate_id=revision.aggregate_id,
+                            actor="minion-v2-manager",
+                            expected_version=current.version,
+                            idempotency_key=(
+                                f"architecture-snapshot-rejected:{revision.aggregate_id}:{finding_ref.sha256}"
+                            ),
+                            payload={
+                                "finding_artifact_ref": finding_ref.to_dict(),
+                                "architecture_repair_baseline_ref": repair_baseline_ref.to_dict(),
+                            },
+                        ),
+                        _connection=connection,
+                    )
+                    WorkflowCoordinator(self.repository).reject_plan_product(
+                        workflow_id=revision.workflow_id,
+                        _connection=connection,
+                    )
+            finally:
+                self._worktree_locks.release(revision.aggregate_id)
+                try:
+                    self.repository.release_lease(
+                        lease_resource,
+                        invocation_id,
+                        fencing_token,
+                    )
+                except (LeaseConflict, StaleFencingToken):
+                    pass
             return {"result_artifact_ref": finding_ref.to_dict(), "status": "rejected"}
         if workspace_content_fingerprint(workspace_path) != before:
             raise RuntimeError("architecture worktree content changed while the Manager created its commit")
         manifest_payload = self.service.artifacts.read_json(manifest_ref)
         effective_requirements_ref = _ref_from_mapping(manifest_payload.get("requirements_ref"))
-        current = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type="ARCHITECTURE_SNAPSHOTTED",
-                workflow_id=revision.workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                aggregate_id=revision.aggregate_id,
-                actor="minion-v2-manager",
-                expected_version=current.version,
-                idempotency_key=f"architecture-snapshot:{revision.aggregate_id}:{manifest_ref.sha256}",
-                payload={
-                    "requirements_ref": effective_requirements_ref.to_dict(),
-                    "architecture_manifest_ref": manifest_ref.to_dict(),
-                    "workspace_fingerprint": before,
-                },
-            )
-        )
-        WorkflowCoordinator(self.repository).submit_plan_product(
-            workflow_id=revision.workflow_id,
-            product_ref=manifest_ref.sha256,
-        )
-        self._worktree_locks.release(revision.aggregate_id)
-        self.repository.release_lease(lease_resource, invocation_id, fencing_token)
+        try:
+            with self.repository.transaction() as connection:
+                current = self.repository.read_snapshot(
+                    AggregateType.ARCHITECTURE_REVISION,
+                    revision.aggregate_id,
+                    _connection=connection,
+                )
+                if current is None:
+                    raise SubmissionInvariantError(
+                        "architecture revision disappeared before publication"
+                    )
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="ARCHITECTURE_SNAPSHOTTED",
+                        workflow_id=revision.workflow_id,
+                        aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                        aggregate_id=revision.aggregate_id,
+                        actor="minion-v2-manager",
+                        expected_version=current.version,
+                        idempotency_key=f"architecture-snapshot:{revision.aggregate_id}:{manifest_ref.sha256}",
+                        payload={
+                            "requirements_ref": effective_requirements_ref.to_dict(),
+                            "architecture_manifest_ref": manifest_ref.to_dict(),
+                            "workspace_fingerprint": before,
+                        },
+                    ),
+                    _connection=connection,
+                )
+                WorkflowCoordinator(self.repository).submit_plan_product(
+                    workflow_id=revision.workflow_id,
+                    product_ref=manifest_ref.sha256,
+                    _connection=connection,
+                )
+        finally:
+            self._worktree_locks.release(revision.aggregate_id)
+            try:
+                self.repository.release_lease(
+                    lease_resource,
+                    invocation_id,
+                    fencing_token,
+                )
+            except (LeaseConflict, StaleFencingToken):
+                pass
         return {"result_artifact_ref": manifest_ref.to_dict()}
 
     async def _run_architecture_review(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -5138,32 +5478,35 @@ class SemanticOrchestrator:
                 )
                 else "REBIND_ARCHITECTURE_REVIEW"
             )
-            revision = self.repository.dispatch(
-                ActionEnvelope(
-                    action_type=action_type,
-                    workflow_id=revision.workflow_id,
-                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                    aggregate_id=revision.aggregate_id,
-                    actor=invocation_id,
-                    expected_version=revision.version,
-                    idempotency_key=(
-                        f"effect:{effect['effect_key']}:"
-                        f"{action_type.lower()}:{lease.fencing_token}"
+            with self.repository.transaction() as connection:
+                revision = self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type=action_type,
+                        workflow_id=revision.workflow_id,
+                        aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                        aggregate_id=revision.aggregate_id,
+                        actor=invocation_id,
+                        expected_version=revision.version,
+                        idempotency_key=(
+                            f"effect:{effect['effect_key']}:"
+                            f"{action_type.lower()}:{lease.fencing_token}"
+                        ),
+                        payload={
+                            "fencing_token": lease.fencing_token,
+                            "active_worker_id": invocation_id,
+                            "lease_resource_key": lease_resource,
+                            "active_role": OrchestrationRole.REVIEWER.value,
+                            "active_role_mode": RoleMode.ARCHITECTURE.value,
+                        },
                     ),
-                    payload={
-                        "fencing_token": lease.fencing_token,
-                        "active_worker_id": invocation_id,
-                        "lease_resource_key": lease_resource,
-                        "active_role": OrchestrationRole.REVIEWER.value,
-                        "active_role_mode": RoleMode.ARCHITECTURE.value,
-                    },
+                    _connection=connection,
+                ).snapshot
+                self._start_plan_cycle_assignment(
+                    workflow_id=revision.workflow_id,
+                    effect=effect,
+                    slot=CycleSlot.CHECKER,
+                    _connection=connection,
                 )
-            ).snapshot
-            self._start_plan_cycle_assignment(
-                workflow_id=revision.workflow_id,
-                effect=effect,
-                slot=CycleSlot.CHECKER,
-            )
             requirements_ref = _ref_from_mapping(artifact["requirements_ref"])
             contract_view_ref = self.service.artifacts.put_json(
                 {
@@ -5360,7 +5703,6 @@ class SemanticOrchestrator:
             payload = dict(self.service.artifacts.read_json(card_ref))
         else:
             actor = str(workflow.payload.get("owner") or "pal")
-            channel = str(workflow.payload.get("active_channel") or "local")
             record = self.repository.read_artifact_record(manifest_ref.sha256)
             if (
                 record
@@ -5379,7 +5721,6 @@ class SemanticOrchestrator:
                     architecture_revision_id=revision.aggregate_id,
                     manifest_sha=manifest_ref.sha256,
                     actor_id=actor,
-                    active_channel_id=channel,
                 )
                 if self._uses_git_skeleton(revision.workflow_id):
                     markdown = compile_skeleton_markdown(
@@ -5403,13 +5744,9 @@ class SemanticOrchestrator:
                     "architecture_revision_id": revision.aggregate_id,
                     "manifest_sha": manifest_ref.sha256,
                     "actor_id": actor,
-                    "active_channel_id": channel,
                     "decision_token": decision_token,
                     "markdown": markdown,
                     "actions": ["accept", "edit", "reject"],
-                    "route": dict(
-                        workflow.payload.get("control_route") or {}
-                    ),
                 }
             else:
                 raise SubmissionInvariantError(
@@ -5706,6 +6043,62 @@ class SemanticOrchestrator:
         workspace_override: Mapping[str, Any] | None = None,
         prepare_workspace: bool = True,
     ) -> tuple[dict[str, Any], ArtifactRef, ArtifactRef]:
+        """Run one logical role while its aggregate ownership stays live.
+
+        The aggregate lease belongs to the durable logical coroutine and is
+        therefore renewed while it waits for native-process capacity.  The
+        attempt lease is deliberately created later, inside
+        ``_run_profile_inner``, only after a process permit is available.
+        """
+
+        self.repository.renew_lease(
+            lease_resource,
+            invocation_id,
+            fencing_token,
+            ttl_seconds=120,
+        )
+        heartbeat = asyncio.create_task(
+            self._lease_heartbeat(
+                lease_resource,
+                invocation_id,
+                fencing_token,
+            )
+        )
+        try:
+            return await self._run_profile_inner(
+                effect=effect,
+                snapshot=snapshot,
+                invocation_id=invocation_id,
+                lease_resource=lease_resource,
+                fencing_token=fencing_token,
+                profile=profile,
+                activation=activation,
+                instruction=instruction,
+                reference_refs=reference_refs,
+                workspace_override=workspace_override,
+                prepare_workspace=prepare_workspace,
+            )
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+            await self._role_supervisor.release_process_slot()
+
+    async def _run_profile_inner(
+        self,
+        *,
+        effect: Mapping[str, Any],
+        snapshot: AggregateSnapshot,
+        invocation_id: str,
+        lease_resource: str,
+        fencing_token: int,
+        profile: str,
+        activation: RoleActivation,
+        instruction: str,
+        reference_refs: Mapping[str, ArtifactRef],
+        workspace_override: Mapping[str, Any] | None = None,
+        prepare_workspace: bool = True,
+    ) -> tuple[dict[str, Any], ArtifactRef, ArtifactRef]:
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, snapshot.workflow_id)
         if workflow is None:
             raise ValueError("worker workflow does not exist")
@@ -5746,10 +6139,7 @@ class SemanticOrchestrator:
                     "artifact_dir": str(attempt_dir / "artifacts"),
                     "artifact_stage_dir": str(attempt_dir / "artifact-stage"),
                     "log_dir": str(attempt_dir / "logs"),
-                    "build_scratch_dir": str(
-                        workspace.get("build_scratch_dir")
-                        or attempt_dir / "build-scratch"
-                    ),
+                    "build_scratch_dir": str(attempt_dir / "build-scratch"),
                     "review_scratch_dir": str(
                         workspace.get("review_scratch_dir")
                         or attempt_dir / "review-scratch"
@@ -5935,11 +6325,13 @@ class SemanticOrchestrator:
             {
                 "role": role,
                 "mode": mode,
-                "references": _assignment_role_input_refs(
+                "references": _semantic_role_input_refs(
                     {
                         name: ref.to_dict()
                         for name, ref in bound_reference_refs.items()
-                    }
+                    },
+                    role=role,
+                    mode=mode,
                 ),
                 "architecture_revision_base_submission": workspace.get(
                     "architecture_revision_base_submission"
@@ -5962,7 +6354,6 @@ class SemanticOrchestrator:
             metadata={
                 "minion_v2": {
                     "workflow_id": snapshot.workflow_id,
-                    "control_route": dict(workflow.payload.get("control_route") or {}),
                     "aggregate_type": snapshot.aggregate_type.value,
                     "aggregate_id": snapshot.aggregate_id,
                     "effect_id": effect["effect_id"],
@@ -5973,6 +6364,7 @@ class SemanticOrchestrator:
                     "role": role,
                     "mode": mode,
                     "role_profile_id": profile,
+                    "family_binding_sha": str(binding_ref.get("sha256") or ""),
                     "submission_receipt_required": True,
                     "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
                     "authoring_input_fingerprint": input_fingerprint,
@@ -6089,8 +6481,24 @@ class SemanticOrchestrator:
                     )
             minion_v2["work_item_seed"] = work_item_seed
             metadata["minion_v2"] = minion_v2
+            # Keep derived role protocol data in the invocation workspace as
+            # well as metadata.  The runner merges both projections for live
+            # tools, but a checkpoint/recovery probe and the model's visible
+            # pack may inspect workspace directly.  Having one complete
+            # assignment binding prevents a missing checklist seed or role
+            # protocol from masquerading as a submission/orchestration bug.
+            workspace_value = dict(pack_value.get("workspace") or {})
+            workspace_minion_v2 = dict(workspace_value.get("minion_v2") or {})
+            workspace_minion_v2.update(
+                {
+                    key: value
+                    for key, value in minion_v2.items()
+                    if key not in workspace_minion_v2
+                }
+            )
+            workspace_value["minion_v2"] = workspace_minion_v2
             pack = MinionInvocationPack.from_dict(
-                {**pack_value, "metadata": metadata}
+                {**pack_value, "workspace": workspace_value, "metadata": metadata}
             )
         pack = apply_v2_role_capability_policy(pack, activation=activation)
         if activation.role == OrchestrationRole.ARCHITECT and revision_scope is not None:
@@ -6114,6 +6522,10 @@ class SemanticOrchestrator:
                 minion_v2 = dict(metadata.get("minion_v2") or {})
                 minion_v2["swe_verification_tool_contract"] = tool_contract
                 metadata["minion_v2"] = minion_v2
+                workspace_value = dict(pack_value.get("workspace") or {})
+                workspace_minion_v2 = dict(workspace_value.get("minion_v2") or {})
+                workspace_minion_v2["swe_verification_tool_contract"] = tool_contract
+                workspace_value["minion_v2"] = workspace_minion_v2
                 resolved_profile = dict(pack_value.get("resolved_profile") or {})
                 guidance_overrides = merge_tool_guidance_overrides(
                     resolved_profile.get("capability_guidance_overrides"),
@@ -6123,6 +6535,7 @@ class SemanticOrchestrator:
                 pack = MinionInvocationPack.from_dict(
                     {
                         **pack_value,
+                        "workspace": workspace_value,
                         "metadata": metadata,
                         "resolved_profile": resolved_profile,
                     }
@@ -6148,10 +6561,11 @@ class SemanticOrchestrator:
                     "artifact_dir": str(attempt_dir / "artifacts"),
                     "artifact_stage_dir": str(attempt_dir / "artifact-stage"),
                     "log_dir": str(attempt_dir / "logs"),
-                    "build_scratch_dir": str(
-                        bound_workspace.get("build_scratch_dir")
-                        or attempt_dir / "build-scratch"
-                    ),
+                    # Build output is attempt-local.  A durable role prompt
+                    # is intentionally reused across retries, but carrying
+                    # its previous fence's scratch path into the new process
+                    # makes the worker inspect and write stale evidence.
+                    "build_scratch_dir": str(attempt_dir / "build-scratch"),
                     "review_scratch_dir": str(
                         bound_workspace.get("review_scratch_dir")
                         or attempt_dir / "review-scratch"
@@ -6294,7 +6708,7 @@ class SemanticOrchestrator:
             )
             return terminal, prompt_ref, terminal_ref
         session_scope_kind, session_subject_key = _role_session_scope(snapshot, activation)
-        self.repository.ensure_role_session(
+        role_session = self.repository.ensure_role_session(
             session_id=invocation_id,
             workflow_id=snapshot.workflow_id,
             aggregate_type=snapshot.aggregate_type,
@@ -6367,6 +6781,11 @@ class SemanticOrchestrator:
                 raise SubmissionInvariantError(
                     "expired active role assignment could not be made retryable"
                 )
+        # The assignment is the immutable source of truth for authoring
+        # identity.  A retry may rebuild the role workspace from newer
+        # orchestration inputs, but it must not derive a new fingerprint: the
+        # Role Gateway authenticates every draft against this assignment.
+        input_fingerprint = _assignment_input_fingerprint(assignment)
         harness_spec = _select_attempt_harness(
             harness_generation,
             role=role,
@@ -6378,6 +6797,37 @@ class SemanticOrchestrator:
                 else ()
             ),
         )
+        # A role session is the logical coroutine; a process attempt is only
+        # its current shell.  Manager restart/reload can compile a new harness
+        # registry generation even when the selected Pal harness is unchanged.
+        # Keep the session's pinned generation for a same-harness continuation
+        # so an encrypted checkpoint remains restorable across process shells.
+        # A real harness switch still gets the current generation and therefore
+        # cannot consume a checkpoint authored by another harness.
+        session_harness_id = str(
+            role_session.get("preferred_harness_id") or ""
+        ).strip()
+        session_harness_generation = str(
+            role_session.get("preferred_harness_generation") or ""
+        ).strip()
+        completed_harness_attempt = (
+            self.repository.read_latest_completed_role_harness_attempt(
+                session_id=invocation_id,
+                harness_id=harness_spec.harness_id,
+            )
+        )
+        completed_harness_generation = str(
+            (completed_harness_attempt or {}).get("harness_generation") or ""
+        ).strip()
+        if completed_harness_generation:
+            effective_harness_generation = completed_harness_generation
+        elif (
+            session_harness_id == harness_spec.harness_id
+            and session_harness_generation
+        ):
+            effective_harness_generation = session_harness_generation
+        else:
+            effective_harness_generation = harness_generation.generation_hash
         pal_checkpoint_capable = (
             harness_spec.launch_kind == HARNESS_LAUNCH_PAL_SANDBOX
         )
@@ -6460,10 +6910,15 @@ class SemanticOrchestrator:
                     "metadata": metadata,
                 }
             )
+        # A durable assignment is the queued logical coroutine.  It consumes
+        # no native-process capacity and owns no attempt lease.  Wait for a
+        # materialization slot before claiming the concrete attempt so queue
+        # time can never expire a worker fence or consume retry budget.
+        await self._role_supervisor.acquire_process_slot(run_id)
         attempt = self.repository.claim_role_assignment(
             str(assignment["assignment_id"]),
             harness_id=harness_spec.harness_id,
-            harness_generation=harness_generation.generation_hash,
+            harness_generation=effective_harness_generation,
         )
         assignment_lease_resource = f"assignment:{assignment['assignment_id']}"
         assignment_lease = self.repository.claim_lease(
@@ -6477,6 +6932,17 @@ class SemanticOrchestrator:
                 "role": role,
                 "mode": mode,
             },
+        )
+        # ``attempt_dir`` was provisioned before the assignment was claimed
+        # and therefore reflects the caller's stale logical fence on retries.
+        # Rebind it to the lease fence that authenticates this process shell;
+        # otherwise every resumed worker silently shares an older build,
+        # artifact and log directory.
+        attempt_dir = (
+            invocation_root(self.service.runtime_root)
+            / invocation_id
+            / "attempts"
+            / f"fence-{assignment_lease.fencing_token}"
         )
         continuation_input_path, continuation_output_path = (
             self._prepare_agent_session_attempt(
@@ -6511,12 +6977,27 @@ class SemanticOrchestrator:
                 "lease_resource_key": assignment_lease_resource,
                 "fencing_token": assignment_lease.fencing_token,
                 "harness_id": harness_spec.harness_id,
-                "harness_generation": harness_generation.generation_hash,
+                "harness_generation": effective_harness_generation,
                 "harness_config": dict(harness_spec.config),
             }
         )
         workspace_value["minion_v2"] = workspace_binding
+        workspace_value.update(
+            {
+                "artifact_dir": str(attempt_dir / "artifacts"),
+                "artifact_stage_dir": str(attempt_dir / "artifact-stage"),
+                "log_dir": str(attempt_dir / "logs"),
+                "build_scratch_dir": str(attempt_dir / "build-scratch"),
+            }
+        )
         pack_value["workspace"] = workspace_value
+        for key in (
+            "artifact_dir",
+            "artifact_stage_dir",
+            "log_dir",
+            "build_scratch_dir",
+        ):
+            Path(str(workspace_value[key])).mkdir(parents=True, exist_ok=True)
         metadata = dict(pack_value.get("metadata") or {})
         minion_v2 = dict(metadata.get("minion_v2") or {})
         minion_v2.update(
@@ -6525,8 +7006,12 @@ class SemanticOrchestrator:
                 "lease_resource": assignment_lease_resource,
                 "lease_resource_key": assignment_lease_resource,
                 "fencing_token": assignment_lease.fencing_token,
+                # Keep both projections of the authoring binding aligned.
+                # Retries may reuse a prompt whose derived workspace changed,
+                # but the assignment fingerprint is immutable.
+                "authoring_input_fingerprint": input_fingerprint,
                 "harness_id": harness_spec.harness_id,
-                "harness_generation": harness_generation.generation_hash,
+                "harness_generation": effective_harness_generation,
                 "harness_config": dict(harness_spec.config),
             }
         )
@@ -6538,8 +7023,16 @@ class SemanticOrchestrator:
             # identity used by the persistent role session.
             "response_key": str(assignment["assignment_id"]),
             "fencing_token": assignment_lease.fencing_token,
+            "workflow_id": snapshot.workflow_id,
             "scope_kind": session_scope_kind,
             "subject_key": session_subject_key,
+            "stage_key": role_session_stage_key(
+                session_scope_kind,
+                session_subject_key,
+                role,
+            ),
+            "harness_id": harness_spec.harness_id,
+            "harness_generation": effective_harness_generation,
             "continuation_input_path": str(continuation_input_path or ""),
             "continuation_output_path": str(continuation_output_path),
         }
@@ -6585,14 +7078,21 @@ class SemanticOrchestrator:
             mode=mode,
             role_profile_id=profile,
             harness_id=harness_spec.harness_id,
-            harness_generation=harness_generation.generation_hash,
+            harness_generation=effective_harness_generation,
             family_binding_sha=str(binding_ref.get("sha256") or ""),
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt_ref.to_dict(),
         )
         invocation_dir = invocation_root(self.service.runtime_root) / invocation_id
         invocation_dir.mkdir(parents=True, exist_ok=True)
-        attempt_dir = invocation_dir / "attempts" / f"fence-{fencing_token}"
+        # The process pack belongs to the assignment lease, not the caller's
+        # stale logical-effect fence.  Keep this path identical to the
+        # attempt-local workspace paths above.
+        attempt_dir = (
+            invocation_dir
+            / "attempts"
+            / f"fence-{assignment_lease.fencing_token}"
+        )
         attempt_dir.mkdir(parents=True, exist_ok=True)
         pack_path = attempt_dir / "pack.json"
         pack_path.write_text(json.dumps(pack.to_dict(), ensure_ascii=False, sort_keys=True), encoding="utf-8")
@@ -6680,6 +7180,16 @@ class SemanticOrchestrator:
                 and self._run_to_invocation.get(run_id) == invocation_id
             ):
                 self._run_to_invocation.pop(run_id, None)
+            # The assignment fence belongs to this concrete native-process
+            # attempt.  Once the complete process group is reaped there can be
+            # no legitimate late role-gateway call, so close the lease at the
+            # same RAII boundary as the process permit.
+            with contextlib.suppress(LeaseConflict, StaleFencingToken):
+                self.repository.release_lease(
+                    assignment_lease_resource,
+                    str(attempt["attempt_id"]),
+                    assignment_lease.fencing_token,
+                )
 
         workspace_path = str(pack.workspace.get("repo_path") or "").strip()
         owner = WorkerProcessOwner(
@@ -6726,6 +7236,11 @@ class SemanticOrchestrator:
                     continue
                 if str(item.get("kind") or "") == "event" and isinstance(item.get("event"), dict):
                     event = dict(item["event"])
+                    # A logical role session reuses its invocation id across
+                    # attempts.  Keep the concrete attempt identity available
+                    # to Manager delivery deduplication without changing the
+                    # worker's public payload contract.
+                    event["_attempt_id"] = str(attempt["attempt_id"])
                     events.append(event)
                     if self.publish_worker_event is not None:
                         await self.publish_worker_event(event)
@@ -6767,16 +7282,15 @@ class SemanticOrchestrator:
                     str(attempt["attempt_id"]),
                     assignment_lease.fencing_token,
                 )
-            continuation_ref = self._publish_agent_session_checkpoint(
+            checkpoint = self._publish_agent_session_checkpoint(
                 invocation_id,
                 assignment_lease.fencing_token,
                 continuation_output_path,
             )
-            if continuation_ref is not None and pal_checkpoint_capable:
+            if checkpoint is not None and pal_checkpoint_capable:
                 self.repository.suspend_role_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
-                    continuation_ref=continuation_ref.to_dict(),
                     status="interrupted",
                 )
             else:
@@ -6808,16 +7322,15 @@ class SemanticOrchestrator:
                     str(attempt["attempt_id"]),
                     assignment_lease.fencing_token,
                 )
-            continuation_ref = self._publish_agent_session_checkpoint(
+            checkpoint = self._publish_agent_session_checkpoint(
                 invocation_id,
                 assignment_lease.fencing_token,
                 continuation_output_path,
             )
-            if continuation_ref is not None and pal_checkpoint_capable:
+            if checkpoint is not None and pal_checkpoint_capable:
                 self.repository.suspend_role_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
-                    continuation_ref=continuation_ref.to_dict(),
                     status="interrupted",
                 )
             else:
@@ -6847,19 +7360,18 @@ class SemanticOrchestrator:
                     str(attempt["attempt_id"]),
                     assignment_lease.fencing_token,
                 )
-            continuation_ref = self._publish_agent_session_checkpoint(
+            checkpoint = self._publish_agent_session_checkpoint(
                 invocation_id,
                 assignment_lease.fencing_token,
                 continuation_output_path,
             )
-            if continuation_ref is None:
+            if checkpoint is None:
                 raise RuntimeError(
                     "worker reached a manager-restart safe point without a durable continuation"
                 )
             self.repository.suspend_role_invocation(
                 invocation_id=invocation_id,
                 fencing_token=fencing_token,
-                continuation_ref=continuation_ref.to_dict(),
                 status="interrupted",
             )
             raise DeferredEffectError(
@@ -6884,16 +7396,15 @@ class SemanticOrchestrator:
                     str(attempt["attempt_id"]),
                     assignment_lease.fencing_token,
                 )
-            continuation_ref = self._publish_agent_session_checkpoint(
+            checkpoint = self._publish_agent_session_checkpoint(
                 invocation_id,
                 assignment_lease.fencing_token,
                 continuation_output_path,
             )
-            if continuation_ref is not None and pal_checkpoint_capable:
+            if checkpoint is not None and pal_checkpoint_capable:
                 self.repository.suspend_role_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
-                    continuation_ref=continuation_ref.to_dict(),
                     status="interrupted",
                 )
             else:
@@ -6918,16 +7429,15 @@ class SemanticOrchestrator:
                     str(attempt["attempt_id"]),
                     assignment_lease.fencing_token,
                 )
-            continuation_ref = self._publish_agent_session_checkpoint(
+            checkpoint = self._publish_agent_session_checkpoint(
                 invocation_id,
                 assignment_lease.fencing_token,
                 continuation_output_path,
             )
-            if continuation_ref is not None and pal_checkpoint_capable:
+            if checkpoint is not None and pal_checkpoint_capable:
                 self.repository.suspend_role_invocation(
                     invocation_id=invocation_id,
                     fencing_token=fencing_token,
-                    continuation_ref=continuation_ref.to_dict(),
                     status="interrupted",
                 )
             else:
@@ -6952,15 +7462,19 @@ class SemanticOrchestrator:
             original_terminal=terminal,
         )
         terminal_payload = dict(terminal.get("payload") or {})
-        continuation_ref = self._publish_agent_session_checkpoint(
+        checkpoint = self._publish_agent_session_checkpoint(
             invocation_id,
             assignment_lease.fencing_token,
             continuation_output_path,
         )
         terminal_payload["v2_timing"] = _worker_event_timing(events)
-        if continuation_ref is not None:
-            continuation_payload = self.service.artifacts.read_json(continuation_ref)
-            terminal_payload["session_turn_index"] = int(continuation_payload.get("llm_round_count") or 0)
+        if checkpoint is not None:
+            terminal_payload["session_turn_index"] = int(
+                dict(checkpoint.get("metrics") or {}).get(
+                    "llm_round_count"
+                )
+                or 0
+            )
         terminal = {**terminal, "payload": terminal_payload}
         terminal_ref = self.service.artifacts.put_json(
             terminal,
@@ -6971,20 +7485,14 @@ class SemanticOrchestrator:
                     str(dict(assignment_after_process["submission_artifact_ref"])["sha256"]),
                     "submission_receipt",
                 ),
-                *(
-                    ((continuation_ref.sha256, "agent_session_continuation"),)
-                    if continuation_ref is not None
-                    else ()
-                ),
             ),
         )
         if pal_checkpoint_capable:
-            if continuation_ref is None:
+            if checkpoint is None:
                 raise RuntimeError("resumable role completed without a durable agent-session checkpoint")
             self.repository.suspend_role_invocation(
                 invocation_id=invocation_id,
                 fencing_token=fencing_token,
-                continuation_ref=continuation_ref.to_dict(),
             )
         else:
             self.repository.finish_role_invocation(
@@ -7142,80 +7650,75 @@ class SemanticOrchestrator:
         with contextlib.suppress(FileNotFoundError):
             checkpoint_path.unlink()
 
-        continuation_ref = dict(session.get("continuation_ref") or {})
-        if not continuation_ref:
+        store = LogicalCoroutineCheckpointStore(self.service.runtime_root)
+        checkpoint = store.read(session_id)
+        if checkpoint is None:
+            if str(session.get("status") or "") in {"suspended", "interrupted"}:
+                raise AgentSessionCheckpointError(
+                    "suspended role session has no logical-coroutine checkpoint"
+                )
             return None, checkpoint_path
-        if str(continuation_ref.get("artifact_type") or "") != "AgentSessionContinuationArtifact":
-            raise AgentSessionCheckpointError(
-                "role session continuation has the wrong artifact type"
-            )
-        try:
-            payload = self.service.artifacts.read_json(continuation_ref)
-        except (OSError, ValueError) as exc:
-            raise AgentSessionCheckpointError(
-                "role session continuation artifact is unreadable"
-            ) from exc
-        if not isinstance(payload, Mapping):
-            raise AgentSessionCheckpointError(
-                "role session continuation is not a JSON object"
-            )
-        restored = dict(payload)
-        if str(restored.get("session_id") or "") != session_id:
+        restored = normalize_agent_session_checkpoint(checkpoint)
+        if str(restored.get("logical_coroutine_id") or "") != session_id:
             raise AgentSessionCheckpointError(
                 "role session continuation has the wrong session identity"
             )
-        scope_kind = str(session.get("scope_kind") or "")
-        subject_key = str(session.get("subject_key") or "")
-        stored_scope = str(restored.get("scope_kind") or "")
-        stored_subject = str(restored.get("subject_key") or "")
-        if stored_scope and stored_scope != scope_kind:
+        if str(restored.get("workflow_id") or "") != str(session.get("workflow_id") or ""):
             raise AgentSessionCheckpointError(
-                "role session continuation has the wrong scope"
+                "role session continuation has the wrong workflow"
             )
-        if stored_subject and stored_subject != subject_key:
-            raise AgentSessionCheckpointError(
-                "role session continuation has the wrong subject"
-            )
-        restored.update({"scope_kind": scope_kind, "subject_key": subject_key})
-        restored = normalize_agent_session_checkpoint(restored)
-        temporary = restore_path.parent / f".{restore_path.name}.{os.getpid()}.tmp"
-        temporary.write_text(
-            json.dumps(restored, ensure_ascii=False, sort_keys=True),
-            encoding="utf-8",
+        expected_stage = role_session_stage_key(
+            str(session.get("scope_kind") or ""),
+            str(session.get("subject_key") or ""),
+            str(session.get("role") or ""),
         )
-        os.replace(temporary, restore_path)
-        return restore_path, checkpoint_path
+        if str(restored.get("stage_key") or "") != expected_stage:
+            raise AgentSessionCheckpointError(
+                "role session continuation has the wrong stage"
+            )
+        materialized = store.materialize_input(session_id, restore_path)
+        return materialized, checkpoint_path
 
     def _publish_agent_session_checkpoint(
         self,
         invocation_id: str,
         fencing_token: int,
         checkpoint_path: Path,
-    ) -> ArtifactRef | None:
+    ) -> dict[str, Any] | None:
         if not checkpoint_path.is_file():
             return None
         try:
             payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError("worker checkpoint output is unreadable") from exc
-        if not isinstance(payload, dict) or str(payload.get("session_id") or "") != invocation_id:
+        if not isinstance(payload, dict) or str(payload.get("logical_coroutine_id") or "") != invocation_id:
             raise RuntimeError("worker checkpoint output has the wrong session identity")
-        if str(payload.get("schema_version") or "") != "6":
-            raise RuntimeError("worker checkpoint output has an unsupported schema version")
-        if int(payload.get("fencing_token") or 0) != int(fencing_token):
+        try:
+            payload = normalize_agent_session_checkpoint(payload)
+        except AgentSessionCheckpointError as exc:
+            raise RuntimeError("worker checkpoint output has an invalid envelope") from exc
+        if int(payload.get("producer_fencing_token") or 0) != int(fencing_token):
             raise RuntimeError("worker checkpoint output has a stale fencing token")
         session = self.repository.read_role_session(invocation_id)
         if session is None:
             raise RuntimeError("worker checkpoint output has no durable session")
-        if str(payload.get("scope_kind") or "") != str(session.get("scope_kind") or ""):
-            raise RuntimeError("worker checkpoint output has the wrong scope")
-        if str(payload.get("subject_key") or "") != str(session.get("subject_key") or ""):
-            raise RuntimeError("worker checkpoint output has the wrong subject")
-        return self.service.artifacts.put_json(
-            payload,
-            artifact_type="AgentSessionContinuationArtifact",
-            provenance={"invocation_id": invocation_id, "fencing_token": int(fencing_token)},
+        if str(payload.get("workflow_id") or "") != str(session.get("workflow_id") or ""):
+            raise RuntimeError("worker checkpoint output has the wrong workflow")
+        expected_stage = role_session_stage_key(
+            str(session.get("scope_kind") or ""),
+            str(session.get("subject_key") or ""),
+            str(session.get("role") or ""),
         )
+        if str(payload.get("stage_key") or "") != expected_stage:
+            raise RuntimeError("worker checkpoint output has the wrong stage")
+        LogicalCoroutineCheckpointStore(self.service.runtime_root).publish(
+            payload,
+            expected_logical_coroutine_id=invocation_id,
+            current_fencing_token=fencing_token,
+        )
+        with contextlib.suppress(FileNotFoundError):
+            checkpoint_path.unlink()
+        return payload
 
     def _profile_for_role(self, workflow_id: str, role: str) -> str:
         role = OrchestrationRole(str(role)).value
@@ -7389,34 +7892,37 @@ class SemanticOrchestrator:
         review_generation = int(
             current.payload.get("architecture_review_generation") or 0
         )
-        self.repository.dispatch(
-            ActionEnvelope(
-                action_type=action_type,
-                workflow_id=current.workflow_id,
-                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-                aggregate_id=current.aggregate_id,
-                actor="minion-v2-architecture-reviewer",
-                expected_version=current.version,
-                idempotency_key=(
-                    f"architecture-review:{current.aggregate_id}:"
-                    f"generation-{review_generation}:{review_ref.sha256}"
+        with self.repository.transaction() as connection:
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=current.workflow_id,
+                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                    aggregate_id=current.aggregate_id,
+                    actor="minion-v2-architecture-reviewer",
+                    expected_version=current.version,
+                    idempotency_key=(
+                        f"architecture-review:{current.aggregate_id}:"
+                        f"generation-{review_generation}:{review_ref.sha256}"
+                    ),
+                    payload=payload,
                 ),
-                payload=payload,
-            ),
-            **self._role_submission_settlement(
-                effect or {},
-                assignment_id=assignment_id,
-            ),
-        )
-        WorkflowCoordinator(self.repository).submit_plan_verdict(
-            workflow_id=current.workflow_id,
-            accepted=review.verdict == "PASS",
-            finding_refs=(
-                ()
-                if review.verdict == "PASS"
-                else (review_ref.sha256,)
-            ),
-        )
+                **self._role_submission_settlement(
+                    effect or {},
+                    assignment_id=assignment_id,
+                ),
+                _connection=connection,
+            )
+            WorkflowCoordinator(self.repository).submit_plan_verdict(
+                workflow_id=current.workflow_id,
+                accepted=review.verdict == "PASS",
+                finding_refs=(
+                    ()
+                    if review.verdict == "PASS"
+                    else (review_ref.sha256,)
+                ),
+                _connection=connection,
+            )
 
     def _effect_snapshot(self, effect: Mapping[str, Any]) -> AggregateSnapshot:
         aggregate_type = AggregateType(str(effect["aggregate_type"]))
@@ -8649,6 +9155,15 @@ def _resolve_dependency_node_id(
     name = str(dependency_module or "").strip()
     if not name:
         raise ValueError("verification defect route requires a target module")
+    current_name = str(
+        node.payload.get("module_name") or node.payload.get("unit_id") or ""
+    ).strip()
+    # A verifier normally reports a defect in the module it is reviewing.  A
+    # repair target may also be a direct dependency, but requiring every
+    # finding to name a dependency makes a self-owned finding fail only after
+    # the verifier has already completed and submitted it.
+    if current_name == name:
+        return node.aggregate_id
     matches: list[str] = []
     for dependency in _verification_related_module_nodes(repository, node):
         module_name = str(dependency.payload.get("module_name") or dependency.payload.get("unit_id") or "")

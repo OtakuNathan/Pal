@@ -488,9 +488,16 @@ class MinionScopedExecutionRuntime:
     capability_guidance_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
     request_user_clarification: Any | None = None
     _original_runtime: Any = field(default=None, init=False, repr=False)
+    _direct_turn_id: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._original_runtime = self.base_runtime if callable(getattr(self.base_runtime, "execute_tool_async", None)) else ExecutionRuntime()
+        lifetime_id = str(
+            self.workspace.get("invocation_id")
+            or self.workspace.get("run_id")
+            or ""
+        ).strip()
+        self._direct_turn_id = f"{lifetime_id}:direct" if lifetime_id else ""
         self.allowed_capabilities = filter_minion_allowed_capabilities(list(self.allowed_capabilities or []))
         if self.allowed_capabilities and "op_tool_result_page" not in self.allowed_capabilities:
             self.allowed_capabilities.append("op_tool_result_page")
@@ -616,6 +623,14 @@ class MinionScopedExecutionRuntime:
         )
         return commit(**kwargs) if callable(commit) else None
 
+    def discard_uncommitted_tool_delivery(self, **kwargs: Any) -> Any:
+        discard = getattr(
+            self._original_runtime,
+            "discard_uncommitted_tool_delivery",
+            None,
+        )
+        return discard(**kwargs) if callable(discard) else None
+
     def resolve_capability_address(self, name: object) -> str:
         return self.base_runtime.resolve_capability_address(name)
 
@@ -673,11 +688,18 @@ class MinionScopedExecutionRuntime:
         )
         if guard_error is not None:
             return guard_error
+        effective_turn_id = str(turn_id or "").strip() or self._direct_turn_id
+        if not effective_turn_id:
+            return _error_result(
+                admission.call,
+                "scoped tool execution requires an explicit logical lifetime",
+                "missing_execution_lifetime",
+            )
         result = await self.base_runtime.execute_tool_async(
             guarded_call,
             allow_tools=True,
             budget=budget,
-            turn_id=turn_id,
+            turn_id=effective_turn_id,
         )
         if admission.call.name in {"op_minion_artifact_write", "op_minion_artifact_edit"} and result.ok:
             artifact = dict((result.structured or {}).get("artifact") or {})

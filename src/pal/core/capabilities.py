@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
 )
@@ -10,6 +14,7 @@ from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.core.runtime import PalCore
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
+    OPERATION_NAMESPACE,
     EventKind,
     IntrospectionCall,
     IntrospectionResult,
@@ -58,12 +63,13 @@ class CoreIntrospectionProvider:
         )
 
     @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
+        namespace=OPERATION_NAMESPACE,
         scope="module",
         action_name="configure",
         description="Configure module-level state for core",
         InputModel=CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
         aliases=("core_configure",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def configure(self, call: IntrospectionCall) -> IntrospectionResult:
         mode = call.args.get("mode")

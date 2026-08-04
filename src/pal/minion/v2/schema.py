@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 27
+MINION_V2_SCHEMA_VERSION = 29
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -19,7 +19,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
     if previous_version not in {0, MINION_V2_SCHEMA_VERSION}:
         raise RuntimeError(
             "legacy Minion runtime schema is not migrated in place; "
-            "archive the old runtime and initialize a fresh v27 runtime"
+            "archive the old runtime and initialize a fresh v29 runtime"
         )
     connection.executescript(
         """
@@ -168,7 +168,6 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             architecture_revision_id TEXT NOT NULL,
             manifest_sha TEXT NOT NULL,
             actor_id TEXT NOT NULL,
-            active_channel_id TEXT NOT NULL,
             expires_at TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'issued',
             decision TEXT NOT NULL DEFAULT '',
@@ -195,7 +194,6 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             family_binding_sha TEXT NOT NULL DEFAULT '',
             authoring_contract_version TEXT NOT NULL DEFAULT '',
             prompt_pack_ref_json TEXT NOT NULL,
-            continuation_ref_json TEXT NOT NULL DEFAULT '{}',
             status TEXT NOT NULL,
             last_completed_turn INTEGER NOT NULL DEFAULT 0,
             total_input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -222,8 +220,6 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             scope_kind TEXT NOT NULL DEFAULT '',
             subject_key TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'active',
-            continuation_ref_json TEXT NOT NULL DEFAULT '{}',
-            execution_state_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -400,21 +396,50 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS minion_v2_channel_bindings (
-            actor_id TEXT NOT NULL,
-            channel_id TEXT NOT NULL,
-            workflow_id TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS minion_v2_task_delivery_bindings (
+            task_id TEXT PRIMARY KEY,
+            origin_binding_json TEXT NOT NULL,
+            current_binding_json TEXT NOT NULL,
+            binding_version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            PRIMARY KEY(actor_id, channel_id)
+            FOREIGN KEY(task_id) REFERENCES minion_v2_task_projection(task_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_delivery_outbox (
+            delivery_id TEXT PRIMARY KEY,
+            dedup_key TEXT NOT NULL UNIQUE,
+            task_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL DEFAULT '',
+            event_kind TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            last_error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES minion_v2_task_projection(task_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS minion_v2_delivery_outbox_ready
+        ON minion_v2_delivery_outbox(status, next_attempt_at, created_at);
+
+        CREATE TABLE IF NOT EXISTS minion_v2_delivery_parts (
+            delivery_id TEXT NOT NULL,
+            part_key TEXT NOT NULL,
+            delivered_at TEXT NOT NULL,
+            PRIMARY KEY (delivery_id, part_key),
+            FOREIGN KEY(delivery_id) REFERENCES minion_v2_delivery_outbox(delivery_id)
+                ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS minion_v2_artifact_aliases (
             actor_id TEXT NOT NULL,
-            channel_id TEXT NOT NULL,
             alias TEXT NOT NULL,
             artifact_sha256 TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            PRIMARY KEY(actor_id, channel_id, alias)
+            PRIMARY KEY(actor_id, alias)
         );
 
         CREATE TABLE IF NOT EXISTS minion_v2_node_projection (

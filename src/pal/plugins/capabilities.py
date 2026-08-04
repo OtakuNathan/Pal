@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_CONTROL,
+)
+
 from pal.execution.generated_tool_models import (
     PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
     PluginsCapabilitiesPluginsIntrospectionProviderDetachInput,
@@ -77,6 +81,7 @@ class PluginsIntrospectionProvider:
         ),
         aliases=("plugin_attach",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
+        execution=INDIRECT_CONTROL,
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.attach(str(call.args.get("plugin_id") or ""))
@@ -95,6 +100,7 @@ class PluginsIntrospectionProvider:
         description="Detach a plugin from the current runtime",
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDetachInput,
         aliases=("plugin_detach",),
+        execution=INDIRECT_CONTROL,
     )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.detach(str(call.args.get("plugin_id") or ""))
@@ -113,6 +119,7 @@ class PluginsIntrospectionProvider:
         description="Enable and attach a plugin that is currently disabled, including disabled first-party plugins such as mcp.",
         aliases=("plugin_enable",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderEnableInput,
+        execution=INDIRECT_CONTROL,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.enable(str(call.args.get("plugin_id") or ""))
@@ -131,6 +138,7 @@ class PluginsIntrospectionProvider:
         description="Disable a plugin",
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDisableInput,
         aliases=("plugin_disable",),
+        execution=INDIRECT_CONTROL,
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.disable(str(call.args.get("plugin_id") or ""))
@@ -141,7 +149,7 @@ class PluginsIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Plugin disable result", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan plugin directories", aliases=("plugin_rescan",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan plugin directories", aliases=("plugin_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         result = self.host.rescan()
@@ -159,6 +167,7 @@ class PluginsIntrospectionProvider:
         action_name="rescan_and_attach_new_first_party",
         description="Rescan plugin directories and attach newly discovered enabled first-party plugins",
         aliases=("plugin_rescan_and_attach_new_first_party",),
+        execution=INDIRECT_CONTROL,
     )
     def rescan_and_attach_new_first_party(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call

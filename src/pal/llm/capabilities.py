@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
     LlmCapabilitiesLLMIntrospectionProviderShowInput,
@@ -250,6 +254,7 @@ class LLMIntrospectionProvider:
         description="Switch the active llm endpoint used for future requests",
         InputModel=LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
         aliases=("llm_set_active_endpoint",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_active_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
         endpoint_id = str(call.args.get("active_endpoint_id") or "").strip()

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from pal.execution.tool_semantics import (
+    INDIRECT_CONTROL,
+    INDIRECT_LOCAL_WRITE,
+)
+
 from pal.execution.generated_tool_models import (
     ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput,
     ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput,
@@ -292,6 +297,7 @@ class ProactiveIntrospectionProvider:
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput,
         aliases=("proactive_create",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def create(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("proactive_id") or "").strip()
@@ -346,6 +352,7 @@ class ProactiveIntrospectionProvider:
         description="Delete (destroy) a proactive task",
         aliases=("proactive_delete",),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput,
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def delete(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("target_id") or "").strip()
@@ -379,6 +386,7 @@ class ProactiveIntrospectionProvider:
         description="Enable a proactive task",
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput,
         aliases=("proactive_enable",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=True)
@@ -391,6 +399,7 @@ class ProactiveIntrospectionProvider:
         description="Disable a proactive task",
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput,
         aliases=("proactive_disable",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_enabled(call, enabled=False)
@@ -403,6 +412,7 @@ class ProactiveIntrospectionProvider:
         description="Set or clear the output channel for a proactive task",
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput,
         aliases=("proactive_set_output_channel",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_output_channel(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("target_id") or "").strip()
@@ -443,6 +453,7 @@ class ProactiveIntrospectionProvider:
         description="Set or clear the output reply target for a proactive task",
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput,
         aliases=("proactive_set_output_target",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def set_output_target(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("target_id") or "").strip()
@@ -481,6 +492,7 @@ class ProactiveIntrospectionProvider:
         description="Update the schedule for a proactive task",
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput,
         aliases=("proactive_update_schedule",),
+        execution=INDIRECT_LOCAL_WRITE,
     )
     def update_schedule(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("target_id") or "").strip()
@@ -517,7 +529,7 @@ class ProactiveIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Proactive schedule updated", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach proactive module", aliases=("proactive_attach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach proactive module", aliases=("proactive_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -529,7 +541,7 @@ class ProactiveIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Proactive attached", {"mounted": True, "degraded": False}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach proactive module", aliases=("proactive_detach",))
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach proactive module", aliases=("proactive_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False

@@ -14,7 +14,8 @@ wire JSON.
 - exactly three wire shapes: `openai_completion`, `openai_response`, and
   `anthropic_messages`;
 - JSON-frame normalization for streaming and single-shot SDK responses;
-- exact-model request hooks.
+- exact-model request hooks;
+- built-in provider response-syntax hooks after codec decoding.
 
 It does not own durable conversation policy, tool execution, capability
 governance, memory ranking, or channel delivery.
@@ -34,8 +35,9 @@ optional exact-endpoint replay envelope. The turn is one atomic protocol unit.
 - Every tool result must consume a known, pending call ID exactly once.
 - Incomplete JSON tool drafts never become `ToolCallIR` and are never
   executable.
-- A received tool call without an explicit call ID is ill-formed and ignored.
-  Only Pal-originated calls may generate an ID, through `new_tool_call()`.
+- A structured received tool call without an explicit call ID is ill-formed
+  and ignored. A provider text-protocol normalizer may generate an internal ID
+  only while constructing the first `ToolCallIR` at that Pal-owned boundary.
 - A `length` terminal discards all tool-call intent from that response.
 - `settle`, `interrupt`, and `abort` close the turn atomically.
 - Closing retires reasoning parts and provider replay data.
@@ -64,9 +66,11 @@ refreshes that independent runtime in the same action. A cold Minion broker
 loads the refreshed registry on its first request. Runtime statistics remain
 separate because the two runtimes have distinct lifecycle and accounting.
 
-`provider` is only credential/display/telemetry identity. It never selects a
-codec or changes message semantics. The old `api_mode` and
-`supports_reasoning` columns are migrated once and then removed.
+`provider` is credential/display/telemetry identity. It never selects a codec
+or changes request semantics. It may select a built-in response-syntax
+normalizer when a provider leaks its textual model protocol through a standard
+wire shape. The old `api_mode` and `supports_reasoning` columns are migrated
+once and then removed.
 
 ## Wire codecs and SDKs
 
@@ -122,6 +126,26 @@ message or tool-definition tuples. The generation policy, endpoint, provider,
 credential, shape, routing metadata, and every other request field are
 read-only to hooks. Hooks perform no I/O. Duplicate model IDs fail loading.
 
+## Provider response hooks
+
+Provider response hooks run after the selected wire codec and before any
+response update reaches Core, L1, or Channel. They may only transform response
+updates into the same immutable IR. They cannot change requests, endpoint
+routing, credentials, generation policy, or codec selection.
+
+The built-in `deepseek` hook recognizes DeepSeek's textual DSML tool protocol.
+It is an incremental decorator over the codec-owned update iterator: ordinary
+content streams immediately, while a small cross-chunk prefix gate retains any
+possible DSML tag. Native structured tool calls pass through unchanged and
+take precedence over textual mirrors. A complete DSML response with no native
+call is parsed into reasoning/text/tool-call parts and assigned internal call
+IDs at this Pal-owned adapter boundary. Raw DSML and echoed historical
+tool-projection markers are discarded. Malformed, unsuccessful, filtered, or
+unterminated DSML fails the provider attempt and follows normal bounded
+retry/fallback handling. A length-truncated DSML block stays hidden while
+output recovery joins its continuation, then the complete response passes
+through the same hook instance again.
+
 ## Invariants
 
 - IR is the only internal LLM contract.
@@ -136,5 +160,5 @@ read-only to hooks. Hooks perform no I/O. Duplicate model IDs fail loading.
   the next endpoint; credentials are never borrowed across endpoints.
 - `finish_reason=error`, including output-recovery errors, is a failed provider
   attempt and never updates successful health or usage state.
-- Model quirks are exact-model hooks; provider-wide behavioral branching is
-  forbidden.
+- Request/model quirks are exact-model hooks. Provider-wide branching is
+  limited to response-syntax normalization and cannot alter behavior policy.

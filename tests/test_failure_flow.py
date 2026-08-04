@@ -10,7 +10,7 @@ from unittest.mock import patch
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.turns import _render_failure_primary_input
 from pal.execution import CapabilityResult
-from pal.execution.tool_facade import EmptyToolInput, ProviderPayloadOutput, ToolGuidance
+from pal.execution.tool_facade import EmptyToolInput, StructuredToolOutput, ToolGuidance
 from pal.execution.tool_semantics import DIRECT_NONE
 from pal.failure import FAILURE_VERIFICATION_FAILED, FailureDraft, FailureSignal
 from pal.failure.handler import FailureEventHandler
@@ -309,7 +309,7 @@ class FailureFlowTests(unittest.TestCase):
                 family="failure_test",
                 source="test",
                 InputModel=EmptyToolInput,
-                OutputModel=ProviderPayloadOutput,
+                OutputModel=StructuredToolOutput,
                 guidance=ToolGuidance(
                     purpose="Inspect a deterministic safe-mode probe.",
                     use_when="the failure flow needs a side-effect-free diagnostic",

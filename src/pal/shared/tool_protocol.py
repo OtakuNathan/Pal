@@ -68,7 +68,7 @@ def new_tool_call(
     *,
     args: Mapping[str, Any] | None = None,
 ) -> ToolCallIR:
-    """Create a Pal-originated call, generating an id only at this explicit boundary."""
+    """Create a call at a Pal-owned adapter boundary, generating an id there only."""
 
     return ToolCallIR(
         call_id=str(call_id or f"call_{uuid4().hex}"),
@@ -88,6 +88,8 @@ class ToolResultIR:
     ok: bool = True
     status: str = "ok"
     structured: Mapping[str, Any] | None = None
+    context_delivery: Mapping[str, Any] | None = None
+    replay_result_ref: str = ""
 
     def __post_init__(self) -> None:
         if not str(self.call_id or "").strip():
@@ -96,6 +98,13 @@ class ToolResultIR:
             raise ValueError("tool result name must be non-empty")
         if self.structured is not None:
             object.__setattr__(self, "structured", freeze_json_mapping(self.structured))
+        if self.context_delivery is not None:
+            object.__setattr__(
+                self,
+                "context_delivery",
+                freeze_json_mapping(self.context_delivery),
+            )
+        object.__setattr__(self, "replay_result_ref", str(self.replay_result_ref or ""))
 
 
 class EffectOutcome(str, Enum):
@@ -135,6 +144,7 @@ class CompleteResult(_StrictProtocolModel, Generic[T]):
     llm_text: str
     affordances: list[ToolAffordance] = Field(default_factory=list)
     context_delivery: dict[str, Any] | None = Field(default=None, exclude=True)
+    replay_result_ref: str = Field(default="", exclude=True)
 
 
 class PagedResult(_StrictProtocolModel):
@@ -189,12 +199,14 @@ class ToolExecutionResult:
     status: str = ""
     invocation_result: ToolInvocationResult | None = None
     context_delivery: dict[str, Any] | None = None
+    replay_result_ref: str = ""
 
     def __post_init__(self) -> None:
         if not str(self.llm_text or "").strip():
             raise ValueError("ToolExecutionResult.llm_text must be non-empty")
         if not str(self.status or "").strip():
             object.__setattr__(self, "status", "ok" if self.ok else "error")
+        object.__setattr__(self, "replay_result_ref", str(self.replay_result_ref or ""))
 
 
 def default_tool_result_text(

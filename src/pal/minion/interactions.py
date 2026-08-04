@@ -110,7 +110,6 @@ def minion_architecture_review_delivery(payload: dict[str, Any], route: ControlR
         "manifest_sha": manifest_sha,
         "decision_token": token,
         "actor_id": str(payload.get("actor_id") or "pal"),
-        "active_channel_id": str(payload.get("active_channel_id") or "local"),
     }
     buttons = (
         (
