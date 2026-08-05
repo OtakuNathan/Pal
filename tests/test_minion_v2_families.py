@@ -1270,6 +1270,21 @@ workspace_policy: {}
             )["behavior_fragment"]
         )
         generic = str(self._pack("general.generic").resolved_profile["behavior_fragment"])
+        architect_playbook = str(
+            self._pack("software_engineering.v2_architect").resolved_profile[
+                "role"
+            ]["playbook"]
+        )
+        coder_playbook = str(
+            self._pack("software_engineering.v2_coder").resolved_profile["role"][
+                "playbook"
+            ]
+        )
+        reviewer_playbook = str(
+            self._pack("software_engineering.v2_reviewer").resolved_profile[
+                "role"
+            ]["playbook"]
+        )
 
         # Stable role philosophy remains explicit even though invocation-specific
         # and mechanically enforced rules are no longer duplicated here.
@@ -1300,6 +1315,11 @@ workspace_policy: {}
         self.assertIn("participates in overload resolution", architect)
         self.assertIn("later function-body failure does not satisfy it", architect)
         self.assertIn("without unnecessary dynamic allocation", architect)
+        self.assertIn("operator-visible entrypoint", architect)
+        self.assertIn("MSDN-like normative API documentation", architect)
+        self.assertIn("no speculative extension seam", architect)
+        self.assertIn("Defer optional capability costs until use", architect_playbook)
+        self.assertIn("genuinely irreversible transition", architect_playbook)
         self.assertIn("object-address side table", architecture_review)
         self.assertIn("Audit requirement preservation", architecture_review)
         self.assertIn("Review semantic composition, not private implementation", architecture_review)
@@ -1318,6 +1338,10 @@ workspace_policy: {}
         self.assertIn("positive and negative declaration probe", architecture_review)
         self.assertIn("invalid combinations cannot be expressed as well-formed programs", architecture_review)
         self.assertIn("focused SFINAE/detection probes", architecture_review)
+        self.assertIn("MSDN-like normative API documentation", architecture_review)
+        self.assertIn("speculative seam without one", architecture_review)
+        self.assertIn("operator-visible entrypoints", reviewer_playbook)
+        self.assertIn("optional capabilities defer costs until use", reviewer_playbook)
 
         self.assertIn("Accepted Skeleton declarations", coder)
         self.assertIn("dependency's public contract as an axiom", coder)
@@ -1334,6 +1358,10 @@ workspace_policy: {}
         self.assertIn("Preserve every accepted declaration's static constraints exactly", coder)
         self.assertIn("Avoid dynamic allocation, unnecessary copying", coder)
         self.assertIn("checklist is its execution cursor, never authority", coder)
+        self.assertIn("Preserve MSDN-like docs", coder)
+        self.assertIn("Make code self-documenting", coder)
+        self.assertIn("owned public facade inward", coder_playbook)
+        self.assertIn("deferred optional costs", coder_playbook)
 
         self.assertIn("complete adjudication scope", verifier)
         self.assertIn("dependency public contract as an axiom", verifier)
@@ -1353,6 +1381,8 @@ workspace_policy: {}
         self.assertIn("positive and negative consumer compile probe", verifier)
         self.assertIn("does not prove overload exclusion", verifier)
         self.assertIn("invalid combinations cannot be expressed as well-formed programs", verifier)
+        self.assertIn("MSDN-like normative API documentation", verifier)
+        self.assertIn("setup and protocol costs are absent until it is exercised", verifier)
         self.assertNotIn("owned_impl", coder)
         self.assertNotIn("owned_test", coder)
 
