@@ -1207,10 +1207,31 @@ class PalCore:
     async def _handle_set_log_async(self, action: ControlAction) -> None:
         enabled = bool(action.args.get("prompt_log_enabled"))
         self.state.prompt_log_enabled = enabled
+        updated_ports: set[int] = set()
+        for port_name, port in self.context.port_registry.items():
+            if id(port) in updated_ports:
+                continue
+            setter = getattr(port, "set_prompt_log_enabled", None)
+            if not callable(setter):
+                continue
+            updated_ports.add(id(port))
+            try:
+                result = setter(enabled)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                self.state.diagnostics.append(
+                    {
+                        "kind": "runtime.prompt_log.dependent_update_failed",
+                        "port": str(port_name),
+                        "enabled": enabled,
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                )
         message = (
-            "Prompt debug logging enabled for new turns."
+            "Debug logging enabled for new turns and Minion role runs."
             if enabled
-            else "Prompt debug logging disabled for new turns."
+            else "Debug logging disabled for new turns and Minion role runs."
         )
         await self._complete_action_reply_async(action, message)
 

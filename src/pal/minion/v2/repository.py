@@ -2072,6 +2072,34 @@ class MinionV2Repository:
                 completed.append(session_id)
         return tuple(completed)
 
+    def reconcile_role_session_checkpoints(self) -> tuple[str, ...]:
+        """Delete derived checkpoints whose durable role session is terminal."""
+
+        self.ensure_schema()
+        store = LogicalCoroutineCheckpointStore(self.runtime_root)
+        checkpoint_ids = store.list_logical_coroutine_ids()
+        if not checkpoint_ids:
+            return ()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id FROM minion_v2_role_sessions
+                WHERE status IN (?, ?)
+                """,
+                (
+                    RoleSessionState.ACTIVE.value,
+                    RoleSessionState.SUSPENDED.value,
+                ),
+            ).fetchall()
+        resumable = {str(row["session_id"]) for row in rows}
+        retired: list[str] = []
+        for session_id in checkpoint_ids:
+            if session_id in resumable:
+                continue
+            store.delete(session_id)
+            retired.append(session_id)
+        return tuple(retired)
+
     def list_role_sessions(
         self,
         *,

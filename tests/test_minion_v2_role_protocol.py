@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pal.minion.checkpoint import LogicalCoroutineCheckpointStore
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
@@ -109,6 +110,19 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
             execution_spec={"effect_type": "run_implementation_role"},
             submission_kind="candidate",
         )
+
+    def test_checkpoint_reconciliation_keeps_only_resumable_role_sessions(self) -> None:
+        store = LogicalCoroutineCheckpointStore(self.runtime_root)
+        for session_id in ("session-router", "orphan-session"):
+            path = store.current_path(session_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}", encoding="utf-8")
+
+        retired = self.repository.reconcile_role_session_checkpoints()
+
+        self.assertEqual(retired, ("orphan-session",))
+        self.assertTrue(store.current_path("session-router").is_file())
+        self.assertFalse(store.current_path("orphan-session").exists())
 
     def start_attempt(self, assignment_id: str) -> tuple[dict, int]:
         attempt = self.repository.claim_role_assignment(assignment_id)

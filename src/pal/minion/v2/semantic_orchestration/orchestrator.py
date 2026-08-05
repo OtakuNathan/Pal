@@ -616,6 +616,7 @@ class SemanticOrchestrator:
     register_broker_run: BrokerRunRegistrar | None = None
     unregister_broker_run: BrokerRunUnregistrar | None = None
     inject_skill: SkillInjector | None = None
+    prompt_log_enabled: bool = False
     _processes: dict[str, asyncio.subprocess.Process] = field(default_factory=dict, init=False)
     _process_owners: dict[str, WorkerProcessOwner] = field(default_factory=dict, init=False)
     _run_to_invocation: dict[str, str] = field(default_factory=dict, init=False)
@@ -7079,6 +7080,18 @@ class SemanticOrchestrator:
             "continuation_input_path": str(continuation_input_path or ""),
             "continuation_output_path": str(continuation_output_path),
         }
+        # Debug logging is runtime policy rather than durable role truth.
+        # Snapshot it when the concrete role process is materialized.
+        metadata["prompt_log_enabled"] = bool(self.prompt_log_enabled)
+        if self.prompt_log_enabled:
+            log_dir = str(workspace_value.get("log_dir") or "").strip()
+            if log_dir:
+                metadata["debug_log"] = {
+                    "enabled": True,
+                    "path": str(Path(log_dir) / "minion-debug.log"),
+                }
+        else:
+            metadata.pop("debug_log", None)
         pack = MinionInvocationPack.from_dict({**pack_value, "metadata": metadata})
         if harness_spec.launch_kind == HARNESS_LAUNCH_PAL_SANDBOX:
             pack = _bind_role_attempt_sandbox(

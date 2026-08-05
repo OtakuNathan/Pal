@@ -277,8 +277,8 @@ def model_panel_delivery(
 def render_log_status_text(enabled: bool) -> str:
     status = "on" if enabled else "off"
     return (
-        f"Prompt log: {status}\n"
-        "Use /log start or /log end. Changes apply to new turns only."
+        f"Debug log: {status}\n"
+        "Use /log start or /log end. Changes apply to new turns and Minion role runs only."
     )
 
 

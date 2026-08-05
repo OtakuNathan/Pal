@@ -309,6 +309,23 @@ class LogicalCoroutineCheckpointStore:
         except (FileNotFoundError, OSError):
             pass
 
+    def list_logical_coroutine_ids(self) -> tuple[str, ...]:
+        """Return checkpoint identities without interpreting their lifecycle."""
+
+        try:
+            directories = tuple(self.root.iterdir())
+        except FileNotFoundError:
+            return ()
+        result: list[str] = []
+        for directory in directories:
+            if not directory.is_dir() or not (directory / "current.json").is_file():
+                continue
+            try:
+                result.append(_safe_component(directory.name))
+            except AgentSessionCheckpointError:
+                continue
+        return tuple(sorted(result))
+
 
 def _safe_component(value: str) -> str:
     text = str(value or "").strip()

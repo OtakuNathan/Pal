@@ -238,6 +238,46 @@ class ManagerWorkerAccountingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state.summary()["run_active"])
         self.assertTrue(state.ended_at)
 
+    async def test_worker_event_history_is_written_only_for_logged_role_run(self) -> None:
+        recorded: list[dict[str, object]] = []
+        self.manager.v2_service.repository.record_worker_event = (
+            lambda event: recorded.append(dict(event))
+        )
+        self.manager.events.queue_event = lambda _event: None
+        quiet = MinionRunState(
+            minion_id="inv-quiet",
+            run_id="run-quiet",
+            pack=MinionInvocationPack(
+                invocation_id="inv-quiet",
+                metadata={"prompt_log_enabled": False},
+            ),
+        )
+        logged = MinionRunState(
+            minion_id="inv-logged",
+            run_id="run-logged",
+            pack=MinionInvocationPack(
+                invocation_id="inv-logged",
+                metadata={"prompt_log_enabled": True},
+            ),
+        )
+        self.manager.runs[quiet.run_id] = quiet
+        self.manager.runs[logged.run_id] = logged
+
+        for state in (quiet, logged):
+            await self.manager._publish_v2_worker_event(
+                {
+                    "event_kind": "progress",
+                    "run_id": state.run_id,
+                    "invocation_id": state.minion_id,
+                    "payload": {"phase": "llm_round_started", "round": 1},
+                }
+            )
+
+        self.assertEqual(
+            [item["invocation_id"] for item in recorded],
+            ["inv-logged"],
+        )
+
     async def test_late_terminal_receipt_after_reap_preserves_terminal_status(self) -> None:
         process = SimpleNamespace(pid=124, returncode=0)
         state = MinionRunState(

@@ -157,6 +157,7 @@ class MinionManager:
     _shutdown_started_at: str = field(default="", init=False)
     _skill_database: Any | None = field(default=None, init=False, repr=False)
     _skill_inject_tool: Any | None = field(default=None, init=False, repr=False)
+    prompt_log_enabled: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.catalog = MinionCatalogService(Path(self.runtime_root))
@@ -165,6 +166,7 @@ class MinionManager:
         configured = config.get("max_parallel_llm_nodes", config.get("max_parallel_modules", _DEFAULT_MAX_PARALLEL_NODES))
         self.max_parallel_modules = max(1, int(self.max_parallel_modules or configured or _DEFAULT_MAX_PARALLEL_NODES))
         self.v2_service = MinionV2WorkflowService(Path(self.runtime_root))
+        self.v2_service.repository.reconcile_role_session_checkpoints()
         self.events = MinionEventDelivery(
             load_backlog=self._pending_task_delivery_events,
         )
@@ -377,6 +379,7 @@ class MinionManager:
             "send_decision": self.send_decision,
             "send_clarification": self.send_clarification,
             "answer_workflow_question": self.answer_workflow_question,
+            "set_prompt_log_enabled": self.set_prompt_log_enabled,
         }
         if method in handlers:
             payload = dict(params.get("decision") or {}) if method == "send_decision" else dict(params.get("clarification") or {}) if method == "send_clarification" else params
@@ -637,7 +640,13 @@ class MinionManager:
                     state.status = "exiting"
             state.last_event = item
             state.last_event_at = str(item.get("created_at") or utc_now())
-        self.v2_service.repository.record_worker_event(item)
+        debug_enabled = (
+            bool(dict(state.pack.metadata or {}).get("prompt_log_enabled"))
+            if state is not None
+            else bool(self.prompt_log_enabled)
+        )
+        if debug_enabled:
+            self.v2_service.repository.record_worker_event(item)
         kind = str(item.get("event_kind") or "")
         if kind in {"approval_requested", "clarification_requested", "terminal"}:
             event_payload = dict(item.get("payload") or {})
@@ -1126,6 +1135,7 @@ class MinionManager:
             "draining": self._drain_requested.is_set() and not self._shutdown_event.is_set(),
             "shutdown_reason": self._shutdown_reason,
             "max_parallel_llm_nodes": self.max_parallel_modules,
+            "prompt_log_enabled": self.prompt_log_enabled,
             "pending_event_count": len(self.event_queue),
             "event_subscriber_count": len(self.event_subscribers),
             "minion_db_path": str(self.v2_service.repository.db_path),
@@ -1150,6 +1160,13 @@ class MinionManager:
         self.v2_semantic_orchestrator.max_parallel_workers = self.max_parallel_modules
         self._v2_wake_event.set()
         return {"ok": True, "status": "ok", "config": config, "max_parallel_llm_nodes": self.max_parallel_modules}
+
+    async def set_prompt_log_enabled(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """Set the debug policy snapshot used by future role processes."""
+
+        self.prompt_log_enabled = bool(params.get("enabled"))
+        self.v2_semantic_orchestrator.prompt_log_enabled = self.prompt_log_enabled
+        return {"ok": True, "enabled": self.prompt_log_enabled}
 
     def request_shutdown(
         self,

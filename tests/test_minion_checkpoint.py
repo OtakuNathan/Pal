@@ -121,6 +121,7 @@ class MinionCheckpointTests(unittest.TestCase):
             current_fencing_token=4,
         )
         self.assertEqual(store.read("session-1")["sequence"], 2)
+        self.assertEqual(store.list_logical_coroutine_ids(), ("session-1",))
         changed_stage_payload = _private_checkpoint(sequence=3, fencing_token=5)
         changed_stage_payload["stage_key"] = "module:module-b:implementation"
         changed_stage_payload["runtime_snapshot"]["stage_key"] = (
@@ -135,6 +136,7 @@ class MinionCheckpointTests(unittest.TestCase):
             )
         store.delete("session-1")
         self.assertIsNone(store.read("session-1"))
+        self.assertEqual(store.list_logical_coroutine_ids(), ())
 
     def test_worker_terminal_error_is_not_hidden_by_empty_stderr(self) -> None:
         error_kind, details, retry_directive = _worker_terminal_failure(

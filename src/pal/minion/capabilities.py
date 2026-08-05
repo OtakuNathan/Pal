@@ -70,6 +70,7 @@ class MinionManagerProvider:
     _event_stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _lifecycle_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _attached: bool = field(default=False, init=False, repr=False)
+    prompt_log_enabled: bool = field(default=False, init=False)
     _unsubscribe_harness_registry: Callable[[], None] | None = field(
         default=None,
         init=False,
@@ -97,6 +98,25 @@ class MinionManagerProvider:
                 self.last_health = health
                 self.last_error = ""
                 self._sync_harness_registry()
+                core = (
+                    self.context.port_registry.get("core:core")
+                    if self.context is not None
+                    else None
+                )
+                core_state = getattr(core, "state", None)
+                if core_state is not None:
+                    self.prompt_log_enabled = bool(
+                        getattr(core_state, "prompt_log_enabled", False)
+                    )
+                log_policy = self.client.request_sync(
+                    "set_prompt_log_enabled",
+                    {"enabled": bool(self.prompt_log_enabled)},
+                )
+                health = {
+                    **dict(health),
+                    "prompt_log_enabled": bool(log_policy.get("enabled")),
+                }
+                self.last_health = health
                 self._start_event_subscription()
                 self.client.request_sync("v2_wake")
                 return health
@@ -124,6 +144,21 @@ class MinionManagerProvider:
     async def refresh_llm_endpoints(self) -> dict[str, Any]:
         await asyncio.to_thread(self._require_manager)
         return await self.client.refresh_llm_endpoints()
+
+    async def set_prompt_log_enabled(self, enabled: bool) -> dict[str, Any]:
+        """Apply Core's /log policy to subsequently started role processes."""
+
+        self.prompt_log_enabled = bool(enabled)
+        if not self._attached:
+            return {
+                "ok": True,
+                "enabled": self.prompt_log_enabled,
+                "manager_running": False,
+            }
+        return await self.client.request(
+            "set_prompt_log_enabled",
+            {"enabled": self.prompt_log_enabled},
+        )
 
     def _on_harness_registry_generation(
         self,

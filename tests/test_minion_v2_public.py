@@ -7103,6 +7103,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             pack=MinionInvocationPack(
                 invocation_id="inv-routed-question",
                 metadata={
+                    "prompt_log_enabled": True,
                     "minion_v2": {
                         "workflow_id": "wf-routed-question",
                     }
