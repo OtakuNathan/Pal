@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="docs/assets/pal-avatar.png" alt="Pal" width="140"/>
+</p>
+
 # Pal
 
 > Your personal AI companion — not a framework, not a platform. One Pal, one person.
+
+> Pal #0 — the original. Yes, that's the official face: a robot caught eating cookies. 🍪
 
 Pal is an event-driven agent runtime built for a single user. It runs as a daemon on your machine, talks through Unix sockets and messaging channels, remembers what matters, and acts on your behalf through a governed capability system.
 
