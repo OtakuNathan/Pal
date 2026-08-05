@@ -26,7 +26,7 @@ from pal.mcp.normalize import (
     sanitize_name,
     schema_normalize_or_reject,
 )
-from pal.shared import BoundCapabilityAction, MountedSubtreeHandle, SINGLETON_TARGET
+from pal.shared import BoundCapabilityAction, MountedSubtreeHandle, OPERATION_NAMESPACE, SINGLETON_TARGET
 from pal.skill.contracts import SKILL_SOURCE_DECLARED, SKILL_STATUS_ACTIVE, SkillApplicabilitySTAR, SkillDescriptor
 
 
@@ -195,14 +195,17 @@ class McpCompiler:
             search_text=f"{alias} {tool.description or tool.name} {snapshot.server_id}",
             mcp_input_schema=dict(schema or {"type": "object", "properties": {}, "required": []}),
             mcp_output_schema=output_schema,
-            metadata=_mcp_metadata(
-                server_id=snapshot.server_id,
-                transport=snapshot.transport,
-                external_name=tool.name,
-                kind="tool",
-                annotations=tool.annotations,
-                raw=tool.raw,
-            ),
+            metadata={
+                **_mcp_metadata(
+                    server_id=snapshot.server_id,
+                    transport=snapshot.transport,
+                    external_name=tool.name,
+                    kind="tool",
+                    annotations=tool.annotations,
+                    raw=tool.raw,
+                ),
+                "namespace": OPERATION_NAMESPACE,
+            },
             lifecycle_scope="detachable",
             module_id=module_id,
             detachable=True,
@@ -256,13 +259,16 @@ class McpCompiler:
             search_text=f"{alias} {prompt.description or prompt.name} {snapshot.server_id}",
             mcp_input_schema=prompt_arguments_schema(prompt),
             mcp_output_schema={"type": "object"},
-            metadata=_mcp_metadata(
-                server_id=snapshot.server_id,
-                transport=snapshot.transport,
-                external_name=prompt.name,
-                kind="prompt_render",
-                raw=prompt.raw,
-            ),
+            metadata={
+                **_mcp_metadata(
+                    server_id=snapshot.server_id,
+                    transport=snapshot.transport,
+                    external_name=prompt.name,
+                    kind="prompt_render",
+                    raw=prompt.raw,
+                ),
+                "namespace": OPERATION_NAMESPACE,
+            },
             lifecycle_scope="detachable",
             module_id=module_id,
             detachable=True,
