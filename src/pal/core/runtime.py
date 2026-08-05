@@ -1440,6 +1440,8 @@ class PalCore:
         if delivery.delivery_kind == "reply":
             text = delivery.text or str(delivery.payload.get("text") or "")
             if text:
+                if not require_provider:
+                    return await self._reply_to_route_async(route, text)
                 return await self._reply_to_route_async(
                     route, text, require_provider=require_provider
                 )
@@ -1493,6 +1495,8 @@ class PalCore:
         if delivery.delivery_kind in control_interactions.INTERACTIVE_DELIVERY_KINDS:
             if delivery.interaction is None:
                 if delivery.text:
+                    if not require_provider:
+                        return await self._reply_to_route_async(route, delivery.text)
                     return await self._reply_to_route_async(
                         route,
                         delivery.text,
@@ -1503,6 +1507,12 @@ class PalCore:
             payload["spec"] = delivery.interaction
             if delivery.text:
                 payload["text"] = delivery.text
+            if not require_provider:
+                return await self._status_to_route_async(
+                    route,
+                    delivery.delivery_kind,
+                    payload,
+                )
             return await self._status_to_route_async(
                 route,
                 delivery.delivery_kind,

@@ -24,6 +24,7 @@ from pal.minion.v2.graph_compiler import (
 )
 from pal.minion.v2.graph_satellites import FamilyGraphSatelliteProjector
 from pal.minion.v2.graph_protocol import GraphSourceMap, RoleBinding
+from pal.minion.v2.git_scope import scoped_role_git_read_command
 from pal.minion.v2.role_contracts import validate_family_binding_payload
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import (
@@ -567,7 +568,14 @@ class RoleAssignmentGateway:
         if not cwd.is_relative_to(workspace_root):
             raise ValueError("Git cwd is outside the assigned repository workspace")
 
-        result = GitTool().invoke({"cmd": command, "cwd": str(cwd)})
+        scoped_command = scoped_role_git_read_command(
+            prompt_pack=prompt_pack,
+            assignment=dict(authenticated.get("assignment") or {}),
+            artifact_reader=self.service.artifacts.read_json,
+            policy=policy,
+        )
+
+        result = GitTool().invoke({"cmd": scoped_command, "cwd": str(cwd)})
         structured = dict(result.structured or {})
         return {
             "returncode": int(structured.get("returncode", 1)),

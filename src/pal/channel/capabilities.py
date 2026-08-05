@@ -433,11 +433,13 @@ class ChannelIntrospectionProvider:
         attach_enabled = bool(call.args.get("attach_enabled_endpoints", False))
         payload = self._manager().rescan_providers(attach_enabled_endpoints=attach_enabled)
         payload["republished_capability_names"] = self._republish_capabilities()
+        status = RuntimeStatus.ERROR if payload.get("scan_errors") else RuntimeStatus.OK
+        text = "channel provider rescan failed; previous generation preserved" if status == RuntimeStatus.ERROR else "channel providers rescanned"
         return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="channel providers rescanned",
+            status=status,
+            text=text,
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Channel providers rescanned", payload),
+            llm_text=render_titled_structured_for_llm(text, payload),
         )
 
     @capability_action(
@@ -611,20 +613,33 @@ class ChannelIntrospectionProvider:
                 },
                 llm_text="recovery socket endpoint cannot be disabled",
             )
+        if endpoint is None and record is None:
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="channel endpoint not found",
+                llm_text="channel endpoint not found",
+            )
+        previous_enabled = bool(endpoint.enabled) if endpoint is not None else None
         if endpoint is not None:
             if enabled:
                 self.runtime.enable_endpoint(endpoint_id)
             else:
                 self.runtime.disable_endpoint(endpoint_id)
         try:
-            record = self.repository.set_enabled(endpoint_id, enabled)
-        except Exception:
-            record = None
-        if endpoint is None and record is None:
+            updated_record = self.repository.set_enabled(endpoint_id, enabled) if record is not None else None
+            if record is not None and updated_record is None:
+                raise RuntimeError(f"channel endpoint disappeared during state update: {endpoint_id}")
+        except Exception as exc:
+            if endpoint is not None and previous_enabled is not None:
+                if previous_enabled:
+                    self.runtime.enable_endpoint(endpoint_id)
+                else:
+                    self.runtime.disable_endpoint(endpoint_id)
             return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="channel endpoint not found",
-                llm_text="channel endpoint not found",
+                status=RuntimeStatus.ERROR,
+                text=f"channel endpoint state update failed: {exc}",
+                structured={"endpoint_id": endpoint_id, "enabled": previous_enabled},
+                llm_text="Channel endpoint state was not changed because its durable state could not be committed.",
             )
         payload = {"endpoint_id": endpoint_id, "enabled": enabled}
         return IntrospectionResult(

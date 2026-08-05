@@ -1289,16 +1289,50 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_tool_surface" for item in commands))
 
-    async def test_channel_replace_from_running_channel_loop_schedules_reload(self) -> None:
+    async def test_channel_replace_from_running_channel_loop_requires_async_api(self) -> None:
         await self.channel_runtime.start_async()
         replacement = _StubEndpoint(
             endpoint=EndpointConfig(endpoint_id="socket_main", channel_kind="socket", binding_key="runtime.sock")
         )
 
-        self.channel_runtime.replace_endpoint(replacement)
-        await asyncio.sleep(0)
+        with self.assertRaisesRegex(RuntimeError, "use replace_endpoint_async"):
+            self.channel_runtime.replace_endpoint(replacement)
+        self.assertIs(self.channel_runtime.get_endpoint("socket_main"), self.endpoint)
+
+        await self.channel_runtime.replace_endpoint_async(replacement)
 
         self.assertIs(self.channel_runtime.get_endpoint("socket_main"), replacement)
+
+    async def test_channel_replace_start_failure_preserves_old_endpoint(self) -> None:
+        class FailingStartEndpoint(_StubEndpoint):
+            async def start_async(self) -> None:
+                raise RuntimeError("start failed")
+
+        await self.channel_runtime.start_async()
+        replacement = FailingStartEndpoint(
+            endpoint=EndpointConfig(endpoint_id="socket_main", channel_kind="socket", binding_key="runtime.sock")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "start failed"):
+            await self.channel_runtime.replace_endpoint_async(replacement)
+
+        self.assertIs(self.channel_runtime.get_endpoint("socket_main"), self.endpoint)
+
+    async def test_channel_remove_stop_failure_preserves_endpoint(self) -> None:
+        class FailingStopEndpoint(_StubEndpoint):
+            async def stop_async(self) -> None:
+                raise RuntimeError("stop failed")
+
+        endpoint = FailingStopEndpoint(
+            endpoint=EndpointConfig(endpoint_id="failing", channel_kind="socket", binding_key="runtime.sock")
+        )
+        self.channel_runtime.register_endpoint(endpoint)
+        await self.channel_runtime.start_async()
+
+        with self.assertRaisesRegex(RuntimeError, "stop failed"):
+            await self.channel_runtime.remove_endpoint_async("failing")
+
+        self.assertIs(self.channel_runtime.get_endpoint("failing"), endpoint)
 
     async def test_reset_request_is_deduplicated_and_expires(self) -> None:
         action = ControlAction(
@@ -1581,7 +1615,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(interrupted)
         self.assertTrue(continuation.interrupted)
-        self.assertTrue(self.endpoint._stream_sessions[id(response_handle)]["closed"])
+        self.assertNotIn(id(response_handle), self.endpoint._stream_sessions)
         closed = self.memory_service.l1_store.turns.get("turn-1")
         self.assertEqual(closed.state, L1TurnState.INTERRUPTED)
         self.assertEqual(len(self.memory_service.l1_store.items), 1)

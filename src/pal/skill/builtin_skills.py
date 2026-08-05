@@ -100,6 +100,7 @@ from dataclasses import dataclass
 
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.execution.tool_facade import StrictToolModel
+from pal.execution.tool_semantics import INDIRECT_NONE
 from pal.shared import OPERATION_NAMESPACE, RuntimeStatus, capability_action, capability_node
 
 
@@ -125,6 +126,7 @@ class DemoProvider:
         action_name="echo",
         description="Echo a short message.",
         InputModel=EchoInput,
+        execution=INDIRECT_NONE,
     )
     def echo(self, call: CapabilityCall) -> CapabilityResult:
         message = str(call.args.get("message") or "")

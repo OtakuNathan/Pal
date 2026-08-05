@@ -17,6 +17,11 @@ from pal.llm.ir import (
     WireShape,
 )
 from pal.llm.models import LLMEndpointModel
+from pal.llm.output_recovery import (
+    continuation_request,
+    merge_responses,
+    safe_truncated_message,
+)
 from pal.llm.response_hooks import (
     ProviderResponseHookError,
     ProviderResponseHookRegistry,
@@ -204,10 +209,18 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
             transport=_FramesTransport(frames),  # type: ignore[arg-type]
         )
 
-        response, _ = invoker.invoke(_endpoint(), _request())
+        response, updates = invoker.invoke(_endpoint(), _request())
 
         self.assertEqual(response.tool_calls[0].call_id, "call-native")
         self.assertEqual(response.tool_calls[0].name, "read_file")
+        committed = next(
+            update
+            for update in updates
+            if update.delta_kind == LLMResponseDeltaKind.ITEM_COMMITTED
+        )
+        self.assertEqual(committed.item_id, "call-native")
+        self.assertIsNotNone(committed.tool_call)
+        self.assertEqual(committed.tool_call.call_id, "call-native")
 
     def test_multiple_calls_and_json_parameter_types_are_preserved(self) -> None:
         first = _dsml_call(
@@ -312,6 +325,57 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
         self.assertEqual(updates[0].delta_kind, LLMResponseDeltaKind.STATE)
         self.assertEqual(updates[0].response.finish_reason, LLMFinishReason.LENGTH)
         self.assertEqual(updates[0].text_delta, "")
+        self.assertEqual(updates[0].response.text, "")
+        self.assertNotIn("DSML", updates[0].response.text)
+        self.assertIsNotNone(updates[0].response.message.replay)
+        self.assertIsNotNone(
+            safe_truncated_message(updates[0].response.message).replay
+        )
+
+    def test_length_truncated_dsml_continuation_closes_one_structured_tool_call(self) -> None:
+        first_text = (
+            f"<{_OFFICIAL_TOKEN}tool_calls>\n"
+            f'<{_OFFICIAL_TOKEN}invoke name="read_file">\n'
+            f'<{_OFFICIAL_TOKEN}parameter name="path" string="true">'
+        )
+        first_invoker = ShapeEndpointInvoker(
+            credential_resolver=lambda endpoint: "secret",
+            transport=_FramesTransport(
+                [{
+                    "content": [{"type": "text", "text": first_text}],
+                    "stop_reason": "max_tokens",
+                }]
+            ),  # type: ignore[arg-type]
+        )
+        first, _ = first_invoker.invoke(_endpoint(), _request())
+        resumed_request = continuation_request(
+            _request(),
+            first,
+            max_output_tokens=1_000,
+            attempt=1,
+        )
+        second_text = (
+            f"a.txt</{_OFFICIAL_TOKEN}parameter>\n"
+            f"</{_OFFICIAL_TOKEN}invoke>\n"
+            f"</{_OFFICIAL_TOKEN}tool_calls>"
+        )
+        second_invoker = ShapeEndpointInvoker(
+            credential_resolver=lambda endpoint: "secret",
+            transport=_FramesTransport(
+                _anthropic_complete(second_text, reasoning="finish the call")
+            ),  # type: ignore[arg-type]
+        )
+
+        second, updates = second_invoker.invoke(_endpoint(), resumed_request)
+        merged = merge_responses([first, second])
+
+        self.assertEqual(merged.text, "")
+        self.assertEqual(len(merged.tool_calls), 1)
+        self.assertEqual(merged.tool_calls[0].name, "read_file")
+        self.assertEqual(merged.tool_calls[0].args, {"path": "a.txt"})
+        self.assertEqual(second.reasoning_text, "finish the call")
+        self.assertEqual(merged.reasoning_text, "finish the call")
+        self.assertFalse(any("DSML" in update.response.text for update in updates))
 
     def test_provider_match_is_case_insensitive_and_independent_of_wire_shape(self) -> None:
         response = LLMResponseIR(

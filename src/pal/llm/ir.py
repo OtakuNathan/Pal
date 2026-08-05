@@ -48,7 +48,15 @@ class LLMResponseDeltaKind(StrEnum):
     TEXT = "text"
     REASONING = "reasoning"
     TOOL_CALL = "tool_call"
+    ITEM_COMMITTED = "item_committed"
     STATE = "state"
+
+
+class LLMResponseItemKind(StrEnum):
+    MESSAGE = "message"
+    REASONING = "reasoning"
+    TOOL_CALL = "tool_call"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -235,6 +243,8 @@ class LLMResponseUpdate:
     delta_kind: LLMResponseDeltaKind
     text_delta: str = ""
     tool_call: _ToolCallIR | None = None
+    item_id: str = ""
+    item_kind: LLMResponseItemKind | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -242,4 +252,19 @@ class LLMResponseUpdate:
             "delta_kind",
             LLMResponseDeltaKind(self.delta_kind),
         )
-
+        if self.item_kind is not None:
+            object.__setattr__(
+                self,
+                "item_kind",
+                LLMResponseItemKind(self.item_kind),
+            )
+        if self.delta_kind == LLMResponseDeltaKind.ITEM_COMMITTED:
+            if not str(self.item_id or "").strip():
+                raise ValueError("committed LLM item must have a stable item_id")
+            if self.item_kind is None:
+                raise ValueError("committed LLM item must declare item_kind")
+            if (
+                self.item_kind == LLMResponseItemKind.TOOL_CALL
+                and self.tool_call is None
+            ):
+                raise ValueError("committed LLM tool item must carry its tool call")

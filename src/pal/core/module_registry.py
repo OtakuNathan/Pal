@@ -45,6 +45,12 @@ class ModuleRegistry:
     def register(self, handle: ModuleHandle) -> None:
         self.modules[handle.module_id] = handle
 
+    def unregister(self, module_id: str, *, expected: ModuleHandle | None = None) -> ModuleHandle | None:
+        current = self.modules.get(module_id)
+        if current is None or (expected is not None and current is not expected):
+            return None
+        return self.modules.pop(module_id)
+
     def get(self, module_id: str) -> ModuleHandle | None:
         return self.modules.get(module_id)
 

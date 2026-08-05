@@ -550,14 +550,19 @@ class TurnExecutor:
 
     async def _handle_ir_stream_update(self, continuation: Any, update: Any) -> None:
         self._ensure_not_interrupted(continuation)
-        # A terminal ERROR update is not a semantic assistant message.  The
-        # non-terminal deltas have already preserved any valid partial wire
-        # replay; the error itself must stay outside the L1 conversation so a
-        # retry can resend the same logical request.
-        if not (
+        # A terminal ERROR is transport state, not an assistant message.  Any
+        # partial text or item-level tool snapshot from this failed response
+        # must leave L1 together so the retry resends the same logical input.
+        terminal_error = (
             update.delta_kind == LLMResponseDeltaKind.STATE
             and update.response.finish_reason == LLMFinishReason.ERROR
-        ):
+        )
+        if terminal_error:
+            await self._discard_l1_assistant_async(
+                continuation,
+                update.response.message.message_id,
+            )
+        else:
             await self._upsert_l1_assistant_async(continuation, update.response.message)
         channel_update: ChannelStreamUpdate | None = None
         if update.delta_kind == LLMResponseDeltaKind.TEXT and update.text_delta:
@@ -1088,6 +1093,28 @@ class TurnExecutor:
                 ),
             )
         result = method(str(continuation.turn_id), message)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _discard_l1_assistant_async(
+        self,
+        continuation: Any,
+        message_id: str,
+    ) -> None:
+        memory_service = self.context.port_registry.get("memory:memory")
+        method = getattr(memory_service, "discard_l1_assistant", None)
+        if not callable(method):
+            return
+        active_reader = getattr(memory_service, "active_l1_turn", None)
+        if callable(active_reader):
+            active = active_reader(str(continuation.turn_id))
+            if active is None or not any(
+                item.role == MessageRole.ASSISTANT
+                and str(item.message_id or "") == str(message_id)
+                for item in active.messages
+            ):
+                return
+        result = method(str(continuation.turn_id), str(message_id))
         if inspect.isawaitable(result):
             await result
 

@@ -39,6 +39,8 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "LLMFinishReason": ("pal.llm.ir", "LLMFinishReason"),
     "LLMMessageIR": ("pal.llm.ir", "LLMMessageIR"),
     "LLMRequestIR": ("pal.llm.ir", "LLMRequestIR"),
+    "LLMResponseDeltaKind": ("pal.llm.ir", "LLMResponseDeltaKind"),
+    "LLMResponseItemKind": ("pal.llm.ir", "LLMResponseItemKind"),
     "LLMResponseIR": ("pal.llm.ir", "LLMResponseIR"),
     "LLMResponseUpdate": ("pal.llm.ir", "LLMResponseUpdate"),
     "LLMUsageIR": ("pal.llm.ir", "LLMUsageIR"),

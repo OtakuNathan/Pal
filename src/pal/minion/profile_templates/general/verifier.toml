@@ -65,4 +65,3 @@ tool = "verification_submit"
 
 [metadata]
 builtin = true
-max_output_tokens = 32768

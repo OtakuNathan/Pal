@@ -11,6 +11,7 @@ from pal.llm.ir import (
     LLMFinishReason,
     LLMRequestIR,
     LLMResponseDeltaKind,
+    LLMResponseItemKind,
     LLMResponseIR,
     LLMResponseUpdate,
     MessageRole,
@@ -175,8 +176,9 @@ class OpenAIResponseDecoder:
                 else "stop"
             )
             if status_reason in {"length", "error"}:
-                self.tool_drafts.clear()
-                self.builder.discard_tool_calls()
+                self._discard_open_tools()
+                if status_reason == "error":
+                    self.builder.discard_tool_calls()
             else:
                 updates.extend(self._finalize_tools())
             self._refresh_replay()
@@ -186,9 +188,12 @@ class OpenAIResponseDecoder:
 
     def finish(self) -> LLMResponseIR:
         if not self.builder.complete:
-            self.tool_drafts.clear()
-            self.builder.discard_tool_calls()
-            self.builder.mark_complete(LLMFinishReason.ERROR)
+            self._discard_open_tools()
+            self.builder.mark_complete(
+                LLMFinishReason.TOOL_CALLS
+                if self.builder.has_tools
+                else LLMFinishReason.ERROR
+            )
         self._refresh_replay()
         return self.builder.finish()
 
@@ -213,6 +218,12 @@ class OpenAIResponseDecoder:
                         update = self.builder.append_text(str(block.get("text") or block.get("refusal") or ""))
                         if update is not None:
                             updates.append(update)
+                committed = self.builder.commit_item(
+                    item_id=_response_item_id(self.builder.message_id, index, item),
+                    item_kind=LLMResponseItemKind.MESSAGE,
+                )
+                if committed is not None:
+                    updates.append(committed)
                 continue
             if kind == "reasoning":
                 for block in list(item.get("summary") or []):
@@ -220,19 +231,35 @@ class OpenAIResponseDecoder:
                         update = self.builder.append_reasoning(str(block.get("text") or ""))
                         if update is not None:
                             updates.append(update)
+                committed = self.builder.commit_item(
+                    item_id=_response_item_id(self.builder.message_id, index, item),
+                    item_kind=LLMResponseItemKind.REASONING,
+                )
+                if committed is not None:
+                    updates.append(committed)
                 continue
-            if kind == "function_call" and not incomplete and not failed:
+            item_complete = not incomplete or str(item.get("status") or "").lower() == "completed"
+            if kind == "function_call" and item_complete and not failed:
                 call_id = str(item.get("call_id") or "").strip()
                 if not call_id:
                     self.replay_items.pop(index, None)
                     continue
-                updates.append(
-                    self.builder.append_tool_call(
-                        call_id=call_id,
-                        name=str(item.get("name") or ""),
-                        arguments=json_object(item.get("arguments") or {}, label="Responses tool arguments"),
-                    )
+                tool_update = self.builder.append_tool_call(
+                    call_id=call_id,
+                    name=str(item.get("name") or ""),
+                    arguments=json_object(
+                        item.get("arguments") or {},
+                        label="Responses tool arguments",
+                    ),
                 )
+                updates.append(tool_update)
+                committed = self.builder.commit_item(
+                    item_id=_response_item_id(self.builder.message_id, index, item),
+                    item_kind=LLMResponseItemKind.TOOL_CALL,
+                    tool_call=tool_update.tool_call,
+                )
+                if committed is not None:
+                    updates.append(committed)
         usage = payload.get("usage")
         if isinstance(usage, Mapping):
             self.builder.set_usage(usage_from_mapping(usage))
@@ -288,9 +315,33 @@ class OpenAIResponseDecoder:
                 draft["name"] = str(item.get("name") or draft.get("name") or "")
                 if item.get("arguments") is not None:
                     draft["arguments"] = [str(item.get("arguments") or "")]
-        # A syntactically complete item is still not executable until the
-        # response-level terminal event confirms the whole generation.
-        return []
+        kind = str(dict(item or {}).get("type") or self.replay_items.get(index, {}).get("type") or "")
+        updates: list[LLMResponseUpdate] = []
+        tool_call = None
+        if kind == "function_call":
+            tool_updates = self._finalize_tool(index)
+            updates.extend(tool_updates)
+            if tool_updates:
+                tool_call = tool_updates[-1].tool_call
+            item_kind = LLMResponseItemKind.TOOL_CALL
+        elif kind == "reasoning":
+            item_kind = LLMResponseItemKind.REASONING
+        elif kind == "message":
+            item_kind = LLMResponseItemKind.MESSAGE
+        else:
+            item_kind = LLMResponseItemKind.UNKNOWN
+        committed = self.builder.commit_item(
+            item_id=_response_item_id(
+                self.builder.message_id,
+                index,
+                dict(item or self.replay_items.get(index) or {}),
+            ),
+            item_kind=item_kind,
+            tool_call=tool_call,
+        )
+        if committed is not None:
+            updates.append(committed)
+        return updates
 
     def _finalize_tool(self, index: int) -> list[LLMResponseUpdate]:
         draft = self.tool_drafts.pop(index, None)
@@ -318,6 +369,11 @@ class OpenAIResponseDecoder:
             updates.extend(self._finalize_tool(index))
         return updates
 
+    def _discard_open_tools(self) -> None:
+        for index in tuple(self.tool_drafts):
+            self.replay_items.pop(index, None)
+        self.tool_drafts.clear()
+
     def _refresh_replay(self) -> None:
         if self.replay_items:
             output = [self.replay_items[index] for index in sorted(self.replay_items)]
@@ -336,6 +392,14 @@ def _responses_user_content(parts: tuple[Any, ...]) -> str | list[dict[str, Any]
     if len(rendered) == 1 and rendered[0].get("type") == "input_text":
         return str(rendered[0]["text"])
     return rendered
+
+
+def _response_item_id(
+    message_id: str,
+    index: int,
+    item: Mapping[str, Any],
+) -> str:
+    return str(item.get("id") or item.get("call_id") or f"{message_id}:{index}")
 
 
 def _semantic_response_items(parts: list[Any]) -> list[dict[str, Any]]:

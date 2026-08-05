@@ -63,7 +63,6 @@ allowed_output_types = ["ModuleCoderReport", "ModuleSplitRequest"]
 
 [metadata]
 builtin = true
-max_output_tokens = 32768
 
 [role]
 protocol_id = "module_implementation.v1"

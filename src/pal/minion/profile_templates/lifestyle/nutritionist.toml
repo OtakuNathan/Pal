@@ -35,4 +35,3 @@ allowed_output_types = []
 
 [metadata]
 builtin = true
-max_output_tokens = 32768

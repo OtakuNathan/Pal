@@ -115,7 +115,7 @@ class FactoryChannelProvider:
         return self.factory.create(record, runtime_root=context.runtime_root)
 
     def attach_endpoint(self, endpoint_id: str, context: ChannelProviderContext) -> IntrospectionResult:
-        record = context.repository.set_attached(endpoint_id, True)
+        record = context.repository.get(endpoint_id)
         if record is None:
             return _not_found(endpoint_id)
         endpoint = self.create_endpoint(record, context)
@@ -124,7 +124,7 @@ class FactoryChannelProvider:
         old_endpoint = context.runtime.get_endpoint(endpoint_id)
         _preserve_runtime_endpoint_state(old_endpoint, endpoint)
         endpoint.attached = True
-        context.runtime.replace_endpoint(endpoint)
+        record = commit_channel_endpoint_attach(endpoint_id, endpoint, context)
         return _ok(
             "Channel endpoint attached",
             {
@@ -154,12 +154,9 @@ class FactoryChannelProvider:
                 },
                 llm_text="recovery socket endpoint cannot be detached",
             )
-        record = context.repository.set_attached(endpoint_id, False)
         if record is None and endpoint is None:
             return _not_found(endpoint_id)
-        if endpoint is not None:
-            endpoint.detach()
-        removed = context.runtime.remove_endpoint(endpoint_id)
+        record, endpoint, removed = commit_channel_endpoint_detach(endpoint_id, context)
         endpoint_type = record.channel_kind if record is not None else endpoint.endpoint.channel_kind
         return _ok(
             "Channel endpoint detached",
@@ -319,11 +316,30 @@ class ChannelEndpointProviderManager:
         provider_id = str(provider.provider_id or "").strip()
         if not provider_id:
             raise ValueError("channel provider_id is required")
-        self.providers[provider_id] = provider
-        for endpoint_type in provider.endpoint_types:
+        endpoint_types = tuple(
+            dict.fromkeys(
+                normalized
+                for endpoint_type in provider.endpoint_types
+                if (normalized := str(endpoint_type or "").strip())
+            )
+        )
+        if not endpoint_types:
+            raise ValueError(f"channel provider has no endpoint types: {provider_id}")
+        for endpoint_type in endpoint_types:
+            owner_id = self.endpoint_type_to_provider.get(endpoint_type)
+            if owner_id is not None and owner_id != provider_id:
+                raise ValueError(
+                    f"channel endpoint type already registered: {endpoint_type} ({owner_id})"
+                )
+        old_provider = self.providers.get(provider_id)
+        old_types = tuple(old_provider.endpoint_types) if old_provider is not None else ()
+        for endpoint_type in old_types:
             normalized = str(endpoint_type or "").strip()
-            if normalized:
-                self.endpoint_type_to_provider[normalized] = provider_id
+            if normalized not in endpoint_types and self.endpoint_type_to_provider.get(normalized) == provider_id:
+                self.endpoint_type_to_provider.pop(normalized, None)
+        self.providers[provider_id] = provider
+        for endpoint_type in endpoint_types:
+            self.endpoint_type_to_provider[endpoint_type] = provider_id
 
     def unregister_provider(self, provider_id: str) -> ChannelProvider | None:
         normalized = str(provider_id or "").strip()
@@ -473,31 +489,86 @@ class ChannelEndpointProviderManager:
         return provider.inspect_health(endpoint_id, self.context())
 
     def load_runtime_providers(self) -> dict[str, Any]:
-        self._clear_runtime_providers()
+        previous_providers = dict(self.providers)
+        previous_type_map = dict(self.endpoint_type_to_provider)
+        previous_provider_ids = set(self.runtime_provider_ids)
+        previous_module_names = set(self.runtime_module_names)
+        previous_manifests = dict(self.runtime_provider_manifests)
+        previous_runtime_endpoint_types = {
+            str(endpoint_type or "").strip()
+            for provider_id in previous_provider_ids
+            for provider in (previous_providers.get(provider_id),)
+            if provider is not None
+            for endpoint_type in provider.endpoint_types
+            if str(endpoint_type or "").strip()
+        }
+        previous_endpoints = tuple(
+            (endpoint, bool(endpoint.attached))
+            for endpoint in self.runtime.list_endpoints()
+            if endpoint.endpoint.channel_kind in previous_runtime_endpoint_types
+        )
+        previous_module_cache = {
+            module_name: module
+            for module_name, module in sys.modules.items()
+            if module_name in previous_module_names
+            or any(
+                _module_loaded_from(module_name, Path(manifest.filesystem_path).resolve())
+                for manifest in previous_manifests.values()
+                if manifest.filesystem_path
+            )
+        }
         self.runtime_provider_load_errors = []
         manifests_seen: list[str] = []
         loaded_provider_ids: list[str] = []
         disabled_provider_ids: list[str] = []
-        primary_dir = self.runtime_root / RUNTIME_CHANNEL_PROVIDER_DIR
-        primary_dir.mkdir(parents=True, exist_ok=True)
-        for providers_dir in _runtime_provider_dirs(self.runtime_root):
-            for manifest_path in _iter_runtime_provider_manifest_paths(providers_dir):
-                manifests_seen.append(str(manifest_path))
-                try:
-                    manifest = _read_runtime_provider_manifest(manifest_path)
-                except Exception as exc:
-                    self.runtime_provider_load_errors.append(f"{manifest_path}: {exc.__class__.__name__}: {exc}")
-                    continue
-                if not manifest.enabled:
-                    disabled_provider_ids.append(manifest.provider_id)
-                    continue
-                try:
-                    self._load_runtime_provider_manifest(manifest)
-                    loaded_provider_ids.append(manifest.provider_id)
-                except Exception as exc:
-                    self.runtime_provider_load_errors.append(
-                        f"{manifest_path}: {exc.__class__.__name__}: {exc}"
-                    )
+        try:
+            self._clear_runtime_providers()
+            primary_dir = self.runtime_root / RUNTIME_CHANNEL_PROVIDER_DIR
+            primary_dir.mkdir(parents=True, exist_ok=True)
+            for providers_dir in _runtime_provider_dirs(self.runtime_root):
+                for manifest_path in _iter_runtime_provider_manifest_paths(providers_dir):
+                    manifests_seen.append(str(manifest_path))
+                    try:
+                        manifest = _read_runtime_provider_manifest(manifest_path)
+                    except Exception as exc:
+                        self.runtime_provider_load_errors.append(
+                            f"{manifest_path}: {exc.__class__.__name__}: {exc}"
+                        )
+                        continue
+                    if not manifest.enabled:
+                        disabled_provider_ids.append(manifest.provider_id)
+                        continue
+                    try:
+                        self._load_runtime_provider_manifest(manifest)
+                        loaded_provider_ids.append(manifest.provider_id)
+                    except Exception as exc:
+                        self.runtime_provider_load_errors.append(
+                            f"{manifest_path}: {exc.__class__.__name__}: {exc}"
+                        )
+            if self.runtime_provider_load_errors:
+                raise RuntimeError("runtime channel provider candidate failed validation")
+        except Exception as exc:
+            if not self.runtime_provider_load_errors:
+                self.runtime_provider_load_errors.append(f"{exc.__class__.__name__}: {exc}")
+            try:
+                self._clear_runtime_providers()
+            except Exception:
+                pass
+            self.providers.clear()
+            self.providers.update(previous_providers)
+            self.endpoint_type_to_provider.clear()
+            self.endpoint_type_to_provider.update(previous_type_map)
+            self.runtime_provider_ids.clear()
+            self.runtime_provider_ids.update(previous_provider_ids)
+            self.runtime_module_names.clear()
+            self.runtime_module_names.update(previous_module_names)
+            self.runtime_provider_manifests.clear()
+            self.runtime_provider_manifests.update(previous_manifests)
+            sys.modules.update(previous_module_cache)
+            for endpoint, attached in previous_endpoints:
+                endpoint.attached = attached
+                self.runtime.replace_endpoint(endpoint)
+            loaded_provider_ids = []
         self.scan_errors = list(self.runtime_provider_load_errors)
         return {
             "runtime_provider_dirs": [str(path) for path in _runtime_provider_dirs(self.runtime_root)],
@@ -568,28 +639,38 @@ class ChannelEndpointProviderManager:
         entrypoint_path = _runtime_provider_entrypoint_path(manifest)
         module_name = _runtime_provider_module_name(entrypoint_path, root=self.runtime_root, provider_id=provider_id)
         module = _load_source_module(module_name, entrypoint_path)
-        build_context = ChannelProviderBuildContext(
-            runtime_root=self.runtime_root,
-            provider_dir=provider_dir,
-            manifest=manifest,
-            manager=self,
-        )
-        provider = _provider_from_module(module, context=build_context)
-        actual_provider_id = str(getattr(provider, "provider_id", "") or "").strip()
-        if actual_provider_id != provider_id:
-            raise ValueError(
-                f"provider object id '{actual_provider_id}' does not match manifest provider_id '{provider_id}'"
+        try:
+            build_context = ChannelProviderBuildContext(
+                runtime_root=self.runtime_root,
+                provider_dir=provider_dir,
+                manifest=manifest,
+                manager=self,
             )
-        endpoint_types = tuple(
-            dict.fromkeys(str(item or "").strip() for item in getattr(provider, "endpoint_types", ()) if str(item or "").strip())
-        )
-        if not endpoint_types:
-            raise ValueError(f"provider '{provider_id}' must declare at least one endpoint type")
-        for endpoint_type in endpoint_types:
-            owner_id = self.endpoint_type_to_provider.get(endpoint_type)
-            if owner_id and owner_id != provider_id:
-                raise ValueError(f"endpoint type '{endpoint_type}' is already owned by provider '{owner_id}'")
-        self.register_provider(provider)
+            provider = _provider_from_module(module, context=build_context)
+            actual_provider_id = str(getattr(provider, "provider_id", "") or "").strip()
+            if actual_provider_id != provider_id:
+                raise ValueError(
+                    f"provider object id '{actual_provider_id}' does not match manifest provider_id '{provider_id}'"
+                )
+            endpoint_types = tuple(
+                dict.fromkeys(
+                    str(item or "").strip()
+                    for item in getattr(provider, "endpoint_types", ())
+                    if str(item or "").strip()
+                )
+            )
+            if not endpoint_types:
+                raise ValueError(f"provider '{provider_id}' must declare at least one endpoint type")
+            for endpoint_type in endpoint_types:
+                owner_id = self.endpoint_type_to_provider.get(endpoint_type)
+                if owner_id and owner_id != provider_id:
+                    raise ValueError(f"endpoint type '{endpoint_type}' is already owned by provider '{owner_id}'")
+            self.register_provider(provider)
+        except Exception:
+            for loaded_name in list(sys.modules):
+                if loaded_name == module_name or _module_loaded_from(loaded_name, provider_dir.resolve()):
+                    sys.modules.pop(loaded_name, None)
+            raise
         self.runtime_provider_ids.add(provider_id)
         self.runtime_module_names.add(module_name)
         self.runtime_provider_manifests[provider_id] = manifest
@@ -693,6 +774,7 @@ def _load_source_module(module_name: str, module_path: Path) -> types.ModuleType
         package_name = f"{module_name}_package"
         module_name = f"{package_name}.{module_path.stem}"
     package = sys.modules.get(package_name)
+    created_package = package is None
     if package is None:
         package = types.ModuleType(package_name)
         package.__file__ = str(provider_dir)
@@ -713,6 +795,8 @@ def _load_source_module(module_name: str, module_path: Path) -> types.ModuleType
         spec.loader.exec_module(module)
     except Exception:
         sys.modules.pop(module_name, None)
+        if created_package:
+            sys.modules.pop(package_name, None)
         raise
     return module
 
@@ -846,6 +930,48 @@ def is_recovery_socket_endpoint(
     if not str(binding_key or "").strip():
         return False
     return _normalized_path(binding_key) == _normalized_path(recovery_socket_path(runtime_root))
+
+
+def commit_channel_endpoint_attach(
+    endpoint_id: str,
+    endpoint: ChannelEndpointBase,
+    context: ChannelProviderContext,
+) -> ChannelEndpointModel:
+    """Publish a started endpoint, then atomically commit its attached row."""
+    old_endpoint = context.runtime.get_endpoint(endpoint_id)
+    context.runtime.replace_endpoint(endpoint)
+    try:
+        record = context.repository.set_attached(endpoint_id, True)
+        if record is None:
+            raise RuntimeError(f"channel endpoint disappeared during attach: {endpoint_id}")
+    except Exception:
+        if old_endpoint is None:
+            context.runtime.remove_endpoint(endpoint_id)
+        else:
+            context.runtime.replace_endpoint(old_endpoint)
+        raise
+    return record
+
+
+def commit_channel_endpoint_detach(
+    endpoint_id: str,
+    context: ChannelProviderContext,
+) -> tuple[ChannelEndpointModel | None, ChannelEndpointBase | None, bool]:
+    """Stop the runtime endpoint before committing its detached row."""
+    endpoint = context.runtime.get_endpoint(endpoint_id)
+    original_record = context.repository.get(endpoint_id)
+    removed = context.runtime.remove_endpoint(endpoint_id) if endpoint is not None else False
+    try:
+        record = context.repository.set_attached(endpoint_id, False) if original_record is not None else None
+        if original_record is not None and record is None:
+            raise RuntimeError(f"channel endpoint disappeared during detach: {endpoint_id}")
+    except Exception:
+        if removed and endpoint is not None:
+            context.runtime.replace_endpoint(endpoint)
+        raise
+    if endpoint is not None:
+        endpoint.detach()
+    return record, endpoint, removed
 
 
 def _ok(text: str, payload: dict[str, Any]) -> IntrospectionResult:

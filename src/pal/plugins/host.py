@@ -212,12 +212,12 @@ class PluginHost:
                 "status": status,
                 "plugin_id": plugin_id,
                 "enabled": bool(record.enabled),
-                "attached": status == RuntimeStatus.OK,
-                "temporary_attach": status == RuntimeStatus.OK and not bool(record.enabled),
+                "attached": bool(record.attached),
+                "temporary_attach": bool(record.attached) and not bool(record.enabled),
             }
         if plugin_id in self.third_party_handles:
             return {"status": self._attach_community(plugin_id, refresh=True), "plugin_id": plugin_id}
-        row = self.third_party_repository.set_attached(plugin_id, True)
+        row = self.third_party_repository.get(plugin_id)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
         status = self._load_and_attach_community(plugin_id, refresh=True)
@@ -258,28 +258,57 @@ class PluginHost:
 
     def enable(self, plugin_id: str) -> dict[str, Any]:
         if plugin_id in self.first_party_records:
+            record = self.first_party_records[plugin_id]
+            was_disabled = plugin_id in self.first_party_disabled
+            previous_enabled = bool(record.enabled)
             self.first_party_disabled.discard(plugin_id)
-            self.first_party_records[plugin_id].enabled = True
-            if self.first_party_records[plugin_id].attached:
+            record.enabled = True
+            if record.attached:
                 return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "enabled": True}
-            return {"status": self._load_and_attach_first_party(plugin_id), "plugin_id": plugin_id, "enabled": True}
+            status = self._load_and_attach_first_party(plugin_id)
+            if status != RuntimeStatus.OK:
+                record.enabled = previous_enabled
+                if was_disabled:
+                    self.first_party_disabled.add(plugin_id)
+            return {"status": status, "plugin_id": plugin_id, "enabled": bool(record.enabled)}
+        original = self.third_party_repository.get(plugin_id)
+        if original is None:
+            return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
+        previous_enabled = bool(original.enabled)
         row = self.third_party_repository.set_enabled(plugin_id, True)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
-        if plugin_id not in self.third_party_handles:
+        status = (
             self._load_and_attach_community(plugin_id)
-        return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "enabled": True}
+            if plugin_id not in self.third_party_handles
+            else self._attach_community(plugin_id)
+        )
+        if status != RuntimeStatus.OK:
+            self.third_party_repository.set_enabled(plugin_id, previous_enabled)
+        return {
+            "status": status,
+            "plugin_id": plugin_id,
+            "enabled": True if status == RuntimeStatus.OK else previous_enabled,
+        }
 
     def disable(self, plugin_id: str) -> dict[str, Any]:
         if plugin_id in self.first_party_records:
-            self.first_party_disabled.add(plugin_id)
-            self._detach_first_party(plugin_id)
             record = self.first_party_records[plugin_id]
+            if record.attached:
+                status = self._detach_first_party(plugin_id)
+                if status != RuntimeStatus.OK:
+                    return {"status": status, "plugin_id": plugin_id, "enabled": bool(record.enabled)}
+            self.first_party_disabled.add(plugin_id)
             record.enabled = False
             record.last_load_status = PLUGIN_STATUS_DISABLED
             return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "enabled": False}
+        row = self.third_party_repository.get(plugin_id)
+        if row is None:
+            return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
         if plugin_id in self.third_party_handles:
-            self._detach_community(plugin_id)
+            status = self._detach_community(plugin_id)
+            if status != RuntimeStatus.OK:
+                return {"status": status, "plugin_id": plugin_id, "enabled": bool(row.enabled)}
         row = self.third_party_repository.set_enabled(plugin_id, False)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
@@ -404,17 +433,21 @@ class PluginHost:
         record = self.first_party_records.get(plugin_id)
         if record is None:
             return RuntimeStatus.NOT_FOUND
-        if refresh:
-            self._forget_first_party_handle(plugin_id)
-        if plugin_id not in self.first_party_handles:
-            status = self._instantiate_first_party(plugin_id)
-            if status != RuntimeStatus.OK:
-                return status
-        handle = self.first_party_handles[plugin_id]
         try:
+            if refresh:
+                self._forget_first_party_handle(plugin_id)
+            if plugin_id not in self.first_party_handles:
+                status = self._instantiate_first_party(plugin_id)
+                if status != RuntimeStatus.OK:
+                    return status
+            handle = self.first_party_handles[plugin_id]
             self._do_attach(handle)
         except Exception as exc:
-            record.attached = False
+            failed_handle = self.first_party_handles.get(plugin_id)
+            if failed_handle is not None and not failed_handle.mounted:
+                self.first_party_handles.pop(plugin_id, None)
+                self._forget_module_handle(failed_handle)
+            record.attached = bool(failed_handle is not None and failed_handle.mounted)
             record.last_load_status = PLUGIN_STATUS_LOAD_FAILED
             record.last_error = f"{exc.__class__.__name__}: {exc}"
             return RuntimeStatus.ERROR
@@ -428,9 +461,14 @@ class PluginHost:
         record = self.first_party_records.get(plugin_id)
         if handle is None or record is None:
             return RuntimeStatus.NOT_FOUND
-        self._do_detach(handle)
+        try:
+            self._do_detach(handle)
+        except Exception as exc:
+            record.last_error = f"{exc.__class__.__name__}: {exc}"
+            return RuntimeStatus.ERROR
         record.attached = False
         record.last_load_status = PLUGIN_STATUS_DETACHED
+        record.last_error = None
         return RuntimeStatus.OK
 
     # --- community (third-party) lifecycle ---
@@ -475,17 +513,20 @@ class PluginHost:
         return RuntimeStatus.OK
 
     def _attach_community(self, plugin_id: str, *, refresh: bool = False) -> str:
-        if refresh:
-            self._forget_community_handle(plugin_id)
-        if plugin_id not in self.third_party_handles:
-            status = self._instantiate_community(plugin_id)
-            if status != RuntimeStatus.OK:
-                return status
-        handle = self.third_party_handles[plugin_id]
         try:
+            if refresh:
+                self._forget_community_handle(plugin_id)
+            if plugin_id not in self.third_party_handles:
+                status = self._instantiate_community(plugin_id)
+                if status != RuntimeStatus.OK:
+                    return status
+            handle = self.third_party_handles[plugin_id]
             self._do_attach(handle)
         except Exception as exc:
-            self._rollback_failed_attach(handle)
+            failed_handle = self.third_party_handles.get(plugin_id)
+            if failed_handle is not None and not failed_handle.mounted:
+                self.third_party_handles.pop(plugin_id, None)
+                self._forget_module_handle(failed_handle)
             self.third_party_repository.set_load_status(
                 plugin_id, status=PLUGIN_STATUS_LOAD_FAILED,
                 error_text=f"{exc.__class__.__name__}: {exc}",
@@ -499,17 +540,25 @@ class PluginHost:
         handle = self.third_party_handles.get(plugin_id)
         if handle is None:
             return RuntimeStatus.NOT_FOUND
-        self._do_detach(handle)
+        try:
+            self._do_detach(handle)
+        except Exception as exc:
+            self.third_party_repository.set_load_status(
+                plugin_id,
+                status=PLUGIN_STATUS_LOAD_FAILED,
+                error_text=f"{exc.__class__.__name__}: {exc}",
+            )
+            return RuntimeStatus.ERROR
         self.third_party_repository.set_attached(plugin_id, False)
         self.third_party_repository.set_load_status(plugin_id, status=PLUGIN_STATUS_DETACHED, error_text=None)
         return RuntimeStatus.OK
 
     def _forget_first_party_handle(self, plugin_id: str) -> None:
         record = self.first_party_records.get(plugin_id)
-        handle = self.first_party_handles.pop(plugin_id, None)
+        handle = self.first_party_handles.get(plugin_id)
         if handle is not None:
-            with contextlib.suppress(Exception):
-                self._do_detach(handle)
+            self._do_detach(handle)
+            self.first_party_handles.pop(plugin_id, None)
             self._forget_module_handle(handle)
         if record is not None:
             self._drop_plugin_import_cache(
@@ -520,10 +569,10 @@ class PluginHost:
             )
 
     def _forget_community_handle(self, plugin_id: str) -> None:
-        handle = self.third_party_handles.pop(plugin_id, None)
+        handle = self.third_party_handles.get(plugin_id)
         if handle is not None:
-            with contextlib.suppress(Exception):
-                self._do_detach(handle)
+            self._do_detach(handle)
+            self.third_party_handles.pop(plugin_id, None)
             self._forget_module_handle(handle)
         row = self.third_party_repository.get(plugin_id)
         if row is not None:
@@ -580,12 +629,7 @@ class PluginHost:
         return tuple(dict.fromkeys(str(item).strip() for item in configured if str(item).strip()))
 
     def _forget_module_handle(self, handle: ModuleHandle) -> None:
-        self.context.introspection_registry.pop(handle.module_id, None)
-        current = self.context.module_registry.get(handle.module_id)
-        if current is handle:
-            self.context.module_registry.modules.pop(handle.module_id, None)
-        for port_name in handle.ports:
-            self.context.port_registry.pop(f"{handle.module_id}:{port_name}", None)
+        self.context.unregister_module(handle)
 
     def _drop_plugin_import_cache(
         self,
@@ -633,6 +677,9 @@ class PluginHost:
     def _do_detach(self, handle: ModuleHandle) -> None:
         provider = handle.introspection_provider
         if provider is not None and hasattr(provider, "detach"):
+            # The provider owns its resources and must close them before the
+            # globally visible projections are removed.  On failure the old
+            # generation and bookkeeping remain intact and retryable.
             provider.detach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.detach"))
         for cleanup in reversed(list(handle.cleanup_callbacks)):
             try:
@@ -753,6 +800,10 @@ class PluginHost:
             self.context.prompt_fragment_registry.unregister_module(handle.module_id)
         with contextlib.suppress(Exception):
             self.context.event_source_registry.detach_module(handle.module_id)
+        with contextlib.suppress(Exception):
+            self.context.event_handler_registry.detach_module(handle.module_id)
+        with contextlib.suppress(Exception):
+            self.context.control_action_registry.unregister_module(handle.module_id)
         for provider_id in list(handle.provider_refs):
             with contextlib.suppress(Exception):
                 self.context.execution_runtime.unregister_provider_ref(provider_id)
@@ -763,6 +814,10 @@ class PluginHost:
         if provider is not None and hasattr(provider, "detach"):
             with contextlib.suppress(Exception):
                 provider.detach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.detach"))
+        for cleanup in reversed(list(handle.cleanup_callbacks)):
+            with contextlib.suppress(Exception):
+                cleanup()
+        handle.cleanup_callbacks.clear()
         handle.mounted = False
         handle.degraded = True
 

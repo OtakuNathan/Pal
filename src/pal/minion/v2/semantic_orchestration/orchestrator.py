@@ -158,6 +158,7 @@ from pal.minion.v2.verification import (
 from pal.minion.v2.verification_builder import (
     VERIFICATION_BUILDER_CAPABILITIES,
     VERIFICATION_EVIDENCE_CAPABILITIES,
+    compile_verification_invocation_tool_contract,
     dominant_verification_defect_kind,
     effective_verification_policy,
 )
@@ -2743,9 +2744,20 @@ class SemanticOrchestrator:
                 provenance={"owner": "manager", "audience": "verifier"},
                 child_refs=((candidate_ref.sha256, "candidate"),),
             )
+        system_delivery_view_ref = (
+            UnitWorkViewBuilder(self.service.contracts).build_system_delivery_view(node)
+            if bool(node.payload.get("graph_sink"))
+            else None
+        )
+        system_delivery_view = (
+            self.service.artifacts.read_json(system_delivery_view_ref)
+            if system_delivery_view_ref is not None
+            else None
+        )
         verification_policy = effective_verification_policy(
             work_view=self.service.artifacts.read_json(view_ref),
             verification_policy=self._workflow_policy(node.workflow_id, "verification"),
+            system_delivery_view=system_delivery_view,
         )
         # The work view limits this run's scope; the complete immutable ledger
         # prevents an upstream summary from narrowing user intent.
@@ -2769,6 +2781,8 @@ class SemanticOrchestrator:
             module_work_view_ref=view_ref,
             candidate_diff_ref=candidate_diff_ref,
         )
+        if system_delivery_view_ref is not None:
+            verifier_references["system_delivery_view"] = system_delivery_view_ref
         verifier_references.update(git_diff_refs)
         path_policy = dict(node.payload.get("path_policy") or {})
         developer_test_path = str(
@@ -2805,7 +2819,9 @@ class SemanticOrchestrator:
             ),
             instruction=(
                 "This is the terminal delivery module in the contract graph. Assume accepted dependencies satisfy their public "
-                "contracts, then test the real consumer entrypoint end to end in this node's assembled worktree. Replay the "
+                "contracts. Use reference:module_work_view for this module and the separate "
+                "reference:system_delivery_view for whole-system requirements and scenarios; then test the real consumer "
+                "entrypoint end to end in this node's assembled worktree. Replay the "
                 "bound corpora and findings, cover success and material failure paths, and inspect the current diff for new "
                 "defects. Submit one outcome bound to this Candidate; no earlier verdict settles it."
                 if bool(node.payload.get("graph_sink"))
@@ -6189,6 +6205,7 @@ class SemanticOrchestrator:
                 provenance={"family_id": str(binding.get("family_id") or ""), "role": role},
             )
             bound_reference_refs["workspace_preparation"] = preparation_ref
+        verification_tool_contract: dict[str, Any] | None = None
         if activation.role == OrchestrationRole.VERIFIER or activation == RoleActivation(
             OrchestrationRole.REVIEWER,
             RoleMode.STANDALONE,
@@ -6200,10 +6217,29 @@ class SemanticOrchestrator:
             )
             view_ref = bound_reference_refs.get(view_name)
             view = self.service.artifacts.read_json(view_ref) if view_ref is not None else {}
+            system_delivery_view = (
+                self.service.artifacts.read_json(
+                    bound_reference_refs["system_delivery_view"]
+                )
+                if "system_delivery_view" in bound_reference_refs
+                else None
+            )
+            family_verification_policy = dict(
+                family_policies.get("verification") or {}
+            )
             effective_policy = effective_verification_policy(
                 work_view=view,
-                verification_policy=dict(family_policies.get("verification") or {}),
+                verification_policy=family_verification_policy,
+                system_delivery_view=system_delivery_view,
             )
+            if activation.role == OrchestrationRole.VERIFIER:
+                verification_tool_contract = (
+                    compile_verification_invocation_tool_contract(
+                        work_view=view,
+                        verification_policy=family_verification_policy,
+                        system_delivery_view=system_delivery_view,
+                    )
+                )
             verification_policy_ref = self.service.artifacts.put_json(
                 effective_policy,
                 artifact_type="VerificationPolicyArtifact",
@@ -6368,6 +6404,13 @@ class SemanticOrchestrator:
                     "submission_receipt_required": True,
                     "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
                     "authoring_input_fingerprint": input_fingerprint,
+                    **(
+                        {
+                            "verification_tool_contract": verification_tool_contract
+                        }
+                        if verification_tool_contract is not None
+                        else {}
+                    ),
                 },
                 "agent_session": {
                     "session_id": invocation_id,

@@ -34,6 +34,9 @@ Exposes:
 
 Interaction rule:
 - channel normalizes external ingress before it reaches `PalCore`
+- every endpoint receives the same provider-neutral stream events. TTY and the
+  recovery socket may render deltas immediately; Telegram accumulates them,
+  keeps tool rounds silent, and sends only the terminal answer
 - reply completion for a turn means "accepted by channel outbox"
 - actual delivery success/failure is emitted later as channel-side diagnostics
 - concrete endpoint implementations inherit `ChannelEndpointQueueBase` and fill in:

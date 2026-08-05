@@ -42,6 +42,7 @@ from pal.minion.runner import (
     MinionRunner,
     MinionRuntimeBundle,
     _minion_temperature,
+    _llm_tools_for_allowed,
     _resolve_minion_max_output_tokens,
     build_slim_minion_runtime,
 )
@@ -57,6 +58,7 @@ from pal.minion.sandbox import (
     scrub_minion_sandbox_env,
     with_minion_sandbox_metadata,
 )
+from pal.execution.tool_facade import EffectKind as ToolEffectKind
 from pal.shared import RuntimeStatus, MinionInvocationPack
 
 
@@ -248,6 +250,97 @@ class MinionSandboxTests(unittest.TestCase):
         pack = MinionInvocationPack(invocation_id="endpoint-output-budget", goal="g")
 
         self.assertEqual(_resolve_minion_max_output_tokens(Runtime(), pack), 12_288)
+
+    def test_length_recovery_exposes_action_tools_instead_of_more_investigation(self) -> None:
+        def record(effect_kind):
+            return SimpleNamespace(execution=SimpleNamespace(effect_kind=effect_kind))
+
+        class Runtime:
+            registry_generation = SimpleNamespace(
+                direct_aliases={
+                    "read_file": record(ToolEffectKind.LOCAL_READ),
+                    "write_file": record(ToolEffectKind.LOCAL_WRITE),
+                    "run_shell": record(ToolEffectKind.LOCAL_WRITE),
+                    "candidate_submit": record(ToolEffectKind.CONTROL),
+                },
+                indirect_aliases={},
+            )
+
+            @staticmethod
+            def build_llm_tool_contracts():
+                return [
+                    {"function": {"name": "read_file"}},
+                    {"function": {"name": "write_file"}},
+                    {"function": {"name": "run_shell"}},
+                    {"function": {"name": "candidate_submit"}},
+                ]
+
+        selected = _llm_tools_for_allowed(Runtime(), [], action_only=True)
+
+        self.assertEqual(
+            [item["function"]["name"] for item in selected],
+            ["write_file", "run_shell", "candidate_submit"],
+        )
+
+    def test_length_recovery_uses_semantics_for_custom_aliases_and_fails_closed(self) -> None:
+        def record(effect_kind):
+            return SimpleNamespace(execution=SimpleNamespace(effect_kind=effect_kind))
+
+        runtime = SimpleNamespace(
+            registry_generation=SimpleNamespace(
+                direct_aliases={
+                    "inspect_plan": record(ToolEffectKind.LOCAL_READ),
+                    "publish_plan": record(ToolEffectKind.CONTROL),
+                },
+                indirect_aliases={},
+            ),
+            build_llm_tool_contracts=lambda: [
+                {"function": {"name": "inspect_plan"}},
+                {"function": {"name": "publish_plan"}},
+            ],
+        )
+        selected = _llm_tools_for_allowed(runtime, [], action_only=True)
+        self.assertEqual(
+            [item["function"]["name"] for item in selected],
+            ["publish_plan"],
+        )
+
+        runtime.registry_generation = SimpleNamespace(
+            direct_aliases={"inspect_plan": record(ToolEffectKind.LOCAL_READ)},
+            indirect_aliases={},
+        )
+        runtime.build_llm_tool_contracts = lambda: [
+            {"function": {"name": "inspect_plan"}}
+        ]
+        with self.assertRaisesRegex(RuntimeError, "no action capability"):
+            _llm_tools_for_allowed(runtime, [], action_only=True)
+
+    def test_length_recovery_keeps_dispatcher_for_indirect_actions(self) -> None:
+        def record(effect_kind):
+            return SimpleNamespace(execution=SimpleNamespace(effect_kind=effect_kind))
+
+        runtime = SimpleNamespace(
+            registry_generation=SimpleNamespace(
+                direct_aliases={
+                    "read_file": record(ToolEffectKind.LOCAL_READ),
+                    "call_tool": record(ToolEffectKind.NONE),
+                },
+                indirect_aliases={
+                    "publish_plan": record(ToolEffectKind.CONTROL),
+                },
+            ),
+            build_llm_tool_contracts=lambda: [
+                {"function": {"name": "read_file"}},
+                {"function": {"name": "call_tool"}},
+            ],
+        )
+
+        selected = _llm_tools_for_allowed(runtime, [], action_only=True)
+
+        self.assertEqual(
+            [item["function"]["name"] for item in selected],
+            ["call_tool"],
+        )
 
     def test_sandbox_metadata_defaults_to_bubblewrap(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_meta_") as tmp:

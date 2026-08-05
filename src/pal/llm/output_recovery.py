@@ -148,16 +148,28 @@ def safe_truncated_response(response: LLMResponseIR) -> LLMResponseIR:
 
 
 def safe_truncated_message(message: LLMMessageIR) -> LLMMessageIR:
+    keep_committed_tools = _has_committed_tool_items(message)
+    keep_provider_replay = bool(
+        message.metadata.get("preserve_replay_for_output_recovery")
+    )
     return replace(
         message,
         parts=tuple(
             part
             for part in message.parts
-            if not isinstance(part, ToolCallIR)
+            if keep_committed_tools or not isinstance(part, ToolCallIR)
         ),
-        replay=None,
+        replay=(
+            message.replay
+            if keep_committed_tools or keep_provider_replay
+            else None
+        ),
         state=MessageState.COMPLETE,
     )
+
+
+def has_committed_tool_calls(response: LLMResponseIR) -> bool:
+    return bool(response.tool_calls) and _has_committed_tool_items(response.message)
 
 
 def merge_responses(
@@ -231,7 +243,10 @@ def stream_recovery_updates(
                 text_delta=text_delta,
             )
         )
+    initial_call_ids = {call.call_id for call in initial.tool_calls}
     for call in recovered.tool_calls:
+        if call.call_id in initial_call_ids:
+            continue
         updates.append(
             LLMResponseUpdate(
                 recovered,
@@ -243,6 +258,16 @@ def stream_recovery_updates(
         LLMResponseUpdate(recovered, delta_kind=LLMResponseDeltaKind.STATE)
     )
     return tuple(updates)
+
+
+def _has_committed_tool_items(message: LLMMessageIR) -> bool:
+    raw_items = message.metadata.get("committed_items")
+    if not isinstance(raw_items, (list, tuple)):
+        return False
+    return any(
+        isinstance(item, Mapping) and str(item.get("item_kind") or "") == "tool_call"
+        for item in raw_items
+    )
 
 
 def _positive_int(value: Any) -> int | None:

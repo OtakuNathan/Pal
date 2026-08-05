@@ -299,22 +299,20 @@ class ChannelEndpointQueueBase(ABC):
     def send_stream_update(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
         session = self._stream_sessions.setdefault(
             id(response_handle),
-            {"text": "", "reasoning": "", "updates": [], "closed": False, "abort_reason": "", "text_delivered": False},
+            {"text": "", "reasoning": "", "updates": [], "text_delivered": False},
         )
-        if bool(session.get("closed")):
-            return
         session["updates"].append(update.kind)
         if update.text:
             session["text"] = f'{session["text"]}{update.text}'
         if update.reasoning_text:
             session["reasoning"] = f'{session["reasoning"]}{update.reasoning_text}'
+        if update.finish_reason is not None:
+            session["finish_reason"] = str(update.finish_reason)
 
     def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
         session = self._stream_sessions.pop(id(response_handle), None)
         if session is None:
             return text
-        if bool(session.get("closed")):
-            return None
         if bool(session.get("text_delivered")) and str(session.get("text") or "") == text:
             return None
         return text
@@ -324,17 +322,16 @@ class ChannelEndpointQueueBase(ABC):
             return
         session = self._stream_sessions.setdefault(
             id(response_handle),
-            {"text": "", "reasoning": "", "updates": [], "closed": False, "abort_reason": "", "text_delivered": False},
+            {"text": "", "reasoning": "", "updates": [], "text_delivered": False},
         )
         session["text_delivered"] = True
 
     def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
-        session = self._stream_sessions.setdefault(
-            id(response_handle),
-            {"text": "", "reasoning": "", "updates": [], "closed": False, "abort_reason": "", "text_delivered": False},
-        )
-        session["closed"] = True
-        session["abort_reason"] = str(reason or "interrupted")
+        # Abort is the stream's terminal ownership boundary.  No tombstone is
+        # needed after Core has cancelled the producing turn; retaining one by
+        # ``id(response_handle)`` leaks state and can poison an unrelated
+        # future handle if CPython reuses that object id.
+        self._stream_sessions.pop(id(response_handle), None)
         remaining: deque[QueuedStreamUpdate] = deque()
         while self.stream_update_outbox:
             queued = self.stream_update_outbox.popleft()
@@ -457,9 +454,6 @@ class ChannelEndpointQueueBase(ABC):
         response_handle: ResponseHandle | None = None,
     ) -> str:
         handle = response_handle or self.build_response_handle()
-        session = self._stream_sessions.get(id(handle))
-        if session is not None and bool(session.get("closed")):
-            return str(uuid4())
         update_id = str(uuid4())
         self.stream_update_outbox.append(
             QueuedStreamUpdate(

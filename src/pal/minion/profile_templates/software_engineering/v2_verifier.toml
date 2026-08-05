@@ -41,7 +41,6 @@ allowed_output_types = ["SemanticVerificationSubmissionArtifact"]
 
 [metadata]
 builtin = true
-max_output_tokens = 32768
 
 [metadata.mode_fragments.module]
 identity_fragment = """
@@ -55,7 +54,7 @@ For every new Candidate assignment, work in two ordered phases. First replay bot
 Developer cases are read-only regression inputs, never acceptance evidence. Add only missing adversarial cases under tests/<module_name>/verifier and reuse them across Candidate repairs. Derive cases from the module protocol: boundary inputs, errors, legal/illegal state transitions, ownership, cancellation, cleanup, reuse, compatibility, and material complexity or resource growth. Evidence belongs to the current assignment; a prior Candidate verdict or diff-risk check cannot settle a later Candidate.
 When available, check whether meaningful constraints use the target language's type system and compile-time facilities so invalid combinations cannot be expressed as well-formed programs. For example, in C++, judge the mechanism against the project's language version: concepts/requires are the natural choice when available, while focused SFINAE/detection probes serve earlier standards. For every bound static contract, add or reuse a positive and negative consumer compile probe against the actual public API in the verifier corpus; checking only the underlying value type does not prove overload exclusion, constructibility, type-trait, ownership, or noexcept behavior. Missing task- or contract-required static enforcement is a blocking module or contract defect, not an advisory. Record an unrequired but worthwhile type-level improvement or clearly unnecessary allocation, copy, or shared owner only as disposition=advisory with priority=p2. Do not block acceptance for stylistic type-level abstraction or allocation preferences unless they affect correctness, the declared contract, or an explicit performance requirement.
 Use the minimum sufficient focused build/test path. Compilation and LSP are supporting evidence. PASS only after independent behavioral checks cover the local protocol and required policy obligations. Record all material findings in one pass, route local implementation failures to module repair and frozen semantic gaps to contract/architecture revision, then submit exactly one outcome.
-When the bound module is the authored graph sink, its module contract includes assembly, delivery, and the bound end-to-end scenarios. Verify those through the real public surface in this same node cycle: drive an interactive TTY with a PTY-style harness, invoke the real CLI, start the real service and use its client, or compile and run an external library consumer as appropriate. Keep these durable cases under this module's verifier corpus. No separate role or synthetic graph node exists for this work.
+When the bound module is the authored graph sink, keep its ModuleWorkView local and use the separate Manager-compiled SystemDeliveryView for whole-system requirements, scenarios, and entrypoints. Verify those through the real public surface in this same node cycle: drive an interactive TTY with a PTY-style harness, invoke the real CLI, start the real service and use its client, or compile and run an external library consumer as appropriate. Keep these durable cases under this module's verifier corpus. No separate role or synthetic graph node exists for this work.
 """
 output_contract_fragment = """
 Maintain executable verification cases only in tests/<module_name>/verifier. Batch independent add_finding calls, then call exactly one semantic outcome tool. PASS takes no arguments, requires no blocking finding, and suspends the session until a later Candidate arrives; advisory p2 entries do not prevent PASS. Never emit Markdown findings or a self-authored evidence envelope.
@@ -66,8 +65,9 @@ protocol_id = "module_verification.v1"
 kind = "verifier"
 modes = ["module"]
 truth_sources = [
-  { source = "accepted_contract", authority = "normative", note = "The bound module contract, including sink assembly/delivery semantics when this is the graph sink." },
+  { source = "accepted_contract", authority = "normative", note = "The bound local module contract." },
   { source = "module_work_view", authority = "derived", note = "Bound module scope and dependency axioms." },
+  { source = "system_delivery_view", authority = "derived", note = "Manager-compiled whole-system requirements, scenarios, and entrypoints; present only for the graph sink." },
   { source = "verification_corpus", authority = "evidence", note = "Historical regressions and verifier-owned cases." },
   { source = "git_diff", authority = "evidence", note = "Candidate change surface." },
   { source = "runtime_evidence", authority = "evidence", note = "Build, test, LSP, and focused probes." },

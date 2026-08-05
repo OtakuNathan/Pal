@@ -22,12 +22,14 @@ from pal.llm.ir import (
     LLMMessageIR,
     LLMRequestIR,
     LLMResponseDeltaKind,
+    LLMResponseItemKind,
     LLMResponseIR,
     LLMResponseUpdate,
     MessageRole,
     MessageState,
     TextPartIR,
 )
+from pal.shared.tool_protocol import new_tool_call
 from pal.llm.serde import request_to_payload, response_to_payload
 from pal.minion.llm_broker import (
     BrokerStreamDecoder,
@@ -128,6 +130,154 @@ class MinionLLMBrokerStreamTests(unittest.TestCase):
             for item in updates
         )
         self.assertLess(compact_size * 10, cumulative_size)
+
+    def test_broker_round_trips_committed_tool_item_without_full_snapshot(self) -> None:
+        call = new_tool_call(name="read_file", args={"path": "a.txt"})
+        response = LLMResponseIR(
+            LLMMessageIR(
+                MessageRole.ASSISTANT,
+                (call,),
+                message_id="tool-message",
+                state=MessageState.IN_PROGRESS,
+                metadata={
+                    "committed_items": [
+                        {"item_id": "item-1", "item_kind": "tool_call"}
+                    ]
+                },
+            ),
+            LLMFinishReason.TOOL_CALLS,
+        )
+        source = LLMResponseUpdate(
+            response,
+            LLMResponseDeltaKind.ITEM_COMMITTED,
+            tool_call=call,
+            item_id="item-1",
+            item_kind=LLMResponseItemKind.TOOL_CALL,
+        )
+
+        payload = stream_update_to_payload(source)
+        decoded = BrokerStreamDecoder().feed(payload)
+
+        self.assertNotIn("response", payload)
+        self.assertEqual(payload["item_id"], "item-1")
+        self.assertEqual(decoded.item_id, "item-1")
+        self.assertEqual(decoded.item_kind, LLMResponseItemKind.TOOL_CALL)
+        self.assertEqual(decoded.tool_call, call)
+        self.assertEqual(decoded.response.tool_calls, (call,))
+        self.assertEqual(
+            [
+                dict(item)
+                for item in decoded.response.message.metadata["committed_items"]
+            ],
+            [{"item_id": "item-1", "item_kind": "tool_call"}],
+        )
+
+    def test_broker_rejects_malformed_commit_without_mutating_stream_state(self) -> None:
+        decoder = BrokerStreamDecoder()
+
+        with self.assertRaisesRegex(ValueError, "has no tool call"):
+            decoder.feed(
+                {
+                    "delta_kind": "item_committed",
+                    "message_id": "message-1",
+                    "item_id": "item-1",
+                    "item_kind": "tool_call",
+                }
+            )
+
+        self.assertEqual(decoder.message_id, "")
+        self.assertEqual(decoder.committed_items, {})
+        self.assertEqual(decoder.committed_tool_calls, {})
+        self.assertEqual(decoder.parts, [])
+
+    def test_successful_terminal_cannot_revoke_a_committed_tool_item(self) -> None:
+        call = new_tool_call(call_id="call-1", name="read_file", args={"path": "a.txt"})
+        decoder = BrokerStreamDecoder()
+        decoder.feed(
+            stream_update_to_payload(
+                LLMResponseUpdate(
+                    LLMResponseIR(
+                        LLMMessageIR(
+                            MessageRole.ASSISTANT,
+                            (call,),
+                            message_id="tool-message",
+                            state=MessageState.IN_PROGRESS,
+                        ),
+                        LLMFinishReason.TOOL_CALLS,
+                    ),
+                    LLMResponseDeltaKind.ITEM_COMMITTED,
+                    tool_call=call,
+                    item_id="item-1",
+                    item_kind=LLMResponseItemKind.TOOL_CALL,
+                )
+            )
+        )
+        revoked = LLMResponseIR(
+            LLMMessageIR(
+                MessageRole.ASSISTANT,
+                (TextPartIR("done"),),
+                message_id="tool-message",
+                state=MessageState.COMPLETE,
+            ),
+            LLMFinishReason.STOP,
+        )
+
+        with self.assertRaisesRegex(ValueError, "revoked a committed item"):
+            decoder.feed(
+                stream_update_to_payload(
+                    LLMResponseUpdate(revoked, LLMResponseDeltaKind.STATE)
+                )
+            )
+
+        self.assertFalse(decoder.terminal_seen)
+
+    def test_successful_terminal_preserves_a_committed_tool_item(self) -> None:
+        call = new_tool_call(call_id="call-1", name="read_file", args={"path": "a.txt"})
+        metadata = {
+            "committed_items": [
+                {"item_id": "item-1", "item_kind": "tool_call"}
+            ]
+        }
+        decoder = BrokerStreamDecoder()
+        decoder.feed(
+            stream_update_to_payload(
+                LLMResponseUpdate(
+                    LLMResponseIR(
+                        LLMMessageIR(
+                            MessageRole.ASSISTANT,
+                            (call,),
+                            message_id="tool-message",
+                            state=MessageState.IN_PROGRESS,
+                            metadata=metadata,
+                        ),
+                        LLMFinishReason.TOOL_CALLS,
+                    ),
+                    LLMResponseDeltaKind.ITEM_COMMITTED,
+                    tool_call=call,
+                    item_id="item-1",
+                    item_kind=LLMResponseItemKind.TOOL_CALL,
+                )
+            )
+        )
+        terminal = LLMResponseIR(
+            LLMMessageIR(
+                MessageRole.ASSISTANT,
+                (call,),
+                message_id="tool-message",
+                state=MessageState.COMPLETE,
+                metadata=metadata,
+            ),
+            LLMFinishReason.TOOL_CALLS,
+        )
+
+        decoded = decoder.feed(
+            stream_update_to_payload(
+                LLMResponseUpdate(terminal, LLMResponseDeltaKind.STATE)
+            )
+        )
+
+        self.assertEqual(decoded.response, terminal)
+        self.assertTrue(decoder.terminal_seen)
 
     def test_sidecar_stream_delivers_first_item_before_terminal(self) -> None:
         async def scenario() -> None:

@@ -10,6 +10,7 @@ from pal.llm.ir import (
     LLMFinishReason,
     LLMMessageIR,
     LLMResponseDeltaKind,
+    LLMResponseItemKind,
     LLMResponseIR,
     LLMResponseUpdate,
     LLMUsageIR,
@@ -30,6 +31,7 @@ class ResponseIRBuilder:
         self.finish_reason = LLMFinishReason.STOP
         self.usage = LLMUsageIR()
         self.replay_payload: dict[str, Any] = {}
+        self.committed_items: dict[str, LLMResponseItemKind] = {}
         self.complete = False
 
     def append_text(self, text: str) -> LLMResponseUpdate | None:
@@ -84,7 +86,43 @@ class ResponseIRBuilder:
 
     def discard_tool_calls(self) -> None:
         self.parts = [part for part in self.parts if not isinstance(part, ToolCallIR)]
+        self.committed_items = {
+            item_id: kind
+            for item_id, kind in self.committed_items.items()
+            if kind != LLMResponseItemKind.TOOL_CALL
+        }
         self.replay_payload = {}
+
+    def commit_item(
+        self,
+        *,
+        item_id: str,
+        item_kind: LLMResponseItemKind | str,
+        tool_call: ToolCallIR | None = None,
+    ) -> LLMResponseUpdate | None:
+        normalized_id = str(item_id or "").strip()
+        if not normalized_id:
+            raise ShapeDecodeError("completed LLM item has no stable id")
+        normalized_kind = LLMResponseItemKind(item_kind)
+        previous = self.committed_items.get(normalized_id)
+        if previous is not None:
+            if previous != normalized_kind:
+                raise ShapeDecodeError("completed LLM item changed kind")
+            return None
+        if normalized_kind == LLMResponseItemKind.TOOL_CALL and tool_call is None:
+            raise ShapeDecodeError("completed LLM tool item has no tool call")
+        self.committed_items[normalized_id] = normalized_kind
+        try:
+            return LLMResponseUpdate(
+                response=self.snapshot(),
+                delta_kind=LLMResponseDeltaKind.ITEM_COMMITTED,
+                tool_call=tool_call,
+                item_id=normalized_id,
+                item_kind=normalized_kind,
+            )
+        except Exception:
+            self.committed_items.pop(normalized_id, None)
+            raise
 
     def snapshot(self) -> LLMResponseIR:
         replay = None
@@ -102,6 +140,12 @@ class ResponseIRBuilder:
             message_id=self.message_id,
             state=state,
             replay=replay,
+            metadata={
+                "committed_items": [
+                    {"item_id": item_id, "item_kind": kind.value}
+                    for item_id, kind in self.committed_items.items()
+                ]
+            },
         )
         return LLMResponseIR(
             message=message,

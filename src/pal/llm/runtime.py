@@ -42,6 +42,7 @@ from pal.llm.model_hooks import ModelHookRegistry
 from pal.llm.models import LLMEndpointModel
 from pal.llm.output_recovery import (
     continuation_request,
+    has_committed_tool_calls,
     endpoint_output_upper_limit,
     merge_responses,
     recovery_settings,
@@ -770,6 +771,11 @@ class LLMRuntime(LLMRuntimePort):
     ) -> LLMResponseIR:
         if first.finish_reason != LLMFinishReason.LENGTH:
             return first
+        # A provider item boundary is a durable semantic commit.  Do not ask
+        # the model to regenerate a closed tool call: return it to the normal
+        # agent loop, which remains the sole execution path.
+        if has_committed_tool_calls(first):
+            return first
         default_attempts = max(
             0,
             int(
@@ -819,6 +825,8 @@ class LLMRuntime(LLMRuntimePort):
                     stream=False,
                     timeout_seconds=self._timeout_seconds(current_request),
                 )
+                if has_committed_tool_calls(current):
+                    return merge_responses([current], discarded=discarded)
                 if current.finish_reason != LLMFinishReason.LENGTH:
                     recovered = merge_responses([current], discarded=discarded)
                     self._emit(
@@ -854,6 +862,11 @@ class LLMRuntime(LLMRuntimePort):
                 stream=False,
                 timeout_seconds=self._timeout_seconds(current_request),
             )
+            if has_committed_tool_calls(current):
+                return merge_responses(
+                    [*responses, current],
+                    discarded=discarded,
+                )
             if current.finish_reason != LLMFinishReason.LENGTH:
                 recovered = merge_responses(
                     [*responses, current],

@@ -2729,6 +2729,40 @@ class MinionV2VerificationTests(unittest.TestCase):
             "op_minion_verification_run_dogfood", platform_capabilities
         )
 
+    def test_sink_policy_uses_separate_system_delivery_entrypoints(self) -> None:
+        local_view = {
+            "module_name": "delivery",
+            "graph_sink": True,
+            "entrypoints": [],
+        }
+        system_view = {
+            "graph_sink": True,
+            "sink_module": "delivery",
+            "entrypoints": [
+                {"kind": "platform_probe", "target": "native_runtime_probe"}
+            ],
+        }
+
+        policy = effective_verification_policy(
+            work_view=local_view,
+            verification_policy={},
+            system_delivery_view=system_view,
+        )
+        self.assertTrue(policy["require_public_surface_dogfood"])
+        self.assertTrue(policy["require_platform_probe"])
+        self.assertIn("platform_probe", policy["allowed_obligations"])
+
+        contract = compile_verification_invocation_tool_contract(
+            work_view=local_view,
+            verification_policy={},
+            system_delivery_view=system_view,
+        )
+        self.assertEqual(contract["entrypoints"], system_view["entrypoints"])
+        self.assertIn(
+            "op_minion_verification_run_platform_probe",
+            contract["allowed_capabilities"],
+        )
+
     def test_module_verifier_rejects_out_of_scope_dogfood_call(self) -> None:
         work_view = {
             "module_name": "rule_router",

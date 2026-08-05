@@ -8,6 +8,8 @@ import subprocess
 from pal.minion.v2.architecture_templates import ArchitectureTemplateCompiler
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType
 from pal.minion.v2.graph_protocol import graph_ir_from_mapping
+from pal.minion.v2.git_scope import scoped_role_git_read_command
+from pal.execution.git_tool import classify_git_command
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.minion.v2.role_gateway import (
@@ -33,8 +35,21 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
             check=True,
         )
         (self.workspace / "README.md").write_text("gateway\n", encoding="utf-8")
+        (self.workspace / "src" / "router").mkdir(parents=True)
+        (self.workspace / "src" / "router" / "router.py").write_text(
+            "VALUE = 1\n",
+            encoding="utf-8",
+        )
         self.input_ref = self.service.artifacts.put_json(
-            {"module": "router", "contract": "route deterministically"},
+            {
+                "module": "router",
+                "contract": "route deterministically",
+                "implementation_scopes": ["src/router"],
+                "contract_paths": ["include/router.hpp"],
+                "dependency_contracts": {
+                    "codec": {"contract_paths": ["include/codec.hpp"]}
+                },
+            },
             artifact_type="ModuleWorkViewArtifact",
         )
         self.bound_input_path = self.runtime_root / "input.json"
@@ -425,7 +440,85 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         )
 
         self.assertEqual(result["returncode"], 0)
-        self.assertEqual(result["stdout"].strip(), "?? README.md")
+        self.assertIn("src/router", result["stdout"])
+        self.assertNotIn("README.md", result["stdout"])
+        self.assertEqual(result["classification"]["operation_kind"], "read")
+
+    def test_git_read_accepts_safe_option_values_without_treating_them_as_revisions(self) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Pal Tests",
+                "-c",
+                "user.email=pal-tests@example.invalid",
+                "add",
+                "src/router/router.py",
+            ],
+            cwd=self.workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Pal Tests",
+                "-c",
+                "user.email=pal-tests@example.invalid",
+                "commit",
+                "-m",
+                "seed router",
+            ],
+            cwd=self.workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        blame = self.call(
+            "git_read",
+            cmd="blame -L 1,1 src/router/router.py",
+            cwd=str(self.workspace),
+        )
+        blame_with_separator = self.call(
+            "git_read",
+            cmd="blame HEAD -- src/router/router.py",
+            cwd=str(self.workspace),
+        )
+        grep = self.call(
+            "git_read",
+            cmd="grep -e router -e definitely_missing_pattern",
+            cwd=str(self.workspace),
+        )
+
+        self.assertEqual(blame["returncode"], 0)
+        self.assertEqual(blame_with_separator["returncode"], 0)
+        self.assertIn(grep["returncode"], {0, 1})
+
+    def test_git_read_is_limited_to_candidate_range_and_module_paths(self) -> None:
+        for command in (
+            "log --all --oneline",
+            "log --oneline -5",
+            "show main",
+            "diff -- README.md",
+            "show HEAD:README.md",
+            "blame -S /etc/passwd src/router/router.py",
+            "blame --ignore-revs-file=/etc/passwd src/router/router.py",
+            "ls-files --exclude-from /etc/passwd",
+            "ls-files --exclude-per-directory .gitignore",
+        ):
+            with self.subTest(command=command), self.assertRaisesRegex(
+                ValueError,
+                "outside|enumeration|archaeology",
+            ):
+                self.call("git_read", cmd=command, cwd=str(self.workspace))
+
+        result = self.call(
+            "git_read",
+            cmd="diff -- src/router/router.py",
+            cwd=str(self.workspace),
+        )
         self.assertEqual(result["classification"]["operation_kind"], "read")
 
     def test_git_read_rejects_mutations_unknown_commands_and_out_of_scope_cwd(self) -> None:
@@ -440,6 +533,28 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         outside.mkdir()
         with self.assertRaisesRegex(ValueError, "outside the assigned repository"):
             self.call("git_read", cmd="status --short", cwd=str(outside))
+
+    def test_git_read_fails_closed_without_authenticated_paths_or_with_bad_artifact(self) -> None:
+        policy = classify_git_command("status --short")
+        with self.assertRaisesRegex(ValueError, "no Manager-authenticated"):
+            scoped_role_git_read_command(
+                prompt_pack={"workspace": {"repo_path": str(self.workspace)}},
+                assignment={"input_refs": {}},
+                artifact_reader=lambda _ref: {},
+                policy=policy,
+            )
+
+        with self.assertRaisesRegex(ValueError, "unavailable or invalid"):
+            scoped_role_git_read_command(
+                prompt_pack={"workspace": {"repo_path": str(self.workspace)}},
+                assignment={
+                    "input_refs": {
+                        "module_work_view": {"sha256": "missing" * 9 + "x"}
+                    }
+                },
+                artifact_reader=lambda _ref: (_ for _ in ()).throw(KeyError("missing")),
+                policy=policy,
+            )
 
     def _create_architect_assignment(
         self,

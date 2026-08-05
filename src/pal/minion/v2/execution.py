@@ -1877,6 +1877,48 @@ class UnitWorkViewBuilder:
         raise ValueError(
             "unit work view requires a ContractArtifact"
         )
+
+    def build_system_delivery_view(self, node: AggregateSnapshot) -> ArtifactRef:
+        """Project whole-graph delivery semantics for the sink verifier only."""
+
+        if not bool(node.payload.get("graph_sink")):
+            raise ValueError("system delivery view is available only for the graph sink")
+        manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
+        artifact = dict(self.contracts.artifacts.read_json(manifest_ref))
+        adapter = str(node.payload.get("execution_adapter") or "")
+        if adapter == SOFTWARE_GIT_ADAPTER:
+            full_contract = software_contract_projection(
+                dict(artifact.get("contract") or {})
+            )
+        elif adapter == ARTIFACT_BUNDLE_ADAPTER:
+            full_contract = dict(artifact.get("contract") or {})
+        else:
+            raise ValueError("system delivery view has no supported execution adapter")
+        scenarios = dict(full_contract.get("scenarios") or {})
+        payload = {
+            "schema_version": "1",
+            "graph_sink": True,
+            "sink_module": str(
+                node.payload.get("module_name")
+                or node.payload.get("unit_id")
+                or ""
+            ),
+            "requirements": dict(full_contract.get("requirements") or {}),
+            "scenarios": scenarios,
+            "entrypoints": [
+                self._entrypoint_view(scenario.get("entrypoint"))
+                for scenario in scenarios.values()
+                if isinstance(scenario, Mapping)
+                and self._entrypoint_view(scenario.get("entrypoint"))
+            ],
+        }
+        return self.contracts.artifacts.put_json(
+            payload,
+            artifact_type="SystemDeliveryViewArtifact",
+            provenance={"owner": "manager", "audience": "sink_verifier"},
+            child_refs=((str(manifest_ref["sha256"]), "contract"),),
+        )
+
     def _build_skeleton_view(
         self,
         node: AggregateSnapshot,
@@ -1941,12 +1983,6 @@ class UnitWorkViewBuilder:
         ]
         bound_requirements = dict(contract.get("requirements") or {})
         bound_scenarios = dict(contract.get("scenarios") or {})
-        if bool(node.payload.get("graph_sink")):
-            # The authored sink checker owns system and delivery verification,
-            # so it receives the complete scenario graph.  Other nodes remain
-            # scoped to scenarios that bind their module.
-            bound_requirements = dict(submission.get("requirements") or {})
-            bound_scenarios = dict(submission.get("scenarios") or {})
         payload = {
             "schema_version": "3",
             "module_name": module_name,
@@ -2018,9 +2054,6 @@ class UnitWorkViewBuilder:
             module_contract.get("requirements") or {}
         )
         bound_scenarios = dict(module_contract.get("scenarios") or {})
-        if bool(node.payload.get("graph_sink")):
-            bound_requirements = dict(full_contract.get("requirements") or {})
-            bound_scenarios = dict(full_contract.get("scenarios") or {})
         payload = {
             "schema_version": "3",
             "execution_adapter": ARTIFACT_BUNDLE_ADAPTER,

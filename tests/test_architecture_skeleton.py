@@ -787,6 +787,42 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(found_call.status, "ok")
         self.assertTrue(found_call.text.startswith("pong"))
 
+    def test_module_registration_conflict_does_not_leak_partial_projections(self) -> None:
+        core = PalCore()
+        first = ModuleHandle(
+            module_id="first",
+            tier=MODULE_TIER_DETACHABLE,
+            ports={"service": object()},
+            control_action_handlers={"shared.action": lambda _action: None},
+        )
+        second_port = object()
+        second = ModuleHandle(
+            module_id="second",
+            tier=MODULE_TIER_DETACHABLE,
+            ports={"service": second_port},
+            control_action_handlers={"shared.action": lambda _action: None},
+        )
+        core.context.register_module(first)
+
+        with self.assertRaisesRegex(ValueError, "control action handler already registered"):
+            core.context.register_module(second)
+
+        self.assertIsNone(core.context.module_registry.get("second"))
+        self.assertNotIn("second:service", core.context.port_registry)
+        self.assertNotIn("second", core.context.control_action_registry.by_module)
+        self.assertIs(core.context.module_registry.get("first"), first)
+
+    def test_duplicate_module_registration_preserves_original_handle(self) -> None:
+        core = PalCore()
+        original = ModuleHandle(module_id="demo", tier=MODULE_TIER_DETACHABLE)
+        replacement = ModuleHandle(module_id="demo", tier=MODULE_TIER_DETACHABLE)
+        core.context.register_module(original)
+
+        with self.assertRaisesRegex(ValueError, "module already registered"):
+            core.context.register_module(replacement)
+
+        self.assertIs(core.context.module_registry.get("demo"), original)
+
     def test_execution_tool_failures_are_isolated(self) -> None:
         core = PalCore()
         register_execution_with_core(core.context)

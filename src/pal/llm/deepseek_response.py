@@ -8,9 +8,12 @@ from typing import Any
 
 from pal.llm.ir import (
     LLMFinishReason,
+    LLMMessageIR,
     LLMResponseDeltaKind,
     LLMResponseIR,
+    LLMResponseItemKind,
     LLMResponseUpdate,
+    MessageRole,
     MessageState,
     ReasoningPartIR,
     TextPartIR,
@@ -148,6 +151,7 @@ def normalize_deepseek_updates(
 
     text_gate = _SafeTextGate()
     reasoning_gate = _SafeTextGate()
+    recovery_prefix = _output_recovery_text_prefix(context)
     projected_parts: list[Any] = []
     native_calls: dict[str, ToolCallIR] = {}
     source_text = ""
@@ -197,6 +201,13 @@ def normalize_deepseek_updates(
 
         if update.delta_kind == LLMResponseDeltaKind.TEXT:
             value = update.text_delta
+            if recovery_prefix:
+                # The preceding response stopped inside a reserved DSML
+                # envelope.  This response is only its provider continuation,
+                # so no fragment is independently safe to expose.  Parse the
+                # concatenated wire text at the terminal boundary instead.
+                source_text += value
+                continue
             if thinking_enabled and not structured_reasoning_seen:
                 deferred_text += value
                 if "</think>" not in deferred_text:
@@ -244,6 +255,24 @@ def normalize_deepseek_updates(
                 )
             continue
 
+        if update.delta_kind == LLMResponseDeltaKind.ITEM_COMMITTED:
+            # Item closure is not a response-terminal signal.  In particular,
+            # Anthropic-shaped responses close their text block before the
+            # message_stop event that carries max_tokens.  Treating that block
+            # closure as terminal would try to parse a truncated DSML envelope
+            # before the hook knows it is recoverable.  Native tool items are
+            # already semantic, so preserve their closure for Core; textual
+            # DSML remains hidden until the actual response terminal arrives.
+            if update.item_kind == LLMResponseItemKind.TOOL_CALL:
+                yield LLMResponseUpdate(
+                    response=_project_response(response, projected_parts),
+                    delta_kind=LLMResponseDeltaKind.ITEM_COMMITTED,
+                    tool_call=update.tool_call,
+                    item_id=update.item_id,
+                    item_kind=update.item_kind,
+                )
+            continue
+
         terminal_seen = True
         if deferred_text and response.text.startswith(source_text + deferred_text):
             # With no textual </think> delimiter, classification must wait for
@@ -280,12 +309,30 @@ def normalize_deepseek_updates(
                     tool_call=call,
                 )
 
-        has_dsml = text_gate.dsml_seen or text_gate.pending_dsml or text_dsml
+        has_dsml = bool(recovery_prefix) or text_gate.dsml_seen or text_gate.pending_dsml or text_dsml
         if has_dsml:
             if response.finish_reason == LLMFinishReason.LENGTH:
-                # Keep the raw cumulative response exclusively in the hidden
-                # terminal state so continuation recovery can merge it.
-                yield LLMResponseUpdate(response, LLMResponseDeltaKind.STATE)
+                # The incomplete DSML envelope is provider recovery state, not
+                # assistant text.  Preserve its lossless wire replay for a
+                # same-endpoint continuation while exposing only the already
+                # safe semantic prefix to L1, channels, and final rendering.
+                metadata = dict(response.message.metadata)
+                metadata["preserve_replay_for_output_recovery"] = True
+                hidden = _project_response(
+                    response,
+                    projected_parts,
+                    finish_reason=LLMFinishReason.LENGTH,
+                    state=MessageState.COMPLETE,
+                )
+                hidden = replace(
+                    hidden,
+                    message=replace(
+                        hidden.message,
+                        metadata=metadata,
+                        replay=response.message.replay,
+                    ),
+                )
+                yield LLMResponseUpdate(hidden, LLMResponseDeltaKind.STATE)
                 continue
             if response.finish_reason not in {
                 LLMFinishReason.STOP,
@@ -302,12 +349,51 @@ def normalize_deepseek_updates(
                         tuple(native_calls.values()),
                     )
                 else:
+                    parse_response = response
+                    parse_text = response.text
+                    if recovery_prefix:
+                        parse_text = recovery_prefix + response.text
+                        parse_response = replace(
+                            response,
+                            message=replace(
+                                response.message,
+                                parts=(
+                                    *tuple(
+                                        part
+                                        for part in response.message.parts
+                                        if isinstance(part, ReasoningPartIR)
+                                    ),
+                                    TextPartIR(parse_text),
+                                ),
+                            ),
+                        )
                     normalized = _parse_dsml_response(
                         context,
-                        response,
-                        _canonicalize_dsml(response.text),
+                        parse_response,
+                        _canonicalize_dsml(parse_text),
                         dsml_token=_DSML_TOKEN,
                     )
+                    if recovery_prefix:
+                        # Earlier safe text/reasoning is already present in
+                        # the preceding response.  Keep only semantic parts
+                        # produced by this continuation: its newly emitted
+                        # structured reasoning and the newly closed tool
+                        # items.  The replay text itself is provider-private.
+                        continuation_reasoning = tuple(
+                            part
+                            for part in response.message.parts
+                            if isinstance(part, ReasoningPartIR)
+                        )
+                        normalized = replace(
+                            normalized,
+                            message=replace(
+                                normalized.message,
+                                parts=(
+                                    *continuation_reasoning,
+                                    *normalized.tool_calls,
+                                ),
+                            ),
+                        )
             except ProviderResponseHookError:
                 raise
             except Exception as exc:
@@ -340,6 +426,71 @@ def normalize_deepseek_updates(
         raise ProviderResponseHookError("DeepSeek response produced no semantic updates")
     if not terminal_seen and (text_gate.dsml_seen or text_gate.pending_dsml):
         raise ProviderResponseHookError("DeepSeek DSML response ended before a terminal update")
+
+
+def _output_recovery_text_prefix(
+    context: ProviderResponseHookContext,
+) -> str:
+    """Return the contiguous hidden DSML prefix for one continuation chain."""
+
+    messages = list(context.request.messages)
+    if not messages or str(messages[-1].semantic_kind or "") != "output_continuation":
+        return ""
+    fragments: list[str] = []
+    index = len(messages) - 1
+    while index >= 0:
+        message = messages[index]
+        if (
+            message.role == MessageRole.USER
+            and str(message.semantic_kind or "") == "output_continuation"
+        ):
+            index -= 1
+            continue
+        if (
+            message.role == MessageRole.ASSISTANT
+            and bool(message.metadata.get("preserve_replay_for_output_recovery"))
+        ):
+            text = _replay_text(message)
+            if not text:
+                raise ProviderResponseHookError(
+                    "DeepSeek output recovery replay has no textual DSML state"
+                )
+            fragments.append(text)
+            index -= 1
+            continue
+        break
+    return "".join(reversed(fragments))
+
+
+def _replay_text(message: LLMMessageIR) -> str:
+    replay = message.replay
+    if replay is None:
+        return ""
+    payload = replay.payload
+    if replay.wire_shape == "anthropic_messages":
+        return "".join(
+            str(block.get("text") or "")
+            for block in list(payload.get("content") or [])
+            if isinstance(block, Mapping) and str(block.get("type") or "") == "text"
+        )
+    if replay.wire_shape == "openai_completion":
+        raw_message = payload.get("message")
+        if isinstance(raw_message, Mapping):
+            return str(raw_message.get("content") or "")
+        return ""
+    if replay.wire_shape == "openai_response":
+        text: list[str] = []
+        for item in list(payload.get("output") or []):
+            if not isinstance(item, Mapping) or str(item.get("type") or "") != "message":
+                continue
+            for block in list(item.get("content") or []):
+                if isinstance(block, Mapping) and str(block.get("type") or "") in {
+                    "output_text",
+                    "refusal",
+                }:
+                    text.append(str(block.get("text") or block.get("refusal") or ""))
+        return "".join(text)
+    return ""
 
 
 def _parse_dsml_response(

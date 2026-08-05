@@ -3,7 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ from pal.llm.ir import (
     LLMMessageIR,
     LLMRequestIR,
     LLMResponseDeltaKind,
+    LLMResponseItemKind,
     LLMResponseIR,
     LLMResponseUpdate,
     MessageRole,
@@ -95,6 +96,13 @@ def stream_update_to_payload(update: LLMResponseUpdate) -> dict[str, Any]:
         if update.tool_call is None:
             raise ValueError("tool-call stream event has no tool call")
         payload["tool_call"] = part_to_payload(update.tool_call)
+    if update.delta_kind == LLMResponseDeltaKind.ITEM_COMMITTED:
+        payload["item_id"] = update.item_id
+        payload["item_kind"] = (
+            update.item_kind.value if update.item_kind is not None else ""
+        )
+        if update.tool_call is not None:
+            payload["tool_call"] = part_to_payload(update.tool_call)
     return payload
 
 
@@ -104,6 +112,8 @@ class BrokerStreamDecoder:
     def __init__(self) -> None:
         self.message_id = ""
         self.parts: list[Any] = []
+        self.committed_items: dict[str, LLMResponseItemKind] = {}
+        self.committed_tool_calls: dict[str, ToolCallIR] = {}
         self.terminal_seen = False
 
     def feed(self, payload: dict[str, Any]) -> LLMResponseUpdate:
@@ -115,20 +125,27 @@ class BrokerStreamDecoder:
             raise ValueError("broker stream event has no message_id")
         if self.message_id and message_id != self.message_id:
             raise ValueError("broker stream changed message_id")
-        self.message_id = message_id
 
         if kind == LLMResponseDeltaKind.STATE:
             response_payload = payload.get("response")
             if not isinstance(response_payload, dict):
                 raise ValueError("terminal broker stream event has no response")
             response = response_from_payload(response_payload)
-            if response.message.message_id != self.message_id:
+            if response.message.message_id != message_id:
                 raise ValueError("terminal broker response changed message_id")
+            if response.finish_reason not in {
+                LLMFinishReason.ERROR,
+                LLMFinishReason.CONTENT_FILTER,
+            }:
+                self._validate_committed_items(response)
+            self.message_id = message_id
             self.terminal_seen = True
             return LLMResponseUpdate(response, delta_kind=kind)
 
         text_delta = str(payload.get("text_delta") or "")
         tool_call: ToolCallIR | None = None
+        item_id = ""
+        item_kind: LLMResponseItemKind | None = None
         if kind == LLMResponseDeltaKind.TEXT:
             if not text_delta:
                 raise ValueError("text broker stream event has an empty delta")
@@ -147,13 +164,58 @@ class BrokerStreamDecoder:
                 raise ValueError("broker stream tool_call is not a tool call")
             tool_call = parsed
             self.parts.append(tool_call)
+        elif kind == LLMResponseDeltaKind.ITEM_COMMITTED:
+            item_id = str(payload.get("item_id") or "").strip()
+            if not item_id:
+                raise ValueError("committed broker item has no item_id")
+            raw_item_kind = str(payload.get("item_kind") or "").strip()
+            if not raw_item_kind:
+                raise ValueError("committed broker item has no item_kind")
+            item_kind = LLMResponseItemKind(raw_item_kind)
+            previous = self.committed_items.get(item_id)
+            if previous is not None and previous != item_kind:
+                raise ValueError("committed broker item changed kind")
+            call_payload = payload.get("tool_call")
+            if item_kind == LLMResponseItemKind.TOOL_CALL:
+                if not isinstance(call_payload, dict):
+                    raise ValueError("committed broker tool item has no tool call")
+                parsed = part_from_payload(call_payload)
+                if not isinstance(parsed, ToolCallIR):
+                    raise ValueError("committed broker item tool_call is not a tool call")
+                tool_call = parsed
+                previous_call = self.committed_tool_calls.get(item_id)
+                if previous_call is not None and previous_call != tool_call:
+                    raise ValueError("committed broker tool item changed value")
+                self.committed_items[item_id] = item_kind
+                self.committed_tool_calls[item_id] = tool_call
+                if not any(
+                    isinstance(part, ToolCallIR)
+                    and part.call_id == tool_call.call_id
+                    for part in self.parts
+                ):
+                    self.parts.append(tool_call)
+            else:
+                self.committed_items[item_id] = item_kind
 
         response = LLMResponseIR(
             message=LLMMessageIR(
                 role=MessageRole.ASSISTANT,
                 parts=tuple(self.parts),
-                message_id=self.message_id,
+                message_id=message_id,
                 state=MessageState.IN_PROGRESS,
+                metadata=(
+                    {
+                        "committed_items": [
+                            {
+                                "item_id": committed_id,
+                                "item_kind": committed_kind.value,
+                            }
+                            for committed_id, committed_kind in self.committed_items.items()
+                        ]
+                    }
+                    if self.committed_items
+                    else {}
+                ),
             ),
             finish_reason=(
                 LLMFinishReason.TOOL_CALLS
@@ -161,12 +223,41 @@ class BrokerStreamDecoder:
                 else LLMFinishReason.STOP
             ),
         )
-        return LLMResponseUpdate(
+        update = LLMResponseUpdate(
             response,
             delta_kind=kind,
             text_delta=text_delta,
             tool_call=tool_call,
+            item_id=item_id,
+            item_kind=item_kind,
         )
+        self.message_id = message_id
+        return update
+
+    def _validate_committed_items(self, response: LLMResponseIR) -> None:
+        raw_items = response.message.metadata.get("committed_items", ())
+        if not isinstance(raw_items, (list, tuple)):
+            raise ValueError("terminal broker committed_items is not a sequence")
+        terminal_items: dict[str, LLMResponseItemKind] = {}
+        for raw_item in raw_items:
+            if not isinstance(raw_item, Mapping):
+                raise ValueError("terminal broker committed item is not an object")
+            item_id = str(raw_item.get("item_id") or "").strip()
+            raw_kind = str(raw_item.get("item_kind") or "").strip()
+            if not item_id or not raw_kind:
+                raise ValueError("terminal broker committed item is incomplete")
+            item_kind = LLMResponseItemKind(raw_kind)
+            previous = terminal_items.get(item_id)
+            if previous is not None and previous != item_kind:
+                raise ValueError("terminal broker committed item changed kind")
+            terminal_items[item_id] = item_kind
+        for item_id, item_kind in self.committed_items.items():
+            if terminal_items.get(item_id) != item_kind:
+                raise ValueError("terminal broker response revoked a committed item")
+        terminal_calls = {call.call_id: call for call in response.tool_calls}
+        for committed_call in self.committed_tool_calls.values():
+            if terminal_calls.get(committed_call.call_id) != committed_call:
+                raise ValueError("terminal broker response revoked a committed tool call")
 
     def _append_text(self, value: str) -> None:
         if self.parts and isinstance(self.parts[-1], TextPartIR):

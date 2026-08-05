@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from pal.bootstrap import compose_runtime
-from pal.channel import ChannelEndpointRepository, ChannelRuntime, FactoryChannelProvider
+from pal.channel import ChannelEndpointRepository, ChannelProviderContext, ChannelRuntime, FactoryChannelProvider
 from pal.channel.contracts import EndpointConfig, ResponseHandle
 from pal.channel.endpoints import SocketChannelEndpoint
 from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
@@ -40,12 +40,13 @@ from pal.llm import (
     SecretRef,
     build_default_endpoint_invoker,
 )
-from pal.shared.tool_protocol import ToolCallIR
+from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3ProviderSelector, MemoryPackRequest, MemoryQuery, MemoryService
 from pal.plugins.l3 import SQLiteVecL3Plugin
 from pal.plugins import PluginBundleRepository
+from pal.plugins.capabilities import PluginsIntrospectionProvider
 from pal.proactive import ProactiveDefinition, ProactiveRepository
-from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, LLMFinishReason, SINGLETON_TARGET
+from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, IntrospectionCall, LLMFinishReason, SINGLETON_TARGET
 from pal.wizard import WizardService
 from pal.web_fetch import DEFAULT_WEB_FETCH_USER_AGENT, BrowserServiceManager, WebFetchProviderRepository, plain_http_fetch
 from pal.web_search import WebSearchItem, WebSearchProviderRepository
@@ -725,6 +726,46 @@ class PalV2BootstrapTests(unittest.TestCase):
         demo_record = next(item for item in records if item["plugin_id"] == "demo_builtin")
         self.assertTrue(demo_record["attached"])
 
+    def test_plugin_rescan_capability_reports_partial_attach_failure_as_error(self) -> None:
+        class FailingHost:
+            @staticmethod
+            def rescan_and_attach_new_first_party() -> dict[str, object]:
+                return {
+                    "new_first_party_plugins": ["broken"],
+                    "attached_new_first_party_plugins": [],
+                    "scan_errors": {},
+                    "attach_errors": {"broken": "invalid tool contract"},
+                }
+
+        result = PluginsIntrospectionProvider(  # type: ignore[arg-type]
+            host=FailingHost()
+        ).rescan_and_attach_new_first_party(
+            CapabilityCall(name="plugin_rescan_and_attach_new_first_party")
+        )
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(
+            result.structured["attach_errors"],
+            {"broken": "invalid tool contract"},
+        )
+
+    def test_plugin_rescan_capability_reports_scan_failure_as_error(self) -> None:
+        class FailingHost:
+            @staticmethod
+            def rescan() -> dict[str, object]:
+                return {
+                    "first_party_discovered": 0,
+                    "third_party_discovered": 0,
+                    "scan_errors": ["broken manifest"],
+                }
+
+        result = PluginsIntrospectionProvider(  # type: ignore[arg-type]
+            host=FailingHost()
+        ).rescan(CapabilityCall(name="plugin_rescan"))
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.structured["scan_errors"], ["broken manifest"])
+
     def test_plugin_attach_refreshes_import_cache_and_recompiles_capabilities(self) -> None:
         self.wizard.seed_defaults(self.registration)
         handle = self._compose_runtime(
@@ -761,11 +802,12 @@ class PalV2BootstrapTests(unittest.TestCase):
                         "from demo_reload.impl import VALUE",
                         "from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle",
                         "from pal.execution import CapabilityCall, CapabilityResult",
+                        "from pal.execution.tool_semantics import INDIRECT_NONE",
                         "from pal.shared import OPERATION_NAMESPACE, capability_action, capability_node",
                         "",
                         "@capability_node(namespace=OPERATION_NAMESPACE, scope='demo_reload', kind='module', source='test', target_kind='module')",
                         "class DemoProvider:",
-                        "    @capability_action(namespace=OPERATION_NAMESPACE, scope='demo_reload', family='operation', action_name='ping', aliases=('demo_reload_ping',))",
+                        "    @capability_action(namespace=OPERATION_NAMESPACE, scope='demo_reload', family='operation', action_name='ping', aliases=('demo_reload_ping',), execution=INDIRECT_NONE)",
                         "    def ping(self, call: CapabilityCall) -> CapabilityResult:",
                         "        _ = call",
                         "        return CapabilityResult(status='ok', text=VALUE, llm_text=VALUE)",
@@ -982,6 +1024,97 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(detached.status, "ok")
         self.assertEqual(calls, ["cleanup"])
         self.assertEqual(module.cleanup_callbacks, [])
+
+    def test_failed_plugin_detach_preserves_attached_runtime_generation(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        runtime = self._compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        module = runtime.core.context.module_registry.require("l3.sqlite_vec_l3")
+        provider = module.introspection_provider
+        self.assertIsNotNone(provider)
+        record = runtime.plugin_host.first_party_records["sqlite_vec_l3"]
+        cleanup_calls: list[str] = []
+        module.cleanup_callbacks.append(lambda: cleanup_calls.append("cleanup"))
+        published = tuple(module.published_capabilities)
+
+        with patch.object(provider, "detach", side_effect=RuntimeError("detach failed")):
+            result = runtime.plugin_host.detach("sqlite_vec_l3")
+            disabled = runtime.plugin_host.disable("sqlite_vec_l3")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(disabled["status"], "error")
+        self.assertTrue(disabled["enabled"])
+        self.assertTrue(record.attached)
+        self.assertTrue(record.enabled)
+        self.assertNotIn("sqlite_vec_l3", runtime.plugin_host.first_party_disabled)
+        self.assertTrue(module.mounted)
+        self.assertEqual(cleanup_calls, [])
+        self.assertEqual(tuple(module.published_capabilities), published)
+        for alias in published:
+            self.assertIn(alias, runtime.core.context.capability_registry.descriptors)
+
+    def test_failed_plugin_attach_rolls_back_every_runtime_projection(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        runtime = self._compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        module = runtime.core.context.module_registry.require("l3.sqlite_vec_l3")
+        event_kind = "test.plugin.rollback"
+        action_kind = "test.plugin.rollback.action"
+        event_handler = object()
+        cleanup_calls: list[str] = []
+        runtime.core.context.event_handler_registry.register(
+            event_kind,
+            event_handler,  # type: ignore[arg-type]
+            module_id=module.module_id,
+        )
+        runtime.core.context.control_action_registry.register(
+            module.module_id,
+            action_kind,
+            lambda _action: None,
+        )
+        module.cleanup_callbacks.append(lambda: cleanup_calls.append("cleanup"))
+
+        runtime.plugin_host._rollback_failed_attach(module)
+
+        self.assertNotIn(module.module_id, runtime.core.context.event_handler_registry.by_module)
+        self.assertNotIn(event_kind, runtime.core.context.event_handler_registry.handlers)
+        self.assertNotIn(module.module_id, runtime.core.context.control_action_registry.by_module)
+        self.assertNotIn(action_kind, runtime.core.context.control_action_registry.handlers)
+        self.assertEqual(cleanup_calls, ["cleanup"])
+        self.assertEqual(module.cleanup_callbacks, [])
+        self.assertFalse(module.mounted)
+        self.assertTrue(module.degraded)
+
+    def test_failed_plugin_attach_discards_spent_handle_before_retry(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        runtime = self._compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        self.assertEqual(runtime.plugin_host.detach("sqlite_vec_l3")["status"], "ok")
+
+        with patch.object(
+            runtime.plugin_host,
+            "_publish_module_capabilities",
+            side_effect=RuntimeError("publish failed"),
+        ):
+            failed = runtime.plugin_host.attach("sqlite_vec_l3")
+
+        self.assertEqual(failed["status"], "error")
+        self.assertNotIn("sqlite_vec_l3", runtime.plugin_host.first_party_handles)
+        self.assertIsNone(runtime.core.context.module_registry.get("l3.sqlite_vec_l3"))
+
+        retried = runtime.plugin_host.attach("sqlite_vec_l3")
+        self.assertEqual(retried["status"], "ok")
+        self.assertIn("sqlite_vec_l3", runtime.plugin_host.first_party_handles)
+        self.assertIsNotNone(runtime.core.context.module_registry.get("l3.sqlite_vec_l3"))
 
     def test_plugin_attach_detach_lifecycle_works_end_to_end(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -1944,6 +2077,44 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(health.status, "ok")
         self.assertEqual(health.structured["source"], "runtime_root_provider")
 
+    def test_channel_provider_rescan_failure_restores_previous_generation(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        handle = self._compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        self._write_demo_runtime_channel_provider()
+        ChannelEndpointRepository().upsert(
+            endpoint_id="demo_runtime_main",
+            channel_kind="demo_runtime",
+            binding_key="demo:1",
+            enabled=True,
+        )
+        attached = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="channel_provider_rescan",
+                args={"attach_enabled_endpoints": True},
+            )
+        )
+        self.assertEqual(attached.status, "ok")
+        old_endpoint = handle.channel_runtime.get_endpoint("demo_runtime_main")
+        self.assertIsNotNone(old_endpoint)
+        provider_path = self.runtime_root / "channel" / "providers" / "demo_runtime" / "runtime.py"
+        provider_path.write_text("this is not valid python !!!\n", encoding="utf-8")
+
+        failed = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="channel_provider_rescan",
+                args={"attach_enabled_endpoints": False},
+            )
+        )
+
+        self.assertEqual(failed.status, "error")
+        self.assertTrue(failed.structured["runtime_provider_load_errors"])
+        self.assertIn("demo_runtime", failed.structured["runtime_provider_ids"])
+        self.assertIs(handle.channel_runtime.get_endpoint("demo_runtime_main"), old_endpoint)
+
     def test_channel_provider_reload_preserves_runtime_telegram_auth_state(self) -> None:
         repository = ChannelEndpointRepository()
         repository.upsert(
@@ -1985,6 +2156,88 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(getattr(new_endpoint, "bot_token", ""), "runtime-only-token")
         self.assertTrue(getattr(new_endpoint, "_authorized", False))
         self.assertTrue(new_endpoint.paired)
+
+    def test_channel_attach_factory_failure_preserves_detached_repository_state(self) -> None:
+        repository = ChannelEndpointRepository()
+        repository.upsert(
+            endpoint_id="missing_runtime",
+            channel_kind="demo",
+            binding_key="demo:missing",
+        )
+        repository.set_attached("missing_runtime", False)
+        runtime = ChannelRuntime()
+        provider = FactoryChannelProvider(
+            provider_id="demo",
+            endpoint_types=("demo",),
+            factory=types.SimpleNamespace(create=lambda _record, runtime_root: None),
+        )
+        context = ChannelProviderContext(runtime=runtime, repository=repository, runtime_root=self.runtime_root)
+
+        result = provider.attach_endpoint("missing_runtime", context)
+
+        self.assertEqual(result.status, "not_found")
+        self.assertIsNotNone(repository.get("missing_runtime").detached_at)
+        self.assertIsNone(runtime.get_endpoint("missing_runtime"))
+
+    def test_channel_detach_repository_failure_restores_runtime_endpoint(self) -> None:
+        repository = ChannelEndpointRepository()
+        repository.upsert(
+            endpoint_id="demo_main",
+            channel_kind="telegram",
+            binding_key="demo:1",
+        )
+        runtime = ChannelRuntime()
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(endpoint_id="demo_main", channel_kind="telegram", binding_key="demo:1"),
+            runtime_root=self.runtime_root,
+            bot_token="",
+        )
+        runtime.register_endpoint(endpoint)
+        provider = FactoryChannelProvider(
+            provider_id="demo",
+            endpoint_types=("telegram",),
+            factory=types.SimpleNamespace(create=lambda record, runtime_root: endpoint),
+        )
+        context = ChannelProviderContext(runtime=runtime, repository=repository, runtime_root=self.runtime_root)
+
+        with patch.object(repository, "set_attached", side_effect=RuntimeError("database failed")):
+            with self.assertRaisesRegex(RuntimeError, "database failed"):
+                provider.detach_endpoint("demo_main", context)
+
+        self.assertIs(runtime.get_endpoint("demo_main"), endpoint)
+        self.assertTrue(endpoint.attached)
+
+    def test_channel_enable_repository_failure_restores_runtime_flag(self) -> None:
+        repository = ChannelEndpointRepository()
+        repository.upsert(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            binding_key="chat:1",
+            enabled=False,
+        )
+        runtime = ChannelRuntime()
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:1"),
+            runtime_root=self.runtime_root,
+            bot_token="",
+        )
+        endpoint.enabled = False
+        runtime.register_endpoint(endpoint)
+        provider = ChannelIntrospectionProvider(
+            runtime=runtime,
+            repository=repository,
+            runtime_root=self.runtime_root,
+        )
+
+        with patch.object(repository, "set_enabled", side_effect=RuntimeError("database failed")):
+            result = provider._set_enabled(
+                IntrospectionCall(name="channel.enable", args={"target_id": "telegram_main"}),
+                enabled=True,
+            )
+
+        self.assertEqual(result.status, "error")
+        self.assertFalse(endpoint.enabled)
+        self.assertFalse(repository.get("telegram_main").enabled)
 
 
     def test_compose_runtime_consumes_wizard_owned_database(self) -> None:
@@ -2389,6 +2642,93 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
 
         self.assertEqual(len(endpoint.outbox), 1)
         self.assertEqual(endpoint.outbox[0].text, "pong")
+
+    def test_telegram_buffers_tool_rounds_and_delivers_only_terminal_answer(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="chat:42",
+            )
+        )
+        handle = ResponseHandle(
+            endpoint_id="telegram_main",
+            reply_target={"chat_id": "42"},
+        )
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="I will inspect."),
+        )
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.TOOL_CALL,
+                tool_call=new_tool_call(name="read_file", args={"file_path": "a"}),
+            ),
+        )
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="tool_calls"),
+        )
+        endpoint.queue_reply("I will inspect.", response_handle=handle)
+
+        self.assertFalse(endpoint.outbox)
+
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.TEXT_DELTA, text="Done."),
+        )
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="stop"),
+        )
+        endpoint.queue_reply("Done.", response_handle=handle)
+
+        self.assertEqual([item.text for item in endpoint.outbox], ["Done."])
+
+    def test_telegram_tool_only_round_does_not_suppress_later_terminal_answer(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="chat:42",
+            )
+        )
+        handle = ResponseHandle(
+            endpoint_id="telegram_main",
+            reply_target={"chat_id": "42"},
+        )
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.TOOL_CALL,
+                tool_call=new_tool_call(name="read_file", args={"file_path": "a"}),
+            ),
+        )
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.DONE,
+                finish_reason="tool_calls",
+            ),
+        )
+
+        # Tool-only rounds do not enqueue an intermediate reply.  The next
+        # stream item must open a fresh buffered round mechanically.
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(
+                kind=ChannelStreamUpdateKind.TEXT_DELTA,
+                text="Done.",
+            ),
+        )
+        endpoint.send_stream_update(
+            handle,
+            ChannelStreamUpdate(kind=ChannelStreamUpdateKind.DONE, finish_reason="stop"),
+        )
+        endpoint.queue_reply("Done.", response_handle=handle)
+
+        self.assertEqual([item.text for item in endpoint.outbox], ["Done."])
 
 
 class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):

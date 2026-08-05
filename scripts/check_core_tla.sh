@@ -12,11 +12,8 @@ if [[ -z "${tla_jar}" || ! -f "${tla_jar}" ]]; then
 fi
 
 cd "${repo_root}"
-for model in L1TurnLifecycle EndpointInvocationLifecycle ItemCommitLifecycle; do
-    echo "==> TLC ${model}"
-    java -XX:+UseParallelGC -jar "${tla_jar}" \
-        -workers "${workers}" \
-        -cleanup \
-        -config "spec/llm/${model}.cfg" \
-        "spec/llm/${model}.tla"
-done
+java -XX:+UseParallelGC -jar "${tla_jar}" \
+    -workers "${workers}" \
+    -cleanup \
+    -config spec/core/RuntimeProjectionLifecycle.cfg \
+    spec/core/RuntimeProjectionLifecycle.tla

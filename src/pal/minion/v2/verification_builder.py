@@ -331,13 +331,20 @@ def effective_verification_policy(
     *,
     work_view: Mapping[str, Any],
     verification_policy: Mapping[str, Any],
+    system_delivery_view: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile family defaults into obligations owned by one verifier node."""
 
     source = dict(verification_policy or {})
     sink = bool(work_view.get("graph_sink"))
     mode = "sink" if sink else "module"
-    entrypoints = [dict(item) for item in list(work_view.get("entrypoints") or []) if isinstance(item, Mapping)]
+    delivery = dict(system_delivery_view or {}) if sink else {}
+    entrypoint_source = delivery if delivery else work_view
+    entrypoints = [
+        dict(item)
+        for item in list(entrypoint_source.get("entrypoints") or [])
+        if isinstance(item, Mapping)
+    ]
     entrypoint_kinds = {str(item.get("kind") or "").strip() for item in entrypoints}
     require_consumer_probe = False
     require_dogfood = sink
@@ -388,6 +395,7 @@ def compile_verification_invocation_tool_contract(
     *,
     work_view: Mapping[str, Any],
     verification_policy: Mapping[str, Any],
+    system_delivery_view: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile one stable, invocation-local description contract from bound inputs."""
 
@@ -436,9 +444,14 @@ def compile_verification_invocation_tool_contract(
             if str(item).strip()
         }
     )
+    entrypoint_source = (
+        dict(system_delivery_view or {})
+        if bool(work_view.get("graph_sink")) and system_delivery_view
+        else work_view
+    )
     entrypoints = [
         dict(item) if isinstance(item, Mapping) else {"target": str(item).strip()}
-        for item in list(work_view.get("entrypoints") or [])
+        for item in list(entrypoint_source.get("entrypoints") or [])
         if isinstance(item, Mapping) or str(item).strip()
     ]
     implementation_targets = accepted_modules or ([module_name] if module_name else [])
@@ -446,6 +459,7 @@ def compile_verification_invocation_tool_contract(
     policy = effective_verification_policy(
         work_view=work_view,
         verification_policy=verification_policy,
+        system_delivery_view=system_delivery_view,
     )
     historical_regressions = historical_repair_checklist_items(work_view)
     allowed_capabilities = set(_COMMON_VERIFICATION_CAPABILITIES)

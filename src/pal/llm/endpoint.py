@@ -16,6 +16,7 @@ from pal.llm.response_hooks import ProviderResponseHookRegistry
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext
 from pal.llm.transport import SDKJSONTransport, SDKTransportRequest
+from pal.shared import LLMFinishReason
 
 
 CredentialResolver = Callable[[LLMEndpointModel], str | None]
@@ -127,7 +128,12 @@ class ShapeEndpointInvoker:
         ):
             last = update
             yield update
-        if last is None or not last.response.message.parts:
+        if last is None:
+            raise RuntimeError("LLM stream completed without semantic output")
+        if (
+            not last.response.message.parts
+            and last.response.finish_reason != LLMFinishReason.LENGTH
+        ):
             raise RuntimeError("LLM stream completed without semantic output")
 
     def _credential(self, endpoint: LLMEndpointModel) -> str:

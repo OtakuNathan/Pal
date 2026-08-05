@@ -50,6 +50,7 @@ from pal.execution import (
     ExecutionApprovalRequest,
     register_with_core as register_execution_with_core,
 )
+from pal.execution.tool_facade import EffectKind as ToolEffectKind
 from pal.foundation import EventEnvelope, PalV2Database, utc_now
 from pal.llm import EndpointResolver, LLMEndpointRepository, LLMRuntime, LLMCredentialResolver, RuntimeSettingRepository, build_default_endpoint_invoker
 from pal.llm.contracts import (
@@ -65,6 +66,7 @@ from pal.llm.ir import (
     MessageState,
     TextPartIR,
 )
+from pal.llm.output_recovery import has_committed_tool_calls
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.lsp import build_lsp_plugin
 from pal.memory import (
@@ -133,11 +135,14 @@ from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository, Web
 DEFAULT_MINION_OUTPUT_LENGTH_RECOVERY_ROUNDS = 3
 MINION_OUTPUT_LENGTH_RECOVERY_NOTE = (
     "The previous assistant response reached the output limit and was discarded; "
-    "do not repeat, recap, or continue that response as prose. Resume from the "
-    "existing workspace and checklist. Execute only the next bounded action with "
-    "complete tool calls. Split large edits across multiple tool-call rounds and "
-    "write content directly to files. Keep the final reply short."
+    "do not repeat, recap, investigate further, or continue that response as prose. "
+    "Resume from the existing workspace and checklist and act now: update the "
+    "checklist if necessary, write the smallest compiling/valid scaffold, then fill "
+    "it as the next bounded action. Emit complete tool calls, including at least one "
+    "action tool call in this round. "
+    "Keep the final reply short."
 )
+
 from pal.web_search import WebSearchProviderRepository, WebSearchService, register_with_core as register_web_search_with_core
 from pal.wizard.runtime import ALL_MODELS, DEFAULT_LLM_ENDPOINTS, DEFAULT_WEB_FETCH_PROVIDERS, DEFAULT_WEB_SEARCH_PROVIDERS
 
@@ -1410,6 +1415,11 @@ class MinionRunner:
                 policy=replace(
                     prompt.policy,
                     temperature=_minion_temperature(self.pack, fallback=prompt.policy.temperature),
+                    tool_choice=(
+                        "required"
+                        if state.pending_output_length_recovery_note
+                        else prompt.policy.tool_choice
+                    ),
                 ),
                 metadata={**dict(prompt.metadata), **_minion_llm_request_metadata(self.pack, self.run_id)},
             )
@@ -1421,7 +1431,11 @@ class MinionRunner:
             debug_log_prompt=lambda _continuation, request: self._debug_log_minion_llm_request(state, request),
             debug_log_outcome=lambda _continuation, outcome: self._debug_log_minion_llm_outcome(state, outcome),
             debug_log_reply=lambda _continuation, text: self._debug_log_minion_reply(text),
-            build_llm_tool_contracts=lambda: _llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities),
+            build_llm_tool_contracts=lambda: _llm_tools_for_allowed(
+                state.execution_runtime,
+                self.pack.allowed_capabilities,
+                action_only=bool(state.pending_output_length_recovery_note),
+            ),
             handle_failure_async=_minion_noop_failure_handler,
             render_failure_feedback_text=lambda feedback: str(feedback or ""),
             should_enter_failure_flow_for_tool_result=lambda _tool_result: False,
@@ -1525,13 +1539,17 @@ class MinionRunner:
             LLMFinishReason.COMPACT_REQUIRED,
         }
         truncated = _is_truncation_finish_reason(finish_reason)
+        committed_tool_calls = bool(
+            truncated
+            and has_committed_tool_calls(getattr(outcome, "response", None))
+        )
         has_consumable_output = bool(
             str(getattr(outcome, "text", "") or "").strip()
             or list(getattr(outcome, "tool_calls", []) or [])
         )
         consumed = (
             not provider_failed
-            and not truncated
+            and (not truncated or committed_tool_calls)
             and has_consumable_output
         )
         if not consumed:
@@ -1562,7 +1580,7 @@ class MinionRunner:
                 raise MinionLLMRetryableError(
                     str(getattr(outcome, "text", "") or "LLM generation failed")
                 )
-        elif truncated:
+        elif truncated and not committed_tool_calls:
             if continuation is not None:
                 response = getattr(outcome, "response", None)
                 message = getattr(response, "message", None)
@@ -2761,12 +2779,57 @@ async def _minion_noop_failure_handler(*args: Any, **kwargs: Any) -> _MinionFail
     return _MinionFailureResult(user_feedback="minion turn failed before a normal reply could be produced")
 
 
-def _llm_tools_for_allowed(execution_runtime: Any, allowed_capabilities: list[str]) -> list[dict[str, Any]]:
+def _llm_tools_for_allowed(
+    execution_runtime: Any,
+    allowed_capabilities: list[str],
+    *,
+    action_only: bool = False,
+) -> list[dict[str, Any]]:
     _ = allowed_capabilities
     build = getattr(execution_runtime, "build_llm_tool_contracts", None)
     if not callable(build):
         raise TypeError("Minion execution runtime must expose immutable generation tool contracts")
-    return list(build())
+    tools = list(build())
+    if not action_only:
+        return tools
+    generation = getattr(execution_runtime, "registry_generation", None)
+    direct_aliases = getattr(generation, "direct_aliases", None)
+    indirect_aliases = getattr(generation, "indirect_aliases", None)
+    if not isinstance(direct_aliases, Mapping) or not isinstance(indirect_aliases, Mapping):
+        raise RuntimeError(
+            "output-length recovery requires immutable tool execution semantics"
+        )
+    read_effects = {
+        ToolEffectKind.NONE,
+        ToolEffectKind.LOCAL_READ,
+        ToolEffectKind.EXTERNAL_READ,
+    }
+    action_aliases = {
+        str(alias)
+        for alias, record in direct_aliases.items()
+        if getattr(getattr(record, "execution", None), "effect_kind", None)
+        not in read_effects
+    }
+    if any(
+        getattr(getattr(record, "execution", None), "effect_kind", None)
+        not in read_effects
+        for record in indirect_aliases.values()
+    ):
+        # The indirect record remains hidden from the provider tool list. Its
+        # single direct dispatcher is nevertheless an action-capable recovery
+        # route for this immutable generation.
+        action_aliases.add("call_tool")
+    selected = [
+        item
+        for item in tools
+        if str(dict(item.get("function") or {}).get("name") or "").strip()
+        in action_aliases
+    ]
+    if not selected:
+        raise RuntimeError(
+            "output-length recovery has no action capability in the immutable tool generation"
+        )
+    return selected
 
 
 def _provider_call_with_effective_args(
@@ -2913,6 +2976,10 @@ def _minion_llm_request_metadata(pack: MinionInvocationPack, run_id: str) -> dic
         "response_mode_hint": "operational",
         "minion_run_id": str(run_id or ""),
         "max_output_tokens_source": "minion",
+        # Minion owns bounded, action-forcing recovery.  Generic endpoint
+        # continuation would replay the same oversized reasoning before the
+        # role harness can narrow the next step.
+        "max_output_recovery_enabled": False,
     }
     preferred_endpoint_id = _preferred_endpoint_id_from_pack(pack)
     if preferred_endpoint_id:

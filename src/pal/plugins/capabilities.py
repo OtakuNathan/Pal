@@ -154,7 +154,11 @@ class PluginsIntrospectionProvider:
         _ = call
         result = self.host.rescan()
         return IntrospectionResult(
-            status=RuntimeStatus.OK,
+            status=(
+                RuntimeStatus.ERROR
+                if result.get("scan_errors")
+                else RuntimeStatus.OK
+            ),
             text="plugin rescan result",
             structured=result,
             llm_text=render_titled_structured_for_llm("Plugin rescan result", result),
@@ -172,8 +176,13 @@ class PluginsIntrospectionProvider:
     def rescan_and_attach_new_first_party(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         result = self.host.rescan_and_attach_new_first_party()
+        status = (
+            RuntimeStatus.ERROR
+            if result.get("scan_errors") or result.get("attach_errors")
+            else RuntimeStatus.OK
+        )
         return IntrospectionResult(
-            status=RuntimeStatus.OK,
+            status=status,
             text="plugin rescan and attach result",
             structured=result,
             llm_text=render_titled_structured_for_llm("Plugin rescan and attach result", result),

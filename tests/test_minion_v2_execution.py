@@ -1002,7 +1002,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             {"module": "framepipe_app", "surface": "decode"},
         )
 
-    def test_sink_work_view_receives_the_complete_scenario_graph(self) -> None:
+    def test_sink_coder_stays_local_and_delivery_view_receives_complete_graph(self) -> None:
         manifest = self._manifest()
         artifact = self.store.read_json(manifest)
         contract = dict(artifact["contract"])
@@ -1035,11 +1035,18 @@ class MinionV2ExecutionTests(unittest.TestCase):
         view = self.store.read_json(
             UnitWorkViewBuilder(self.contracts).build(sink)
         )
-        self.assertEqual(set(view["requirements"]), {"a_output", "b_output"})
-        self.assertEqual(set(view["scenarios"]), {"compose", "library_flow"})
+        delivery = self.store.read_json(
+            UnitWorkViewBuilder(self.contracts).build_system_delivery_view(sink)
+        )
+        self.assertEqual(view["module_name"], "delivery")
+        self.assertIn("b", view["dependency_contracts"])
+        self.assertNotIn("sink_module", view)
+        self.assertEqual(set(delivery["requirements"]), {"a_output", "b_output"})
+        self.assertEqual(set(delivery["scenarios"]), {"compose", "library_flow"})
+        self.assertEqual(delivery["sink_module"], "delivery")
         self.assertIn(
             {"module": "b", "surface": "b_output"},
-            view["entrypoints"],
+            delivery["entrypoints"],
         )
 
     def test_journal_is_mutable_but_lease_fenced(self) -> None:

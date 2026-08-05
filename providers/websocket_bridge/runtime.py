@@ -39,6 +39,8 @@ from pal.channel.models import ChannelEndpointModel
 from pal.channel.provider_manager import (
     ChannelProvider,
     ChannelProviderContext,
+    commit_channel_endpoint_attach,
+    commit_channel_endpoint_detach,
 )
 from pal.foundation.sidecar import (
     SidecarEndpoint,
@@ -379,7 +381,7 @@ class WebSocketBridgeProvider:
 
     def attach_endpoint(self, endpoint_id: str, context: ChannelProviderContext) -> IntrospectionResult:
         """Attach the endpoint and start the sidecar."""
-        record = context.repository.set_attached(endpoint_id, True)
+        record = context.repository.get(endpoint_id)
         if record is None:
             return _not_found(endpoint_id)
         endpoint = self.create_endpoint(record, context)
@@ -387,7 +389,7 @@ class WebSocketBridgeProvider:
             return _provider_missing(endpoint_id, str(record.channel_kind))
         _preserve_state(context.runtime.get_endpoint(endpoint_id), endpoint)
         endpoint.attached = True
-        context.runtime.replace_endpoint(endpoint)
+        record = commit_channel_endpoint_attach(endpoint_id, endpoint, context)
         return _ok(
             "WebSocket bridge endpoint attached",
             {
@@ -404,12 +406,9 @@ class WebSocketBridgeProvider:
         """Stop the sidecar and detach the endpoint (reversible lifecycle)."""
         endpoint = context.runtime.get_endpoint(endpoint_id)
         record = context.repository.get(endpoint_id)
-        record = context.repository.set_attached(endpoint_id, False)
         if record is None and endpoint is None:
             return _not_found(endpoint_id)
-        if endpoint is not None:
-            endpoint.detach()
-        removed = context.runtime.remove_endpoint(endpoint_id)
+        record, endpoint, removed = commit_channel_endpoint_detach(endpoint_id, context)
         endpoint_type = _endpoint_type_of(record, endpoint)
         return _ok(
             "WebSocket bridge endpoint detached",

@@ -12,6 +12,7 @@ from pal.llm.ir import (
     LLMMessageIR,
     LLMRequestIR,
     LLMResponseDeltaKind,
+    LLMResponseItemKind,
     LLMResponseIR,
     LLMResponseUpdate,
     LLMUsageIR,
@@ -106,6 +107,8 @@ def update_to_payload(update: LLMResponseUpdate) -> dict[str, Any]:
         "delta_kind": update.delta_kind.value,
         "text_delta": update.text_delta,
         "tool_call": part_to_payload(update.tool_call) if update.tool_call else None,
+        "item_id": update.item_id,
+        "item_kind": update.item_kind.value if update.item_kind is not None else None,
     }
 
 
@@ -119,6 +122,12 @@ def update_from_payload(payload: Mapping[str, Any]) -> LLMResponseUpdate:
         delta_kind=LLMResponseDeltaKind(str(payload.get("delta_kind") or "state")),
         text_delta=str(payload.get("text_delta") or ""),
         tool_call=call,
+        item_id=str(payload.get("item_id") or ""),
+        item_kind=(
+            LLMResponseItemKind(str(payload.get("item_kind")))
+            if payload.get("item_kind")
+            else None
+        ),
     )
 
 

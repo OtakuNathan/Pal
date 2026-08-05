@@ -94,16 +94,37 @@ class ChannelRuntime(ChannelRuntimePort):
 
     async def replace_endpoint_async(self, endpoint: ChannelEndpointBase) -> None:
         old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
-        if old_endpoint is not None and old_endpoint is not endpoint:
-            stopper = getattr(old_endpoint, "stop_async", None)
-            if callable(stopper):
-                await stopper()
-        self.register_endpoint(endpoint)
-        if self._started:
+        if old_endpoint is endpoint:
+            if self._started:
+                self._queue_cached_control_catalog(endpoint)
+            return
+        endpoint.on_ready = self._notify_ready
+        if not self._started:
+            self.endpoint_registry.register(endpoint)
+            return
+
+        old_stopper = getattr(old_endpoint, "stop_async", None)
+        if old_endpoint is not None and callable(old_stopper):
+            await old_stopper()
+        try:
             starter = getattr(endpoint, "start_async", None)
             if callable(starter):
                 await starter()
-            self._queue_cached_control_catalog(endpoint)
+        except Exception:
+            failed_stopper = getattr(endpoint, "stop_async", None)
+            if callable(failed_stopper):
+                try:
+                    await failed_stopper()
+                except Exception:
+                    pass
+            old_starter = getattr(old_endpoint, "start_async", None)
+            if old_endpoint is not None and callable(old_starter):
+                await old_starter()
+            raise
+        # Registry replacement is the commit point.  Until the candidate has
+        # started successfully, readers continue to resolve the old endpoint.
+        self.endpoint_registry.register(endpoint)
+        self._queue_cached_control_catalog(endpoint)
 
     def replace_endpoint(self, endpoint: ChannelEndpointBase, *, timeout_seconds: float = 10.0) -> None:
         async def _replace() -> None:
@@ -116,8 +137,7 @@ class ChannelRuntime(ChannelRuntimePort):
             except RuntimeError:
                 running_loop = None
             if running_loop is loop:
-                loop.create_task(_replace())
-                return
+                raise RuntimeError("replace_endpoint cannot block its owner event loop; use replace_endpoint_async")
             future = asyncio.run_coroutine_threadsafe(_replace(), loop)
             future.result(timeout=timeout_seconds)
             return
@@ -127,12 +147,13 @@ class ChannelRuntime(ChannelRuntimePort):
         asyncio.run(_replace())
 
     async def remove_endpoint_async(self, endpoint_id: str) -> bool:
-        endpoint = self.endpoint_registry.unregister(endpoint_id)
+        endpoint = self.endpoint_registry.get(endpoint_id)
         if endpoint is None:
             return False
         stopper = getattr(endpoint, "stop_async", None)
         if callable(stopper):
             await stopper()
+        self.endpoint_registry.unregister(endpoint_id)
         return True
 
     def remove_endpoint(self, endpoint_id: str, *, timeout_seconds: float = 10.0) -> bool:
@@ -146,8 +167,7 @@ class ChannelRuntime(ChannelRuntimePort):
             except RuntimeError:
                 running_loop = None
             if running_loop is loop:
-                loop.create_task(_remove())
-                return True
+                raise RuntimeError("remove_endpoint cannot block its owner event loop; use remove_endpoint_async")
             future = asyncio.run_coroutine_threadsafe(_remove(), loop)
             return bool(future.result(timeout=timeout_seconds))
         if not self._started:

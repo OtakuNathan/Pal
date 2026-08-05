@@ -1452,7 +1452,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
         bound = self._resolve_binding(call, generation=generation)
         if isinstance(bound, CapabilityResult):
             return bound
-        lifecycle_result = self._maybe_handle_lifecycle_action(bound.descriptor)
+        lifecycle_result = None
+        if self._is_lifecycle_action(bound.descriptor):
+            loop = asyncio.get_running_loop()
+            lifecycle_result = await loop.run_in_executor(
+                self.sync_executor,
+                lambda: self._maybe_handle_lifecycle_action(bound.descriptor),
+            )
         if lifecycle_result is not None:
             return lifecycle_result
         if bound.async_callable is not None:
@@ -1496,16 +1502,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
         )
 
     def _maybe_handle_lifecycle_action(self, descriptor: CapabilityDescriptor) -> CapabilityResult | None:
-        if not descriptor.detachable:
+        if not self._is_lifecycle_action(descriptor):
             return None
         metadata = dict(descriptor.metadata or {})
-        if metadata.get("namespace") != "operation":
-            return None
         action = str(metadata.get("action") or "").strip()
-        if action not in {"attach", "detach"}:
-            return None
-        if descriptor.target_id and descriptor.target_id != SINGLETON_TARGET:
-            return None
         controller = self.lifecycle_controller
         if controller is None:
             return None
@@ -1538,6 +1538,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 receipt=payload,
             ),
         )
+
+    @staticmethod
+    def _is_lifecycle_action(descriptor: CapabilityDescriptor) -> bool:
+        if not descriptor.detachable:
+            return False
+        metadata = dict(descriptor.metadata or {})
+        if metadata.get("namespace") != "operation":
+            return False
+        if str(metadata.get("action") or "").strip() not in {"attach", "detach"}:
+            return False
+        return not descriptor.target_id or descriptor.target_id == SINGLETON_TARGET
 
     def _resolve_descriptor(self, name: str, *, target_id: str = SINGLETON_TARGET) -> CapabilityDescriptor | CapabilityResult | None:
         candidates: list[CapabilityDescriptor] = []

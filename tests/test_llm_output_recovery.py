@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 import unittest
 
@@ -122,6 +122,37 @@ def _runtime(invoker: _ScriptedInvoker, endpoint=None) -> LLMRuntime:
 
 
 class LLMOutputRecoveryTests(unittest.TestCase):
+    def test_committed_tool_item_short_circuits_length_recovery(self) -> None:
+        response = generation_result_from_values(
+            text="partial",
+            tool_calls=[new_tool_call(name="write", args={"path": "a"})],
+            finish_reason="length",
+        ).response
+        response = replace(
+            response,
+            message=replace(
+                response.message,
+                metadata={
+                    "committed_items": [
+                        {"item_id": "item-1", "item_kind": "tool_call"}
+                    ]
+                },
+            ),
+        )
+        invoker = _ScriptedInvoker([response])
+
+        outcome = _runtime(invoker).generate(
+            request_ir_from_prompt(
+                messages=[{"role": "user", "content": "work"}],
+                max_output_tokens=64_000,
+                metadata={"max_output_recovery_enabled": True},
+            )
+        )
+
+        self.assertEqual(outcome.finish_reason, "length")
+        self.assertEqual([call.name for call in outcome.tool_calls], ["write"])
+        self.assertEqual(len(invoker.requests), 1)
+
     def test_continuation_keeps_text_but_never_exposes_truncated_tool_calls(self) -> None:
         responses = [
             generation_result_from_values(

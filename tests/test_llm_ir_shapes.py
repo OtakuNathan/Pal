@@ -17,6 +17,9 @@ from pal.llm.ir import (
     LLMMessageIR,
     LLMRequestIR,
     LLMResponseDeltaKind,
+    LLMResponseIR,
+    LLMResponseItemKind,
+    LLMResponseUpdate,
     MessageRole,
     ReasoningPartIR,
     TextPartIR,
@@ -24,8 +27,10 @@ from pal.llm.ir import (
 )
 from pal.llm.shapes import codec_for_shape
 from pal.llm.shapes.base import ShapeContext, ShapeDecodeError, _JSONFrame as JSONFrame
+from pal.llm.shapes.builder import ResponseIRBuilder
 from pal.llm.serde import part_from_payload, request_to_payload, response_from_payload, response_to_payload
 from pal.llm.transport import _iter_json_frames
+from pal.shared import LLMFinishReason
 
 
 def _context(shape: WireShape) -> ShapeContext:
@@ -59,6 +64,30 @@ class LLMIRShapeTests(unittest.TestCase):
         local = new_tool_call(name="read", arguments={"path": "a"})
         self.assertTrue(local.call_id.startswith("call_"))
         self.assertEqual(local.args, {"path": "a"})
+
+    def test_committed_tool_item_cannot_lose_its_executable_call(self) -> None:
+        response = LLMResponseIR(
+            LLMMessageIR(MessageRole.ASSISTANT, (TextPartIR("partial"),)),
+            LLMFinishReason.STOP,
+        )
+        with self.assertRaisesRegex(ValueError, "must carry its tool call"):
+            LLMResponseUpdate(
+                response,
+                LLMResponseDeltaKind.ITEM_COMMITTED,
+                item_id="item-1",
+                item_kind=LLMResponseItemKind.TOOL_CALL,
+            )
+
+    def test_builder_rejects_malformed_commit_without_mutating_item_ledger(self) -> None:
+        builder = ResponseIRBuilder(_context(WireShape.OPENAI_RESPONSE))
+
+        with self.assertRaisesRegex(ShapeDecodeError, "has no tool call"):
+            builder.commit_item(
+                item_id="item-1",
+                item_kind=LLMResponseItemKind.TOOL_CALL,
+            )
+
+        self.assertEqual(builder.committed_items, {})
 
     def test_ir_serde_preserves_zero_provider_responses_and_rejects_missing_call_id(self) -> None:
         response = response_from_payload(
@@ -481,7 +510,30 @@ class LLMIRShapeTests(unittest.TestCase):
                 with self.assertRaises(ShapeDecodeError):
                     list(codec_for_shape(shape).decode(frames, _context(shape)))
 
-    def test_length_terminal_discards_even_valid_tool_call(self) -> None:
+    def test_stream_end_after_item_close_preserves_committed_tool(self) -> None:
+        frames_by_shape = {
+            WireShape.OPENAI_RESPONSE: [
+                JSONFrame(0, {"type": "response.output_item.added", "output_index": 0, "item": {"type": "function_call", "call_id": "call-1", "name": "read", "arguments": ""}}),
+                JSONFrame(1, {"type": "response.output_item.done", "output_index": 0, "item": {"type": "function_call", "call_id": "call-1", "name": "read", "arguments": '{"path":"a"}'}}),
+            ],
+            WireShape.ANTHROPIC_MESSAGES: [
+                JSONFrame(0, {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call-1", "name": "read", "input": {}}}),
+                JSONFrame(1, {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"path":"a"}'}}),
+                JSONFrame(2, {"type": "content_block_stop", "index": 0}),
+            ],
+        }
+        for shape, frames in frames_by_shape.items():
+            with self.subTest(shape=shape):
+                updates = list(codec_for_shape(shape).decode(frames, _context(shape)))
+                response = updates[-1].response
+                self.assertEqual(response.finish_reason.value, "tool_calls")
+                self.assertEqual([call.call_id for call in response.tool_calls], ["call-1"])
+                self.assertEqual(
+                    sum(update.delta_kind == LLMResponseDeltaKind.ITEM_COMMITTED for update in updates),
+                    1,
+                )
+
+    def test_length_terminal_preserves_only_provider_committed_tool_items(self) -> None:
         frames_by_shape = {
             WireShape.OPENAI_COMPLETION: [
                 JSONFrame(0, {"choices": [{"delta": {"content": "partial"}, "finish_reason": None}]}),
@@ -506,9 +558,20 @@ class LLMIRShapeTests(unittest.TestCase):
             with self.subTest(shape=shape):
                 updates = list(codec_for_shape(shape).decode(frames, _context(shape)))
                 response = updates[-1].response
-                self.assertFalse(any(update.delta_kind == LLMResponseDeltaKind.TOOL_CALL for update in updates))
-                self.assertEqual(response.message.tool_calls, ())
                 self.assertEqual(response.finish_reason.value, "length")
+                committed = shape in {
+                    WireShape.OPENAI_RESPONSE,
+                    WireShape.ANTHROPIC_MESSAGES,
+                }
+                self.assertEqual(
+                    any(update.delta_kind == LLMResponseDeltaKind.TOOL_CALL for update in updates),
+                    committed,
+                )
+                self.assertEqual(len(response.message.tool_calls), int(committed))
+                self.assertEqual(
+                    any(update.delta_kind == LLMResponseDeltaKind.ITEM_COMMITTED for update in updates),
+                    committed,
+                )
 
     def test_shape_replay_is_scoped_to_endpoint_and_model(self) -> None:
         shape = WireShape.OPENAI_COMPLETION

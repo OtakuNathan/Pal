@@ -100,6 +100,11 @@ def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = 
     from pal.execution.runtime_state import ExecutionRuntimeStatePort
 
     resolved_runtime = runtime or context.execution_runtime
+    existing = context.module_registry.get("execution")
+    if existing is not None:
+        if existing.ports.get("execution") is not resolved_runtime:
+            raise ValueError("execution module is already bound to a different runtime")
+        return existing
     provider = ExecutionIntrospectionProvider(runtime=resolved_runtime)
     handle = ModuleHandle(
         module_id="execution",

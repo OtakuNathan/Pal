@@ -45,7 +45,10 @@ Invariants:
   tool call; native structured calls retain precedence and provider call IDs
 - SDK clients are reused per endpoint and retired safely when the active endpoint changes
 - credentials are endpoint-local; a missing/rejected key falls back the whole endpoint
-- incomplete or length-truncated tool drafts are never executable
+- provider-confirmed item boundaries commit immutable response items into IR;
+  open tool drafts are never executable, while a committed tool item survives
+  a later length terminal and is executed once through Core's normal tool effect
+  path after the response iterator closes
 - streaming and single-shot responses pass through the same codec-owned JSON-frame iterator
 - decoder state and provider stream events never escape the codec
 - closed L1 turns contain neither reasoning parts nor replay envelopes

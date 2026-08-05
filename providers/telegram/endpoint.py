@@ -15,7 +15,7 @@ from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate, End
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
 from pal.foundation.artifact import ArtifactIngestor
 from pal.foundation import AttachmentSpec, EventEnvelope
-from pal.shared import EventKind, SourceKind
+from pal.shared import ChannelStreamUpdateKind, EventKind, SourceKind
 
 from .interaction_store import TelegramInteractionStore
 
@@ -354,7 +354,46 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             loop.create_task(self._send_receipt_marker_async(response_handle, payload))
 
     def send_stream_update(self, response_handle: ResponseHandle, update: ChannelStreamUpdate) -> None:
+        session = self._stream_sessions.get(id(response_handle))
+        if (
+            session is not None
+            and str(session.get("finish_reason") or "") == "tool_calls"
+            and not (
+                update.kind == ChannelStreamUpdateKind.DONE
+                and str(update.finish_reason or "") == "tool_calls"
+            )
+        ):
+            # A tool-only round has no MailboxReplyEffect, so prepare_final_reply
+            # is never called for it.  The next stream event is therefore the
+            # mechanical round boundary: retire the silent tool buffer before
+            # accumulating the final answer round.
+            self._reset_buffered_stream_round(session)
         super().send_stream_update(response_handle, update)
+
+    def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
+        session = self._stream_sessions.get(id(response_handle))
+        if session is not None:
+            updates = list(session.get("updates") or [])
+            has_tool_call = ChannelStreamUpdateKind.TOOL_CALL in updates
+            if str(session.get("finish_reason") or "") == "tool_calls" or has_tool_call:
+                # Telegram cannot append to a message as provider-neutral IR
+                # arrives.  Keep tool rounds silent and retain only the final
+                # answer round for batched delivery.
+                self._reset_buffered_stream_round(session)
+                return None
+        return super().prepare_final_reply(response_handle, text)
+
+    @staticmethod
+    def _reset_buffered_stream_round(session: dict[str, Any]) -> None:
+        session.update(
+            {
+                "text": "",
+                "reasoning": "",
+                "updates": [],
+                "finish_reason": "",
+                "text_delivered": False,
+            }
+        )
 
     def apply_auth_material(self, material: dict[str, Any]) -> dict[str, Any]:
         bot_token = str(material.get("bot_token") or "").strip()

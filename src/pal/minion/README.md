@@ -57,6 +57,12 @@ Interaction rule:
   form and submits it through the Manager's pinned schema validator. Reviewer
   submits structured findings. Coder and Module Verifier keep only their bound
   module view, local contract, code, and checklist authority
+- the authored sink Coder still receives only its local module view. Manager
+  projects whole-graph requirements, scenarios, and entrypoints into a separate
+  `SystemDeliveryViewArtifact` visible only to the sink Verifier
+- Minion Git reads are a Manager-scoped review surface, not repository
+  archaeology: commands are limited to the bound Candidate range, owned module
+  paths, local tests, and dependency public contract paths
 - role profile fragments are playbooks, Manager-derived views are inputs, and
   the WorkItem checklist is the execution driver; none is a second contract
 - every family uses the same Architect/Reviewer/Implementation/Verifier graph.
@@ -86,6 +92,10 @@ Interaction rule:
 - closed tool calls and results enter L1 incrementally. Compaction reads only
   that frozen L1; role contracts, checklists, task fallback, and memory recall
   remain independently projected authority
+- Minion uses the selected endpoint/model output limit by default. If a response
+  reaches that limit, provider-committed tool items continue normally; otherwise
+  the harness discards the uncommitted response and forces one bounded file,
+  checklist, finding, question, or submit action instead of generic continuation
 - compaction retires the active provider prompt projection. It does not advance
   the independent semantic-input pager clock or expire an `N+5` pager handle
 - Minion runtime schema v29 is a fresh cutover. Older or unrecognized runtime

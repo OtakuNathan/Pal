@@ -10,6 +10,7 @@ from pal.llm.ir import (
     LLMFinishReason,
     LLMRequestIR,
     LLMResponseDeltaKind,
+    LLMResponseItemKind,
     LLMResponseIR,
     LLMResponseUpdate,
     MessageRole,
@@ -175,8 +176,12 @@ class AnthropicMessagesDecoder:
                     LLMFinishReason.ERROR,
                     LLMFinishReason.CONTENT_FILTER,
                 }:
-                    self.tool_drafts.clear()
-                    self.builder.discard_tool_calls()
+                    self._discard_open_tools()
+                    if reason in {
+                        LLMFinishReason.ERROR,
+                        LLMFinishReason.CONTENT_FILTER,
+                    }:
+                        self.builder.discard_tool_calls()
                 else:
                     updates.extend(self._finalize_tools())
                 self._refresh_replay()
@@ -192,9 +197,12 @@ class AnthropicMessagesDecoder:
 
     def finish(self) -> LLMResponseIR:
         if not self.builder.complete:
-            self.tool_drafts.clear()
-            self.builder.discard_tool_calls()
-            self.builder.mark_complete(LLMFinishReason.ERROR)
+            self._discard_open_tools()
+            self.builder.mark_complete(
+                LLMFinishReason.TOOL_CALLS
+                if self.builder.has_tools
+                else LLMFinishReason.ERROR
+            )
         self._refresh_replay()
         return self.builder.finish()
 
@@ -213,7 +221,6 @@ class AnthropicMessagesDecoder:
             elif block_type == "redacted_thinking":
                 update = self.builder.append_reasoning("", redacted=True)
             elif block_type == "tool_use" and reason not in {
-                LLMFinishReason.LENGTH,
                 LLMFinishReason.ERROR,
                 LLMFinishReason.CONTENT_FILTER,
             }:
@@ -230,6 +237,20 @@ class AnthropicMessagesDecoder:
                 update = None
             if update is not None:
                 updates.append(update)
+                item_kind = (
+                    LLMResponseItemKind.TOOL_CALL
+                    if block_type == "tool_use"
+                    else LLMResponseItemKind.REASONING
+                    if block_type in {"thinking", "redacted_thinking"}
+                    else LLMResponseItemKind.MESSAGE
+                )
+                committed = self.builder.commit_item(
+                    item_id=str(block.get("id") or f"{self.builder.message_id}:{index}"),
+                    item_kind=item_kind,
+                    tool_call=update.tool_call,
+                )
+                if committed is not None:
+                    updates.append(committed)
         usage = payload.get("usage")
         if isinstance(usage, Mapping):
             self.builder.set_usage(usage_from_mapping(usage))
@@ -284,7 +305,19 @@ class AnthropicMessagesDecoder:
     def _finish_block(self, index: int) -> list[LLMResponseUpdate]:
         draft = self.tool_drafts.get(index)
         if draft is None:
-            return []
+            block = dict(self.blocks.get(index) or {})
+            kind = str(block.get("type") or "")
+            committed = self.builder.commit_item(
+                item_id=str(block.get("id") or f"{self.builder.message_id}:{index}"),
+                item_kind=(
+                    LLMResponseItemKind.REASONING
+                    if kind in {"thinking", "redacted_thinking"}
+                    else LLMResponseItemKind.MESSAGE
+                    if kind == "text"
+                    else LLMResponseItemKind.UNKNOWN
+                ),
+            )
+            return [committed] if committed is not None else []
         if not str(draft.get("id") or "").strip():
             self.tool_drafts.pop(index, None)
             self.blocks.pop(index, None)
@@ -293,8 +326,28 @@ class AnthropicMessagesDecoder:
         if not name:
             raise ShapeDecodeError("Anthropic stream tool call has no name")
         raw = "".join(str(item) for item in draft.get("input_json") or []) or "{}"
-        draft["parsed_input"] = json_object(raw, label=f"tool {name} input")
-        return []
+        arguments = json_object(raw, label=f"tool {name} input")
+        self.tool_drafts.pop(index, None)
+        self.blocks[index] = {
+            "type": "tool_use",
+            "id": str(draft["id"]),
+            "name": name,
+            "input": thaw_json(arguments),
+        }
+        tool_update = self.builder.append_tool_call(
+            call_id=str(draft["id"]),
+            name=name,
+            arguments=dict(arguments),
+        )
+        committed = self.builder.commit_item(
+            item_id=str(draft["id"]),
+            item_kind=LLMResponseItemKind.TOOL_CALL,
+            tool_call=tool_update.tool_call,
+        )
+        return [
+            tool_update,
+            *([committed] if committed is not None else []),
+        ]
 
     def _finalize_tools(self) -> list[LLMResponseUpdate]:
         updates: list[LLMResponseUpdate] = []
@@ -324,7 +377,19 @@ class AnthropicMessagesDecoder:
                     arguments=dict(arguments),
                 )
             )
+            committed = self.builder.commit_item(
+                item_id=call_id,
+                item_kind=LLMResponseItemKind.TOOL_CALL,
+                tool_call=updates[-1].tool_call,
+            )
+            if committed is not None:
+                updates.append(committed)
         return updates
+
+    def _discard_open_tools(self) -> None:
+        for index in tuple(self.tool_drafts):
+            self.blocks.pop(index, None)
+        self.tool_drafts.clear()
 
     def _refresh_replay(self) -> None:
         self.builder.replay_payload = {"content": [self.blocks[index] for index in sorted(self.blocks)]}

@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import unittest
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -105,6 +106,7 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         metadata = _minion_llm_request_metadata(pack, "timeout-run")
 
         self.assertEqual(metadata["timeout_seconds"], 3000.0)
+        self.assertFalse(metadata["max_output_recovery_enabled"])
 
     def test_minion_renders_closed_tool_protocol_from_l1_once(self) -> None:
         service, _provider = self._memory_service()
@@ -481,6 +483,58 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
             ),
         )
         self.assertEqual(runner.blocked_summary, "")
+
+    def test_truncated_round_with_committed_tool_item_is_kept_for_execution(self) -> None:
+        runner = self._runner()
+        service, _provider = self._memory_service()
+        turn_id = "committed-length-turn"
+        service.begin_l1_turn(turn_id, user_text="implement the module")
+        truncated = generation_result_from_values(
+            tool_calls=[
+                new_tool_call(
+                    call_id="write-1",
+                    name="write_file",
+                    args={"file_path": "owned.cpp", "content": "int x;"},
+                )
+            ],
+            finish_reason=LLMFinishReason.LENGTH,
+        )
+        truncated = replace(
+            truncated,
+            response=replace(
+                truncated.response,
+                message=replace(
+                    truncated.response.message,
+                    metadata={
+                        "committed_items": [
+                            {"item_id": "write-item", "item_kind": "tool_call"}
+                        ]
+                    },
+                ),
+            ),
+        )
+        service.upsert_l1_assistant(turn_id, truncated.response.message)
+        state = MinionAgentLoopState(
+            execution_runtime=SimpleNamespace(),
+            memory_service=service,
+            memory_candidate_sink=SimpleNamespace(),
+            llm_round_count=2,
+        )
+
+        result = asyncio.run(
+            runner._postprocess_minion_llm_round(
+                state,
+                EffectResult(status=RuntimeStatus.OK, payload=truncated),
+                continuation=SimpleNamespace(turn_id=turn_id),
+            )
+        )
+
+        self.assertEqual([call.call_id for call in result.payload.tool_calls], ["write-1"])
+        self.assertEqual(state.llm_round_count, 2)
+        self.assertEqual(state.output_length_recovery_count, 0)
+        self.assertEqual(state.pending_output_length_recovery_note, "")
+        active = service.active_l1_turn(turn_id)
+        self.assertIn(truncated.response.message.message_id, [item.message_id for item in active.messages])
 
     def test_retryable_llm_error_does_not_become_a_blocked_completion(self) -> None:
         runner = self._runner()
