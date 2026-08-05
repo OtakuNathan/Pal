@@ -166,7 +166,7 @@ if (( ${#missing[@]} )); then
   exit 1
 fi
 
-"$python_bin" - "$wheel_path" "$repo_root/providers" <<'PY'
+"$python_bin" - "$wheel_path" "$repo_root/providers" "$repo_root" <<'PY'
 from __future__ import annotations
 
 import json
@@ -178,6 +178,7 @@ from pathlib import Path
 
 wheel_path = sys.argv[1]
 provider_root = Path(sys.argv[2])
+repo_root = Path(sys.argv[3])
 
 
 def fail(message: str) -> None:
@@ -191,6 +192,31 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if path not in names:
             fail(f"missing {path}")
         return wheel.read(path).decode("utf-8")
+
+    # ``required_wheel_paths`` below intentionally names the files that are
+    # part of the semantic cutover contract.  It is not, however, a safe
+    # inventory of the Python package: new modules can be added without being
+    # remembered there.  Keep the packaging boundary mechanical as well.  All
+    # Python sources and package data types declared by pyproject.toml must be
+    # present in the wheel, while developer docs and generated egg-info remain
+    # source-only.
+    package_source_root = repo_root / "src"
+    package_source_paths = sorted(
+        path.relative_to(package_source_root).as_posix()
+        for path in package_source_root.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and not any(part.endswith(".egg-info") for part in path.parts)
+        and path.suffix in {".py", ".toml", ".json", ".j2"}
+    )
+    missing_package_sources = [
+        path for path in package_source_paths if path not in names
+    ]
+    if missing_package_sources:
+        fail(
+            "wheel is missing package source/data files: "
+            f"{missing_package_sources}"
+        )
 
     packaged_channel_provider_paths = sorted(
         name
@@ -416,7 +442,12 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if forbidden in shared_messages:
             fail(f"shared worker transport contains legacy symbol {forbidden}")
 
-print("Verified runtime-root-only channel providers, V2 families, role playbooks, contract protocols, adapters, worker transport, and legacy cutover")
+print(
+    "Verified package source/data coverage "
+    f"({len(package_source_paths)} files), runtime-root-only channel providers, "
+    "V2 families, role playbooks, contract protocols, adapters, worker "
+    "transport, and legacy cutover"
+)
 PY
 
 websocket_overlay_dir="$runtime_overlay_dir/$websocket_provider_relative"
@@ -474,5 +505,5 @@ echo "Built $wheel_path"
 echo "Built $runtime_overlay_path"
 echo "Built $installer_path"
 echo "Built $install_bundle_path"
-echo "Verified ${#required_wheel_paths[@]} required wheel files"
+echo "Verified ${#required_wheel_paths[@]} semantic wheel contract files plus all package source/data files"
 echo "Verified runtime overlays at $websocket_provider_relative/, $telegram_provider_relative/, and $codex_harness_relative/"
