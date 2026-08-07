@@ -9,6 +9,7 @@ from pal.channel import (
     ChannelRuntime,
     register_with_core as register_channel_with_core,
 )
+from pal.checklist import ChecklistService, register_with_core as register_checklist_with_core
 from pal.control import ControlPlane, register_with_core as register_control_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.runtime_config import RuntimeConfig
@@ -136,6 +137,7 @@ def compose_runtime(
         execution_runtime=core.context.execution_runtime,
     )
     failure_runtime = FailureRuntime()
+    checklist_service = ChecklistService()
     register_core_with_core(core)
     register_execution_with_core(core.context)
     register_artifact_with_core(core.context, artifact_service)
@@ -150,6 +152,7 @@ def compose_runtime(
     register_llm_with_core(core.context, llm_runtime)
     skill_service.llm_runtime = llm_runtime
     register_memory_with_core(core.context, memory_service, config=config)
+    register_checklist_with_core(core.context, checklist_service)
     register_plugins_with_core(core.context, plugin_host)
     register_proactive_with_core(core.context, proactive_manager, proactive_runner)
     register_control_with_core(core.context, control_plane)
@@ -161,7 +164,7 @@ def compose_runtime(
     channel_provider_manager.plugin_host = plugin_host
     channel_provider_manager.rescan_providers(attach_enabled_endpoints=True)
 
-    for module_id in ("core", "execution", "artifact", "skill", "behavior", "channel", "identity", "llm", "memory", "plugins", "proactive", "control", "failure"):
+    for module_id in ("core", "execution", "artifact", "skill", "behavior", "channel", "identity", "llm", "memory", "checklist", "plugins", "proactive", "control", "failure"):
         core.publish_module_capabilities(module_id)
 
     return StubRuntimeHandle(

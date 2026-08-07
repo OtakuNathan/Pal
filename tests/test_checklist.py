@@ -1,0 +1,235 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from pal.checklist.capabilities import ChecklistIntrospectionProvider
+from pal.checklist.service import ChecklistService
+from pal.core.turn_executor import TurnExecutor
+from pal.core.turns import TurnContinuation, channel_turn_program
+from pal.execution.contracts import CapabilityCall
+from pal.shared import ChannelEnvelope, RuntimeStatus
+from pal.shared.tool_protocol import ToolExecutionResult
+
+
+def _continuation() -> TurnContinuation:
+    envelope = ChannelEnvelope(event=None, endpoint=None, response_handle=None)
+    return TurnContinuation(
+        turn_id="test-turn",
+        channel_envelope=envelope,
+        program=channel_turn_program(envelope),
+        correlation_id="test",
+    )
+
+
+def _tool_result(name: str, *, structured: dict | None) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        name=name,
+        ok=True,
+        llm_text="ok",
+        text="ok",
+        structured=structured or {},
+        call_id="call-1",
+    )
+
+
+class TestChecklistService:
+    def test_upsert_show_clear_lifecycle(self):
+        service = ChecklistService()
+        assert service.show() is None
+
+        snapshot = service.upsert(
+            [
+                {"step": "inspect the contract", "status": "completed"},
+                {"step": "implement the behavior"},
+                {"step": "run the tests"},
+            ]
+        )
+        assert snapshot.active is True
+        assert snapshot.done == 1
+        assert snapshot.total == 3
+        assert [item["step"] for item in snapshot.plan] == [
+            "inspect the contract",
+            "implement the behavior",
+            "run the tests",
+        ]
+        assert "☑ inspect the contract" in snapshot.markdown
+        assert "☐ implement the behavior" in snapshot.markdown
+        assert snapshot.markdown.startswith("清单进度 1/3")
+
+        shown = service.show()
+        assert shown is not None and shown.total == 3
+
+        assert service.clear() is True
+        assert service.show() is None
+        assert service.clear() is False
+
+    def test_check_marks_completed_and_is_idempotent(self):
+        service = ChecklistService()
+        service.upsert([{"step": "step one"}, {"step": "step two"}])
+
+        outcome = service.check("step one")
+        assert outcome.changed is True
+        assert outcome.found is True
+        assert outcome.snapshot is not None
+        assert outcome.snapshot.done == 1
+        assert outcome.snapshot.plan[0]["status"] == "completed"
+
+        again = service.check("step one")
+        assert again.changed is False
+        assert again.found is True
+        assert again.snapshot is not None and again.snapshot.done == 1
+
+    def test_check_unknown_step_and_no_active(self):
+        service = ChecklistService()
+        assert service.check("anything").found is False
+        assert service.check("anything").snapshot is None
+
+        service.upsert([{"step": "known"}])
+        outcome = service.check("missing")
+        assert outcome.found is False
+        assert outcome.changed is False
+        assert outcome.snapshot is not None and outcome.snapshot.done == 0
+
+    def test_upsert_replaces_previous_plan(self):
+        service = ChecklistService()
+        service.upsert([{"step": "old"}])
+        snapshot = service.upsert([{"step": "new one"}, {"step": "new two"}])
+        assert [item["step"] for item in snapshot.plan] == ["new one", "new two"]
+
+    def test_upsert_validation(self):
+        service = ChecklistService()
+        with pytest.raises(ValueError):
+            service.upsert([])
+        with pytest.raises(ValueError):
+            service.upsert([{"step": "  "}])
+        with pytest.raises(ValueError):
+            service.upsert([{"step": "ok", "status": "bogus"}])
+        with pytest.raises(ValueError):
+            service.upsert([{"step": f"x{i}"} for i in range(65)])
+
+
+class TestChecklistCapabilities:
+    def setup_method(self) -> None:
+        self.provider = ChecklistIntrospectionProvider(service=ChecklistService())
+
+    def test_upsert_returns_structured_snapshot(self):
+        result = self.provider.upsert(
+            CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}, {"step": "b"}]})
+        )
+        assert result.status == RuntimeStatus.OK
+        assert result.structured is not None
+        assert result.structured["active"] is True
+        assert result.structured["total"] == 2
+        assert result.llm_text.strip()
+
+    def test_check_emits_echo_declaration(self):
+        self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}, {"step": "b"}]}))
+        result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "a"}))
+        assert result.status == RuntimeStatus.OK
+        assert result.structured is not None
+        assert result.structured["changed"] is True
+        echo = result.structured["echo"]
+        assert echo["dedupe_key"] == "checklist:check:a"
+        assert "☑ a" in echo["markdown"]
+
+    def test_check_without_active_returns_error(self):
+        result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "a"}))
+        assert result.status == RuntimeStatus.ERROR
+        assert result.structured is not None and result.structured["error"] == "no_active_checklist"
+
+    def test_check_unknown_step_returns_error_without_echo(self):
+        self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]}))
+        result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "zzz"}))
+        assert result.status == RuntimeStatus.ERROR
+        assert result.structured is not None and result.structured["error"] == "step_not_found"
+        assert "echo" not in result.structured
+
+    def test_show_and_clear(self):
+        self.provider.upsert(CapabilityCall(name="checklist_upsert", args={"plan": [{"step": "a"}]}))
+        shown = self.provider.show(CapabilityCall(name="checklist_show", args={}))
+        assert shown.status == RuntimeStatus.OK
+        assert shown.structured is not None and shown.structured["total"] == 1
+
+        cleared = self.provider.clear(CapabilityCall(name="checklist_clear", args={}))
+        assert cleared.status == RuntimeStatus.OK
+        assert cleared.structured == {"cleared": True}
+
+
+class TestToolEchoFanOut:
+    def _executor_with_echo_capture(self, captured: list):
+        executor = object.__new__(TurnExecutor)
+
+        async def fake_execute(continuation, effect):
+            captured.append((continuation, effect))
+
+        executor.execute_turn_effect_async = fake_execute  # type: ignore[attr-defined]
+        return executor
+
+    def test_echo_fans_out_mailbox_reply(self):
+        captured: list = []
+        executor = self._executor_with_echo_capture(captured)
+        continuation = _continuation()
+        result = _tool_result(
+            "checklist_check",
+            structured={"echo": {"markdown": "清单进度 1/1\n☑ a", "dedupe_key": "checklist:check:a"}},
+        )
+        asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
+        assert len(captured) == 1
+        effect = captured[0][1]
+        assert effect.text == "清单进度 1/1\n☑ a"
+        assert effect.channel_envelope is continuation.channel_envelope
+        assert "checklist:check:a" in continuation.echoed_keys
+
+    def test_no_echo_without_declaration(self):
+        captured: list = []
+        executor = self._executor_with_echo_capture(captured)
+        continuation = _continuation()
+        result = _tool_result("checklist_check", structured={"changed": True})
+        asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
+        assert captured == []
+
+    def test_empty_or_oversized_markdown_ignored(self):
+        captured: list = []
+        executor = self._executor_with_echo_capture(captured)
+        continuation = _continuation()
+        for markdown in ("", "   "):
+            result = _tool_result("t", structured={"echo": {"markdown": markdown, "dedupe_key": "k"}})
+            asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
+        assert captured == []
+        oversized = _tool_result(
+            "t", structured={"echo": {"markdown": "x" * 5000, "dedupe_key": "k2"}}
+        )
+        asyncio.run(executor._maybe_echo_tool_result_async(continuation, oversized, oversized))
+        assert captured == []
+
+    def test_dedupe_prevents_repeated_echo(self):
+        captured: list = []
+        executor = self._executor_with_echo_capture(captured)
+        continuation = _continuation()
+        result = _tool_result(
+            "checklist_check",
+            structured={"echo": {"markdown": "m", "dedupe_key": "same"}},
+        )
+        asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
+        asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
+        assert len(captured) == 1
+
+    def test_no_envelope_ignores_echo(self):
+        captured: list = []
+        executor = self._executor_with_echo_capture(captured)
+        continuation = _continuation()
+        continuation.channel_envelope = None  # type: ignore[assignment]
+        result = _tool_result("t", structured={"echo": {"markdown": "m", "dedupe_key": "k"}})
+        asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
+        assert captured == []
+
+    def test_fallback_dedupe_key_from_tool_call(self):
+        captured: list = []
+        executor = self._executor_with_echo_capture(captured)
+        continuation = _continuation()
+        result = _tool_result("checklist_check", structured={"echo": {"markdown": "m"}})
+        asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
+        assert len(captured) == 1
+        assert "checklist_check:call-1" in continuation.echoed_keys

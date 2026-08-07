@@ -450,6 +450,7 @@ def _render_pal_compact_context(
         "This is compressed prior conversation context, not a new user request.",
         "Use it to resume the current collaboration thread. Treat task state as temporary, not durable memory.",
         "Retire completed, superseded, or user-cancelled tasks when newer context contradicts them.",
+        "Right after compaction, first check your checklist: if it has pending items, resume them before starting anything new.",
         "",
     ]
     sections = (

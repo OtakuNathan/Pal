@@ -154,6 +154,7 @@ class TurnContinuation:
     pending_compact_memory_candidate_batches: list[dict[str, Any]] = field(default_factory=list)
     budget_failure_feedback_text: str = ""
     prompt_budget_snapshot: dict[str, Any] = field(default_factory=dict)
+    echoed_keys: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)

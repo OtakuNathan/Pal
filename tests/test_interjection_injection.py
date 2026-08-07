@@ -262,6 +262,39 @@ class InterjectionInjectionTests(unittest.TestCase):
         # Nothing was injected into L1 (the turn has no L1 transcript).
         self.assertIsNone(self.context.port_registry["memory:memory"].active_l1_turn("turn-main"))
 
+    def test_injection_restores_envelope_when_payload_text_is_empty(self) -> None:
+        # A message with no extractable text must not be lost: it is popped,
+        # found empty, and restored at the head for the normal queue flow.
+        envelope = _make_envelope(turn_id="turn-main", text="run the batch")
+        continuation = self.turn_manager.start(envelope)
+        queued = _make_envelope(turn_id="interjection-1", text="")
+        self.state.pending_channel_turns.append(queued)
+
+        async def scenario() -> None:
+            await self.executor._inject_pending_interjection_async(continuation)
+
+        asyncio.run(scenario())
+
+        self.assertEqual(len(self.state.pending_channel_turns), 1)
+        self.assertIs(self.state.pending_channel_turns[0], queued)
+
+    def test_injection_restores_envelope_when_l1_user_api_unavailable(self) -> None:
+        # Memory port present but append_l1_user missing/not callable: the
+        # envelope must be restored, not dropped.
+        self.context.port_registry["memory:memory"] = object()
+        envelope = _make_envelope(turn_id="turn-main", text="run the batch")
+        continuation = self.turn_manager.start(envelope)
+        queued = _make_envelope(turn_id="interjection-1", text="wait, hold on")
+        self.state.pending_channel_turns.append(queued)
+
+        async def scenario() -> None:
+            await self.executor._inject_pending_interjection_async(continuation)
+
+        asyncio.run(scenario())
+
+        self.assertEqual(len(self.state.pending_channel_turns), 1)
+        self.assertIs(self.state.pending_channel_turns[0], queued)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -400,6 +400,7 @@ class TurnExecutor:
                 llm_text=self._render_failure_feedback_text(failure_result.user_feedback),
             )
         self._log_tool_call_result(continuation, execution_call, tool_result)
+        await self._maybe_echo_tool_result_async(continuation, execution_call, tool_result)
         continuation.tool_observations.append(
             ToolObservation(
                 tool_name=tool_result.name,
@@ -443,6 +444,42 @@ class TurnExecutor:
             text=tool_result.text,
         )
 
+    _ECHO_MARKDOWN_MAX_CHARS = 4000
+
+    async def _maybe_echo_tool_result_async(self, continuation: Any, tool_call: Any, tool_result: Any) -> None:
+        """Fan out a tool-declared echo to the user's channel through core.
+
+        A tool declares that its side effect should be visible to the user by
+        returning structured ``{"echo": {"markdown": ..., "dedupe_key": ...}}``.
+        Core is the only actor that touches the output port; the tool itself
+        never knows the envelope or the channel. Only channel turns carry an
+        envelope, so service/minion turns silently ignore echo declarations —
+        there is physically no path to send "to the LLM itself".
+        """
+        structured = dict(tool_result.structured or {})
+        echo = structured.get("echo")
+        if not isinstance(echo, dict):
+            return
+        markdown = str(echo.get("markdown") or "").strip()
+        if not markdown or len(markdown) > self._ECHO_MARKDOWN_MAX_CHARS:
+            return
+        dedupe_key = (
+            str(echo.get("dedupe_key") or "").strip()
+            or f"{getattr(tool_call, 'name', '')}:{getattr(tool_call, 'call_id', None) or ''}"
+        )
+        if not dedupe_key:
+            return
+        if dedupe_key in continuation.echoed_keys:
+            return
+        envelope = getattr(continuation, "channel_envelope", None)
+        if envelope is None:
+            return
+        continuation.echoed_keys.add(dedupe_key)
+        await self.execute_turn_effect_async(
+            continuation,
+            MailboxReplyEffect(channel_envelope=envelope, text=markdown),
+        )
+
     async def _inject_pending_interjection_async(self, continuation: Any) -> None:
         """Consume the head of the pending channel queue and inject its text
         into the current L1 transcript right after the finished tool batch.
@@ -461,15 +498,27 @@ class TurnExecutor:
             if not self.state.pending_channel_turns:
                 return
             envelope = self.state.pending_channel_turns.popleft()
+        async def _restore_envelope() -> None:
+            # Restore the envelope at the queue head so the normal queue flow
+            # retries it as the next turn instead of losing it. Never let
+            # interjection delivery break the tool batch completion path.
+            try:
+                async with self.state.channel_turn_transition_lock:
+                    self.state.pending_channel_turns.appendleft(envelope)
+            except Exception:
+                pass
+
         try:
             text = extract_text_from_payload(
                 getattr(getattr(envelope, "event", None), "payload", None)
             ).strip()
             if not text:
+                await _restore_envelope()
                 return
             memory_service = self.context.port_registry.get("memory:memory")
             method = getattr(memory_service, "append_l1_user", None)
             if not callable(method):
+                await _restore_envelope()
                 return
             message = LLMMessageIR(
                 role=MessageRole.USER,
@@ -483,11 +532,7 @@ class TurnExecutor:
             # Never let interjection delivery break the tool batch
             # completion path; restore the envelope so it is retried by the
             # normal queue flow instead of being lost.
-            try:
-                async with self.state.channel_turn_transition_lock:
-                    self.state.pending_channel_turns.appendleft(envelope)
-            except Exception:
-                pass
+            await _restore_envelope()
 
     def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
         LOGGER.debug(
