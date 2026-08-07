@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.execution.tool_semantics import (
+    DIRECT_LOCAL_READ,
     INDIRECT_CONTROL,
 )
 from pal.execution.tool_facade import ToolGuidance
@@ -50,7 +51,12 @@ class PluginsIntrospectionProvider:
     module_id: str = "plugins"
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show plugin host summary",
-        guidance=ToolGuidance(purpose="Show plugin host summary"), aliases=("plugins_show",))
+        guidance=ToolGuidance(
+            purpose="Show plugin host summary.",
+            use_when="Diagnosing plugin system health — how many plugins are loaded, enabled, attached.",
+            do_not_use_when="Listing specific plugins with details (use plugins_list). Checking one module's capabilities (use search_tools).",
+            failure_next_steps="Read-only diagnostic. If a plugin is missing, check plugins_list or run plugin_rescan.",
+        ), aliases=("plugins_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         summary = self.host.show_summary()
@@ -62,7 +68,12 @@ class PluginsIntrospectionProvider:
         )
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list", description="List known first-party and third-party plugins",
-        guidance=ToolGuidance(purpose="List known first-party and third-party plugins"), aliases=("plugins_list",))
+        guidance=ToolGuidance(
+            purpose="List known first-party and third-party plugins with their module IDs, enabled/attached status.",
+            use_when="When you need to find which module owns a capability, or how to detach/attach a specific plugin (e.g. minion, mcp). The authoritative source for module ownership and lifecycle state.",
+            do_not_use_when="Checking core/channel/execution internals (use their own show/observe). Searching capabilities by function (use search_tools).",
+            failure_next_steps="Read-only. If a plugin is not listed, it may not be installed — check plugin directories or run plugin_rescan.",
+        ), aliases=("plugins_list",), execution=DIRECT_LOCAL_READ)
     def list_plugins(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         items = self.host.list_plugins()
@@ -80,10 +91,10 @@ class PluginsIntrospectionProvider:
         action_name="attach",
         description="Attach a plugin to the current runtime.",
         guidance=ToolGuidance(
-            purpose="Attach a plugin to the current runtime.",
-            use_when="When the user asks to enable/attach a plugin. If forbidden with reason=plugin_disabled, call plugin_enable first.",
-            do_not_use_when="Not for detaching (use plugin_detach). Not for listing (use plugin_list).",
-            failure_next_steps="Correct the plugin_id; check plugin_list for available plugins.",
+            purpose="Attach an enabled plugin's runtime instance to the current runtime.",
+            use_when="Reconnecting a detached plugin that is already enabled.",
+            do_not_use_when="Attaching a disabled plugin (use plugin_enable — it enables and attaches in one step). Detaching (use plugin_detach).",
+            failure_next_steps="If plugin_disabled, call plugin_enable first. If plugin_id unknown, check plugins_list.",
         ),
         aliases=("plugin_attach",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
@@ -104,7 +115,12 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="detach",
         description="Detach a plugin from the current runtime",
-        guidance=ToolGuidance(purpose="Detach a plugin from the current runtime"),
+        guidance=ToolGuidance(
+            purpose="Detach a plugin's runtime instance without disabling it.",
+            use_when="Temporarily removing a plugin's capabilities from the runtime (e.g. isolating a misbehaving plugin).",
+            do_not_use_when="Permanently removing a plugin (use plugin_disable). Detaching a channel endpoint (use channel_detach).",
+            failure_next_steps="If plugin_id unknown, check plugins_list. Detached plugins can be re-attached with plugin_attach.",
+        ),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDetachInput,
         aliases=("plugin_detach",),
         execution=INDIRECT_CONTROL,
@@ -124,7 +140,12 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="enable",
         description="Enable and attach a plugin that is currently disabled, including disabled first-party plugins such as mcp.",
-        guidance=ToolGuidance(purpose="Enable and attach a plugin that is currently disabled, including disabled first-party plugins such as mcp."),
+        guidance=ToolGuidance(
+            purpose="Enable and attach a disabled plugin in one step, including disabled first-party plugins such as mcp.",
+            use_when="A plugin is disabled and needs to be fully activated. This is the primary way to turn on a plugin.",
+            do_not_use_when="Attaching an already-enabled but detached plugin (use plugin_attach — lighter weight).",
+            failure_next_steps="If plugin_id unknown, check plugins_list. If already enabled, use plugin_attach instead.",
+        ),
         aliases=("plugin_enable",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderEnableInput,
         execution=INDIRECT_CONTROL,
@@ -144,7 +165,12 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="disable",
         description="Disable a plugin",
-        guidance=ToolGuidance(purpose="Disable a plugin"),
+        guidance=ToolGuidance(
+            purpose="Disable a plugin — detach its runtime and mark it as disabled so it won't auto-attach on restart.",
+            use_when="Permanently removing a plugin from the runtime until explicitly re-enabled.",
+            do_not_use_when="Temporarily removing capabilities (use plugin_detach — keeps it enabled for quick re-attach). Disabling a channel endpoint (use channel_disable).",
+            failure_next_steps="If plugin_id unknown, check plugins_list. Re-enable with plugin_enable.",
+        ),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDisableInput,
         aliases=("plugin_disable",),
         execution=INDIRECT_CONTROL,
@@ -159,7 +185,12 @@ class PluginsIntrospectionProvider:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan plugin directories",
-        guidance=ToolGuidance(purpose="Rescan plugin directories"), aliases=("plugin_rescan",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Rescan plugin directories to discover newly installed or updated plugins.",
+            use_when="New plugins were installed or plugin configuration files changed.",
+            do_not_use_when="Restarting one specific plugin (use plugin_attach after detach, or plugin_enable). Rescanning channel providers (use channel_provider_rescan).",
+            failure_next_steps="If scan_errors occur, check plugin manifest files. Previous plugin generation is preserved on error.",
+        ), aliases=("plugin_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         result = self.host.rescan()
@@ -180,7 +211,12 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="rescan_and_attach_new_first_party",
         description="Rescan plugin directories and attach newly discovered enabled first-party plugins",
-        guidance=ToolGuidance(purpose="Rescan plugin directories and attach newly discovered enabled first-party plugins"),
+        guidance=ToolGuidance(
+            purpose="Rescan plugin directories and auto-attach newly discovered enabled first-party plugins.",
+            use_when="After installing new first-party plugins that should be picked up and attached immediately.",
+            do_not_use_when="Rescanning only (use plugin_rescan). Attaching one specific plugin (use plugin_attach or plugin_enable).",
+            failure_next_steps="If attach_errors occur, check plugins_list for which plugins failed and try plugin_attach individually.",
+        ),
         aliases=("plugin_rescan_and_attach_new_first_party",),
         execution=INDIRECT_CONTROL,
     )

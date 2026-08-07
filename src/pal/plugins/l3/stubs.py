@@ -119,7 +119,12 @@ class _L3ProviderCapabilityMixin:
         scope="provider",
         action_name="show",
         description="Show memory provider runtime state",
-        guidance=ToolGuidance(purpose="Show memory provider runtime state"),
+        guidance=ToolGuidance(
+            purpose="Show stub memory provider runtime state.",
+            use_when="Diagnosing the stub memory backend.",
+            do_not_use_when="Checking the real sqlite backend (use memory_provider_show on sqlite_vec). Recalling memories (use recall_memory).",
+            failure_next_steps="Read-only. This is a stub provider for testing.",
+        ),
         aliases=("memory_provider_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -137,7 +142,12 @@ class _L3ProviderCapabilityMixin:
         scope="provider",
         action_name="inventory",
         description="Inspect memory provider inventory and index status",
-        guidance=ToolGuidance(purpose="Inspect memory provider inventory and index status"),
+        guidance=ToolGuidance(
+            purpose="Inspect stub memory inventory.",
+            use_when="Checking stub memory record counts.",
+            do_not_use_when="Real provider inventory (use memory_provider_inventory on sqlite_vec).",
+            failure_next_steps="Read-only. This is a stub provider.",
+        ),
         aliases=("memory_provider_inventory",),
     )
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -204,7 +214,12 @@ class _L3ProviderCapabilityMixin:
         family="commit",
         action_name="write",
         description="Commit durable memory",
-        guidance=ToolGuidance(purpose="Commit durable memory"),
+        guidance=ToolGuidance(
+            purpose="Commit a memory record to the stub backend.",
+            use_when="Testing memory write paths with the stub provider.",
+            do_not_use_when="Real memory writes (use remember_memory — it routes to the active provider).",
+            failure_next_steps="This is a stub — data is not persisted to a real backend.",
+        ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinWriteInput,
         aliases=("memory_provider_write",),
@@ -265,7 +280,12 @@ class _L3ProviderCapabilityMixin:
         family="correct",
         action_name="update",
         description="Update durable memory",
-        guidance=ToolGuidance(purpose="Update durable memory"),
+        guidance=ToolGuidance(
+            purpose="Update a memory record in the stub backend.",
+            use_when="Testing memory update paths with the stub provider.",
+            do_not_use_when="Real memory updates (use update_memory).",
+            failure_next_steps="This is a stub — data is not persisted to a real backend.",
+        ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinUpdateInput,
         aliases=("memory_provider_update",),
@@ -339,7 +359,12 @@ class _L3ProviderCapabilityMixin:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider",
-        guidance=ToolGuidance(purpose="Attach memory provider"), aliases=("memory_provider_attach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Attach the stub memory provider.",
+            use_when="Testing with the stub memory backend.",
+            do_not_use_when="Real provider (use sqlite_vec memory_provider_attach).",
+            failure_next_steps="This is a stub provider.",
+        ), aliases=("memory_provider_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -351,7 +376,12 @@ class _L3ProviderCapabilityMixin:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider",
-        guidance=ToolGuidance(purpose="Detach memory provider"), aliases=("memory_provider_detach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Detach the stub memory provider.",
+            use_when="Disconnecting the stub memory backend.",
+            do_not_use_when="Real provider (use sqlite_vec memory_provider_detach).",
+            failure_next_steps="This is a stub provider.",
+        ), aliases=("memory_provider_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
@@ -368,7 +398,12 @@ class _L3ProviderCapabilityMixin:
         family="maintenance",
         action_name="refresh_indexes",
         description="Refresh provider indexes and embedding state",
-        guidance=ToolGuidance(purpose="Refresh provider indexes and embedding state"),
+        guidance=ToolGuidance(
+            purpose="Refresh stub provider indexes.",
+            use_when="Testing refresh paths with the stub provider.",
+            do_not_use_when="Real provider (use sqlite_vec memory_provider_refresh).",
+            failure_next_steps="This is a stub provider.",
+        ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinRefreshIndexesInput,
         aliases=("memory_provider_refresh_indexes",),

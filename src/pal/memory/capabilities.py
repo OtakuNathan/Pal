@@ -164,7 +164,12 @@ class MemoryIntrospectionProvider:
         return f"Memory candidates accepted ({len(memory_candidates)} reviewed; {committed} committed{suffix})."
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show memory runtime state",
-        guidance=ToolGuidance(purpose="Show memory runtime state"), aliases=("memory_show",))
+        guidance=ToolGuidance(
+            purpose="Show memory runtime state.",
+            use_when="Diagnosing memory system health — provider count, active provider, record counts.",
+            do_not_use_when="Recalling specific memories (use recall_memory). Checking behavior routing (use behavior_show).",
+            failure_next_steps="Read-only diagnostic. If no active provider, check memory_list_providers.",
+        ), aliases=("memory_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_memory(self)
@@ -180,7 +185,12 @@ class MemoryIntrospectionProvider:
         scope="module",
         action_name="list_providers",
         description="List registered L3 providers",
-        guidance=ToolGuidance(purpose="List registered L3 providers"),
+        guidance=ToolGuidance(
+            purpose="List registered L3 memory providers.",
+            use_when="Checking which memory backends are installed and mounted.",
+            do_not_use_when="Checking the active provider (use memory_active_provider). Recalling memories (use recall_memory).",
+            failure_next_steps="Read-only. If empty, no L3 plugins are installed.",
+        ),
         aliases=("memory_list_providers",),
     )
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -207,7 +217,12 @@ class MemoryIntrospectionProvider:
         scope="module",
         action_name="active_provider",
         description="Show the current active memory provider used by recall_memory, remember_memory, update_memory, and forget_memory",
-        guidance=ToolGuidance(purpose="Show the current active memory provider used by recall_memory, remember_memory, update_memory, and forget_memory"),
+        guidance=ToolGuidance(
+            purpose="Show the current active memory provider.",
+            use_when="Checking which backend handles recall/remember/update/forget operations.",
+            do_not_use_when="Listing all providers (use memory_list_providers). Switching providers (use memory_set_active_provider).",
+            failure_next_steps="Read-only. If none active, memories cannot be stored or recalled.",
+        ),
         aliases=("memory_active_provider",),
     )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -243,8 +258,10 @@ class MemoryIntrospectionProvider:
             use_when=(
                 "Before acting when the task depends on prior decisions, user preferences, project history, "
                 "known failures, or repair lessons. Before creating/changing/forgetting memory records. "
-                "When the user references personal relationships, family, or preferences you are not confident about. "
-                "On errors or unfamiliar debugging, prefer kind='case'."
+                "When the user mentions personal relationships, family information, personal preferences, "
+                "or personal state you are not fully confident about — recall first to confirm before answering. "
+                "When hitting errors, regressions, failed repairs, repeated pitfalls, or unfamiliar debugging "
+                "during project work — recall with kind='case' and concrete error/symptom/fix terms before improvising a fix."
             ),
             do_not_use_when=(
                 "Not for current runtime state (inspect live capabilities). "
@@ -294,7 +311,8 @@ class MemoryIntrospectionProvider:
             purpose="Remember a new durable memory record.",
             use_when=(
                 "Only when the user explicitly asks to remember/save, or states a clear durable fact/preference. "
-                "For facts, preferences, project context, prior decisions, repair lessons. "
+                "For facts, preferences, project context, prior decisions. "
+                "After fixing a bug or completing a debugging session with reusable lessons — write kind='case'. "
                 "Before writing, recall_memory with the candidate and limit 3-5 to check for duplicates. "
                 "If a recalled record covers or corrects the candidate, use update_memory instead."
             ),
@@ -474,7 +492,12 @@ class MemoryIntrospectionProvider:
         family="management",
         action_name="set_active_provider",
         description="Switch the active L3 provider for memory recall",
-        guidance=ToolGuidance(purpose="Switch the active L3 provider for memory recall"),
+        guidance=ToolGuidance(
+            purpose="Switch the active L3 memory provider.",
+            use_when="Changing which memory backend handles recall/remember/update/forget.",
+            do_not_use_when="Checking the active provider (use memory_active_provider). Listing providers (use memory_list_providers).",
+            failure_next_steps="If provider_id not found, verify with memory_list_providers.",
+        ),
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,
         aliases=("memory_set_active_provider",),
         execution=INDIRECT_LOCAL_WRITE,

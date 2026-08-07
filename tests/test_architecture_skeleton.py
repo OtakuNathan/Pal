@@ -2200,7 +2200,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(read.ok)
         self.assertEqual(read.structured["alias"], "run_shell")
         self.assertNotIn("[truncated]", read.structured["description"])
-        self.assertIn("git for Git operations", read.structured["description"])
+        self.assertIn("delete_path for deletion", read.structured["description"])
         self.assertNotIn("op_exec_shell", read.llm_text)
         self.assertFalse(compat.ok)
         self.assertEqual(compat.status, "unknown_tool")

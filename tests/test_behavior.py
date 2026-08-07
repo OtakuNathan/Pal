@@ -983,8 +983,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("repair lessons", recall_description)
         self.assertNotIn("behavior guidance, or skills", recall_description)
         self.assertIn("Not for behavior rules", remember_description)
-        self.assertIn("condition-reflex layer", learn_description)
-        self.assertIn("use remember_memory for facts", learn_description)
+        self.assertIn("future behavior rule", learn_description)
+        self.assertIn("use remember_memory", learn_description)
 
     def test_update_affordance_tool_preserves_source_metadata_and_refs(self) -> None:
         self.repository.upsert_affordance(

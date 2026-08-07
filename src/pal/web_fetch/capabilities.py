@@ -105,7 +105,12 @@ class WebFetchIntrospectionProvider:
         return provider.provider_id
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show web fetch module state",
-        guidance=ToolGuidance(purpose="Show web fetch module state"), aliases=("web_fetch_show",))
+        guidance=ToolGuidance(
+            purpose="Show web fetch module state.",
+            use_when="Diagnosing web fetch health — provider count, active provider, mounted status.",
+            do_not_use_when="Fetching a webpage (use read_web). Listing providers (use web_fetch_list_providers).",
+            failure_next_steps="Read-only. If no active provider, check web_fetch_list_providers.",
+        ), aliases=("web_fetch_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = inspect_web_fetch(self).__dict__
@@ -121,7 +126,12 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="list_providers",
         description="List configured web fetch providers",
-        guidance=ToolGuidance(purpose="List configured web fetch providers"),
+        guidance=ToolGuidance(
+            purpose="List configured web fetch providers.",
+            use_when="Discovering available fetch backends and their enabled status.",
+            do_not_use_when="Checking the active provider (use web_fetch_active_provider). Fetching (use read_web).",
+            failure_next_steps="Read-only. If empty, no providers are configured.",
+        ),
         aliases=("web_fetch_list_providers",),
     )
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -140,7 +150,12 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="active_provider",
         description="Show configured and effective active web fetch provider",
-        guidance=ToolGuidance(purpose="Show configured and effective active web fetch provider"),
+        guidance=ToolGuidance(
+            purpose="Show the active web fetch provider.",
+            use_when="Checking which fetch backend handles read_web requests.",
+            do_not_use_when="Listing all providers (use web_fetch_list_providers). Switching (use web_fetch_set_active_provider).",
+            failure_next_steps="Read-only.",
+        ),
         aliases=("web_fetch_active_provider",),
     )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -161,7 +176,12 @@ class WebFetchIntrospectionProvider:
         scope="provider",
         action_name="show",
         description="Show web fetch provider metadata",
-        guidance=ToolGuidance(purpose="Show web fetch provider metadata"),
+        guidance=ToolGuidance(
+            purpose="Show one web fetch provider's metadata.",
+            use_when="Inspecting a specific provider's kind, settings, auth keys.",
+            do_not_use_when="Module health (use web_fetch_show). Auth state (use web_fetch_provider_auth_state).",
+            failure_next_steps="If NOT_FOUND, verify provider_id with web_fetch_list_providers.",
+        ),
         aliases=("web_fetch_provider_show",),
     )
     def show_provider(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -181,7 +201,12 @@ class WebFetchIntrospectionProvider:
         scope="provider",
         action_name="auth_state",
         description="Show web fetch provider authorization state",
-        guidance=ToolGuidance(purpose="Show web fetch provider authorization state"),
+        guidance=ToolGuidance(
+            purpose="Show one web fetch provider's authorization state.",
+            use_when="Diagnosing auth failures or checking if credentials are configured.",
+            do_not_use_when="Applying credentials (use web_fetch_provider_set_auth_material). Provider metadata (use web_fetch_provider_show).",
+            failure_next_steps="If NOT_FOUND, verify provider_id. If not authorized, apply credentials.",
+        ),
         aliases=("web_fetch_provider_auth_state",),
     )
     def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -201,7 +226,12 @@ class WebFetchIntrospectionProvider:
         scope="provider",
         action_name="health",
         description="Show web fetch provider health",
-        guidance=ToolGuidance(purpose="Show web fetch provider health"),
+        guidance=ToolGuidance(
+            purpose="Show one web fetch provider's health.",
+            use_when="Diagnosing fetch failures or browser connectivity issues.",
+            do_not_use_when="Auth state (use web_fetch_provider_auth_state). Module health (use web_fetch_show).",
+            failure_next_steps="If unhealthy, try switching providers with web_fetch_set_active_provider.",
+        ),
         aliases=("web_fetch_provider_health",),
     )
     def health(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -222,7 +252,12 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_active_provider",
         description="Set the configured active web fetch provider",
-        guidance=ToolGuidance(purpose="Set the configured active web fetch provider"),
+        guidance=ToolGuidance(
+            purpose="Set the active web fetch provider.",
+            use_when="Switching to a different fetch backend.",
+            do_not_use_when="Checking the active provider (use web_fetch_active_provider).",
+            failure_next_steps="If NOT_FOUND, verify provider_id with web_fetch_list_providers.",
+        ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput,
         aliases=("web_fetch_set_active_provider",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -250,7 +285,12 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="read",
         description="Fetch a webpage using the configured browser fetch provider and internal fallback",
-        guidance=ToolGuidance(purpose="Fetch a webpage using the configured browser fetch provider and internal fallback"),
+        guidance=ToolGuidance(
+            purpose="Fetch a webpage using the configured browser fetch provider and internal fallback.",
+            use_when="Reading a specific webpage's text content, title, and links.",
+            do_not_use_when="Searching the web (use search_web). Reading local files (use read_file). API calls (use run_shell curl).",
+            failure_next_steps="If fetch fails, the provider may be unhealthy — check web_fetch_provider_health. Internal fallback may still work.",
+        ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
         execution=DIRECT_EXTERNAL_READ,
         metadata={"canonical_path": "op_web_read", "omit_family_in_canonical": True},
@@ -339,7 +379,12 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="enable",
         description="Enable a web fetch provider",
-        guidance=ToolGuidance(purpose="Enable a web fetch provider"),
+        guidance=ToolGuidance(
+            purpose="Enable a web fetch provider.",
+            use_when="Re-enabling a disabled fetch provider.",
+            do_not_use_when="Disabling (use web_fetch_provider_disable). Setting active (use web_fetch_set_active_provider).",
+            failure_next_steps="If NOT_FOUND, verify provider_id.",
+        ),
         aliases=("web_fetch_provider_enable",),
         execution=INDIRECT_LOCAL_WRITE,
     )
@@ -352,7 +397,12 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="disable",
         description="Disable a web fetch provider",
-        guidance=ToolGuidance(purpose="Disable a web fetch provider"),
+        guidance=ToolGuidance(
+            purpose="Disable a web fetch provider.",
+            use_when="Temporarily removing a provider from the active pool.",
+            do_not_use_when="Enabling (use web_fetch_provider_enable).",
+            failure_next_steps="If NOT_FOUND, verify provider_id.",
+        ),
         aliases=("web_fetch_provider_disable",),
         execution=INDIRECT_LOCAL_WRITE,
     )
@@ -365,7 +415,12 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_auth_material",
         description="Update web fetch provider auth material without exposing secrets",
-        guidance=ToolGuidance(purpose="Update web fetch provider auth material without exposing secrets"),
+        guidance=ToolGuidance(
+            purpose="Apply auth material to a web fetch provider without exposing secrets.",
+            use_when="A provider needs API keys or credentials to function.",
+            do_not_use_when="Reading auth state (use web_fetch_provider_auth_state).",
+            failure_next_steps="If NOT_FOUND, verify provider_id.",
+        ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetAuthMaterialInput,
         aliases=("web_fetch_provider_set_auth_material",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -395,7 +450,12 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_config",
         description="Merge config into a web fetch provider settings blob",
-        guidance=ToolGuidance(purpose="Merge config into a web fetch provider settings blob"),
+        guidance=ToolGuidance(
+            purpose="Merge config into a web fetch provider's settings blob.",
+            use_when="Tuning provider-specific settings (e.g. timeout, user agent).",
+            do_not_use_when="Setting auth material (use web_fetch_provider_set_auth_material).",
+            failure_next_steps="If NOT_FOUND, verify provider_id.",
+        ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetConfigInput,
         aliases=("web_fetch_provider_set_config",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -419,7 +479,12 @@ class WebFetchIntrospectionProvider:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach web fetch module",
-        guidance=ToolGuidance(purpose="Attach web fetch module"), aliases=("web_fetch_attach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Attach web fetch module.",
+            use_when="Reconnecting a detached web fetch module.",
+            do_not_use_when="Enabling one provider (use web_fetch_provider_enable). Already attached.",
+            failure_next_steps="No external dependencies.",
+        ), aliases=("web_fetch_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -428,7 +493,12 @@ class WebFetchIntrospectionProvider:
         return IntrospectionResult(status=RuntimeStatus.OK, text="web fetch attached", structured=payload, llm_text=render_titled_structured_for_llm("Web fetch attached", payload))
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach web fetch module",
-        guidance=ToolGuidance(purpose="Detach web fetch module"), aliases=("web_fetch_detach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Detach web fetch module.",
+            use_when="Temporarily stopping all web fetch functionality.",
+            do_not_use_when="Disabling one provider (use web_fetch_provider_disable).",
+            failure_next_steps="Re-attach with web_fetch_attach.",
+        ), aliases=("web_fetch_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.service.shutdown_sync()

@@ -38,7 +38,12 @@ class ExecutionToolSearchMixin:
         scope="module",
         action_name="tools",
         description="List registered execution tools with descriptions and input schemas",
-        guidance=ToolGuidance(purpose="List registered execution tools with descriptions and input schemas"),
+        guidance=ToolGuidance(
+            purpose="List registered execution tools with descriptions and input schemas.",
+            use_when="Browsing all available tools when you don't know what to search for. Checking tool inventory completeness.",
+            do_not_use_when="Searching for a specific capability (use search_tools). Reading one tool's contract (use read_tool).",
+            failure_next_steps="Read-only. If expected tools are missing, check exec_show for capability/tool counts.",
+        ),
         aliases=("exec_tools",),
     )
     def tools(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -62,7 +67,7 @@ class ExecutionDiscoveryCapabilityMixin:
         guidance=ToolGuidance(
             purpose="Invoke one indirect capability by its exact alias.",
             use_when="After discovering the alias via search_tools/read_tool. Direct tools must be invoked directly.",
-            do_not_use_when="Not for direct capabilities (rejected here). Not before reading the tool schema.",
+            do_not_use_when="For direct capabilities — they must be invoked directly and are rejected here.",
             failure_next_steps="Use read_tool to inspect the alias schema before retrying.",
         ),
         aliases=("call_tool",),
@@ -90,10 +95,10 @@ class ExecutionDiscoveryCapabilityMixin:
         action_name="search",
         description="Search execution capabilities by query text.",
         guidance=ToolGuidance(
-            purpose="Search execution capabilities by query text.",
-            use_when="Namespace='inspect' for inspect/list/show; namespace='action' for mutate/execute/external. Set facets=true only for broad searches needing narrowing stats.",
-            do_not_use_when="Not for invoking capabilities (use call_tool for indirect, or call directly for direct).",
-            failure_next_steps="Correct invalid input; try a different namespace or broader query.",
+            purpose="Search execution capabilities by query text. Use namespace='inspect' for inspect/list/show, namespace='action' for mutate/execute/external.",
+            use_when="When you need to find a capability by what it does but don't know its exact alias.",
+            do_not_use_when="When you already know the alias (use read_tool or call_tool). When you want to invoke a known capability.",
+            failure_next_steps="Try a different namespace, broader query, or set facets=true for narrowing stats.",
         ),
         aliases=("search_tools",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput,
@@ -116,7 +121,12 @@ class ExecutionDiscoveryCapabilityMixin:
         family="discovery",
         action_name="read",
         description="Read the full capability contract for an execution capability by exact alias.",
-        guidance=ToolGuidance(purpose="Read the full capability contract for an execution capability by exact alias."),
+        guidance=ToolGuidance(
+            purpose="Read the full capability contract for an execution capability by exact alias.",
+            use_when="Before invoking an indirect capability via call_tool — inspect its input schema, output schema, and execution semantics.",
+            do_not_use_when="Searching for capabilities by query (use search_tools). Listing all tools (use exec_tools).",
+            failure_next_steps="If alias not found, use search_tools to discover the correct alias.",
+        ),
         aliases=("read_tool",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadInput,
         OutputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadOutput,

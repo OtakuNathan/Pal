@@ -29,7 +29,12 @@ class FailureIntrospectionProvider:
     module_id: str = "failure"
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show failure runtime summary",
-        guidance=ToolGuidance(purpose="Show failure runtime summary"), aliases=("failure_show",))
+        guidance=ToolGuidance(
+            purpose="Show failure runtime summary.",
+            use_when="Diagnosing reply delivery failures or checking failure tracking health.",
+            do_not_use_when="Checking LLM errors (use llm_usage). Checking proactive task failures (use proactive_list_runs).",
+            failure_next_steps="Read-only diagnostic. Use failure_recent_reports for specific failure details.",
+        ), aliases=("failure_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         summary = self.runtime.show_summary()
@@ -45,7 +50,12 @@ class FailureIntrospectionProvider:
         scope="module",
         action_name="recent_reports",
         description="List recent structured failure reports",
-        guidance=ToolGuidance(purpose="List recent structured failure reports"),
+        guidance=ToolGuidance(
+            purpose="List recent structured failure reports.",
+            use_when="Investigating why replies or deliveries failed recently.",
+            do_not_use_when="Module-level health (use failure_show).",
+            failure_next_steps="Read-only. Returns the last 16 reports. If empty, no failures have been recorded.",
+        ),
         aliases=("failure_recent_reports",),
     )
     def recent_reports(self, call: IntrospectionCall) -> IntrospectionResult:

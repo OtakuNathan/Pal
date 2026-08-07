@@ -60,7 +60,12 @@ class ControlIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show control module status",
-        guidance=ToolGuidance(purpose="Show control module status"),
+        guidance=ToolGuidance(
+            purpose="Show control module status.",
+            use_when="Diagnosing whether the control plane is mounted or in degraded mode.",
+            do_not_use_when="Checking core runtime state (use core_observe). Checking execution tool count (use exec_show).",
+            failure_next_steps="Read-only diagnostic. If degraded, use control_attach to recover.",
+        ),
         aliases=("control_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -74,7 +79,12 @@ class ControlIntrospectionProvider:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Re-attach control module",
-        guidance=ToolGuidance(purpose="Re-attach control module"), aliases=("control_attach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Re-attach control module — recover from degraded mode.",
+            use_when="The control plane was degraded (via control_detach) and needs to resume normal operation.",
+            do_not_use_when="Attaching a channel endpoint (use channel_attach). The control module is already mounted.",
+            failure_next_steps="No external dependencies. If still degraded after attach, check control_show.",
+        ), aliases=("control_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -87,7 +97,12 @@ class ControlIntrospectionProvider:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Degrade control module",
-        guidance=ToolGuidance(purpose="Degrade control module"), aliases=("control_detach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Degrade control module — enter degraded mode where the control plane stops active management.",
+            use_when="Rarely needed. Only when explicitly instructed to put the control plane into degraded mode.",
+            do_not_use_when="Detaching a channel endpoint (use channel_detach). Normal operation — degrading control is disruptive.",
+            failure_next_steps="Recover with control_attach when ready to resume normal operation.",
+        ), aliases=("control_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False

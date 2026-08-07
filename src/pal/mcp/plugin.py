@@ -100,7 +100,12 @@ class McpManagerPluginProvider:
         self.client = McpManagerClient(runtime_root=self.runtime_root)
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show MCP manager status",
-        guidance=ToolGuidance(purpose="Show MCP manager status"), aliases=("mcp_show",))
+        guidance=ToolGuidance(
+            purpose="Show MCP manager status.",
+            use_when="Diagnosing MCP system health — manager process, projection, server count.",
+            do_not_use_when="Listing servers (use mcp_server_list). Checking one server (use mcp_server_read).",
+            failure_next_steps="Read-only. If last_error is set, the manager sidecar failed to start — check mcp_attach.",
+        ), aliases=("mcp_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self._status_payload()
@@ -112,7 +117,12 @@ class McpManagerPluginProvider:
         )
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="mcp_server", action_name="list", description="List configured MCP servers",
-        guidance=ToolGuidance(purpose="List configured MCP servers"), aliases=("mcp_server_list",))
+        guidance=ToolGuidance(
+            purpose="List configured MCP servers.",
+            use_when="Discovering which MCP servers are configured and their attach status.",
+            do_not_use_when="Checking manager health (use mcp_show). Reading one server's details (use mcp_server_read).",
+            failure_next_steps="If empty, no MCP servers are configured. Check MCP config files or run mcp_rescan.",
+        ), aliases=("mcp_server_list",))
     def list_servers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         result = self._request_or_error("list_servers")
@@ -123,7 +133,12 @@ class McpManagerPluginProvider:
         scope="mcp_server",
         action_name="read",
         description="Read one MCP server metadata and discovery snapshot",
-        guidance=ToolGuidance(purpose="Read one MCP server metadata and discovery snapshot"),
+        guidance=ToolGuidance(
+            purpose="Read one MCP server's metadata and tool discovery snapshot.",
+            use_when="Inspecting what tools a specific MCP server exposes.",
+            do_not_use_when="Listing all servers (use mcp_server_list). Manager health (use mcp_show).",
+            failure_next_steps="If server not found, verify with mcp_server_list.",
+        ),
         InputModel=McpPluginMcpManagerPluginProviderReadInput,
         aliases=("mcp_server_read",),
     )
@@ -132,7 +147,12 @@ class McpManagerPluginProvider:
         return _introspection_from_rpc("MCP server", result)
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="attach", description="Attach MCP manager",
-        guidance=ToolGuidance(purpose="Attach MCP manager"), aliases=("mcp_attach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Attach MCP manager — start sidecar and discover servers.",
+            use_when="Reconnecting a detached MCP manager or after config changes.",
+            do_not_use_when="Attaching one server (use mcp_server_attach). The manager is already attached.",
+            failure_next_steps="If sidecar fails to start, check MCP config and binary availability.",
+        ), aliases=("mcp_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         try:
@@ -157,7 +177,12 @@ class McpManagerPluginProvider:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="detach", description="Detach MCP manager",
-        guidance=ToolGuidance(purpose="Detach MCP manager"), aliases=("mcp_detach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Detach MCP manager — stop sidecar and withdraw all MCP capabilities.",
+            use_when="Temporarily stopping all MCP server connections.",
+            do_not_use_when="Detaching one server (use mcp_server_detach).",
+            failure_next_steps="Re-attach with mcp_attach when ready.",
+        ), aliases=("mcp_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
         self._stop_manager()
@@ -172,7 +197,12 @@ class McpManagerPluginProvider:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan MCP server configs and refresh projection",
-        guidance=ToolGuidance(purpose="Rescan MCP server configs and refresh projection"), aliases=("mcp_rescan",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Rescan MCP server configs and refresh the tool projection.",
+            use_when="After adding or modifying MCP server configuration files.",
+            do_not_use_when="Restarting the manager (use mcp_detach then mcp_attach). Attaching one server (use mcp_server_attach).",
+            failure_next_steps="If rescan fails, check MCP config file syntax.",
+        ), aliases=("mcp_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         try:
@@ -190,7 +220,12 @@ class McpManagerPluginProvider:
         family="server",
         action_name="attach",
         description="Attach one configured MCP server inside the manager",
-        guidance=ToolGuidance(purpose="Attach one configured MCP server inside the manager"),
+        guidance=ToolGuidance(
+            purpose="Attach one configured MCP server inside the manager.",
+            use_when="Enabling a specific MCP server's tools without affecting others.",
+            do_not_use_when="Attaching the whole manager (use mcp_attach). Detaching a server (use mcp_server_detach).",
+            failure_next_steps="If server not found, verify with mcp_server_list or run mcp_rescan.",
+        ),
         InputModel=McpPluginMcpManagerPluginProviderAttachInput,
         aliases=("mcp_server_attach",),
         execution=INDIRECT_CONTROL,
@@ -211,7 +246,12 @@ class McpManagerPluginProvider:
         family="server",
         action_name="detach",
         description="Detach one MCP server inside the manager",
-        guidance=ToolGuidance(purpose="Detach one MCP server inside the manager"),
+        guidance=ToolGuidance(
+            purpose="Detach one MCP server inside the manager.",
+            use_when="Temporarily disabling one MCP server's tools.",
+            do_not_use_when="Detaching the whole manager (use mcp_detach). Attaching a server (use mcp_server_attach).",
+            failure_next_steps="If server not found, verify with mcp_server_list.",
+        ),
         InputModel=McpPluginMcpManagerPluginProviderDetachInput,
         aliases=("mcp_server_detach",),
         execution=INDIRECT_CONTROL,
@@ -231,7 +271,12 @@ class McpManagerPluginProvider:
         family="mcp",
         action_name="image_prepare",
         description="Prepare an image artifact/path/url for external MCP tool arguments as URL, local path, or base64 data",
-        guidance=ToolGuidance(purpose="Prepare an image artifact/path/url for external MCP tool arguments as URL, local path, or base64 data"),
+        guidance=ToolGuidance(
+            purpose="Prepare an image artifact/path/url for external MCP tool arguments.",
+            use_when="An MCP tool requires image input and you have an artifact, local path, or URL.",
+            do_not_use_when="Reading artifact text content (use read_artifact). The MCP tool accepts URLs directly.",
+            failure_next_steps="If artifact not found, verify with list_artifacts. If path invalid, check with read_file.",
+        ),
         InputModel=McpPluginMcpManagerPluginProviderImagePrepareInput,
         aliases=("mcp_image_prepare",),
         execution=INDIRECT_UNSAFE_LOCAL_WRITE,

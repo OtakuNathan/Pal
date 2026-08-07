@@ -45,7 +45,12 @@ class IdentityIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show identity state for read-only lookup",
-        guidance=ToolGuidance(purpose="Show identity state for read-only lookup"),
+        guidance=ToolGuidance(
+            purpose="Show identity state — whether persona and preferences are configured.",
+            use_when="Diagnosing identity configuration or checking if persona/preferences exist.",
+            do_not_use_when="Recalling user facts (use recall_memory). Checking behavior routing (use behavior_show).",
+            failure_next_steps="Read-only. If no persona, identity prompt fragments will use defaults.",
+        ),
         aliases=("identity_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:

@@ -42,7 +42,7 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
     do_not_use_when=(
         "Do not use for Pal runtime, module, capability, or Minion state when a Pal tool is available. "
         "When the matching dedicated capability is visible, use search for repository text search, read_file for "
-        "file reads, edit_file for edits, write_file for writes, delete_path for deletion, and git for Git operations. "
+        "file reads, edit_file for edits, write_file for writes, and delete_path for deletion. "
         "Do not pipe long-running tests or builds through head, tail, or grep merely to shorten their result; result "
         "budgeting handles large output, while such pipelines hide the command that is stalled."
     ),

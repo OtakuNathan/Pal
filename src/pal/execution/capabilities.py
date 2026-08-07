@@ -7,7 +7,6 @@ from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.tool_facade import ToolGuidance
 from pal.execution.file_capabilities import FileCapabilityMixin, get_file_state_cache as _get_file_state_cache
 from pal.execution.file_state import FileStateCache
-from pal.execution.git_capabilities import GitCapabilityMixin
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.shell_exec import ShellExecCapabilityMixin
 from pal.execution.tool_search import (
@@ -65,7 +64,6 @@ class ExecutionIntrospectionProvider(
     ExecutionToolSearchMixin,
     ExecutionDiscoveryCapabilityMixin,
     ShellExecCapabilityMixin,
-    GitCapabilityMixin,
     FileCapabilityMixin,
 ):
     runtime: ExecutionRuntime
@@ -76,7 +74,12 @@ class ExecutionIntrospectionProvider(
         scope="module",
         action_name="show",
         description="Show execution runtime state",
-        guidance=ToolGuidance(purpose="Show execution runtime state"),
+        guidance=ToolGuidance(
+            purpose="Show execution runtime state — capability count and tool count.",
+            use_when="Diagnosing whether all expected capabilities are mounted. Checking if a capability generation swap occurred.",
+            do_not_use_when="Listing specific tools (use exec_tools). Searching for a capability (use search_tools).",
+            failure_next_steps="Read-only diagnostic. If counts look wrong, a module may have failed to mount — check core_observe for detached modules.",
+        ),
         aliases=("exec_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:

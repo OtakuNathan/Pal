@@ -126,7 +126,12 @@ class DemoProvider:
         family="demo",
         action_name="echo",
         description="Echo a short message.",
-        guidance=ToolGuidance(purpose="Echo a short message."),
+        guidance=ToolGuidance(
+            purpose="Echo a short message back. Demo/test capability.",
+            use_when="Testing capability routing or verifying the skill module is responsive.",
+            do_not_use_when="Any real task — this is a demo tool only.",
+            failure_next_steps="No failure modes. If echo doesn't work, the skill module may be detached.",
+        ),
         InputModel=EchoInput,
         execution=INDIRECT_NONE,
     )

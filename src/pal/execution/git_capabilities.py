@@ -18,6 +18,12 @@ class GitCapabilityMixin:
         family="git",
         action_name="git",
         description=GIT_TOOL_DESCRIPTION,
+        guidance=ToolGuidance(
+            purpose="Run git through Pal's structured git wrapper instead of shell.",
+            use_when="Repository status, diffs, history, changed-file evidence, and conservative audited git mutations.",
+            do_not_use_when="Running arbitrary shell commands (use run_shell). Editing files (use edit_file). Dangerous history or destructive operations are refused.",
+            failure_next_steps="If command is rejected as dangerous, use a more conservative subcommand. If shell syntax detected, simplify to plain git args.",
+        ),
         aliases=("git",),
         InputModel=ExecutionGitCapabilitiesGitCapabilityMixinGitInput,
         OutputModel=ExecutionGitCapabilitiesGitCapabilityMixinGitOutput,

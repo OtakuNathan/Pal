@@ -242,7 +242,12 @@ class SQLiteVecL3Plugin:
         return inventory
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show", description="Show sqlite-backed memory provider state",
-        guidance=ToolGuidance(purpose="Show sqlite-backed memory provider state"), aliases=("memory_provider_show",))
+        guidance=ToolGuidance(
+            purpose="Show sqlite-vec memory provider state.",
+            use_when="Diagnosing the sqlite memory backend — record count, index status, embedding model.",
+            do_not_use_when="Checking which provider is active (use memory_active_provider). Recalling memories (use recall_memory).",
+            failure_next_steps="Read-only. If not mounted, use memory_provider_attach.",
+        ), aliases=("memory_provider_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
@@ -254,7 +259,12 @@ class SQLiteVecL3Plugin:
         )
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory", description="Inspect sqlite-backed memory inventory",
-        guidance=ToolGuidance(purpose="Inspect sqlite-backed memory inventory"), aliases=("memory_provider_inventory",))
+        guidance=ToolGuidance(
+            purpose="Inspect sqlite-vec memory inventory and index status.",
+            use_when="Checking memory record counts, embedding coverage, or index health.",
+            do_not_use_when="Recalling specific memories (use recall_memory). Provider state (use memory_provider_show).",
+            failure_next_steps="Read-only. If embeddings missing, run memory_provider_refresh.",
+        ), aliases=("memory_provider_inventory",))
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
@@ -388,7 +398,12 @@ class SQLiteVecL3Plugin:
         family="correct",
         action_name="update",
         description="Update an existing durable memory record. Only provided fields will be updated. search_text: updated source of truth for retrieval indexing.",
-        guidance=ToolGuidance(purpose="Update an existing durable memory record. Only provided fields will be updated. search_text: updated source of truth for retrieval indexing."),
+        guidance=ToolGuidance(
+            purpose="Update a memory record in the sqlite backend.",
+            use_when="Correcting or superseding a stored memory record at the provider level.",
+            do_not_use_when="High-level memory updates (use update_memory — it routes to the active provider).",
+            failure_next_steps="If record not found, verify the mem_ref.",
+        ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginUpdateInput,
         aliases=("memory_provider_update",),
@@ -463,7 +478,12 @@ class SQLiteVecL3Plugin:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider",
-        guidance=ToolGuidance(purpose="Attach memory provider"), aliases=("memory_provider_attach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Attach the sqlite-vec memory provider.",
+            use_when="Reconnecting a detached memory backend.",
+            do_not_use_when="Detaching (use memory_provider_detach). Switching providers (use memory_set_active_provider).",
+            failure_next_steps="If attach fails, check database file and sqlite-vec extension availability.",
+        ), aliases=("memory_provider_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -475,7 +495,12 @@ class SQLiteVecL3Plugin:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider",
-        guidance=ToolGuidance(purpose="Detach memory provider"), aliases=("memory_provider_detach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Detach the sqlite-vec memory provider.",
+            use_when="Temporarily disconnecting the memory backend.",
+            do_not_use_when="Attaching (use memory_provider_attach).",
+            failure_next_steps="Re-attach with memory_provider_attach.",
+        ), aliases=("memory_provider_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
@@ -492,7 +517,12 @@ class SQLiteVecL3Plugin:
         family="maintenance",
         action_name="refresh_indexes",
         description="Refresh provider indexes and embedding state",
-        guidance=ToolGuidance(purpose="Refresh provider indexes and embedding state"),
+        guidance=ToolGuidance(
+            purpose="Refresh sqlite-vec indexes and embedding state.",
+            use_when="After bulk data changes or when search results seem stale.",
+            do_not_use_when="Normal operation — indexes update incrementally. Provider state (use memory_provider_show).",
+            failure_next_steps="If refresh fails, check embedding model configuration.",
+        ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginRefreshIndexesInput,
         aliases=("memory_provider_refresh_indexes",),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.execution.tool_semantics import (
+    DIRECT_LOCAL_READ,
     INDIRECT_CONTROL,
     INDIRECT_LOCAL_WRITE,
 )
@@ -132,7 +133,12 @@ class ProactiveIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show proactive module status for scheduled, reminder, recurring, or push tasks",
-        guidance=ToolGuidance(purpose="Show proactive module status for scheduled, reminder, recurring, or push tasks"),
+        guidance=ToolGuidance(
+            purpose="Show proactive module status.",
+            use_when="Diagnosing proactive system health — how many tasks registered, pending triggers, triggered runs.",
+            do_not_use_when="Listing specific tasks (use proactive_list). Checking one task's details (use proactive_show).",
+            failure_next_steps="Read-only diagnostic. If mounted=false, use proactive_attach.",
+        ),
         aliases=("proactive_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -150,8 +156,14 @@ class ProactiveIntrospectionProvider:
         scope="module",
         action_name="list",
         description="List configured proactive tasks such as reminders, scheduled jobs, recurring reports, and push notifications",
-        guidance=ToolGuidance(purpose="List configured proactive tasks such as reminders, scheduled jobs, recurring reports, and push notifications"),
+        guidance=ToolGuidance(
+            purpose="List configured proactive tasks with their IDs, goals, schedules, next due time, and enabled status.",
+            use_when="Checking what scheduled, recurring, reminder, or push tasks exist. The authoritative source for proactive task inventory.",
+            do_not_use_when="Checking module-level health (use proactive_show). Checking one task's run history (use proactive_list_runs).",
+            failure_next_steps="Read-only. If empty, no proactive tasks are configured. Use proactive_create to add one.",
+        ),
         aliases=("proactive_list",),
+        execution=DIRECT_LOCAL_READ,
     )
     def list(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -184,7 +196,12 @@ class ProactiveIntrospectionProvider:
         scope="proactive",
         action_name="show",
         description="Show a configured proactive task",
-        guidance=ToolGuidance(purpose="Show a configured proactive task"),
+        guidance=ToolGuidance(
+            purpose="Show one proactive task's full configuration — goal, schedule, output channel, skill refs.",
+            use_when="Inspecting a specific task's details before modifying or debugging it.",
+            do_not_use_when="Listing all tasks (use proactive_list). Checking run history (use proactive_last_run or proactive_list_runs).",
+            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list.",
+        ),
         aliases=("proactive_show",),
     )
     def show_task(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -219,7 +236,12 @@ class ProactiveIntrospectionProvider:
         scope="proactive",
         action_name="last_run",
         description="Show the latest run for a proactive task",
-        guidance=ToolGuidance(purpose="Show the latest run for a proactive task"),
+        guidance=ToolGuidance(
+            purpose="Show the most recent run result for one proactive task.",
+            use_when="Checking if a recurring/scheduled task ran successfully or what it produced.",
+            do_not_use_when="Browsing all runs (use proactive_list_runs). Checking task config (use proactive_show).",
+            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list. If no run yet, the task may be newly created.",
+        ),
         aliases=("proactive_last_run",),
     )
     def last_run(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -261,7 +283,12 @@ class ProactiveIntrospectionProvider:
         scope="proactive",
         action_name="list_runs",
         description="List recent runs for a proactive task",
-        guidance=ToolGuidance(purpose="List recent runs for a proactive task"),
+        guidance=ToolGuidance(
+            purpose="List recent run history for one proactive task.",
+            use_when="Debugging a task that keeps failing or checking patterns across multiple runs.",
+            do_not_use_when="Just the latest run (use proactive_last_run). Task configuration (use proactive_show).",
+            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list.",
+        ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput,
         aliases=("proactive_list_runs",),
     )
@@ -359,7 +386,12 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="delete",
         description="Delete (destroy) a proactive task",
-        guidance=ToolGuidance(purpose="Delete (destroy) a proactive task"),
+        guidance=ToolGuidance(
+            purpose="Permanently delete a proactive task and its definition.",
+            use_when="A scheduled/recurring task is no longer needed and should be fully removed.",
+            do_not_use_when="Temporarily stopping a task (use proactive_disable).",
+            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list. Deletion is irreversible.",
+        ),
         aliases=("proactive_delete",),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput,
         execution=INDIRECT_LOCAL_WRITE,
@@ -394,7 +426,12 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="enable",
         description="Enable a proactive task",
-        guidance=ToolGuidance(purpose="Enable a proactive task"),
+        guidance=ToolGuidance(
+            purpose="Enable a proactive task so it resumes firing on schedule.",
+            use_when="Re-enabling a previously disabled task.",
+            do_not_use_when="Disabling a task (use proactive_disable). Creating a new task (use proactive_create).",
+            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list.",
+        ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput,
         aliases=("proactive_enable",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -408,7 +445,12 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="disable",
         description="Disable a proactive task",
-        guidance=ToolGuidance(purpose="Disable a proactive task"),
+        guidance=ToolGuidance(
+            purpose="Disable a proactive task so it stops firing without deleting it.",
+            use_when="Temporarily pausing a task (e.g. debugging, vacation, maintenance).",
+            do_not_use_when="Permanently removing a task (use proactive_delete).",
+            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list. Re-enable with proactive_enable.",
+        ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput,
         aliases=("proactive_disable",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -422,7 +464,12 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="set_output_channel",
         description="Set or clear the output channel for a proactive task",
-        guidance=ToolGuidance(purpose="Set or clear the output channel for a proactive task"),
+        guidance=ToolGuidance(
+            purpose="Set or clear which channel endpoint receives a proactive task's output.",
+            use_when="Routing a task's output to a different channel (e.g. Telegram, socket) or clearing it.",
+            do_not_use_when="Setting a specific reply target within a channel (use proactive_set_output_target).",
+            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list. Verify channel_id with channel_list.",
+        ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput,
         aliases=("proactive_set_output_channel",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -464,7 +511,12 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="set_output_target",
         description="Set or clear the output reply target for a proactive task",
-        guidance=ToolGuidance(purpose="Set or clear the output reply target for a proactive task"),
+        guidance=ToolGuidance(
+            purpose="Set or clear the specific reply target (e.g. chat ID, thread) within a channel for a proactive task.",
+            use_when="Fine-tuning where within a channel the task output goes (e.g. specific chat thread).",
+            do_not_use_when="Switching the channel itself (use proactive_set_output_channel).",
+            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list.",
+        ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput,
         aliases=("proactive_set_output_target",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -504,7 +556,12 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="update_schedule",
         description="Update the schedule for a proactive task",
-        guidance=ToolGuidance(purpose="Update the schedule for a proactive task"),
+        guidance=ToolGuidance(
+            purpose="Update the schedule (cron, once, manual) for a proactive task.",
+            use_when="Changing when a task fires — switching from manual to cron, updating cron expression, or setting a one-time trigger.",
+            do_not_use_when="Changing output destination (use proactive_set_output_channel). Creating a new task (use proactive_create).",
+            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list. If schedule invalid, check cron syntax or run_at_utc format.",
+        ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput,
         aliases=("proactive_update_schedule",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -545,7 +602,12 @@ class ProactiveIntrospectionProvider:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach proactive module",
-        guidance=ToolGuidance(purpose="Attach proactive module"), aliases=("proactive_attach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Attach proactive module — resume scheduled task processing.",
+            use_when="Reconnecting a detached proactive module.",
+            do_not_use_when="Enabling one specific task (use proactive_enable). The module is already attached.",
+            failure_next_steps="No external dependencies. If still degraded after attach, check proactive_show.",
+        ), aliases=("proactive_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -558,7 +620,12 @@ class ProactiveIntrospectionProvider:
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach proactive module",
-        guidance=ToolGuidance(purpose="Detach proactive module"), aliases=("proactive_detach",), execution=INDIRECT_CONTROL)
+        guidance=ToolGuidance(
+            purpose="Detach proactive module — stop all scheduled task processing.",
+            use_when="Temporarily stopping all proactive tasks (e.g. maintenance). Rarely needed.",
+            do_not_use_when="Stopping one task (use proactive_disable). Detaching a channel endpoint (use channel_detach).",
+            failure_next_steps="Re-attach with proactive_attach when ready to resume.",
+        ), aliases=("proactive_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False

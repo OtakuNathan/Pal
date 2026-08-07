@@ -51,7 +51,12 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="observe",
         description="Observe module-level state for core",
-        guidance=ToolGuidance(purpose="Observe module-level state for core"),
+        guidance=ToolGuidance(
+            purpose="Observe core runtime state — queued events, active turns, mode, detached modules.",
+            use_when="Diagnosing core health: event backlog, stuck turns, or checking which modules are detached.",
+            do_not_use_when="Checking control plane status (use control_show). Checking execution tool count (use exec_show).",
+            failure_next_steps="Read-only diagnostic. If event queue is backed up, turns may be stuck. If modules are unexpectedly detached, investigate lifecycle.",
+        ),
         aliases=("core_observe",),
     )
     def observe(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -69,7 +74,12 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="configure",
         description="Configure module-level state for core",
-        guidance=ToolGuidance(purpose="Configure module-level state for core"),
+        guidance=ToolGuidance(
+            purpose="Configure core runtime mode.",
+            use_when="Switching core operating mode (e.g. normal, maintenance).",
+            do_not_use_when="Reading core state (use core_observe). Configuring a specific module (use that module's capabilities).",
+            failure_next_steps="If mode change fails, check core_observe for current state and module health.",
+        ),
         InputModel=CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
         aliases=("core_configure",),
         execution=INDIRECT_LOCAL_WRITE,

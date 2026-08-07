@@ -114,7 +114,12 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="list",
         description="List enabled llm endpoints ordered by priority. Use endpoint_id with llm show.",
-        guidance=ToolGuidance(purpose="List enabled llm endpoints ordered by priority. Use endpoint_id with llm show."),
+        guidance=ToolGuidance(
+            purpose="List enabled LLM endpoints ordered by priority.",
+            use_when="Discovering available model endpoints, their provider, wire shape, and priority.",
+            do_not_use_when="Checking the current active model (use llm_active). Inspecting one endpoint in depth (use llm_show).",
+            failure_next_steps="Read-only. If empty, no endpoints are configured or enabled.",
+        ),
         aliases=("llm_list",),
     )
     def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -142,7 +147,12 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="active",
         description="Show the current active llm model metadata",
-        guidance=ToolGuidance(purpose="Show the current active llm model metadata"),
+        guidance=ToolGuidance(
+            purpose="Show the current active LLM model metadata.",
+            use_when="Checking which model endpoint is currently selected for requests.",
+            do_not_use_when="Listing all endpoints (use llm_list). Switching endpoints (use llm_set_active_endpoint).",
+            failure_next_steps="Read-only. If no active model, check llm_list for available endpoints.",
+        ),
         aliases=("llm_active",),
     )
     def active(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -160,7 +170,12 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show public metadata for one enabled llm endpoint by endpoint_id",
-        guidance=ToolGuidance(purpose="Show public metadata for one enabled llm endpoint by endpoint_id"),
+        guidance=ToolGuidance(
+            purpose="Show public metadata for one enabled LLM endpoint by endpoint_id.",
+            use_when="Inspecting one endpoint's context window, max output, thinking levels, capabilities.",
+            do_not_use_when="Checking the active model (use llm_active). Listing all endpoints (use llm_list).",
+            failure_next_steps="If NOT_FOUND, verify endpoint_id with llm_list.",
+        ),
         InputModel=LlmCapabilitiesLLMIntrospectionProviderShowInput,
         aliases=("llm_show",),
     )
@@ -193,7 +208,12 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="think_level",
         description="Show the active endpoint's provider-declared thinking choices and current selection",
-        guidance=ToolGuidance(purpose="Show the active endpoint's provider-declared thinking choices and current selection"),
+        guidance=ToolGuidance(
+            purpose="Show the active endpoint's thinking level choices and current selection.",
+            use_when="Checking or deciding which reasoning level (e.g. low/medium/high) the active model uses.",
+            do_not_use_when="Checking token usage (use llm_usage). Switching endpoints (use llm_set_active_endpoint).",
+            failure_next_steps="Read-only. Thinking levels are provider-declared; if empty, the endpoint may not support thinking.",
+        ),
         aliases=("llm_think_level",),
     )
     def think_level(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -227,7 +247,12 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="usage",
         description="Show resident-process LLM request, token, prompt-cache, reasoning-token, and provider-reported cost statistics.",
-        guidance=ToolGuidance(purpose="Show resident-process LLM request, token, prompt-cache, reasoning-token, and provider-reported cost statistics."),
+        guidance=ToolGuidance(
+            purpose="Show resident-process LLM usage statistics — requests, tokens, cache hit rate, cost.",
+            use_when="Monitoring token consumption, cache performance, or cost across the current process lifetime.",
+            do_not_use_when="Checking model metadata (use llm_active or llm_show).",
+            failure_next_steps="Read-only. Stats reset on process restart. If all zeros, no LLM requests have been made yet.",
+        ),
         aliases=("llm_usage",),
     )
     def usage(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -255,7 +280,12 @@ class LLMIntrospectionProvider:
         family="management",
         action_name="set_active_endpoint",
         description="Switch the active llm endpoint used for future requests",
-        guidance=ToolGuidance(purpose="Switch the active llm endpoint used for future requests"),
+        guidance=ToolGuidance(
+            purpose="Switch the active LLM endpoint for future requests.",
+            use_when="The user asks to switch models (e.g. to a different provider, a faster/cheaper model, or one with vision).",
+            do_not_use_when="Checking the current model (use llm_active). Listing endpoints (use llm_list).",
+            failure_next_steps="If NOT_FOUND, verify endpoint_id with llm_list. Only enabled endpoints can be activated.",
+        ),
         InputModel=LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
         aliases=("llm_set_active_endpoint",),
         execution=INDIRECT_LOCAL_WRITE,
