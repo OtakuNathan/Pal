@@ -94,9 +94,9 @@ class ToolGuidance(StrictToolModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
     purpose: str
-    use_when: str
-    do_not_use_when: str
-    failure_next_steps: str
+    use_when: str = ""
+    do_not_use_when: str = ""
+    failure_next_steps: str = ""
 
 
 class ToolExecutionSemantics(StrictToolModel):

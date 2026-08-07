@@ -10,6 +10,7 @@ from pal.execution.generated_tool_models import (
     BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateInput,
     BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateOutput,
 )
+from pal.execution.tool_facade import ToolGuidance
 from pal.execution.tool_semantics import DIRECT_LOCAL_READ, DIRECT_UNSAFE_LOCAL_WRITE
 
 from dataclasses import dataclass
@@ -67,6 +68,7 @@ class BehaviorIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show behavior routing state",
+        guidance=ToolGuidance(purpose="Show behavior routing state"),
         aliases=("behavior_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:

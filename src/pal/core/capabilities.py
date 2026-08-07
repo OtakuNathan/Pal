@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_WRITE,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
     CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
@@ -50,6 +51,7 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="observe",
         description="Observe module-level state for core",
+        guidance=ToolGuidance(purpose="Observe module-level state for core"),
         aliases=("core_observe",),
     )
     def observe(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -67,6 +69,7 @@ class CoreIntrospectionProvider:
         scope="module",
         action_name="configure",
         description="Configure module-level state for core",
+        guidance=ToolGuidance(purpose="Configure module-level state for core"),
         InputModel=CoreCapabilitiesCoreIntrospectionProviderConfigureInput,
         aliases=("core_configure",),
         execution=INDIRECT_LOCAL_WRITE,

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
+from pal.execution.tool_facade import ToolGuidance
 from pal.execution.file_capabilities import FileCapabilityMixin, get_file_state_cache as _get_file_state_cache
 from pal.execution.file_state import FileStateCache
 from pal.execution.git_capabilities import GitCapabilityMixin
@@ -75,6 +76,7 @@ class ExecutionIntrospectionProvider(
         scope="module",
         action_name="show",
         description="Show execution runtime state",
+        guidance=ToolGuidance(purpose="Show execution runtime state"),
         aliases=("exec_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:

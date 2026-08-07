@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
     PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
@@ -48,7 +49,8 @@ class PluginsIntrospectionProvider:
     host: PluginHost
     module_id: str = "plugins"
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show plugin host summary", aliases=("plugins_show",))
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show plugin host summary",
+        guidance=ToolGuidance(purpose="Show plugin host summary"), aliases=("plugins_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         summary = self.host.show_summary()
@@ -59,7 +61,8 @@ class PluginsIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Plugin host summary", summary),
         )
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list", description="List known first-party and third-party plugins", aliases=("plugins_list",))
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list", description="List known first-party and third-party plugins",
+        guidance=ToolGuidance(purpose="List known first-party and third-party plugins"), aliases=("plugins_list",))
     def list_plugins(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         items = self.host.list_plugins()
@@ -75,9 +78,12 @@ class PluginsIntrospectionProvider:
         scope="module",
         family="management",
         action_name="attach",
-        description=(
-            "Attach a plugin to the current runtime. First-party plugins that are disabled by default can be attached "
-            "temporarily; if the result is forbidden with reason=plugin_disabled, call plugin_enable for that plugin_id."
+        description="Attach a plugin to the current runtime.",
+        guidance=ToolGuidance(
+            purpose="Attach a plugin to the current runtime.",
+            use_when="When the user asks to enable/attach a plugin. If forbidden with reason=plugin_disabled, call plugin_enable first.",
+            do_not_use_when="Not for detaching (use plugin_detach). Not for listing (use plugin_list).",
+            failure_next_steps="Correct the plugin_id; check plugin_list for available plugins.",
         ),
         aliases=("plugin_attach",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
@@ -98,6 +104,7 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="detach",
         description="Detach a plugin from the current runtime",
+        guidance=ToolGuidance(purpose="Detach a plugin from the current runtime"),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDetachInput,
         aliases=("plugin_detach",),
         execution=INDIRECT_CONTROL,
@@ -117,6 +124,7 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="enable",
         description="Enable and attach a plugin that is currently disabled, including disabled first-party plugins such as mcp.",
+        guidance=ToolGuidance(purpose="Enable and attach a plugin that is currently disabled, including disabled first-party plugins such as mcp."),
         aliases=("plugin_enable",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderEnableInput,
         execution=INDIRECT_CONTROL,
@@ -136,6 +144,7 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="disable",
         description="Disable a plugin",
+        guidance=ToolGuidance(purpose="Disable a plugin"),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDisableInput,
         aliases=("plugin_disable",),
         execution=INDIRECT_CONTROL,
@@ -149,7 +158,8 @@ class PluginsIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Plugin disable result", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan plugin directories", aliases=("plugin_rescan",), execution=INDIRECT_CONTROL)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan plugin directories",
+        guidance=ToolGuidance(purpose="Rescan plugin directories"), aliases=("plugin_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         result = self.host.rescan()
@@ -170,6 +180,7 @@ class PluginsIntrospectionProvider:
         family="management",
         action_name="rescan_and_attach_new_first_party",
         description="Rescan plugin directories and attach newly discovered enabled first-party plugins",
+        guidance=ToolGuidance(purpose="Rescan plugin directories and attach newly discovered enabled first-party plugins"),
         aliases=("plugin_rescan_and_attach_new_first_party",),
         execution=INDIRECT_CONTROL,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
+from pal.execution.tool_facade import ToolGuidance
 from pal.failure.runtime import FailureRuntime
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -27,7 +28,8 @@ class FailureIntrospectionProvider:
     runtime: FailureRuntime
     module_id: str = "failure"
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show failure runtime summary", aliases=("failure_show",))
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show failure runtime summary",
+        guidance=ToolGuidance(purpose="Show failure runtime summary"), aliases=("failure_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         summary = self.runtime.show_summary()
@@ -43,6 +45,7 @@ class FailureIntrospectionProvider:
         scope="module",
         action_name="recent_reports",
         description="List recent structured failure reports",
+        guidance=ToolGuidance(purpose="List recent structured failure reports"),
         aliases=("failure_recent_reports",),
     )
     def recent_reports(self, call: IntrospectionCall) -> IntrospectionResult:

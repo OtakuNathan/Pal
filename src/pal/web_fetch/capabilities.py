@@ -5,6 +5,7 @@ from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_WRITE,
     INDIRECT_UNSAFE_LOCAL_WRITE,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
     WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
@@ -103,7 +104,8 @@ class WebFetchIntrospectionProvider:
     def resolve_provider_label(self, provider: WebFetchProviderModel) -> str:
         return provider.provider_id
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show web fetch module state", aliases=("web_fetch_show",))
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show web fetch module state",
+        guidance=ToolGuidance(purpose="Show web fetch module state"), aliases=("web_fetch_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = inspect_web_fetch(self).__dict__
@@ -119,6 +121,7 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="list_providers",
         description="List configured web fetch providers",
+        guidance=ToolGuidance(purpose="List configured web fetch providers"),
         aliases=("web_fetch_list_providers",),
     )
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -137,6 +140,7 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="active_provider",
         description="Show configured and effective active web fetch provider",
+        guidance=ToolGuidance(purpose="Show configured and effective active web fetch provider"),
         aliases=("web_fetch_active_provider",),
     )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -157,6 +161,7 @@ class WebFetchIntrospectionProvider:
         scope="provider",
         action_name="show",
         description="Show web fetch provider metadata",
+        guidance=ToolGuidance(purpose="Show web fetch provider metadata"),
         aliases=("web_fetch_provider_show",),
     )
     def show_provider(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -176,6 +181,7 @@ class WebFetchIntrospectionProvider:
         scope="provider",
         action_name="auth_state",
         description="Show web fetch provider authorization state",
+        guidance=ToolGuidance(purpose="Show web fetch provider authorization state"),
         aliases=("web_fetch_provider_auth_state",),
     )
     def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -195,6 +201,7 @@ class WebFetchIntrospectionProvider:
         scope="provider",
         action_name="health",
         description="Show web fetch provider health",
+        guidance=ToolGuidance(purpose="Show web fetch provider health"),
         aliases=("web_fetch_provider_health",),
     )
     def health(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -215,6 +222,7 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_active_provider",
         description="Set the configured active web fetch provider",
+        guidance=ToolGuidance(purpose="Set the configured active web fetch provider"),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput,
         aliases=("web_fetch_set_active_provider",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -242,6 +250,7 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="read",
         description="Fetch a webpage using the configured browser fetch provider and internal fallback",
+        guidance=ToolGuidance(purpose="Fetch a webpage using the configured browser fetch provider and internal fallback"),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
         execution=DIRECT_EXTERNAL_READ,
         metadata={"canonical_path": "op_web_read", "omit_family_in_canonical": True},
@@ -302,9 +311,12 @@ class WebFetchIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         action_name="screenshot",
-        description=(
-            "Render a URL in the browser and save a PNG screenshot as an artifact. "
-            "Returns artifact_id and local_cached_path. Use only when visual page evidence is needed."
+        description="Render a URL in the browser and save a PNG screenshot.",
+        guidance=ToolGuidance(
+            purpose="Render a URL in the browser and save a PNG screenshot as an artifact.",
+            use_when="Only when visual page evidence is needed.",
+            do_not_use_when="Not for text extraction (use read_web). Not for API calls.",
+            failure_next_steps="Check URL validity and browser availability.",
         ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput,
         OutputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput,
@@ -327,6 +339,7 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="enable",
         description="Enable a web fetch provider",
+        guidance=ToolGuidance(purpose="Enable a web fetch provider"),
         aliases=("web_fetch_provider_enable",),
         execution=INDIRECT_LOCAL_WRITE,
     )
@@ -339,6 +352,7 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="disable",
         description="Disable a web fetch provider",
+        guidance=ToolGuidance(purpose="Disable a web fetch provider"),
         aliases=("web_fetch_provider_disable",),
         execution=INDIRECT_LOCAL_WRITE,
     )
@@ -351,6 +365,7 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_auth_material",
         description="Update web fetch provider auth material without exposing secrets",
+        guidance=ToolGuidance(purpose="Update web fetch provider auth material without exposing secrets"),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetAuthMaterialInput,
         aliases=("web_fetch_provider_set_auth_material",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -380,6 +395,7 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_config",
         description="Merge config into a web fetch provider settings blob",
+        guidance=ToolGuidance(purpose="Merge config into a web fetch provider settings blob"),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetConfigInput,
         aliases=("web_fetch_provider_set_config",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -402,7 +418,8 @@ class WebFetchIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Web fetch provider config updated", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach web fetch module", aliases=("web_fetch_attach",), execution=INDIRECT_CONTROL)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach web fetch module",
+        guidance=ToolGuidance(purpose="Attach web fetch module"), aliases=("web_fetch_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -410,7 +427,8 @@ class WebFetchIntrospectionProvider:
         payload = {"mounted": True, "degraded": False}
         return IntrospectionResult(status=RuntimeStatus.OK, text="web fetch attached", structured=payload, llm_text=render_titled_structured_for_llm("Web fetch attached", payload))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach web fetch module", aliases=("web_fetch_detach",), execution=INDIRECT_CONTROL)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach web fetch module",
+        guidance=ToolGuidance(purpose="Detach web fetch module"), aliases=("web_fetch_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.service.shutdown_sync()

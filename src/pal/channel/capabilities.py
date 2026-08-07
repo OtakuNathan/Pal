@@ -192,6 +192,7 @@ class ChannelIntrospectionProvider:
         scope="module",
         action_name="list",
         description="List configured channel endpoints",
+        guidance=ToolGuidance(purpose="List configured channel endpoints"),
         aliases=("channel_list",),
     )
     def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -220,6 +221,7 @@ class ChannelIntrospectionProvider:
         family="channel",
         action_name="send_attachment",
         description="Send a local file attachment back to the channel that started the current turn.",
+        guidance=ToolGuidance(purpose="Send a local file attachment back to the channel that started the current turn."),
         aliases=("send_channel_attachment",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput,
         OutputModel=ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentOutput,
@@ -373,6 +375,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="enable",
         description="Enable a channel endpoint",
+        guidance=ToolGuidance(purpose="Enable a channel endpoint"),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderEnableInput,
         aliases=("channel_enable",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -386,6 +389,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="disable",
         description="Disable a channel endpoint",
+        guidance=ToolGuidance(purpose="Disable a channel endpoint"),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderDisableInput,
         aliases=("channel_disable",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -399,6 +403,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="attach",
         description="Attach a channel endpoint",
+        guidance=ToolGuidance(purpose="Attach a channel endpoint"),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderAttachInput,
         aliases=("channel_attach",),
         execution=INDIRECT_CONTROL,
@@ -412,6 +417,7 @@ class ChannelIntrospectionProvider:
         family="management",
         action_name="detach",
         description="Detach a channel endpoint",
+        guidance=ToolGuidance(purpose="Detach a channel endpoint"),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderDetachInput,
         aliases=("channel_detach",),
         execution=INDIRECT_CONTROL,
@@ -425,6 +431,7 @@ class ChannelIntrospectionProvider:
         family="provider",
         action_name="rescan",
         description="Rescan channel providers and update the channel provider registry.",
+        guidance=ToolGuidance(purpose="Rescan channel providers and update the channel provider registry."),
         aliases=("channel_provider_rescan",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderRescanInput,
         execution=INDIRECT_CONTROL,
@@ -447,10 +454,8 @@ class ChannelIntrospectionProvider:
         scope="module",
         family="management",
         action_name="reload_provider",
-        description=(
-            "Restart one channel endpoint runtime instance through its provider. "
-            "Use channel provider rescan to discover newly available providers."
-        ),
+        description="Restart one channel endpoint runtime instance through its provider. Use channel provider rescan to discover newly available providers.",
+        guidance=ToolGuidance(purpose="Restart one channel endpoint runtime instance through its provider. Use channel provider rescan to discover newly available providers."),
         aliases=("channel_reload_provider",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput,
         execution=INDIRECT_CONTROL,
@@ -463,6 +468,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="inspect",
         description="Inspect channel endpoint state",
+        guidance=ToolGuidance(purpose="Inspect channel endpoint state"),
         aliases=("channel_endpoint_inspect",),
     )
     def inspect_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -480,6 +486,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="auth_state",
         description="Inspect endpoint authorization state",
+        guidance=ToolGuidance(purpose="Inspect endpoint authorization state"),
         aliases=("channel_endpoint_auth_state",),
     )
     def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -498,6 +505,7 @@ class ChannelIntrospectionProvider:
         family="endpoint",
         action_name="set_auth_material",
         description="Apply endpoint authorization material without exposing secrets",
+        guidance=ToolGuidance(purpose="Apply endpoint authorization material without exposing secrets"),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderSetAuthMaterialInput,
         aliases=("channel_endpoint_set_auth_material",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -524,6 +532,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="backlog",
         description="Inspect endpoint backlog state",
+        guidance=ToolGuidance(purpose="Inspect endpoint backlog state"),
         aliases=("channel_endpoint_backlog",),
     )
     def backlog(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -541,6 +550,7 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="health",
         description="Inspect endpoint network and delivery health",
+        guidance=ToolGuidance(purpose="Inspect endpoint network and delivery health"),
         aliases=("channel_endpoint_health",),
     )
     def health(self, call: IntrospectionCall) -> IntrospectionResult:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -59,6 +60,7 @@ class ControlIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show control module status",
+        guidance=ToolGuidance(purpose="Show control module status"),
         aliases=("control_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -71,7 +73,8 @@ class ControlIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Control snapshot", snapshot.__dict__),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Re-attach control module", aliases=("control_attach",), execution=INDIRECT_CONTROL)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Re-attach control module",
+        guidance=ToolGuidance(purpose="Re-attach control module"), aliases=("control_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -83,7 +86,8 @@ class ControlIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Control re-attached", {"mounted": True, "degraded": False}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Degrade control module", aliases=("control_detach",), execution=INDIRECT_CONTROL)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Degrade control module",
+        guidance=ToolGuidance(purpose="Degrade control module"), aliases=("control_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False

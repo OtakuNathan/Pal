@@ -5,6 +5,7 @@ from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_WRITE,
     INDIRECT_UNSAFE_LOCAL_WRITE,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
     MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput,
@@ -293,10 +294,8 @@ class MinionV2PublicProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="minion_catalog",
         action_name="read",
-        description=(
-            "Read the effective Minion profile/family catalog from the attached sidecar. Builtins come from the installed package and explicit "
-            "user overrides are marked separately. Use semantic names such as software_engineering.v2_coder; no runtime files or Manager IDs are exposed."
-        ),
+        description="Read the effective Minion profile/family catalog from the attached sidecar. Builtins come from the installed package and explicit user overrides are marked separately. Use semantic names such as software_engineering.v2_coder; no runtime files or Manager IDs are exposed.",
+        guidance=ToolGuidance(purpose="Read the effective Minion profile/family catalog from the attached sidecar. Builtins come from the installed package and explicit user overrides are marked separately. Use semantic names such as software_engineering.v2_coder; no runtime files or Manager IDs are exposed."),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderReadInput,
         aliases=("minion_catalog_read",),
     )
@@ -322,10 +321,8 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion_catalog",
         action_name="set_profile_override",
-        description=(
-            "Atomically patch one Minion profile inside the sidecar. The profile is selected by semantic name; omitted fields retain their current "
-            "effective value and null removes an optional field. Existing Tasks keep their pinned FamilyBindingArtifact, so this affects only future Tasks."
-        ),
+        description="Atomically patch one Minion profile inside the sidecar. The profile is selected by semantic name; omitted fields retain their current effective value and null removes an optional field. Existing Tasks keep their pinned FamilyBindingArtifact, so this affects only future Tasks.",
+        guidance=ToolGuidance(purpose="Atomically patch one Minion profile inside the sidecar. The profile is selected by semantic name; omitted fields retain their current effective value and null removes an optional field. Existing Tasks keep their pinned FamilyBindingArtifact, so this affects only future Tasks."),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInput,
         aliases=("minion_catalog_set_profile_override",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -346,6 +343,7 @@ class MinionV2PublicProvider:
         scope="minion_catalog",
         action_name="reset_profile_override",
         description="Remove one explicit profile override in the sidecar and restore the current package builtin when one exists.",
+        guidance=ToolGuidance(purpose="Remove one explicit profile override in the sidecar and restore the current package builtin when one exists."),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResetProfileOverrideInput,
         aliases=("minion_catalog_reset_profile_override",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -365,10 +363,8 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion_catalog",
         action_name="set_family_override",
-        description=(
-            "Atomically patch one data-driven Minion family inside the sidecar using its semantic family name. Four role bindings and profile availability "
-            "are validated before the override becomes visible to future Tasks."
-        ),
+        description="Atomically patch one data-driven Minion family inside the sidecar using its semantic family name. Four role bindings and profile availability are validated before the override becomes visible to future Tasks.",
+        guidance=ToolGuidance(purpose="Atomically patch one data-driven Minion family inside the sidecar using its semantic family name. Four role bindings and profile availability are validated before the override becomes visible to future Tasks."),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSetFamilyOverrideInput,
         aliases=("minion_catalog_set_family_override",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -389,6 +385,7 @@ class MinionV2PublicProvider:
         scope="minion_catalog",
         action_name="reset_family_override",
         description="Remove one explicit family override in the sidecar and restore the current package builtin when one exists.",
+        guidance=ToolGuidance(purpose="Remove one explicit family override in the sidecar and restore the current package builtin when one exists."),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResetFamilyOverrideInput,
         aliases=("minion_catalog_reset_family_override",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -408,10 +405,8 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion_catalog",
         action_name="refresh",
-        description=(
-            "Ask the attached Minion sidecar to reload package builtins, validate explicit overrides, and return the "
-            "new effective catalog generation. The Pal process does not read or modify Minion catalog files."
-        ),
+        description="Ask the attached Minion sidecar to reload package builtins, validate explicit overrides, and return the new effective catalog generation. The Pal process does not read or modify Minion catalog files.",
+        guidance=ToolGuidance(purpose="Ask the attached Minion sidecar to reload package builtins, validate explicit overrides, and return the new effective catalog generation. The Pal process does not read or modify Minion catalog files."),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderRefreshInput,
         aliases=("minion_catalog_refresh",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -468,9 +463,12 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="submit_artifact",
-        description=(
-            "Publish a durable artifact under a natural-language name for the current actor. This does not execute it. "
-            "Later workflow calls refer to this name; the Manager owns its content hash and internal identity."
+        description="Publish a durable artifact under a natural-language name.",
+        guidance=ToolGuidance(
+            purpose="Publish a durable artifact under a natural-language name for the current actor.",
+            use_when="When the user has a named architecture or design to reference in later workflow calls.",
+            do_not_use_when="This does not execute the artifact. Not for unnamed or ad-hoc content.",
+            failure_next_steps="Correct invalid input; the Manager owns content hash and internal identity.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSubmitArtifactInput,
         aliases=("minion_submit_artifact",),
@@ -497,10 +495,12 @@ class MinionV2PublicProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="minion_task",
         action_name="search",
-        description=(
-            "Search the durable Minion V2 Task Ledger for the current actor. Use this before claiming that a workflow cannot be "
-            "found. Returns semantic Task details and compact Workflow phase/liveness summaries "
-            "without exposing Manager identities. An empty query lists the most recently updated Tasks."
+        description="Search the durable Minion V2 Task Ledger for the current actor.",
+        guidance=ToolGuidance(
+            purpose="Search the durable Minion V2 Task Ledger for the current actor.",
+            use_when="Before claiming a workflow cannot be found. Empty query lists most recently updated Tasks.",
+            do_not_use_when="Not for live workflow state (use minion_task_status).",
+            failure_next_steps="Correct invalid input; try a broader query if no results.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSearchInput,
         aliases=("minion_task_search",),
@@ -550,10 +550,15 @@ class MinionV2PublicProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="minion_task",
         action_name="status",
-        description=(
-            "Read a Task by natural-language title, then mechanically attach its single current workflow when one exists. Returns Task state plus "
-            "workflow phase, every module's Coder/Verifier state, blockers, next legal actions, timings, last progress, and liveness without exposing "
-            "Manager identities. When workflow.human_review_available is true, call this same tool with view=human_review to read the durable review."
+        description="Read a Task by title and attach its current workflow state.",
+        guidance=ToolGuidance(
+            purpose="Read a Task by natural-language title, then mechanically attach its single current workflow when one exists.",
+            use_when=(
+                "Checking workflow phase, module Coder/Verifier state, blockers, next legal actions, timings, or liveness. "
+                "When workflow.human_review_available is true, call with view=human_review to read the durable review."
+            ),
+            do_not_use_when="Do not poll repeatedly after workflow acceptance; completion returns through system callbacks.",
+            failure_next_steps="Correct the Task title; reconcile with minion_task_search if the title is uncertain.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderStatusInput,
         aliases=("minion_task_status",),
@@ -591,10 +596,12 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="resume_workflow",
-        description=(
-            "Resume a deliberately paused V2 workflow, or normalize liveness=orphaned worker-owned work into explicit TRIAGE_REQUIRED "
-            "items after an interrupted worker disappears. Orphan normalization never bypasses recovery: resolve each reported item with "
-            "resolve_triage after its blocker has actually been addressed."
+        description="Resume a paused workflow or normalize orphaned work into triage items.",
+        guidance=ToolGuidance(
+            purpose="Resume a deliberately paused V2 workflow, or normalize orphaned worker-owned work into TRIAGE_REQUIRED items.",
+            use_when="When a workflow was deliberately paused, or after an interrupted worker disappears.",
+            do_not_use_when="Not for triage resolution (use resolve_triage after addressing blockers).",
+            failure_next_steps="Correct invalid input; reconcile with minion_task_status before retrying.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput,
         aliases=("minion_resume_workflow",),
@@ -626,11 +633,12 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="restart_execution",
-        description=(
-            "Discard the current execution attempt and restart from its accepted architecture without rerunning Architect first. The Manager "
-            "safely cancels and settles the current workflow, creates a new review_then_execute workflow under the same Task with the latest "
-            "Family binding, requires Architecture Review and Human Accept, and reuses no Coder candidates. Use this when execution policy or "
-            "Coder behavior changed but the accepted architecture remains the intended baseline."
+        description="Restart execution from the accepted architecture without rerunning Architect.",
+        guidance=ToolGuidance(
+            purpose="Discard the current execution attempt and restart from its accepted architecture.",
+            use_when="When execution policy or Coder behavior changed but the accepted architecture remains the intended baseline.",
+            do_not_use_when="Not for architecture changes (start a new workflow). Not for transient failures (use resolve_triage).",
+            failure_next_steps="Correct invalid input; reconcile with minion_task_status before retrying.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput,
         aliases=("minion_restart_execution",),
@@ -663,11 +671,12 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="resolve_triage",
-        description=(
-            "Mark one TRIAGE_REQUIRED workflow item as manually handled and resume it through the Manager's declared RESOLVE_TRIAGE "
-            "transition. Supply what was actually fixed or verified. This does not accept a candidate, waive verification, or skip a gate. "
-            "When several items need triage, copy one exact globally unique semantic subject reported by workflow status, such as "
-            "module:ohos_font or phase:architecture."
+        description="Mark one TRIAGE_REQUIRED workflow item as manually handled.",
+        guidance=ToolGuidance(
+            purpose="Mark one TRIAGE_REQUIRED workflow item as manually handled and resume it.",
+            use_when="After the blocker has actually been addressed. Copy the exact semantic subject from workflow status (e.g. module:ohos_font).",
+            do_not_use_when="Does not accept a candidate, waive verification, or skip a gate.",
+            failure_next_steps="Correct invalid input; reconcile with minion_task_status before retrying.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResolveTriageInput,
         aliases=("minion_resolve_triage",),
@@ -701,9 +710,12 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="submit_human_decision",
-        description=(
-            "Submit Accept/Edit/Reject for an architecture review. The Manager resolves the unique pending card and "
-            "atomically validates its actor, revision, and content before acting. Use this manual path when an inline card is unavailable."
+        description="Submit Accept/Edit/Reject for an architecture review.",
+        guidance=ToolGuidance(
+            purpose="Submit Accept/Edit/Reject for an architecture review.",
+            use_when="When an inline review card is unavailable and the user needs to decide manually.",
+            do_not_use_when="Not for live workflow state queries (use minion_task_status).",
+            failure_next_steps="Correct invalid input; the Manager validates actor, revision, and content atomically.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderSubmitHumanDecisionInput,
         aliases=("minion_submit_human_decision",),
@@ -787,10 +799,12 @@ class MinionV2PublicProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         action_name="answer_question",
-        description=(
-            "Answer the single pending Architect question for the named Task with custom free text. "
-            "Use this when the user's response is not one of the inline options. The Architect remains running and receives "
-            "the answer through its existing tool call."
+        description="Answer the pending Architect question for a Task with custom free text.",
+        guidance=ToolGuidance(
+            purpose="Answer the single pending Architect question for the named Task.",
+            use_when="When the user's response is not one of the inline options.",
+            do_not_use_when="Not for multiple-choice answers (use inline options when available).",
+            failure_next_steps="Correct invalid input; the Architect receives the answer through its existing tool call.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderAnswerQuestionInput,
         aliases=("minion_answer_question",),
@@ -826,6 +840,7 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="control_workflow",
         description="Request asynchronous pause or cancel for a V2 workflow. Child aggregates stop at safe points before the workflow settles.",
+        guidance=ToolGuidance(purpose="Request asynchronous pause or cancel for a V2 workflow. Child aggregates stop at safe points before the workflow settles."),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderControlWorkflowInput,
         aliases=("minion_control_workflow",),
         execution=INDIRECT_CONTROL,
@@ -859,6 +874,7 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="archive_workflow",
         description="Archive a terminal V2 workflow. Active workflows must be cancelled and settled first.",
+        guidance=ToolGuidance(purpose="Archive a terminal V2 workflow. Active workflows must be cancelled and settled first."),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput,
         aliases=("minion_archive_workflow",),
         execution=INDIRECT_CONTROL,

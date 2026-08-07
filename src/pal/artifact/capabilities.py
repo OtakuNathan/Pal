@@ -4,6 +4,7 @@ from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_READ,
     INDIRECT_LOCAL_WRITE,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
     ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput,
@@ -77,6 +78,7 @@ class ArtifactIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show artifact manager state.",
+        guidance=ToolGuidance(purpose="Show artifact manager state."),
         aliases=("artifact_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -99,6 +101,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="list",
         description="List recent tagged conversation artifacts visible to the current turn.",
+        guidance=ToolGuidance(purpose="List recent tagged conversation artifacts visible to the current turn."),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListOutput,
         metadata={"async_required": True},
@@ -116,6 +119,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="info",
         description="Inspect metadata and available representations for one artifact id.",
+        guidance=ToolGuidance(purpose="Inspect metadata and available representations for one artifact id."),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderInfoOutput,
         metadata={"async_required": True},
@@ -133,6 +137,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="read",
         description="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
+        guidance=ToolGuidance(purpose="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels."),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput,
         metadata={"async_required": True},
@@ -150,6 +155,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="search",
         description="Search recent tagged conversation artifacts by filename, kind, caption, summary, or time hint.",
+        guidance=ToolGuidance(purpose="Search recent tagged conversation artifacts by filename, kind, caption, summary, or time hint."),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSearchOutput,
         metadata={"async_required": True},
@@ -167,6 +173,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="select",
         description="Mark an artifact search result as selected and refresh its short-lived hot state.",
+        guidance=ToolGuidance(purpose="Mark an artifact search result as selected and refresh its short-lived hot state."),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSelectOutput,
         metadata={"async_required": True},
@@ -183,9 +190,12 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="grep",
-        description=(
-            "Search inside existing text representations of a known artifact, such as text files, PDF page text/chunks, "
-            "or an already-created transcript. Does not inspect image pixels or create transcripts from audio."
+        description="Search inside existing text representations of a known artifact.",
+        guidance=ToolGuidance(
+            purpose="Search inside existing text representations of a known artifact.",
+            use_when="For text files, PDF page text/chunks, or existing transcripts.",
+            do_not_use_when="Does not inspect image pixels or create transcripts from audio.",
+            failure_next_steps="Correct invalid regex or artifact_id.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderGrepOutput,
@@ -204,6 +214,7 @@ class ArtifactIntrospectionProvider:
         family="artifact",
         action_name="transcribe",
         description="Request transcription for an audio artifact.",
+        guidance=ToolGuidance(purpose="Request transcription for an audio artifact."),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderTranscribeOutput,
         metadata={"async_required": True},

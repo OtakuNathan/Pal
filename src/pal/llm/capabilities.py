@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_WRITE,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
     LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
@@ -113,6 +114,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="list",
         description="List enabled llm endpoints ordered by priority. Use endpoint_id with llm show.",
+        guidance=ToolGuidance(purpose="List enabled llm endpoints ordered by priority. Use endpoint_id with llm show."),
         aliases=("llm_list",),
     )
     def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -140,6 +142,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="active",
         description="Show the current active llm model metadata",
+        guidance=ToolGuidance(purpose="Show the current active llm model metadata"),
         aliases=("llm_active",),
     )
     def active(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -157,6 +160,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show public metadata for one enabled llm endpoint by endpoint_id",
+        guidance=ToolGuidance(purpose="Show public metadata for one enabled llm endpoint by endpoint_id"),
         InputModel=LlmCapabilitiesLLMIntrospectionProviderShowInput,
         aliases=("llm_show",),
     )
@@ -189,6 +193,7 @@ class LLMIntrospectionProvider:
         scope="module",
         action_name="think_level",
         description="Show the active endpoint's provider-declared thinking choices and current selection",
+        guidance=ToolGuidance(purpose="Show the active endpoint's provider-declared thinking choices and current selection"),
         aliases=("llm_think_level",),
     )
     def think_level(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -221,10 +226,8 @@ class LLMIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="usage",
-        description=(
-            "Show resident-process LLM request, token, prompt-cache, reasoning-token, "
-            "and provider-reported cost statistics."
-        ),
+        description="Show resident-process LLM request, token, prompt-cache, reasoning-token, and provider-reported cost statistics.",
+        guidance=ToolGuidance(purpose="Show resident-process LLM request, token, prompt-cache, reasoning-token, and provider-reported cost statistics."),
         aliases=("llm_usage",),
     )
     def usage(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -252,6 +255,7 @@ class LLMIntrospectionProvider:
         family="management",
         action_name="set_active_endpoint",
         description="Switch the active llm endpoint used for future requests",
+        guidance=ToolGuidance(purpose="Switch the active llm endpoint used for future requests"),
         InputModel=LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
         aliases=("llm_set_active_endpoint",),
         execution=INDIRECT_LOCAL_WRITE,

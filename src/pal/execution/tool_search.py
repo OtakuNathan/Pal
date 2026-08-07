@@ -5,6 +5,7 @@ from pal.shared.tool_protocol import ToolCallIR
 from pal.shared.tool_protocol import new_tool_call
 
 from pal.execution.contracts import CapabilityCall, CapabilityResult
+from pal.execution.tool_facade import ToolGuidance
 from pal.execution.generated_tool_models import (
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput,
     ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadInput,
@@ -37,6 +38,7 @@ class ExecutionToolSearchMixin:
         scope="module",
         action_name="tools",
         description="List registered execution tools with descriptions and input schemas",
+        guidance=ToolGuidance(purpose="List registered execution tools with descriptions and input schemas"),
         aliases=("exec_tools",),
     )
     def tools(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -56,9 +58,12 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="exec",
         action_name="capability_call",
-        description=(
-            "Invoke one indirect capability by its exact alias. Direct tools must be invoked directly and are rejected "
-            "here. Use search_tools/read_tool to discover the alias and inspect its argument schema."
+        description="Invoke one indirect capability by its exact alias.",
+        guidance=ToolGuidance(
+            purpose="Invoke one indirect capability by its exact alias.",
+            use_when="After discovering the alias via search_tools/read_tool. Direct tools must be invoked directly.",
+            do_not_use_when="Not for direct capabilities (rejected here). Not before reading the tool schema.",
+            failure_next_steps="Use read_tool to inspect the alias schema before retrying.",
         ),
         aliases=("call_tool",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinCapabilityCallInput,
@@ -83,9 +88,12 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="discovery",
         action_name="search",
-        description=(
-            "Search execution capabilities by query text. Use namespace='inspect' for inspect/list/show capabilities "
-            "and namespace='action' for capabilities that mutate, execute, or call external services. Set facets=true only for broad searches that need narrowing statistics."
+        description="Search execution capabilities by query text.",
+        guidance=ToolGuidance(
+            purpose="Search execution capabilities by query text.",
+            use_when="Namespace='inspect' for inspect/list/show; namespace='action' for mutate/execute/external. Set facets=true only for broad searches needing narrowing stats.",
+            do_not_use_when="Not for invoking capabilities (use call_tool for indirect, or call directly for direct).",
+            failure_next_steps="Correct invalid input; try a different namespace or broader query.",
         ),
         aliases=("search_tools",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput,
@@ -108,6 +116,7 @@ class ExecutionDiscoveryCapabilityMixin:
         family="discovery",
         action_name="read",
         description="Read the full capability contract for an execution capability by exact alias.",
+        guidance=ToolGuidance(purpose="Read the full capability contract for an execution capability by exact alias."),
         aliases=("read_tool",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadInput,
         OutputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinReadOutput,
@@ -143,9 +152,12 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="discovery",
         action_name="result_page",
-        description=(
-            "Read a page of a prior large tool result. Use anchor='head' for normal forward pages or anchor='tail' "
-            "to inspect the newest/end of log-like output. Pass the original tool_call_id as result_ref."
+        description="Read a page of a prior large tool result.",
+        guidance=ToolGuidance(
+            purpose="Read a page of a prior large tool result.",
+            use_when="When a prior tool result was truncated or paginated. Use anchor='tail' for log-like output ends.",
+            do_not_use_when="Not for new tool invocations.",
+            failure_next_steps="Pass the original tool_call_id as result_ref.",
         ),
         aliases=("read_tool_result",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageInput,

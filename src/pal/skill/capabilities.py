@@ -4,6 +4,7 @@ from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_WRITE,
     INDIRECT_UNSAFE_LOCAL_WRITE,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
     SkillCapabilitiesSkillIntrospectionProviderAssimilateInput,
@@ -181,6 +182,7 @@ class SkillIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show skill management state",
+        guidance=ToolGuidance(purpose="Show skill management state"),
         aliases=("skill_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -208,6 +210,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="assimilate",
         description="Create a sanitized Pal skill candidate from plain text or SKILL.md content. Does not commit.",
+        guidance=ToolGuidance(purpose="Create a sanitized Pal skill candidate from plain text or SKILL.md content. Does not commit."),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateOutput,
         metadata={"async_required": True},
@@ -223,6 +226,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="commit",
         description="Commit a sanitized skill candidate and its thin affordance.",
+        guidance=ToolGuidance(purpose="Commit a sanitized skill candidate and its thin affordance."),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderCommitInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderCommitOutput,
         aliases=("skill_commit",),
@@ -237,6 +241,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="update",
         description="Update a normalized skill and refresh its thin affordance.",
+        guidance=ToolGuidance(purpose="Update a normalized skill and refresh its thin affordance."),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateOutput,
         aliases=("skill_update",),
@@ -251,6 +256,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="disable",
         description="Disable a normalized skill without deleting history.",
+        guidance=ToolGuidance(purpose="Disable a normalized skill without deleting history."),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderDisableInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderDisableOutput,
         aliases=("skill_disable",),
@@ -265,6 +271,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="search",
         description="Search normalized Pal skills for the current scenario or explicit skill name. Does not inject manuals.",
+        guidance=ToolGuidance(purpose="Search normalized Pal skills for the current scenario or explicit skill name. Does not inject manuals."),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderSearchInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderSearchOutput,
         execution=INDIRECT_LOCAL_READ,
@@ -279,6 +286,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="read",
         description="Read normalized Pal skill metadata, optionally including manual text.",
+        guidance=ToolGuidance(purpose="Read normalized Pal skill metadata, optionally including manual text."),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderReadInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderReadOutput,
         execution=INDIRECT_LOCAL_READ,
@@ -293,6 +301,7 @@ class SkillIntrospectionProvider:
         family="skill",
         action_name="inject",
         description="Inject a registered active skill manual as a tool observation without executing capabilities.",
+        guidance=ToolGuidance(purpose="Inject a registered active skill manual as a tool observation without executing capabilities."),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderInjectInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderInjectOutput,
         execution=INDIRECT_LOCAL_READ,

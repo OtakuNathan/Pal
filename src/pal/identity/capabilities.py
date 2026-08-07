@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
+from pal.execution.tool_facade import ToolGuidance
 from pal.identity.service import IdentityService
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -44,6 +45,7 @@ class IdentityIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show identity state for read-only lookup",
+        guidance=ToolGuidance(purpose="Show identity state for read-only lookup"),
         aliases=("identity_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:

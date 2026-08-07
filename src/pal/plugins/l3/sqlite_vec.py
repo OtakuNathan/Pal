@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pal.execution.tool_semantics import (
+
     INDIRECT_CONTROL,
     INDIRECT_EXTERNAL_READ,
     INDIRECT_EXTERNAL_WRITE,
     INDIRECT_LOCAL_WRITE,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
     PluginsL3SqliteVecSQLiteVecL3PluginDeleteInput,
@@ -239,7 +241,8 @@ class SQLiteVecL3Plugin:
         )
         return inventory
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show", description="Show sqlite-backed memory provider state", aliases=("memory_provider_show",))
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show", description="Show sqlite-backed memory provider state",
+        guidance=ToolGuidance(purpose="Show sqlite-backed memory provider state"), aliases=("memory_provider_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
@@ -250,7 +253,8 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("SQLite vec memory provider", payload),
         )
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory", description="Inspect sqlite-backed memory inventory", aliases=("memory_provider_inventory",))
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory", description="Inspect sqlite-backed memory inventory",
+        guidance=ToolGuidance(purpose="Inspect sqlite-backed memory inventory"), aliases=("memory_provider_inventory",))
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
@@ -266,11 +270,12 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="recall",
         action_name="recall",
-        description=(
-            "Recall durable memory records by searching against the source-of-truth text. "
-            "When an error, regression, failed repair, repeated pitfall, or unfamiliar debugging situation appears, "
-            "prefer kind='case' with concrete error/symptom/fix terms to check prior failures and fixes before improvising. "
-            "queries: natural language search terms; provide descriptive, specific queries for best recall results."
+        description="Recall durable memory records by searching against the source-of-truth text.",
+        guidance=ToolGuidance(
+            purpose="Recall durable memory records by searching against the source-of-truth text.",
+            use_when="When an error, regression, failed repair, repeated pitfall, or unfamiliar debugging situation appears, prefer kind='case' with concrete error/symptom/fix terms to check prior failures and fixes before",
+            do_not_use_when="See recall_memory for boundaries.",
+            failure_next_steps="Correct invalid input.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginRecallInput,
@@ -313,11 +318,12 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="commit",
         action_name="write",
-        description=(
-            "Commit a durable memory record. "
-            "summary is prompt-ready memory text for future LLM consumption. "
-            "search_text is source-of-truth retrieval text for indexing. "
-            "For kind=case, provide star with situation, task, action, and result."
+        description="Commit a durable memory record.",
+        guidance=ToolGuidance(
+            purpose="Commit a durable memory record.",
+            use_when="summary is prompt-ready memory text for future LLM consumption. search_text is source-of-truth retrieval text for indexing. For kind=case, provide star with situation, task, action, and result.",
+            do_not_use_when="See recall_memory for boundaries.",
+            failure_next_steps="Correct invalid input.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginWriteInput,
@@ -381,11 +387,8 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="correct",
         action_name="update",
-        description=(
-            "Update an existing durable memory record. "
-            "Only provided fields will be updated. "
-            "search_text: updated source of truth for retrieval indexing."
-        ),
+        description="Update an existing durable memory record. Only provided fields will be updated. search_text: updated source of truth for retrieval indexing.",
+        guidance=ToolGuidance(purpose="Update an existing durable memory record. Only provided fields will be updated. search_text: updated source of truth for retrieval indexing."),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginUpdateInput,
         aliases=("memory_provider_update",),
@@ -431,9 +434,12 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="delete",
         action_name="delete",
-        description=(
-            "Delete one durable memory record by exact mem_ref. "
-            "Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record."
+        description="Delete one durable memory record by exact mem_ref.",
+        guidance=ToolGuidance(
+            purpose="Delete one durable memory record by exact mem_ref.",
+            use_when="Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record.",
+            do_not_use_when="See recall_memory for boundaries.",
+            failure_next_steps="Correct invalid input.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginDeleteInput,
@@ -456,7 +462,8 @@ class SQLiteVecL3Plugin:
             llm_text=render_mutation_result_for_llm("delete", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider", aliases=("memory_provider_attach",), execution=INDIRECT_CONTROL)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider",
+        guidance=ToolGuidance(purpose="Attach memory provider"), aliases=("memory_provider_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -467,7 +474,8 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("Memory provider attached", {"mounted": True}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider", aliases=("memory_provider_detach",), execution=INDIRECT_CONTROL)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider",
+        guidance=ToolGuidance(purpose="Detach memory provider"), aliases=("memory_provider_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
@@ -484,6 +492,7 @@ class SQLiteVecL3Plugin:
         family="maintenance",
         action_name="refresh_indexes",
         description="Refresh provider indexes and embedding state",
+        guidance=ToolGuidance(purpose="Refresh provider indexes and embedding state"),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginRefreshIndexesInput,
         aliases=("memory_provider_refresh_indexes",),

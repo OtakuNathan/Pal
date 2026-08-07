@@ -1173,10 +1173,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("scope", memory_recall_properties)
             memory_write = next(item for item in request.tools if item.name == "remember_memory")
             memory_write_description = memory_write.description
-            self.assertIn("Before using this tool, call recall_memory", memory_write_description)
-            self.assertIn("use update_memory with that", memory_write_description)
-            self.assertIn("Do not write duplicate memories", memory_write_description)
-            self.assertIn("fact: or case:", memory_write_description)
+            self.assertIn("recall_memory", memory_write_description)
+            self.assertIn("use update_memory instead", memory_write_description)
+            self.assertIn("Do not write duplicates", memory_write_description)
+            self.assertIn("fact:/case:", memory_write_description)
             memory_write_properties = memory_write.input_schema["properties"]
             self.assertIn("star", memory_write_properties)
             self.assertIn("task_id", memory_write_properties)

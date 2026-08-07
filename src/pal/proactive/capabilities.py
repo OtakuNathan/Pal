@@ -4,6 +4,7 @@ from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
     INDIRECT_LOCAL_WRITE,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
     ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput,
@@ -131,6 +132,7 @@ class ProactiveIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show proactive module status for scheduled, reminder, recurring, or push tasks",
+        guidance=ToolGuidance(purpose="Show proactive module status for scheduled, reminder, recurring, or push tasks"),
         aliases=("proactive_show",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -148,6 +150,7 @@ class ProactiveIntrospectionProvider:
         scope="module",
         action_name="list",
         description="List configured proactive tasks such as reminders, scheduled jobs, recurring reports, and push notifications",
+        guidance=ToolGuidance(purpose="List configured proactive tasks such as reminders, scheduled jobs, recurring reports, and push notifications"),
         aliases=("proactive_list",),
     )
     def list(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -181,6 +184,7 @@ class ProactiveIntrospectionProvider:
         scope="proactive",
         action_name="show",
         description="Show a configured proactive task",
+        guidance=ToolGuidance(purpose="Show a configured proactive task"),
         aliases=("proactive_show",),
     )
     def show_task(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -215,6 +219,7 @@ class ProactiveIntrospectionProvider:
         scope="proactive",
         action_name="last_run",
         description="Show the latest run for a proactive task",
+        guidance=ToolGuidance(purpose="Show the latest run for a proactive task"),
         aliases=("proactive_last_run",),
     )
     def last_run(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -256,6 +261,7 @@ class ProactiveIntrospectionProvider:
         scope="proactive",
         action_name="list_runs",
         description="List recent runs for a proactive task",
+        guidance=ToolGuidance(purpose="List recent runs for a proactive task"),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput,
         aliases=("proactive_list_runs",),
     )
@@ -291,9 +297,12 @@ class ProactiveIntrospectionProvider:
         scope="module",
         family="management",
         action_name="create",
-        description=(
-            "Create or replace a proactive task for future work: one-time reminders, scheduled jobs, recurring reports, "
-            "periodic checks, or proactive push notifications."
+        description="Create or replace a proactive task for future work.",
+        guidance=ToolGuidance(
+            purpose="Create or replace a proactive task for future work.",
+            use_when="For one-time reminders, scheduled jobs, recurring reports, periodic checks, or push notifications.",
+            do_not_use_when="Not for one-shot immediate tasks (handle directly).",
+            failure_next_steps="Correct invalid schedule/cron syntax; verify the output channel exists.",
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput,
         aliases=("proactive_create",),
@@ -350,6 +359,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="delete",
         description="Delete (destroy) a proactive task",
+        guidance=ToolGuidance(purpose="Delete (destroy) a proactive task"),
         aliases=("proactive_delete",),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput,
         execution=INDIRECT_LOCAL_WRITE,
@@ -384,6 +394,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="enable",
         description="Enable a proactive task",
+        guidance=ToolGuidance(purpose="Enable a proactive task"),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput,
         aliases=("proactive_enable",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -397,6 +408,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="disable",
         description="Disable a proactive task",
+        guidance=ToolGuidance(purpose="Disable a proactive task"),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput,
         aliases=("proactive_disable",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -410,6 +422,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="set_output_channel",
         description="Set or clear the output channel for a proactive task",
+        guidance=ToolGuidance(purpose="Set or clear the output channel for a proactive task"),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput,
         aliases=("proactive_set_output_channel",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -451,6 +464,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="set_output_target",
         description="Set or clear the output reply target for a proactive task",
+        guidance=ToolGuidance(purpose="Set or clear the output reply target for a proactive task"),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput,
         aliases=("proactive_set_output_target",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -490,6 +504,7 @@ class ProactiveIntrospectionProvider:
         family="management",
         action_name="update_schedule",
         description="Update the schedule for a proactive task",
+        guidance=ToolGuidance(purpose="Update the schedule for a proactive task"),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput,
         aliases=("proactive_update_schedule",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -529,7 +544,8 @@ class ProactiveIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Proactive schedule updated", payload),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach proactive module", aliases=("proactive_attach",), execution=INDIRECT_CONTROL)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach proactive module",
+        guidance=ToolGuidance(purpose="Attach proactive module"), aliases=("proactive_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
@@ -541,7 +557,8 @@ class ProactiveIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Proactive attached", {"mounted": True, "degraded": False}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach proactive module", aliases=("proactive_detach",), execution=INDIRECT_CONTROL)
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach proactive module",
+        guidance=ToolGuidance(purpose="Detach proactive module"), aliases=("proactive_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False

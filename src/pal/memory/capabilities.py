@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.execution.tool_semantics import (
     INDIRECT_LOCAL_WRITE,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.generated_tool_models import (
     MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
@@ -162,7 +163,8 @@ class MemoryIntrospectionProvider:
         suffix = f"; {skipped} skipped" if skipped else ""
         return f"Memory candidates accepted ({len(memory_candidates)} reviewed; {committed} committed{suffix})."
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show memory runtime state", aliases=("memory_show",))
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show memory runtime state",
+        guidance=ToolGuidance(purpose="Show memory runtime state"), aliases=("memory_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_memory(self)
@@ -178,6 +180,7 @@ class MemoryIntrospectionProvider:
         scope="module",
         action_name="list_providers",
         description="List registered L3 providers",
+        guidance=ToolGuidance(purpose="List registered L3 providers"),
         aliases=("memory_list_providers",),
     )
     def list_providers(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -204,6 +207,7 @@ class MemoryIntrospectionProvider:
         scope="module",
         action_name="active_provider",
         description="Show the current active memory provider used by recall_memory, remember_memory, update_memory, and forget_memory",
+        guidance=ToolGuidance(purpose="Show the current active memory provider used by recall_memory, remember_memory, update_memory, and forget_memory"),
         aliases=("memory_active_provider",),
     )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -233,17 +237,24 @@ class MemoryIntrospectionProvider:
         scope="module",
         family="recall",
         action_name="recall",
-        description=(
-            "Recall durable memory records from the active memory provider. Use this before acting when the task depends "
-            "on prior Pal decisions, user preferences, project history, custom Pal/project terms, known failures, repair "
-            "lessons, or before creating/changing/forgetting durable memory records. When an error, regression, failed "
-            "repair, repeated pitfall, or unfamiliar debugging situation appears, prefer a targeted recall with kind='case' "
-            "to check prior failures and fixes before improvising. Memory is Pal's remembered facts, "
-            "not behavior guidance: behavior is the condition-reflex layer for when situation X should trigger route/action Y. "
-            "Do not use memory for current runtime state; inspect live runtime/capabilities instead. Do not use it for current external facts; verify "
-            "externally instead. Use targeted queries with limit 3-5 by default. Results render each item as "
-            "[mem_ref]: text. mem_ref is opaque; prefixes such as fact: or case: are part of the ref and must be copied "
-            "exactly when using update_memory or forget_memory."
+        description="Recall durable memory records from the active memory provider.",
+        guidance=ToolGuidance(
+            purpose="Recall durable memory records from the active memory provider.",
+            use_when=(
+                "Before acting when the task depends on prior decisions, user preferences, project history, "
+                "known failures, or repair lessons. Before creating/changing/forgetting memory records. "
+                "When the user references personal relationships, family, or preferences you are not confident about. "
+                "On errors or unfamiliar debugging, prefer kind='case'."
+            ),
+            do_not_use_when=(
+                "Not for current runtime state (inspect live capabilities). "
+                "Not for current external facts (verify externally). "
+                "Not for behavior routing rules (use advise_behavior)."
+            ),
+            failure_next_steps=(
+                "Use targeted queries with limit 3-5. "
+                "mem_ref is opaque; copy exactly including prefixes like fact: or case:."
+            ),
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderRecallInput,
@@ -278,16 +289,24 @@ class MemoryIntrospectionProvider:
         scope="module",
         family="commit",
         action_name="write",
-        description=(
-            "Remember a new durable memory record only when the user explicitly asks Pal to remember/save it or states a "
-            "clear durable fact/preference with low ambiguity. Use for facts, preferences, project context, prior decisions, "
-            "and reusable repair lessons. Do not use for behavior rules about when Pal should take a route/action; use learn_behavior for that. "
-            "Before using this tool, call recall_memory with the "
-            "candidate summary/search_text and limit 3-5. If a recalled [mem_ref] is semantically the same record, an "
-            "older version, already covers the candidate, or is the memory being corrected, use update_memory with that "
-            "complete mem_ref instead. Do not write duplicate memories. Do not invent mem_ref values; prefixes such as "
-            "fact: or case: are part of the ref. "
-            "Use summary for prompt-ready memory text and search_text for source-of-truth retrieval text."
+        description="Remember a new durable memory record.",
+        guidance=ToolGuidance(
+            purpose="Remember a new durable memory record.",
+            use_when=(
+                "Only when the user explicitly asks to remember/save, or states a clear durable fact/preference. "
+                "For facts, preferences, project context, prior decisions, repair lessons. "
+                "Before writing, recall_memory with the candidate and limit 3-5 to check for duplicates. "
+                "If a recalled record covers or corrects the candidate, use update_memory instead."
+            ),
+            do_not_use_when=(
+                "Not for behavior rules (use learn_behavior). "
+                "Not for current runtime state or external facts. "
+                "Do not write duplicates or invent mem_ref values."
+            ),
+            failure_next_steps=(
+                "Use summary for prompt-ready text, search_text for retrieval. "
+                "mem_ref prefixes (fact:/case:) are part of the ref."
+            ),
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderWriteInput,
@@ -357,11 +376,18 @@ class MemoryIntrospectionProvider:
         scope="module",
         family="correct",
         action_name="update",
-        description=(
-            "Update an existing durable memory record in the active memory provider. "
-            "Use this instead of remember_memory when a recalled memory is being corrected, superseded, or already covers "
-            "the candidate. mem_ref is the opaque ref returned by recall_memory; copy it exactly, including prefixes "
-            "such as fact: or case:. Do not invent or shorten mem_ref values."
+        description="Update an existing durable memory record.",
+        guidance=ToolGuidance(
+            purpose="Update an existing durable memory record.",
+            use_when=(
+                "Instead of remember_memory when a recalled record is being corrected, superseded, or already covers the candidate. "
+                "Copy mem_ref exactly from recall_memory results, including prefixes like fact: or case:."
+            ),
+            do_not_use_when=(
+                "Not for new memories (use remember_memory). "
+                "Do not invent or shorten mem_ref values."
+            ),
+            failure_next_steps="Correct invalid input; otherwise follow the returned recovery affordances before retrying.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
@@ -412,11 +438,18 @@ class MemoryIntrospectionProvider:
         scope="module",
         family="delete",
         action_name="delete",
-        description=(
-            "Forget an existing durable memory record from the active memory provider. "
-            "Use only when the user explicitly asks to forget/delete a specific memory or approves deleting a clearly "
-            "invalid record. mem_ref is the opaque ref returned by recall_memory; copy it exactly, including prefixes "
-            "such as fact: or case:. Do not invent or shorten mem_ref values."
+        description="Forget an existing durable memory record.",
+        guidance=ToolGuidance(
+            purpose="Forget an existing durable memory record.",
+            use_when=(
+                "Only when the user explicitly asks to forget/delete a specific memory, or approves deleting a clearly invalid record. "
+                "Copy mem_ref exactly from recall_memory results, including prefixes like fact: or case:."
+            ),
+            do_not_use_when=(
+                "Not for behavior guidance (use forget_behavior). "
+                "Do not invent or shorten mem_ref values."
+            ),
+            failure_next_steps="Correct invalid input; otherwise follow the returned recovery affordances before retrying.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
@@ -441,6 +474,7 @@ class MemoryIntrospectionProvider:
         family="management",
         action_name="set_active_provider",
         description="Switch the active L3 provider for memory recall",
+        guidance=ToolGuidance(purpose="Switch the active L3 provider for memory recall"),
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,
         aliases=("memory_set_active_provider",),
         execution=INDIRECT_LOCAL_WRITE,

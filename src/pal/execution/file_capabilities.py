@@ -12,6 +12,7 @@ from pal.execution.generated_tool_models import (
     ExecutionFileCapabilitiesFileCapabilityMixinWriteInput,
     ExecutionFileCapabilitiesFileCapabilityMixinWriteOutput,
 )
+from pal.execution.tool_facade import ToolGuidance
 
 from pal.execution.file_tool_contracts import (
     FILE_EDIT_DESCRIPTION,
@@ -144,9 +145,12 @@ class FileCapabilityMixin:
         scope="module",
         family="path",
         action_name="delete",
-        description=(
-            "Delete a file or directory. Regular files must first be read with read_file so Pal can detect stale deletes, "
-            "or expected_sha256 must match the current file bytes. Directories require recursive=true."
+        description="Delete a file or directory at the given path.",
+        guidance=ToolGuidance(
+            purpose="Delete a file or directory at the given path.",
+            use_when="Regular files must be read first (or expected_sha256 must match). Directories require recursive=true.",
+            do_not_use_when="Not before reading the file first. Not without user confirmation for destructive deletes.",
+            failure_next_steps="Read the file first, or provide correct expected_sha256.",
         ),
         aliases=("delete_path",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput,
@@ -163,10 +167,8 @@ class FileCapabilityMixin:
         scope="module",
         family="file",
         action_name="state",
-        description=(
-            "Inspect the read-before-edit file cache. "
-            "Use this to check whether a file has a current cached read snapshot before edit_file."
-        ),
+        description="Inspect the read-before-edit file cache. Use this to check whether a file has a current cached read snapshot before edit_file.",
+        guidance=ToolGuidance(purpose="Inspect the read-before-edit file cache. Use this to check whether a file has a current cached read snapshot before edit_file."),
         aliases=("file_state",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinStateInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinStateOutput,

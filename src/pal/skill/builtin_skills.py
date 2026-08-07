@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.skill.contracts import SkillApplicabilitySTAR, SkillDescriptor
+from pal.execution.tool_facade import ToolGuidance
 
 
 PAL_PLUGIN_DEVELOPMENT_SKILL_ID = "pal.plugin.development"
@@ -125,6 +126,7 @@ class DemoProvider:
         family="demo",
         action_name="echo",
         description="Echo a short message.",
+        guidance=ToolGuidance(purpose="Echo a short message."),
         InputModel=EchoInput,
         execution=INDIRECT_NONE,
     )
