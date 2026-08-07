@@ -452,6 +452,7 @@ def _compile_record(
         input_schema=input_schema,
         output_schema=output_schema,
         example=example,
+        fallback_description=descriptor.description,
     )
     return CompiledToolRecord(
         alias=alias,

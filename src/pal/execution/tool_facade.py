@@ -216,10 +216,14 @@ def compile_tool_description(
     input_schema: dict[str, Any],
     output_schema: dict[str, Any],
     example: dict[str, Any] | None,
+    fallback_description: str | None = None,
 ) -> str:
     enum_values = _schema_enum_values(input_schema)
+    # Display contract: guidance.purpose is the display source of truth;
+    # the raw description is only the fallback when purpose is absent/empty.
+    purpose = str(guidance.purpose or fallback_description or "").strip()
     sections = [
-        f"Purpose: {guidance.purpose}",
+        f"Purpose: {purpose}",
         f"Use when: {guidance.use_when}",
         f"Do not use when: {guidance.do_not_use_when}",
         f"Failure next steps: {guidance.failure_next_steps}",

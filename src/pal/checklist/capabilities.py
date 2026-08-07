@@ -72,10 +72,10 @@ class ChecklistIntrospectionProvider:
         scope="module",
         family="checklist",
         action_name="upsert",
-        description="Open or replace Pal's own task checklist. When work is fragmented but easy (many small steps, batched verification, a long multi-part routine), start here: write the plan, tick steps off with checklist_check as you finish (the user sees each tick), and clear it with checklist_clear after re-verifying.",
+        description="Open or replace Pal's own task checklist. Land preflight plans here as visible steps, tick them off as you finish, and clear after re-verifying.",
         guidance=ToolGuidance(
             purpose="Open or replace Pal's own task checklist.",
-            use_when="Work is fragmented but easy (many small steps, batched verification, a long multi-part routine) and Pal needs a session checklist that survives context compaction and lets the user watch progress.",
+            use_when="Before multi-step work that causes side effects (writing, mutating, sending, executing, creating): form a brief action path and identify where side effects begin, then land the plan here as the visible checklist — the step where side effects begin is the boundary marker in the list; when the plan materially changes, update the checklist to match. Also when work is fragmented but easy (many small steps, batched verification, a long multi-part routine) and Pal needs a session checklist that survives context compaction and lets the user watch progress.",
             do_not_use_when="Single-step or conversational work. Durable project plans (use memory). Minion task ledger work (that is Manager-owned). Anything needing gating or enforcement — this is a scratchpad, not a cursor.",
             failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a non-empty step string and an optional status of pending/in_progress/completed.",
         ),

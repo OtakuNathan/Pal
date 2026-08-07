@@ -1,0 +1,5 @@
+# Normalize line endings: text files are stored as LF.
+# Python sources are forced to LF regardless of platform (eol=lf),
+# so editors/IDEs on any OS never reintroduce CRLF into these files.
+* text=auto
+*.py text eol=lf

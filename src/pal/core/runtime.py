@@ -639,23 +639,22 @@ class PalCore:
         control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
         channel_envelope = await self._prepare_channel_artifacts_async(channel_envelope)
         turn_id = channel_envelope.event.event_id
-        should_stop_only = False
-        should_queue = False
         async with self.state.channel_turn_transition_lock:
             if self._turn_task_running(turn_id) or self._channel_turn_is_pending(turn_id):
-                should_stop_only = True
-            elif self.state.resident_quiescing or self.turn_manager.latest_active_turn_id() is not None:
+                # Duplicate arrival for a turn that is already running or
+                # already queued: nothing to do. The active turn's
+                # working/typing status must keep running.
+                return
+            if self.state.resident_quiescing or self.turn_manager.latest_active_turn_id() is not None:
+                # Busy: queue the envelope. The active turn keeps its typing
+                # status; working_stop is only emitted when that turn actually
+                # ends (turn.end / runner finally). An interjection may later
+                # be injected from this queue without ever starting its own
+                # turn, so stopping typing here would leave the chat silently
+                # idle while the tool chain is still running.
                 self.state.pending_channel_turns.append(channel_envelope)
-                should_queue = True
-            else:
-                self._start_channel_turn_task_locked(channel_envelope, control_scope_key)
-        if should_stop_only or should_queue:
-            await self._status_to_route_async(
-                self._route_from_channel_envelope(channel_envelope),
-                "working_stop",
-                {},
-            )
-            return
+                return
+            self._start_channel_turn_task_locked(channel_envelope, control_scope_key)
 
     def process_channel_turn(self, channel_envelope: ChannelEnvelope) -> TurnOutcome:
         return asyncio.run(self.process_channel_turn_async(channel_envelope))

@@ -117,6 +117,7 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                             value
                             for value in (
                                 descriptor_name,
+                                getattr(action_blueprint.guidance, "purpose", None),
                                 action_blueprint.description,
                                 action_blueprint.family,
                                 module_id,

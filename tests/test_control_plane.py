@@ -1373,8 +1373,12 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(envelope.event.event_id, self.core.state.turn_tasks)
         self.assertEqual(len(self.core.state.pending_channel_turns), 1)
         self.assertFalse(self.endpoint.has_queued_replies())
-        self.assertTrue(self.endpoint.has_queued_status())
-        self.assertEqual(self.endpoint.status_outbox[-1].kind, "working_stop")
+        # Queuing must not emit working_stop: the queued envelope may later be
+        # injected as an interjection without ever starting its own turn, so
+        # stopping typing here would leave the chat silently idle while the
+        # active turn is still running. working_stop is emitted only when the
+        # turn actually ends.
+        self.assertFalse(self.endpoint.has_queued_status())
 
     async def test_control_action_emits_typing_start_and_working_stop(self) -> None:
         await self.core.handle_control_action_async(
@@ -1754,7 +1758,9 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.core.state.active_turn_id, "turn-queue-1")
         self.assertEqual(len(self.core.state.pending_channel_turns), 1)
         self.assertNotIn("turn-queue-2", self.core.state.turn_tasks)
-        self.assertEqual(self.endpoint.status_outbox[-1].kind, "working_stop")
+        # Queuing must not emit working_stop: turn-queue-1 is still running,
+        # so its typing status must stay up while turn-queue-2 waits.
+        self.assertNotIn("working_stop", [item.kind for item in self.endpoint.status_outbox])
 
         first_release.set()
         await asyncio.wait_for(second_started.wait(), timeout=1.0)
