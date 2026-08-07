@@ -311,6 +311,18 @@ class MemoryService(MemoryServicePort):
         self.l1_store.replace(updated)
         return updated
 
+    def append_l1_user(self, turn_id: str, message: LLMMessageIR) -> L1TurnIR:
+        """Append a user message into an active L1 transcript.
+
+        Used to inject an interjection received while the turn was busy
+        executing tools; the message lands right after the finished tool
+        batch and is seen by the next LLM generation.
+        """
+        current = self.l1_store.active(turn_id)
+        updated = current.append(message)
+        self.l1_store.replace(updated)
+        return updated
+
     def rollback_l1_tool_result(
         self,
         turn_id: str,

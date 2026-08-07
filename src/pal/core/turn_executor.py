@@ -436,11 +436,58 @@ class TurnExecutor:
                 continuation.pending_assistant_tool_text = ""
                 continuation.pending_tool_call_batch = []
                 continuation.pending_tool_results = []
+                await self._inject_pending_interjection_async(continuation)
         return EffectResult(
             status=RuntimeStatus.OK if tool_result.ok else RuntimeStatus.ERROR,
             payload=tool_result,
             text=tool_result.text,
         )
+
+    async def _inject_pending_interjection_async(self, continuation: Any) -> None:
+        """Consume the head of the pending channel queue and inject its text
+        into the current L1 transcript right after the finished tool batch.
+
+        The next LLM generation therefore sees the user's interjection
+        without interrupting the running tool chain, and the consumed
+        envelope never starts as its own turn afterwards. If L1 is
+        unavailable (closed turn, compaction), the envelope is restored at
+        the head of the queue so nothing is lost and the normal queue flow
+        picks it up as the next turn.
+        """
+        if not self.state.pending_channel_turns:
+            return
+        envelope = None
+        async with self.state.channel_turn_transition_lock:
+            if not self.state.pending_channel_turns:
+                return
+            envelope = self.state.pending_channel_turns.popleft()
+        try:
+            text = extract_text_from_payload(
+                getattr(getattr(envelope, "event", None), "payload", None)
+            ).strip()
+            if not text:
+                return
+            memory_service = self.context.port_registry.get("memory:memory")
+            method = getattr(memory_service, "append_l1_user", None)
+            if not callable(method):
+                return
+            message = LLMMessageIR(
+                role=MessageRole.USER,
+                parts=(TextPartIR(text),),
+                semantic_kind="user_interjection",
+            )
+            result = method(str(continuation.turn_id), message)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            # Never let interjection delivery break the tool batch
+            # completion path; restore the envelope so it is retried by the
+            # normal queue flow instead of being lost.
+            try:
+                async with self.state.channel_turn_transition_lock:
+                    self.state.pending_channel_turns.appendleft(envelope)
+            except Exception:
+                pass
 
     def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
         LOGGER.debug(
