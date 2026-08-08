@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from pal.control.contracts import ControlAction, ControlEvent, InteractionResult
@@ -8,6 +9,8 @@ from pal.control.service import ControlPlane
 from pal.core.events import EventHandler
 from pal.foundation import EventEnvelope
 from pal.shared import ChannelEnvelope, EventKind, SourceKind
+from pal.shared.payloads import extract_text_from_payload
+from pal.llm.ir import LLMMessageIR
 
 
 @dataclass(frozen=True)
@@ -50,7 +53,14 @@ class ControlEventHandler(EventHandler):
                     correlation_id=event.correlation_id or event.event_id,
                 )
             ]
-        payload = payload_source if isinstance(payload_source, dict) else {}
+        if isinstance(payload_source, dict):
+            payload = payload_source
+        elif isinstance(payload_source, LLMMessageIR):
+            control_payload = payload_source.metadata.get("control_payload")
+            payload = dict(control_payload) if isinstance(control_payload, Mapping) else {}
+            payload["text"] = extract_text_from_payload(payload_source)
+        else:
+            payload = {"text": extract_text_from_payload(payload_source)}
         control_event = ControlEvent(
             event_kind=event.event_kind,
             source_kind=event.source_kind,
@@ -95,6 +105,7 @@ def _slash_command_fallback_user_message(event: EventEnvelope) -> EventEnvelope 
         event=fallback_inner,
         endpoint=channel_envelope.endpoint,
         response_handle=channel_envelope.response_handle,
+        opening_delivery_binding=channel_envelope.opening_delivery_binding,
     )
     return EventEnvelope(
         event_kind=EventKind.USER_MESSAGE,

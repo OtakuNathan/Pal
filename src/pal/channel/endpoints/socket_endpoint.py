@@ -141,7 +141,8 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                     self._accept_interaction_result(session, incoming)
                     continue
                 text = str(incoming.get("text") or "").strip()
-                if not text and payload_type != "slash_command":
+                attachments = list(incoming.get("attachments") or [])
+                if not text and not attachments and payload_type != "slash_command":
                     continue
                 request_id = str(incoming.get("request_id") or uuid4())
                 session.request_ids.add(request_id)
@@ -151,7 +152,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                         "text": text,
                         "request_id": request_id,
                         "session_id": session_id,
-                        "attachments": list(incoming.get("attachments") or []),
+                        "attachments": attachments,
                     },
                     event_kind=event_kind,
                     correlation_id=request_id,

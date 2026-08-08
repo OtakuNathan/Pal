@@ -683,7 +683,7 @@ class PromptCompiler:
         guidance_sections = self._render_runtime_reminder_guidance(blocks)
         content = (
             "Before answering: apply the active system prompt's hard rules and priority order. "
-            "Treat the user's ordinary message above as the current request. "
+            "Treat the user's active conversation message as the current request. "
             "Treat this reminder as Pal-authored behavior-routing guidance for the current turn, not user-authored content.\n"
         )
         if guidance_sections:
@@ -927,6 +927,8 @@ class PromptCompiler:
         }
 
     def _extract_primary_input_text(self, assembly_context: PromptAssemblyContext) -> str:
+        if assembly_context.metadata.get("active_l1_owns_primary_input"):
+            return ""
         if assembly_context.turn_kind == "proactive_trigger":
             proactive_input = assembly_context.metadata.get("proactive_input")
             if isinstance(proactive_input, str) and proactive_input.strip():

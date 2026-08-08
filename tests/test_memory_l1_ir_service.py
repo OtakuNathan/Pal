@@ -74,6 +74,35 @@ class MemoryL1IRServiceTests(unittest.TestCase):
                 ToolResultIR(call_id="call-1", name="write", content="late"),
             )
 
+    def test_interjection_append_is_idempotent_by_message_id(self) -> None:
+        service = MemoryService()
+        service.begin_l1_turn("turn-1", user_text="start")
+        message = LLMMessageIR(
+            role=MessageRole.USER,
+            parts=(TextPartIR("additional context"),),
+            message_id="interjection-1",
+            semantic_kind="user_interjection",
+        )
+
+        first = service.append_l1_user("turn-1", message)
+        second = service.append_l1_user("turn-1", message)
+
+        self.assertEqual(first.revision, second.revision)
+        self.assertEqual(
+            [item.message_id for item in second.messages].count("interjection-1"),
+            1,
+        )
+        with self.assertRaises(L1TurnProtocolError):
+            service.append_l1_user(
+                "turn-1",
+                LLMMessageIR(
+                    role=MessageRole.USER,
+                    parts=(TextPartIR("different content"),),
+                    message_id="interjection-1",
+                    semantic_kind="user_interjection",
+                ),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

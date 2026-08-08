@@ -168,6 +168,25 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("看看这个附件", text)
         self.assertIn("<runtime_reminder", text)
 
+    def test_legacy_artifact_fragment_is_suppressed_when_active_l1_owns_input(self) -> None:
+        self._register_text(name="active.txt", text="only once")
+        provider = ArtifactPromptFragmentProvider(service=self.manager)
+        fragments = provider.build_prompt_fragments(
+            PromptAssemblyContext(
+                event=EventEnvelope(
+                    event_kind=EventKind.USER_MESSAGE,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={"text": "inspect"},
+                ),
+                metadata={
+                    "artifact_scope_key": self.scope_key,
+                    "artifact_turn_id": self.turn_id,
+                    "active_l1_owns_primary_input": True,
+                },
+            )
+        )
+        self.assertEqual(fragments, [])
+
     def test_artifact_info_exposes_local_file_metadata_for_tool_use(self) -> None:
         ref = self._register_text(name="invoice.txt", text="invoice total is 42")
 

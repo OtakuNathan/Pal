@@ -42,6 +42,10 @@ capabilities = [
     # Only the entry point is resident; check/show/clear stay discoverable
     # via op_tool_search and invocable via op_tool_call.
     "op_checklist_upsert",
+    # -- LSP (workspace preparation is the only resident entry point) --
+    # Navigation, symbols, hierarchy, diagnostics, and repair operations stay
+    # indirect; prepare_workspace tells the model which family to use next.
+    "op_lsp_prepare_workspace",
 ]
 
 # Dynamic capabilities: resolved at runtime by following active provider-like settings.

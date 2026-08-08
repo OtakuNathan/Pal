@@ -1,12 +1,75 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NoReturn, Protocol, Self
 
 from pal.foundation import EventEnvelope
 from pal.foundation.attachment import AttachmentSpec
 from pal.shared.enums import ChannelStreamUpdateKind
 from pal.shared.tool_protocol import ToolCallIR
+
+
+class _FrozenJsonDict(dict):
+    """A JSON-serializable mapping whose complete value tree is immutable."""
+
+    def __init__(self, value=(), /, **kwargs: Any) -> None:
+        source = dict(value, **kwargs)
+        dict.__init__(self, ((key, _freeze_json(item)) for key, item in source.items()))
+
+    @staticmethod
+    def _immutable() -> NoReturn:
+        raise TypeError("frozen JSON mapping")
+
+    def __setitem__(self, key: Any, value: Any) -> NoReturn:
+        self._immutable()
+
+    def __delitem__(self, key: Any) -> NoReturn:
+        self._immutable()
+
+    def clear(self) -> NoReturn:
+        self._immutable()
+
+    def pop(self, key: Any, default: Any = None) -> NoReturn:
+        self._immutable()
+
+    def popitem(self) -> NoReturn:
+        self._immutable()
+
+    def setdefault(self, key: Any, default: Any = None) -> NoReturn:
+        self._immutable()
+
+    def update(self, *args: Any, **kwargs: Any) -> NoReturn:
+        self._immutable()
+
+    def __ior__(self, other: Any, /) -> Self:
+        self._immutable()
+
+    def __or__(self, other: Any, /) -> Self:
+        return type(self)({**dict(self), **dict(other)})
+
+    def __ror__(self, other: Any, /) -> Self:
+        return type(self)({**dict(other), **dict(self)})
+
+    def __copy__(self) -> "_FrozenJsonDict":
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_FrozenJsonDict":
+        memo[id(self)] = self
+        return self
+
+    def __reduce__(self):
+        return (_FrozenJsonDict, (dict(self),))
+
+
+def _freeze_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _FrozenJsonDict(value)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_json(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -50,6 +113,46 @@ class ChannelEnvelope:
     event: EventEnvelope
     endpoint: EndpointConfig
     response_handle: ResponseHandle
+    opening_delivery_binding: "TurnDeliveryBinding | None" = None
+
+
+@dataclass(frozen=True)
+class TurnDeliveryBinding:
+    """Immutable reply authority captured from the message that opened a turn."""
+
+    endpoint: EndpointConfig
+    response_handle: ResponseHandle
+    control_scope_key: str
+    correlation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "endpoint",
+            EndpointConfig(
+                endpoint_id=self.endpoint.endpoint_id,
+                channel_kind=self.endpoint.channel_kind,
+                binding_key=self.endpoint.binding_key,
+                send_policy=_FrozenJsonDict(self.endpoint.send_policy),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "response_handle",
+            ResponseHandle(
+                endpoint_id=self.response_handle.endpoint_id,
+                reply_target=_FrozenJsonDict(self.response_handle.reply_target),
+            ),
+        )
+
+    @classmethod
+    def from_envelope(cls, envelope: ChannelEnvelope, *, control_scope_key: str) -> "TurnDeliveryBinding":
+        return cls(
+            endpoint=envelope.endpoint,
+            response_handle=envelope.response_handle,
+            control_scope_key=str(control_scope_key),
+            correlation_id=envelope.event.correlation_id or envelope.event.event_id,
+        )
 
 
 @dataclass(frozen=True)
@@ -115,19 +218,19 @@ class ChannelNormalizer(Protocol):
 
 
 class AgentOutputPort(Protocol):
-    def queue_reply(self, envelope: ChannelEnvelope, text: str) -> Any:
+    def queue_reply(self, envelope: TurnDeliveryBinding, text: str) -> Any:
         ...
 
-    def queue_stream_update(self, envelope: ChannelEnvelope, update: ChannelStreamUpdate) -> Any:
+    def queue_stream_update(self, envelope: TurnDeliveryBinding, update: ChannelStreamUpdate) -> Any:
         ...
 
     def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
         ...
 
-    def queue_status(self, envelope: ChannelEnvelope, kind: str, *, payload: dict[str, Any] | None = None) -> Any:
+    def queue_status(self, envelope: TurnDeliveryBinding, kind: str, *, payload: dict[str, Any] | None = None) -> Any:
         ...
 
-    def queue_attachment(self, envelope: ChannelEnvelope, attachment: AttachmentSpec) -> Any:
+    def queue_attachment(self, envelope: TurnDeliveryBinding, attachment: AttachmentSpec) -> Any:
         ...
 
 

@@ -84,6 +84,15 @@ def _scope_piece(value: Any) -> str:
 
 
 def route_from_channel_envelope(envelope: ChannelEnvelope) -> ControlRoute:
+    opening_binding = envelope.opening_delivery_binding
+    if opening_binding is not None:
+        return ControlRoute(
+            endpoint_id=opening_binding.endpoint.endpoint_id,
+            channel_kind=opening_binding.endpoint.channel_kind,
+            reply_target=dict(opening_binding.response_handle.reply_target),
+            control_scope_key=opening_binding.control_scope_key,
+            correlation_id=opening_binding.correlation_id,
+        )
     payload = envelope.event.payload if isinstance(envelope.event.payload, dict) else {}
     return ControlRoute(
         endpoint_id=envelope.endpoint.endpoint_id,

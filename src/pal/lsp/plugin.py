@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pal.execution.tool_semantics import (
+    DIRECT_LOCAL_WRITE,
     INDIRECT_CONTROL,
     INDIRECT_LOCAL_READ,
     INDIRECT_LOCAL_WRITE,
@@ -166,7 +167,6 @@ def _position_schema() -> dict[str, Any]:
         "to understand relationships, and lsp_diagnostics after edits when a matching server is available. "
         "Pair LSP with source reads, search, and tests; do not treat LSP as a substitute for inspecting source."
     ),
-    visibility_mode="resident",
     activation_terms=(
         "code",
         "source",
@@ -200,7 +200,6 @@ def _position_schema() -> dict[str, Any]:
     ),
     priority=75,
     activation_threshold=0.15,
-    metadata={"resident": True},
 )
 @affordance(
     affordance_id="declared.skill.pal_lsp_template_development",
@@ -288,19 +287,17 @@ class LspManagerPluginProvider:
         description="Prepare and prewarm one workspace before LSP navigation or diagnostics.",
         guidance=ToolGuidance(
             purpose="Prepare and prewarm one workspace before LSP navigation or diagnostics.",
-            use_when="Once after selecting a project/worktree. Again when compile commands, include paths, or language settings change.",
+            use_when="Once after selecting a project/worktree. Again when compile commands, include paths, or language settings change. After preparing, follow up with the LSP tool family: lsp_document_symbols/workspace_symbols to map code, lsp_definition/references/hover/call hierarchy to understand relationships, and lsp_diagnostics after edits when a matching server is available.",
             do_not_use_when="Not a substitute for reading source. Not for non-LSP projects.",
             failure_next_steps="Check compile_commands.json and language server availability.",
         ),
         InputModel=LspPluginLspManagerPluginProviderPrepareWorkspaceInput,
         aliases=("lsp_prepare_workspace",),
-        execution=INDIRECT_LOCAL_WRITE,
+        execution=DIRECT_LOCAL_WRITE,
     )
     def prepare_workspace(self, call: CapabilityCall) -> CapabilityResult:
-        return _capability_from_rpc(
-            "LSP workspace preparation",
-            self._request_or_error("prepare_workspace", dict(call.args or {})),
-        )
+        payload = self._request_or_error("prepare_workspace", dict(call.args or {}))
+        return _prepare_workspace_result(payload)
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor", description="Check one selected LSP server's binary, workspace, initialize, and diagnostics readiness",
         guidance=ToolGuidance(
@@ -581,3 +578,45 @@ def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResul
     elif status == "partial":
         status = RuntimeStatus.OK
     return CapabilityResult(status=status, text=title, structured=payload, llm_text=render_titled_structured_for_llm(title, payload))
+
+
+def _prepare_workspace_result(payload: dict[str, Any]) -> CapabilityResult:
+    projected = dict(payload)
+    raw_status = str(projected.get("status") or RuntimeStatus.OK)
+    if raw_status == RuntimeStatus.OK:
+        projected["next_tools"] = {
+            "map_code": ["lsp_document_symbols", "lsp_workspace_symbols"],
+            "inspect_symbol": ["lsp_hover", "lsp_definition", "lsp_implementation", "lsp_references"],
+            "trace_calls": ["lsp_prepare_call_hierarchy", "lsp_incoming_calls", "lsp_outgoing_calls"],
+            "verify_edits": ["lsp_diagnostics"],
+        }
+        direction = (
+            "Workspace preparation completed. The LSP tools above are indirect capabilities: "
+            "invoke the relevant one with call_tool using its exact alias; use read_tool first when its arguments are unclear."
+        )
+    elif raw_status == "partial":
+        projected["next_tools"] = {
+            "inspect_readiness": ["lsp_status", "lsp_doctor"],
+            "refresh_configuration": ["lsp_rescan"],
+        }
+        direction = (
+            "Workspace preparation is partial: the primary language server is not ready even though another "
+            "detected server may be available. Use call_tool with lsp_status or lsp_doctor before navigation; "
+            "after changing server configuration, use lsp_rescan and retry lsp_prepare_workspace."
+        )
+    else:
+        projected["next_tools"] = {
+            "inspect_readiness": ["lsp_status", "lsp_doctor"],
+            "refresh_configuration": ["lsp_rescan"],
+        }
+        direction = (
+            "Workspace preparation did not become ready. Use call_tool with lsp_status or lsp_doctor; "
+            "after changing server configuration, use lsp_rescan and retry lsp_prepare_workspace."
+        )
+    result = _capability_from_rpc("LSP workspace preparation", projected)
+    return CapabilityResult(
+        status=result.status,
+        text=result.text,
+        structured=result.structured,
+        llm_text=f"{result.llm_text}\n\n{direction}",
+    )

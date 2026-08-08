@@ -57,10 +57,17 @@ class L1TurnIR:
         turn_id: str,
         *,
         user_text: str = "",
+        user_message: LLMMessageIR | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> "L1TurnIR":
+        if user_message is not None and str(user_text or ""):
+            raise ValueError("provide user_message or user_text, not both")
+        if user_message is not None and user_message.role != MessageRole.USER:
+            raise ValueError("initial L1 message must have user role")
         messages: tuple[LLMMessageIR, ...] = ()
-        if str(user_text or ""):
+        if user_message is not None:
+            messages = (user_message,)
+        elif str(user_text or ""):
             messages = (
                 LLMMessageIR(
                     role=MessageRole.USER,
@@ -85,6 +92,23 @@ class L1TurnIR:
 
     def append(self, message: LLMMessageIR) -> "L1TurnIR":
         self._require_active()
+        return replace(self, messages=(*self.messages, message), revision=self.revision + 1)
+
+    def append_user_once(self, message: LLMMessageIR) -> "L1TurnIR":
+        """Idempotently append one user message by its stable message ID."""
+
+        self._require_active()
+        if message.role != MessageRole.USER:
+            raise L1TurnProtocolError("only user messages can use append_user_once")
+        matches = [item for item in self.messages if item.message_id == message.message_id]
+        if len(matches) > 1:
+            raise L1TurnProtocolError("user message id is duplicated in L1")
+        if matches:
+            if matches[0] != message:
+                raise L1TurnProtocolError(
+                    "user message id already belongs to different L1 content"
+                )
+            return self
         return replace(self, messages=(*self.messages, message), revision=self.revision + 1)
 
     def upsert_assistant(self, message: LLMMessageIR) -> "L1TurnIR":
@@ -229,12 +253,18 @@ class L1TurnStore:
         turn_id: str,
         *,
         user_text: str = "",
+        user_message: LLMMessageIR | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> L1TurnIR:
         normalized = str(turn_id or "").strip()
         if any(turn.turn_id == normalized for turn in self.turns):
             raise L1TurnProtocolError(f"L1 turn already exists: {normalized}")
-        turn = L1TurnIR.begin(normalized, user_text=user_text, metadata=metadata)
+        turn = L1TurnIR.begin(
+            normalized,
+            user_text=user_text,
+            user_message=user_message,
+            metadata=metadata,
+        )
         self.turns.append(turn)
         return turn
 

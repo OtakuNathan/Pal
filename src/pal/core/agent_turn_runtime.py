@@ -63,6 +63,7 @@ class AgentTurnRuntime:
         handle_llm_provider_errors: bool = True,
         compaction_policy: CompactionPolicy | None = None,
         compaction_clock_provider: Callable[[], int] | None = None,
+        after_tool_batch: Callable[[Any], Awaitable[None]] | None = None,
     ) -> "AgentTurnRuntime":
         resolved_state = state if state is not None else AgentTurnRuntimeState()
         resolved_guard_host = guard_host
@@ -125,6 +126,7 @@ class AgentTurnRuntime:
             config=config,
             compaction_engine=compaction_engine,
             compaction_clock_provider=compaction_clock_provider,
+            after_tool_batch=after_tool_batch,
         )
         return cls(
             context=context,

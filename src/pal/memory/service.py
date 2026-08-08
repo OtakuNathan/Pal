@@ -46,6 +46,7 @@ from pal.memory.repository import L3ProviderSelector
 from pal.memory.tool_protocol import l1_tool_protocol_validation_error
 from pal.memory.turn_ir import L1TurnIR, L1TurnProtocolError, L1TurnState, L1TurnStore
 from pal.llm.ir import (
+    ArtifactRefPartIR,
     LLMMessageIR,
     MessageRole,
     TextPartIR,
@@ -122,8 +123,20 @@ class InMemoryL1Store(L1Store):
                 raise L1TurnProtocolError(f"L1 turn already exists: {turn_id}")
             self.turns.turns.append(_turn_from_transcript(turn_id, normalized))
 
-    def begin(self, turn_id: str, *, user_text: str = "", metadata: dict[str, Any] | None = None) -> L1TurnIR:
-        return self.turns.begin(turn_id, user_text=user_text, metadata=metadata)
+    def begin(
+        self,
+        turn_id: str,
+        *,
+        user_text: str = "",
+        user_message: LLMMessageIR | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> L1TurnIR:
+        return self.turns.begin(
+            turn_id,
+            user_text=user_text,
+            user_message=user_message,
+            metadata=metadata,
+        )
 
     def active(self, turn_id: str) -> L1TurnIR:
         return self.turns.require_active(turn_id)
@@ -280,6 +293,7 @@ class MemoryService(MemoryServicePort):
         turn_id: str,
         *,
         user_text: str = "",
+        user_message: LLMMessageIR | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> L1TurnIR:
         existing = self.l1_store.turns.get(turn_id)
@@ -287,11 +301,32 @@ class MemoryService(MemoryServicePort):
             if existing.state != L1TurnState.ACTIVE:
                 raise L1TurnProtocolError(f"L1 turn is already closed: {turn_id}")
             return existing
-        return self.l1_store.begin(turn_id, user_text=user_text, metadata=metadata)
+        return self.l1_store.begin(
+            turn_id,
+            user_text=user_text,
+            user_message=user_message,
+            metadata=metadata,
+        )
 
     def active_l1_turn(self, turn_id: str) -> L1TurnIR | None:
         turn = self.l1_store.turns.get(turn_id)
         return turn if turn is not None and turn.state == L1TurnState.ACTIVE else None
+
+    def contains_l1_message(self, turn_id: str, message_id: str) -> bool:
+        """Return whether a stable message ID has reached this L1 turn.
+
+        This deliberately also observes closed turns: an interjection commit
+        may have succeeded immediately before another exit path closed L1.
+        """
+
+        normalized = str(message_id or "").strip()
+        if not normalized:
+            return False
+        turn = self.l1_store.turns.get(str(turn_id))
+        return bool(
+            turn is not None
+            and any(message.message_id == normalized for message in turn.messages)
+        )
 
     def upsert_l1_assistant(self, turn_id: str, message: LLMMessageIR) -> L1TurnIR:
         current = self.l1_store.active(turn_id)
@@ -319,7 +354,9 @@ class MemoryService(MemoryServicePort):
         batch and is seen by the next LLM generation.
         """
         current = self.l1_store.active(turn_id)
-        updated = current.append(message)
+        updated = current.append_user_once(message)
+        if updated is current:
+            return current
         self.l1_store.replace(updated)
         return updated
 
@@ -860,10 +897,32 @@ def _transcript_from_turn(turn: L1TurnIR) -> list[L1TranscriptMessage]:
                 )
             )
         else:
+            artifact_refs = [
+                part for part in message.parts if isinstance(part, ArtifactRefPartIR)
+            ]
+            content = message.text
+            if artifact_refs:
+                summaries = [
+                    f"[artifact {ref.artifact_id}: {ref.file_name or '<unknown>'}; "
+                    f"kind={ref.kind or '<unknown>'}; status={ref.status or 'unavailable'}; "
+                    f"summary={ref.summary or '<none>'}]"
+                    for ref in artifact_refs
+                ]
+                content = "\n".join([item for item in (content, *summaries) if item])
+                payload["artifact_refs"] = [
+                    {
+                        "artifact_id": ref.artifact_id,
+                        "kind": ref.kind,
+                        "file_name": ref.file_name,
+                        "summary": ref.summary,
+                        "status": ref.status,
+                    }
+                    for ref in artifact_refs
+                ]
             transcript.append(
                 L1TranscriptMessage(
                     role=message.role.value,
-                    content=message.text,
+                    content=content,
                     kind=message.semantic_kind,
                     tool_calls=tool_calls,
                     payload=payload,

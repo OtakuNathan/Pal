@@ -45,7 +45,7 @@ from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryCommitRequest
 from pal.memory.compact import coerce_memory_candidate_list, memory_candidates_from_compact_result
 from pal.memory.interactions import memory_candidate_approval_delivery
 from pal.memory.tool_protocol import l1_tool_protocol_transcript
-from pal.shared import ChannelEnvelope, EventKind, SourceKind
+from pal.shared import ChannelEnvelope, EventKind, SourceKind, TurnDeliveryBinding
 from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus
 from pal.shared.payloads import extract_text_from_payload
 
@@ -57,19 +57,37 @@ class TurnManager:
     guard: ToolStagnationGuardProcess = field(default_factory=ToolStagnationGuardProcess)
     config: RuntimeConfig = field(default_factory=RuntimeConfig.defaults)
 
-    def start(self, channel_envelope: ChannelEnvelope) -> TurnContinuation:
+    def start(
+        self,
+        channel_envelope: ChannelEnvelope,
+        *,
+        delivery_binding: TurnDeliveryBinding | None = None,
+    ) -> TurnContinuation:
         turn_id = channel_envelope.event.event_id
         max_output_tokens = self._resolve_max_output_tokens()
-        control_scope_key = derive_control_scope_key(
-            endpoint_id=channel_envelope.endpoint.endpoint_id,
-            channel_kind=channel_envelope.endpoint.channel_kind,
-            reply_target=channel_envelope.response_handle.reply_target,
-            payload=channel_envelope.event.payload if isinstance(channel_envelope.event.payload, dict) else {},
-        )
+        if delivery_binding is None:
+            delivery_binding = channel_envelope.opening_delivery_binding
+        if delivery_binding is None:
+            control_scope_key = derive_control_scope_key(
+                endpoint_id=channel_envelope.endpoint.endpoint_id,
+                channel_kind=channel_envelope.endpoint.channel_kind,
+                reply_target=channel_envelope.response_handle.reply_target,
+                payload=channel_envelope.event.payload if isinstance(channel_envelope.event.payload, dict) else {},
+            )
+            delivery_binding = TurnDeliveryBinding.from_envelope(
+                channel_envelope,
+                control_scope_key=control_scope_key,
+            )
+        control_scope_key = delivery_binding.control_scope_key
         continuation = TurnContinuation(
             turn_id=turn_id,
-            channel_envelope=channel_envelope,
-            program=channel_turn_program(channel_envelope, core_mode=self.state.mode, max_output_tokens=max_output_tokens),
+            opening_event=channel_envelope.event,
+            delivery_binding=delivery_binding,
+            program=channel_turn_program(
+                channel_envelope.event,
+                core_mode=self.state.mode,
+                max_output_tokens=max_output_tokens,
+            ),
             correlation_id=channel_envelope.event.correlation_id or turn_id,
             control_scope_key=control_scope_key,
             turn_settings_snapshot=self._build_turn_settings_snapshot(),
@@ -144,8 +162,12 @@ class TurnManager:
                 continuation.interrupt_reason = reason
                 await self._close_l1_turn_async(continuation, state="interrupted", reason=reason)
             output_port = self.context.port_registry.get("agent_io:output") or self.context.port_registry.get("channel:channel")
-            if output_port is not None and isinstance(continuation, TurnContinuation):
-                abort_result = output_port.abort_stream(continuation.channel_envelope.response_handle, reason=reason)
+            if (
+                output_port is not None
+                and isinstance(continuation, TurnContinuation)
+                and continuation.delivery_binding is not None
+            ):
+                abort_result = output_port.abort_stream(continuation.delivery_binding.response_handle, reason=reason)
                 if inspect.isawaitable(abort_result):
                     await abort_result
             execution_runtime = getattr(self.context, "execution_runtime", None)
@@ -456,10 +478,20 @@ class PalCore:
             guard_host=self.turn_manager,
             compaction_policy=PalCompactionPolicy(),
             compaction_clock_provider=lambda: self.state.compaction_user_turn_count,
+            after_tool_batch=self._after_tool_batch_async,
         )
         self.prompt_compiler = self.agent_turn_runtime.prompt_compiler
         self.turn_executor = self.agent_turn_runtime.executor
         self.context.execution_runtime.register_provider_ref("core:turn_io", CoreTurnIOPort(core=self))
+
+    async def _after_tool_batch_async(self, continuation: TurnContinuation) -> None:
+        from pal.core.interjection import inject_pending_interjection_async
+
+        await inject_pending_interjection_async(
+            context=self.context,
+            state=self.state,
+            continuation=continuation,
+        )
 
     def event_loop(self) -> MainLoop:
         return self.main_loop
@@ -534,6 +566,16 @@ class PalCore:
                 llm_text="Could not send attachment: active turn not found.",
                 structured={"reason": "turn_not_active", "turn_id": normalized_turn_id},
             )
+        if continuation.delivery_binding is None:
+            return CapabilityResult(
+                status=RuntimeStatus.UNSUPPORTED,
+                text="active turn has no delivery authority",
+                llm_text="Could not send attachment: active turn has no delivery authority.",
+                structured={
+                    "reason": "delivery_authority_missing",
+                    "turn_id": normalized_turn_id,
+                },
+            )
         path = Path(attachment.path).expanduser()
         if not path.is_file():
             return CapabilityResult(
@@ -561,7 +603,7 @@ class PalCore:
             file_name=str(attachment.file_name or resolved.name),
             mime_type=str(attachment.mime_type or ""),
         )
-        attachment_id = queue_attachment(continuation.channel_envelope, normalized)
+        attachment_id = queue_attachment(continuation.delivery_binding, normalized)
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text=f"queued attachment: {normalized.file_name}",
@@ -575,6 +617,9 @@ class PalCore:
         )
 
     def _derive_channel_control_scope_key(self, channel_envelope: ChannelEnvelope) -> str:
+        opening_binding = channel_envelope.opening_delivery_binding
+        if opening_binding is not None:
+            return opening_binding.control_scope_key
         return derive_control_scope_key(
             endpoint_id=channel_envelope.endpoint.endpoint_id,
             channel_kind=channel_envelope.endpoint.channel_kind,
@@ -595,13 +640,36 @@ class PalCore:
     def _queue_channel_status(self, channel_envelope: ChannelEnvelope, kind: str, payload: dict[str, Any] | None = None) -> None:
         channel_runtime = self.context.port_registry.get("channel:channel")
         if channel_runtime is not None:
-            channel_runtime.queue_status(channel_envelope, kind, payload=dict(payload or {}))
+            channel_runtime.queue_status(
+                self._delivery_binding_for_envelope(channel_envelope),
+                kind,
+                payload=dict(payload or {}),
+            )
+
+    def _delivery_binding_for_envelope(
+        self,
+        channel_envelope: ChannelEnvelope,
+    ) -> TurnDeliveryBinding:
+        binding = channel_envelope.opening_delivery_binding
+        if binding is not None:
+            return binding
+        return TurnDeliveryBinding.from_envelope(
+            channel_envelope,
+            control_scope_key=self._derive_channel_control_scope_key(channel_envelope),
+        )
 
     def _start_channel_turn_task_locked(
         self,
         channel_envelope: ChannelEnvelope,
-        control_scope_key: str,
     ) -> asyncio.Task[Any]:
+        delivery_binding = channel_envelope.opening_delivery_binding
+        if delivery_binding is None:
+            control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
+            delivery_binding = TurnDeliveryBinding.from_envelope(
+                channel_envelope,
+                control_scope_key=control_scope_key,
+            )
+        control_scope_key = delivery_binding.control_scope_key
         turn_id = channel_envelope.event.event_id
         self.context.turn_event_bus.emit("turn.start", {
             "turn_id": turn_id,
@@ -624,20 +692,16 @@ class PalCore:
             if self.turn_manager.latest_active_turn_id() is not None:
                 return
             while self.state.pending_channel_turns:
-                next_envelope = self.state.pending_channel_turns.popleft()
+                pending = self.state.pending_channel_turns.popleft()
+                next_envelope = await self._prepare_channel_turn_async(pending)
                 next_turn_id = next_envelope.event.event_id
                 if self._turn_task_running(next_turn_id):
                     continue
-                control_scope_key = self._derive_channel_control_scope_key(next_envelope)
-                self._start_channel_turn_task_locked(
-                    next_envelope,
-                    control_scope_key,
-                )
+                self._start_channel_turn_task_locked(next_envelope)
                 return
 
     async def schedule_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
-        control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
-        channel_envelope = await self._prepare_channel_artifacts_async(channel_envelope)
+        channel_envelope = await self._prepare_channel_turn_async(channel_envelope)
         turn_id = channel_envelope.event.event_id
         async with self.state.channel_turn_transition_lock:
             if self._turn_task_running(turn_id) or self._channel_turn_is_pending(turn_id):
@@ -654,17 +718,24 @@ class PalCore:
                 # idle while the tool chain is still running.
                 self.state.pending_channel_turns.append(channel_envelope)
                 return
-            self._start_channel_turn_task_locked(channel_envelope, control_scope_key)
+            self._start_channel_turn_task_locked(channel_envelope)
 
     def process_channel_turn(self, channel_envelope: ChannelEnvelope) -> TurnOutcome:
         return asyncio.run(self.process_channel_turn_async(channel_envelope))
 
-    async def process_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> TurnOutcome:
+    async def process_channel_turn_async(
+        self,
+        channel_envelope: ChannelEnvelope,
+    ) -> TurnOutcome:
         if self.state.resident_quiescing:
             raise RuntimeError("resident runtime is quiescing")
+        channel_envelope = await self._prepare_channel_turn_async(channel_envelope)
         # The hot path is: start turn -> interpret yielded effects -> resume
         # until the generator returns a TurnOutcome.
-        continuation = self.turn_manager.start(channel_envelope)
+        continuation = self.turn_manager.start(
+            channel_envelope,
+            delivery_binding=channel_envelope.opening_delivery_binding,
+        )
         self._begin_tool_result_turn(continuation)
         return await self._run_turn_continuation_async(continuation)
 
@@ -697,7 +768,12 @@ class PalCore:
 
     async def _background_channel_turn_runner_async(self, channel_envelope: ChannelEnvelope) -> None:
         turn_id = channel_envelope.event.event_id
-        control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
+        delivery_binding = channel_envelope.opening_delivery_binding
+        control_scope_key = (
+            delivery_binding.control_scope_key
+            if delivery_binding is not None
+            else self._derive_channel_control_scope_key(channel_envelope)
+        )
         turn_status = "success"
         try:
             await self.process_channel_turn_async(channel_envelope)
@@ -1134,69 +1210,37 @@ class PalCore:
         continuation = self.state.active_turns.get(normalized)
         if not isinstance(continuation, TurnContinuation):
             return {}
-        route = route_from_channel_envelope(continuation.channel_envelope)
+        binding = continuation.delivery_binding
+        if binding is None:
+            return {}
         return {
-            "channel_id": route.endpoint_id,
-            "channel_kind": route.channel_kind,
-            "reply_target": dict(route.reply_target),
-            "control_scope_key": route.control_scope_key,
+            "channel_id": binding.endpoint.endpoint_id,
+            "channel_kind": binding.endpoint.channel_kind,
+            "reply_target": dict(binding.response_handle.reply_target),
+            "control_scope_key": binding.control_scope_key,
         }
 
     async def _prepare_channel_artifacts_async(
         self,
         channel_envelope: ChannelEnvelope,
     ) -> ChannelEnvelope:
-        payload = channel_envelope.event.payload
-        if not isinstance(payload, dict):
-            return channel_envelope
-        attachments = payload.get("attachments")
-        if not isinstance(attachments, list) or not attachments:
-            return channel_envelope
-        artifact_manager = self.context.port_registry.get("artifact:artifact")
-        register_ingested = getattr(artifact_manager, "register_ingested", None)
-        if not callable(register_ingested):
-            return channel_envelope
-        refs: list[dict[str, Any]] = []
-        for item in attachments:
-            try:
-                ref = register_ingested(
-                    item,
-                    scope_key=self.state.resident_execution_lifetime_id,
-                    turn_id=channel_envelope.event.event_id,
-                    source_channel=channel_envelope.endpoint.channel_kind,
-                    metadata={
-                        "source_text": str(payload.get("text") or ""),
-                        "caption": str(payload.get("caption") or payload.get("text") or ""),
-                        "endpoint_id": channel_envelope.endpoint.endpoint_id,
-                    },
-                )
-            except Exception as exc:
-                self.state.diagnostics.append(
-                    {
-                        "kind": "artifact.register.failed",
-                        "turn_id": channel_envelope.event.event_id,
-                        "error": f"{exc.__class__.__name__}: {exc}",
-                    }
-                )
-                continue
-            refs.append(ref.to_dict() if hasattr(ref, "to_dict") else dict(ref))
-        if not refs:
-            return channel_envelope
-        new_payload = dict(payload)
-        new_payload.pop("attachments", None)
-        new_payload["artifact_refs"] = refs
-        return ChannelEnvelope(
-            event=EventEnvelope(
-                event_kind=channel_envelope.event.event_kind,
-                source_kind=channel_envelope.event.source_kind,
-                payload=new_payload,
-                correlation_id=channel_envelope.event.correlation_id,
-                created_at=channel_envelope.event.created_at,
-                event_id=channel_envelope.event.event_id,
-            ),
-            endpoint=channel_envelope.endpoint,
-            response_handle=channel_envelope.response_handle,
-        )
+        # Direct core callers (mostly tests and embedded hosts) share the same
+        # idempotent boundary as ChannelRuntime.emit.
+        from pal.channel.ingress import ChannelIngressCompiler
+
+        return ChannelIngressCompiler(
+            artifact_manager=self.context.port_registry.get("artifact:artifact"),
+            scope_key=self.state.resident_execution_lifetime_id,
+        ).compile(channel_envelope)
+
+    async def _prepare_channel_turn_async(
+        self,
+        channel_envelope: ChannelEnvelope,
+    ) -> ChannelEnvelope:
+        # Capture routing authority while the provider-normalized payload is
+        # still intact. Typed ingress compilation is content-only and must not
+        # be asked to reconstruct channel/control scope later.
+        return await self._prepare_channel_artifacts_async(channel_envelope)
 
     async def _handle_show_log_async(self, action: ControlAction) -> None:
         await self._deliver_control_delivery_async(
@@ -1503,7 +1547,7 @@ class PalCore:
             if not callable(queue_attachment):
                 return not require_provider
             queue_attachment(
-                envelope,
+                self._delivery_binding_for_envelope(envelope),
                 AttachmentSpec(
                     path=str(path.resolve()),
                     caption=str(delivery.payload.get("caption") or ""),
@@ -1555,7 +1599,10 @@ class PalCore:
         if envelope is None:
             return False
         channel_runtime = self.context.require_port("channel:channel")
-        channel_runtime.queue_reply(envelope, text)
+        channel_runtime.queue_reply(
+            self._delivery_binding_for_envelope(envelope),
+            text,
+        )
         return True
 
     async def _status_to_route_async(
@@ -1573,7 +1620,11 @@ class PalCore:
         if envelope is None:
             return False
         channel_runtime = self.context.require_port("channel:channel")
-        channel_runtime.queue_status(envelope, kind, payload=payload)
+        channel_runtime.queue_status(
+            self._delivery_binding_for_envelope(envelope),
+            kind,
+            payload=payload,
+        )
         return True
 
     def _route_from_channel_envelope(self, channel_envelope: ChannelEnvelope) -> ControlRoute:
@@ -1608,6 +1659,12 @@ class PalCore:
             response_handle = ResponseHandle(endpoint_id=route.endpoint_id, reply_target=dict(route.reply_target))
         else:
             response_handle = endpoint.build_response_handle(reply_target=dict(route.reply_target))
+        opening_binding = TurnDeliveryBinding(
+            endpoint=endpoint_config,
+            response_handle=response_handle,
+            control_scope_key=route.control_scope_key,
+            correlation_id=route.correlation_id,
+        )
         return ChannelEnvelope(
             event=EventEnvelope(
                 event_kind=EventKind.CONTROL_ACTION,
@@ -1617,6 +1674,7 @@ class PalCore:
             ),
             endpoint=endpoint_config,
             response_handle=response_handle,
+            opening_delivery_binding=opening_binding,
         )
 
     async def _run_turn_continuation_async(self, continuation: TurnContinuation) -> TurnOutcome:
@@ -1625,7 +1683,7 @@ class PalCore:
             await self.turn_executor._ensure_l1_turn_async(
                 continuation,
                 PromptAssemblyContext(
-                    event=continuation.channel_envelope.event,
+                    event=continuation.opening_event,
                     core_mode=self.state.mode,
                 ),
             )
@@ -1637,7 +1695,7 @@ class PalCore:
                     outcome = yielded
                     await self._schedule_post_turn_commit_async(
                         outcome,
-                        event=continuation.channel_envelope.event,
+                        event=continuation.opening_event,
                     )
                     await self._deliver_pending_compact_memory_candidates_async(continuation)
                     self.turn_executor.clear_execution_cursors(continuation)
@@ -1658,17 +1716,24 @@ class PalCore:
         batches = list(getattr(continuation, "pending_compact_memory_candidate_batches", []) or [])
         if not batches:
             return
-        continuation.pending_compact_memory_candidate_batches.clear()
-        route = self._route_from_channel_envelope(continuation.channel_envelope)
-        if route is None:
+        binding = continuation.delivery_binding
+        if binding is None:
             self.state.diagnostics.append(
                 {
-                    "kind": "memory.compact_candidates.route_missing",
+                    "kind": "memory.compact_candidates.delivery_authority_missing",
                     "turn_id": continuation.turn_id,
                     "batch_count": len(batches),
                 }
             )
             return
+        continuation.pending_compact_memory_candidate_batches.clear()
+        route = ControlRoute(
+            endpoint_id=binding.endpoint.endpoint_id,
+            channel_kind=binding.endpoint.channel_kind,
+            reply_target=dict(binding.response_handle.reply_target),
+            control_scope_key=binding.control_scope_key,
+            correlation_id=binding.correlation_id,
+        )
         for batch in batches:
             candidates = coerce_memory_candidate_list(batch.get("memory_candidates") if isinstance(batch, dict) else None)
             if not candidates:

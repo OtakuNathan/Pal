@@ -370,8 +370,8 @@ class ChannelIntrospectionProvider:
         try:
             core = self.main_context.require_port("core:core")
             continuation = core.state.active_turns.get(turn_id)
-            envelope = continuation.channel_envelope
-            endpoint = envelope.endpoint
+            binding = getattr(continuation, "delivery_binding", None)
+            endpoint = binding.endpoint
         except (AttributeError, KeyError, TypeError):
             return False
         return (
@@ -831,6 +831,11 @@ def register_with_core(
     runtime_root: Path | None = None,
     endpoint_factories: Any = None,
 ) -> ModuleHandle:
+    from pal.channel.ingress import ChannelIngressCompiler
+
+    runtime.ingress_compiler = ChannelIngressCompiler(
+        artifact_manager_provider=lambda: context.port_registry.get("artifact:artifact"),
+    )
     repository = ChannelEndpointRepository()
     provider_manager = build_default_channel_provider_manager(
         runtime=runtime,

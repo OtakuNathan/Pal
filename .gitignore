@@ -25,3 +25,8 @@ build/
 
 # Packaging artifacts
 *.egg-info/
+
+# Pal runtime layout generated when Pal runs in-tree (not source)
+/channel/
+/data/
+/plugins/_builtin/

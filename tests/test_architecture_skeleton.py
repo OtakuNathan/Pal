@@ -85,7 +85,7 @@ from pal.plugins import PluginHost, register_with_core as register_plugins_with_
 from pal.plugins.l3 import MockL3Plugin, register_with_core as register_l3_with_core
 from pal.proactive import ProactiveDefinition, ProactiveManager, ProactiveRepository, ProactiveRunner, ProactiveTriggerEvent, build_proactive_trigger_input, register_with_core as register_proactive_with_core
 from pal.proactive.scheduling import compute_next_proactive_run_at_utc, utc_now_dt
-from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, EventKind, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, capability_action, capability_node, default_tool_result_text
+from pal.shared import ChannelStreamUpdate, ChannelStreamUpdateKind, EventKind, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, TurnDeliveryBinding, capability_action, capability_node, default_tool_result_text
 from pal.shared.prompt_dates import today_for_timezone
 from pal.wizard import WizardService
 from pal.minion import register_with_core as register_minion_with_core
@@ -2467,7 +2467,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             endpoint=EndpointConfig(endpoint_id="stdio", channel_kind="stdio", binding_key="stdin"),
             response_handle=ResponseHandle(endpoint_id="stdio"),
         )
-        reply_id = channel_runtime.queue_reply(envelope, "world")
+        reply_id = channel_runtime.queue_reply(
+            TurnDeliveryBinding.from_envelope(envelope, control_scope_key="stdio"),
+            "world",
+        )
         delivered = ChannelEventSource(runtime=channel_runtime).drain(core.context)
 
         self.assertEqual(reply_id != "", True)

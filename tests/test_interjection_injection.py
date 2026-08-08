@@ -5,6 +5,7 @@ import unittest
 
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
 from pal.core.agent_turn_runtime import AgentTurnRuntime, AgentTurnGuardHost
+from pal.core.interjection import inject_pending_interjection_async
 from pal.core.contracts import CoreRuntimeState
 from pal.core.main_context import MainContext
 from pal.core.runtime import TurnManager
@@ -154,6 +155,13 @@ class InterjectionInjectionTests(unittest.TestCase):
                 call_id=call.call_id,
             )
 
+        async def after_tool_batch(continuation) -> None:
+            await inject_pending_interjection_async(
+                context=self.context,
+                state=self.state,
+                continuation=continuation,
+            )
+
         self.runtime = AgentTurnRuntime.build(
             context=self.context,
             config=RuntimeConfig.defaults(),
@@ -168,6 +176,7 @@ class InterjectionInjectionTests(unittest.TestCase):
             state=self.state,
             guard_host=AgentTurnGuardHost(guard=self.turn_manager.guard),
             execute_tool_async=execute_tool_async,
+            after_tool_batch=after_tool_batch,
         )
         self.executor: TurnExecutor = self.runtime.executor
 
@@ -252,7 +261,9 @@ class InterjectionInjectionTests(unittest.TestCase):
         self.state.pending_channel_turns.append(queued)
 
         async def scenario() -> None:
-            await self.executor._inject_pending_interjection_async(continuation)
+            await inject_pending_interjection_async(
+                context=self.context, state=self.state, continuation=continuation
+            )
 
         asyncio.run(scenario())
 
@@ -271,7 +282,9 @@ class InterjectionInjectionTests(unittest.TestCase):
         self.state.pending_channel_turns.append(queued)
 
         async def scenario() -> None:
-            await self.executor._inject_pending_interjection_async(continuation)
+            await inject_pending_interjection_async(
+                context=self.context, state=self.state, continuation=continuation
+            )
 
         asyncio.run(scenario())
 
@@ -288,12 +301,183 @@ class InterjectionInjectionTests(unittest.TestCase):
         self.state.pending_channel_turns.append(queued)
 
         async def scenario() -> None:
-            await self.executor._inject_pending_interjection_async(continuation)
+            await inject_pending_interjection_async(
+                context=self.context, state=self.state, continuation=continuation
+            )
 
         asyncio.run(scenario())
 
         self.assertEqual(len(self.state.pending_channel_turns), 1)
         self.assertIs(self.state.pending_channel_turns[0], queued)
+
+    def test_interjection_does_not_replace_opening_delivery_authority(self) -> None:
+        opening = _make_envelope(
+            turn_id="turn-main", text="run", session_id="opening-session"
+        )
+        continuation = self.turn_manager.start(opening)
+        self.context.port_registry["memory:memory"].begin_l1_turn(
+            "turn-main", user_text="run"
+        )
+        self.state.pending_channel_turns.append(
+            _make_envelope(
+                turn_id="interjection-other",
+                text="additional context",
+                session_id="other-session",
+            )
+        )
+
+        asyncio.run(
+            inject_pending_interjection_async(
+                context=self.context,
+                state=self.state,
+                continuation=continuation,
+            )
+        )
+
+        self.assertEqual(
+            continuation.delivery_binding.response_handle.reply_target["session_id"],
+            "opening-session",
+        )
+
+    def test_cancellation_waits_for_async_l1_append_and_does_not_lose_message(self) -> None:
+        backing = self.context.port_registry["memory:memory"]
+        opening = _make_envelope(turn_id="turn-main", text="run")
+        continuation = self.turn_manager.start(opening)
+        backing.begin_l1_turn("turn-main", user_text="run")
+        queued = _make_envelope(turn_id="interjection-cancel", text="must survive")
+        self.state.pending_channel_turns.append(queued)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class AsyncMemory:
+            async def append_l1_user(inner_self, turn_id, message):
+                started.set()
+                await release.wait()
+                return backing.append_l1_user(turn_id, message)
+
+        self.context.port_registry["memory:memory"] = AsyncMemory()
+
+        async def scenario() -> None:
+            task = asyncio.create_task(
+                inject_pending_interjection_async(
+                    context=self.context,
+                    state=self.state,
+                    continuation=continuation,
+                )
+            )
+            await started.wait()
+            task.cancel()
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+
+        self.assertEqual(len(self.state.pending_channel_turns), 0)
+        active = backing.active_l1_turn("turn-main")
+        self.assertEqual(
+            [message.text for message in active.messages].count("must survive"),
+            1,
+        )
+
+    def test_double_cancellation_cannot_start_committed_interjection_as_new_turn(self) -> None:
+        backing = self.context.port_registry["memory:memory"]
+        opening = _make_envelope(turn_id="turn-main", text="run")
+        continuation = self.turn_manager.start(opening)
+        backing.begin_l1_turn("turn-main", user_text="run")
+        queued = _make_envelope(
+            turn_id="interjection-double-cancel",
+            text="commit exactly once",
+        )
+        self.state.pending_channel_turns.append(queued)
+        committed = asyncio.Event()
+        release = asyncio.Event()
+
+        class AsyncMemory:
+            async def append_l1_user(inner_self, turn_id, message):
+                result = backing.append_l1_user(turn_id, message)
+                committed.set()
+                await release.wait()
+                return result
+
+            def contains_l1_message(inner_self, turn_id, message_id):
+                return backing.contains_l1_message(turn_id, message_id)
+
+        self.context.port_registry["memory:memory"] = AsyncMemory()
+
+        async def dequeue_next_turn():
+            async with self.state.channel_turn_transition_lock:
+                if not self.state.pending_channel_turns:
+                    return None
+                return self.state.pending_channel_turns.popleft()
+
+        async def scenario() -> ChannelEnvelope | None:
+            injection = asyncio.create_task(
+                inject_pending_interjection_async(
+                    context=self.context,
+                    state=self.state,
+                    continuation=continuation,
+                )
+            )
+            await committed.wait()
+
+            injection.cancel()
+            await asyncio.sleep(0)
+            injection.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await injection
+
+            competing_dequeue = asyncio.create_task(dequeue_next_turn())
+            await asyncio.sleep(0)
+            self.assertFalse(competing_dequeue.done())
+            release.set()
+            return await competing_dequeue
+
+        dequeued = asyncio.run(scenario())
+
+        self.assertIsNone(dequeued)
+        self.assertEqual(len(self.state.pending_channel_turns), 0)
+        active = backing.active_l1_turn("turn-main")
+        self.assertEqual(
+            [message.text for message in active.messages].count("commit exactly once"),
+            1,
+        )
+
+    def test_commit_then_adapter_error_acknowledges_interjection(self) -> None:
+        backing = self.context.port_registry["memory:memory"]
+        opening = _make_envelope(turn_id="turn-main", text="run")
+        continuation = self.turn_manager.start(opening)
+        backing.begin_l1_turn("turn-main", user_text="run")
+        queued = _make_envelope(
+            turn_id="interjection-commit-then-error",
+            text="durable before error",
+        )
+        self.state.pending_channel_turns.append(queued)
+
+        class CommitThenErrorMemory:
+            def append_l1_user(inner_self, turn_id, message):
+                backing.append_l1_user(turn_id, message)
+                raise RuntimeError("adapter failed after durable commit")
+
+            def contains_l1_message(inner_self, turn_id, message_id):
+                return backing.contains_l1_message(turn_id, message_id)
+
+        self.context.port_registry["memory:memory"] = CommitThenErrorMemory()
+
+        asyncio.run(
+            inject_pending_interjection_async(
+                context=self.context,
+                state=self.state,
+                continuation=continuation,
+            )
+        )
+
+        self.assertEqual(len(self.state.pending_channel_turns), 0)
+        active = backing.active_l1_turn("turn-main")
+        self.assertEqual(
+            [message.text for message in active.messages].count("durable before error"),
+            1,
+        )
 
 
 if __name__ == "__main__":

@@ -4,6 +4,15 @@ from typing import Any
 
 
 def extract_text_from_payload(payload: Any) -> str:
+    # Keep command/control consumers independent of whether channel ingress has
+    # already compiled the provider payload into L1's message IR.
+    try:
+        from pal.llm.ir import LLMMessageIR
+
+        if isinstance(payload, LLMMessageIR):
+            return payload.text.strip()
+    except ImportError:
+        pass
     if isinstance(payload, str):
         return payload.strip()
     if isinstance(payload, dict):

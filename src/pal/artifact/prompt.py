@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pal.artifact.service import ArtifactManager
+from pal.llm.ir import ArtifactRefPartIR, LLMMessageIR
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
 from pal.shared.payloads import extract_text_from_payload
 
@@ -14,6 +15,11 @@ class ArtifactPromptFragmentProvider(PromptFragmentProvider):
     module_id: str = "artifact"
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
+        # Typed artifact refs in the active L1 message are projected at the
+        # final provider boundary. The legacy fragment path is only a fallback
+        # for hosts where L1 could not be opened.
+        if context.metadata.get("active_l1_owns_primary_input"):
+            return []
         scope_key = str(context.metadata.get("artifact_scope_key") or "").strip()
         turn_id = str(context.metadata.get("artifact_turn_id") or "").strip()
         if not scope_key or not turn_id:
@@ -44,6 +50,14 @@ class ArtifactPromptFragmentProvider(PromptFragmentProvider):
 
 
 def _artifact_ids_from_payload(payload: object) -> tuple[str, ...]:
+    if isinstance(payload, LLMMessageIR):
+        return tuple(
+            dict.fromkeys(
+                part.artifact_id
+                for part in payload.parts
+                if isinstance(part, ArtifactRefPartIR)
+            )
+        )
     if not isinstance(payload, dict):
         return ()
     refs = payload.get("artifact_refs")

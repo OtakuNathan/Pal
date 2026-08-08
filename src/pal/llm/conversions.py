@@ -6,6 +6,7 @@ import json
 from typing import Any, Mapping
 
 from pal.llm.ir import (
+    ArtifactRefPartIR,
     GenerationPolicyIR,
     ImagePartIR,
     LLMMessageIR,
@@ -184,6 +185,8 @@ def tool_definition_ir_from_dict(tool: Mapping[str, Any]) -> ToolDefinitionIR:
 
 
 def message_ir_to_dict(message: LLMMessageIR) -> dict[str, Any]:
+    if any(isinstance(part, ArtifactRefPartIR) for part in message.parts):
+        raise LLMConversionError("artifact references must be projected before provider conversion")
     if any(isinstance(part, ReasoningPartIR) and part.redacted for part in message.parts):
         raise LLMConversionError(
             "legacy message dictionaries cannot represent redacted reasoning without losing information"

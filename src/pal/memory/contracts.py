@@ -236,7 +236,27 @@ L3ProviderResolver = Callable[[str], L3ProviderPort]
 
 
 class MemoryServicePort(Protocol):
-    def begin_l1_turn(self, turn_id: str, *, user_text: str = "", metadata: dict[str, Any] | None = None) -> "L1TurnIR":
+    def begin_l1_turn(
+        self,
+        turn_id: str,
+        *,
+        user_text: str = "",
+        user_message: "LLMMessageIR | None" = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> "L1TurnIR":
+        ...
+
+    def active_l1_turn(self, turn_id: str) -> "L1TurnIR | None":
+        ...
+
+    def append_l1_user(
+        self,
+        turn_id: str,
+        message: "LLMMessageIR",
+    ) -> "L1TurnIR":
+        ...
+
+    def contains_l1_message(self, turn_id: str, message_id: str) -> bool:
         ...
 
     def upsert_l1_assistant(self, turn_id: str, message: "LLMMessageIR") -> "L1TurnIR":

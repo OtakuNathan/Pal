@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest
 from pal.llm.ir import (
+    ArtifactRefPartIR,
     GenerationPolicyIR,
     ImagePartIR,
     LLMFinishReason,
@@ -202,6 +203,16 @@ def part_to_payload(part: Any) -> dict[str, Any]:
         return {"kind": "text", "text": part.text}
     if isinstance(part, ImagePartIR):
         return {"kind": "image", "source": part.source, "media_type": part.media_type}
+    if isinstance(part, ArtifactRefPartIR):
+        return {
+            "kind": "artifact_ref",
+            "artifact_id": part.artifact_id,
+            "artifact_kind": part.kind,
+            "file_name": part.file_name,
+            "summary": part.summary,
+            "status": part.status,
+            "available_actions": list(part.available_actions),
+        }
     if isinstance(part, ReasoningPartIR):
         return {"kind": "reasoning", "text": part.text, "redacted": part.redacted}
     if isinstance(part, ToolCallIR):
@@ -228,6 +239,15 @@ def part_from_payload(payload: Mapping[str, Any]) -> Any:
         return TextPartIR(str(payload.get("text") or ""))
     if kind == "image":
         return ImagePartIR(str(payload.get("source") or ""), str(payload.get("media_type") or "") or None)
+    if kind == "artifact_ref":
+        return ArtifactRefPartIR(
+            artifact_id=str(payload.get("artifact_id") or ""),
+            kind=str(payload.get("artifact_kind") or ""),
+            file_name=str(payload.get("file_name") or ""),
+            summary=str(payload.get("summary") or ""),
+            status=str(payload.get("status") or ""),
+            available_actions=tuple(str(item) for item in payload.get("available_actions") or ()),
+        )
     if kind == "reasoning":
         return ReasoningPartIR(str(payload.get("text") or ""), bool(payload.get("redacted")))
     if kind == "tool_call":

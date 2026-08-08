@@ -15,6 +15,7 @@ from pal.shared.agent_io import (
     QueuedStatus,
     QueuedStreamUpdate,
     ResponseHandle,
+    TurnDeliveryBinding,
 )
 
 __all__ = [
@@ -32,4 +33,5 @@ __all__ = [
     "QueuedStatus",
     "QueuedStreamUpdate",
     "ResponseHandle",
+    "TurnDeliveryBinding",
 ]

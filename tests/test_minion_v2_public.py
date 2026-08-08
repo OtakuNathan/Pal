@@ -2219,7 +2219,6 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 tool_batch_count=6,
                 preferred_llm_endpoint_id="glm",
                 preferred_llm_model_id="glm-5.2",
-                channel_envelope=None,
             )
             await first._persist_agent_session_checkpoint(
                 bundle,

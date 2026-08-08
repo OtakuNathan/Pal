@@ -9,16 +9,37 @@ from pal.checklist.service import ChecklistService
 from pal.core.turn_executor import TurnExecutor
 from pal.core.turns import TurnContinuation, channel_turn_program
 from pal.execution.contracts import CapabilityCall
-from pal.shared import ChannelEnvelope, RuntimeStatus
+from pal.foundation import EventEnvelope
+from pal.shared import (
+    ChannelEnvelope,
+    EndpointConfig,
+    EventKind,
+    ResponseHandle,
+    RuntimeStatus,
+    SourceKind,
+    TurnDeliveryBinding,
+)
 from pal.shared.tool_protocol import ToolExecutionResult
 
 
 def _continuation() -> TurnContinuation:
-    envelope = ChannelEnvelope(event=None, endpoint=None, response_handle=None)
+    event = EventEnvelope(
+        event_kind=EventKind.USER_MESSAGE,
+        source_kind=SourceKind.CHANNEL,
+        payload={"text": "test"},
+        event_id="test-turn",
+    )
+    envelope = ChannelEnvelope(
+        event=event,
+        endpoint=EndpointConfig("test", "memory", "memory://test"),
+        response_handle=ResponseHandle("test", {}),
+    )
+    binding = TurnDeliveryBinding.from_envelope(envelope, control_scope_key="test")
     return TurnContinuation(
         turn_id="test-turn",
-        channel_envelope=envelope,
-        program=channel_turn_program(envelope),
+        opening_event=event,
+        delivery_binding=binding,
+        program=channel_turn_program(event),
         correlation_id="test",
     )
 
@@ -54,8 +75,8 @@ class TestChecklistService:
             "implement the behavior",
             "run the tests",
         ]
-        assert "☑ inspect the contract" in snapshot.markdown
-        assert "☐ implement the behavior" in snapshot.markdown
+        assert "✅ inspect the contract" in snapshot.markdown
+        assert "⬜ implement the behavior" in snapshot.markdown
         assert snapshot.markdown.startswith("清单进度 1/3")
 
         shown = service.show()
@@ -132,7 +153,7 @@ class TestChecklistCapabilities:
         assert result.structured["changed"] is True
         echo = result.structured["echo"]
         assert echo["dedupe_key"] == "checklist:check:a"
-        assert "☑ a" in echo["markdown"]
+        assert "✅ a" in echo["markdown"]
 
     def test_check_without_active_returns_error(self):
         result = self.provider.check(CapabilityCall(name="checklist_check", args={"step": "a"}))
@@ -173,13 +194,13 @@ class TestToolEchoFanOut:
         continuation = _continuation()
         result = _tool_result(
             "checklist_check",
-            structured={"echo": {"markdown": "清单进度 1/1\n☑ a", "dedupe_key": "checklist:check:a"}},
+            structured={"echo": {"markdown": "清单进度 1/1\n✅ a", "dedupe_key": "checklist:check:a"}},
         )
         asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
         assert len(captured) == 1
         effect = captured[0][1]
-        assert effect.text == "清单进度 1/1\n☑ a"
-        assert effect.channel_envelope is continuation.channel_envelope
+        assert effect.text == "清单进度 1/1\n✅ a"
+        assert not hasattr(effect, "delivery_binding")
         assert "checklist:check:a" in continuation.echoed_keys
 
     def test_no_echo_without_declaration(self):
@@ -220,7 +241,7 @@ class TestToolEchoFanOut:
         captured: list = []
         executor = self._executor_with_echo_capture(captured)
         continuation = _continuation()
-        continuation.channel_envelope = None  # type: ignore[assignment]
+        continuation.delivery_binding = None
         result = _tool_result("t", structured={"echo": {"markdown": "m", "dedupe_key": "k"}})
         asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
         assert captured == []

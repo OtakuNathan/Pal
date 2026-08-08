@@ -126,6 +126,7 @@ from pal.shared import (
     RuntimeStatus,
     SourceKind,
     ToolExecutionResult,
+    TurnDeliveryBinding,
     MinionInvocationPack,
     default_tool_result_text,
 )
@@ -348,12 +349,12 @@ class _MinionOutputPort:
     def __init__(self, runner: "MinionRunner") -> None:
         self._runner = runner
 
-    async def queue_reply(self, envelope: ChannelEnvelope, text: str) -> str:
+    async def queue_reply(self, envelope: TurnDeliveryBinding, text: str) -> str:
         _ = envelope
         await self._runner._emit("progress", {"phase": "reply", "summary": _preview_text(text, limit=500)})
         return f"minion_reply_{uuid4().hex[:12]}"
 
-    async def queue_stream_update(self, envelope: ChannelEnvelope, event: Any) -> str:
+    async def queue_stream_update(self, envelope: TurnDeliveryBinding, event: Any) -> str:
         _ = envelope
         _ = event
         return f"minion_stream_{uuid4().hex[:12]}"
@@ -362,12 +363,12 @@ class _MinionOutputPort:
         _ = response_handle
         _ = reason
 
-    async def queue_status(self, envelope: ChannelEnvelope, kind: str, *, payload: dict[str, Any] | None = None) -> str:
+    async def queue_status(self, envelope: TurnDeliveryBinding, kind: str, *, payload: dict[str, Any] | None = None) -> str:
         _ = envelope
         await self._runner._emit("progress", {"phase": kind, "summary": _preview_text(json.dumps(payload or {}, ensure_ascii=False), limit=500)})
         return f"minion_status_{uuid4().hex[:12]}"
 
-    async def queue_attachment(self, envelope: ChannelEnvelope, attachment: Any) -> str:
+    async def queue_attachment(self, envelope: TurnDeliveryBinding, attachment: Any) -> str:
         _ = envelope
         _ = attachment
         return f"minion_attachment_{uuid4().hex[:12]}"
@@ -805,7 +806,11 @@ class MinionRunner:
         )
         continuation = TurnContinuation(
             turn_id=turn_id,
-            channel_envelope=state.channel_envelope,
+            opening_event=state.channel_envelope.event,
+            delivery_binding=TurnDeliveryBinding.from_envelope(
+                state.channel_envelope,
+                control_scope_key=f"minion:{self.run_id}",
+            ),
             program=program,
             correlation_id=self.run_id,
             control_scope_key=f"minion:{self.run_id}",
@@ -1156,11 +1161,7 @@ class MinionRunner:
                 "response_keys": list(response_keys),
                 "active_input_id": str(
                     getattr(
-                        getattr(
-                            getattr(continuation, "channel_envelope", None),
-                            "event",
-                            None,
-                        ),
+                        getattr(continuation, "opening_event", None),
                         "event_id",
                         "",
                     )

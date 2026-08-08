@@ -14,7 +14,7 @@ from pal.foundation import EventEnvelope
 from pal.memory import L1MessageKind, L1TranscriptMessage
 from pal.proactive.contracts import ProactiveDefinition
 from pal.proactive.input_builder import build_proactive_trigger_input
-from pal.shared import ChannelEnvelope, EndpointConfig, EventKind, PromptAssemblyContext, ProactiveTriggerEvent, ResponseHandle, SourceKind
+from pal.shared import ChannelEnvelope, EndpointConfig, EventKind, PromptAssemblyContext, ProactiveTriggerEvent, ResponseHandle, SourceKind, TurnDeliveryBinding
 
 
 def build_proactive_turn_continuation(
@@ -49,15 +49,23 @@ def build_proactive_turn_continuation(
         endpoint=_build_proactive_endpoint_config(definition),
         response_handle=_build_proactive_response_handle(definition),
     )
+    reply_envelope = _resolve_proactive_reply_envelope(
+        context, proactive_event, definition, resolved_trigger
+    )
+    delivery_envelope = reply_envelope or synthetic_envelope
     return TurnContinuation(
         turn_id=proactive_event.event_id,
-        channel_envelope=synthetic_envelope,
+        opening_event=proactive_event,
+        delivery_binding=TurnDeliveryBinding.from_envelope(
+            delivery_envelope,
+            control_scope_key=f"proactive:{definition.proactive_id}",
+        ),
         program=proactive_turn_program(
             resolved_trigger,
             definition,
             core_mode=core_mode,
             max_output_tokens=max_output_tokens,
-            reply_envelope=_resolve_proactive_reply_envelope(context, proactive_event, definition, resolved_trigger),
+            emit_reply=reply_envelope is not None,
         ),
         correlation_id=proactive_event.correlation_id or proactive_event.event_id,
     )
@@ -69,7 +77,7 @@ def proactive_turn_program(
     *,
     core_mode: str = "default",
     max_output_tokens: int = 1024,
-    reply_envelope: ChannelEnvelope | None = None,
+    emit_reply: bool = False,
 ) -> TurnProgram:
     proactive_input = build_proactive_trigger_input(definition)
 
@@ -101,8 +109,8 @@ def proactive_turn_program(
             render_final_text=lambda outcome: str(outcome.text or "") if outcome is not None else "",
             build_commit_payload=build_commit_payload,
             max_output_tokens=max_output_tokens,
-            emit_mid_text=(lambda text: MailboxReplyEffect(channel_envelope=reply_envelope, text=text)) if reply_envelope is not None else None,
-            emit_final_text=(lambda text: MailboxReplyEffect(channel_envelope=reply_envelope, text=text)) if reply_envelope is not None else None,
+            emit_mid_text=(lambda text: MailboxReplyEffect(text=text)) if emit_reply else None,
+            emit_final_text=(lambda text: MailboxReplyEffect(text=text)) if emit_reply else None,
         )
     )
 

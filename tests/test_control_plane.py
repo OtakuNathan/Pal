@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pal.channel import ChannelRuntime, register_with_core as register_channel_with_core
+from pal.channel.ingress import ChannelIngressCompiler
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
 from pal.control import (
@@ -44,7 +45,7 @@ from pal.llm.contracts import generation_result_from_values, request_ir_from_pro
 from pal.llm.ir import LLMMessageIR, MessageRole, TextPartIR
 from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryService, register_with_core as register_memory_with_core
 from pal.memory.turn_ir import L1TurnProtocolError, L1TurnState
-from pal.shared import ChannelStreamUpdate, EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
+from pal.shared import ChannelStreamUpdate, EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind, TurnDeliveryBinding
 
 
 class _StubEndpoint(ChannelEndpointQueueBase):
@@ -469,17 +470,21 @@ class ControlPlaneTests(unittest.TestCase):
             endpoint_id="socket_main",
             reply_target={"session_id": "sess-1", "request_id": "req-1"},
         )
-        channel_envelope = ChannelEnvelope(
+        channel_envelope = ChannelIngressCompiler().compile(ChannelEnvelope(
             event=EventEnvelope(
                 event_kind=EventKind.SLASH_COMMAND,
                 source_kind=SourceKind.CHANNEL,
-                payload={"text": "/not_a_command should reach the model"},
+                payload={
+                    "text": "/not_a_command should reach the model",
+                    "command_name": "not_a_command",
+                    "argv": ["should", "reach", "the", "model"],
+                },
                 correlation_id="req-1",
                 event_id="turn-1",
             ),
             endpoint=EndpointConfig(endpoint_id="socket_main", channel_kind="socket", binding_key="runtime.sock"),
             response_handle=route,
-        )
+        ))
 
         derived = handler.handle(
             EventEnvelope(
@@ -501,7 +506,12 @@ class ControlPlaneTests(unittest.TestCase):
         fallback_channel = fallback.payload
         assert isinstance(fallback_channel, ChannelEnvelope)
         self.assertEqual(fallback_channel.event.event_kind, EventKind.USER_MESSAGE)
-        self.assertEqual(fallback_channel.event.payload["text"], "/not_a_command should reach the model")
+        self.assertIsInstance(fallback_channel.event.payload, LLMMessageIR)
+        self.assertEqual(fallback_channel.event.payload.text, "/not_a_command should reach the model")
+        self.assertEqual(
+            tuple(fallback_channel.event.payload.metadata["control_payload"]["argv"]),
+            ("should", "reach", "the", "model"),
+        )
         self.assertEqual(fallback_channel.event.event_id, "turn-1")
         self.assertEqual(fallback_channel.response_handle.reply_target["request_id"], "req-1")
 
@@ -847,6 +857,59 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             snapshot["system_chars"] + snapshot["current_user_chars"] + snapshot["tool_protocol_chars"] + expected_tool_chars,
         )
 
+    async def test_turn_prompt_falls_back_to_event_when_l1_begin_fails(self) -> None:
+        class BrokenMemory:
+            def begin_l1_turn(self, *args, **kwargs):
+                raise RuntimeError("storage unavailable")
+
+            def active_l1_turn(self, turn_id):
+                return None
+
+        envelope = self._make_channel_envelope(
+            turn_id="turn-l1-fallback",
+            request_id="req-l1-fallback",
+            text="do not lose this input",
+        )
+        continuation = self.core.turn_manager.start(envelope)
+        self.core.context.port_registry["memory:memory"] = BrokenMemory()
+        assembly = PromptAssemblyContext(event=envelope.event, core_mode="default")
+
+        self.assertFalse(await self.core.turn_executor._ensure_l1_turn_async(continuation, assembly))
+        prompt = self.core.turn_executor.build_turn_prompt(
+            continuation, assembly, max_output_tokens=64
+        )
+
+        self.assertNotIn("active_l1_owns_primary_input", prompt.metadata)
+        self.assertIn("do not lose this input", "\n".join(message.text for message in prompt.messages))
+
+    async def test_typed_ingress_keeps_precompiled_control_scope_binding(self) -> None:
+        envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=EventKind.USER_MESSAGE,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "hello", "session_id": "payload-session"},
+                event_id="turn-scope-capture",
+            ),
+            endpoint=EndpointConfig("custom", "custom", "custom"),
+            response_handle=ResponseHandle("custom", {}),
+        )
+
+        prepared = await self.core._prepare_channel_turn_async(envelope)
+        continuation = self.core.turn_manager.start(
+            prepared,
+            delivery_binding=prepared.opening_delivery_binding,
+        )
+
+        self.assertEqual(
+            continuation.control_scope_key,
+            "channel:custom:session_id=payload-session",
+        )
+        self.assertIsInstance(continuation.opening_event.payload, LLMMessageIR)
+        self.assertEqual(
+            route_from_channel_envelope(prepared).control_scope_key,
+            "channel:custom:session_id=payload-session",
+        )
+
     async def test_set_log_updates_future_turn_snapshot_only(self) -> None:
         class DebugAwarePort:
             def __init__(inner_self) -> None:
@@ -1156,10 +1219,12 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.core.config = RuntimeConfig(runtime_root=Path(tmp))
             envelope = self._make_channel_envelope(turn_id="turn-log-file", request_id="req-log-file")
+            binding = TurnDeliveryBinding.from_envelope(envelope, control_scope_key="socket:socket_main:sess-1")
             continuation = TurnContinuation(
                 turn_id="turn-log-file",
-                channel_envelope=envelope,
-                program=channel_turn_program(envelope),
+                opening_event=envelope.event,
+                delivery_binding=binding,
+                program=channel_turn_program(envelope.event),
                 correlation_id="req-log-file",
                 control_scope_key="socket:socket_main:sess-1",
                 turn_settings_snapshot={"think_level": "balanced", "prompt_log_enabled": True},
@@ -1204,10 +1269,12 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.core.config = RuntimeConfig(runtime_root=Path(tmp))
             envelope = self._make_channel_envelope(turn_id="turn-log-file-off", request_id="req-log-file-off")
+            binding = TurnDeliveryBinding.from_envelope(envelope, control_scope_key="socket:socket_main:sess-1")
             continuation = TurnContinuation(
                 turn_id="turn-log-file-off",
-                channel_envelope=envelope,
-                program=channel_turn_program(envelope),
+                opening_event=envelope.event,
+                delivery_binding=binding,
+                program=channel_turn_program(envelope.event),
                 correlation_id="req-log-file-off",
                 control_scope_key="socket:socket_main:sess-1",
                 turn_settings_snapshot={"think_level": "balanced", "prompt_log_enabled": False},
@@ -1562,10 +1629,12 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             response_handle=response_handle,
         )
         scope_key = self.route.control_scope_key
+        binding = TurnDeliveryBinding.from_envelope(envelope, control_scope_key=scope_key)
         continuation = TurnContinuation(
             turn_id="turn-1",
-            channel_envelope=envelope,
-            program=channel_turn_program(envelope, core_mode="default", max_output_tokens=64),
+            opening_event=envelope.event,
+            delivery_binding=binding,
+            program=channel_turn_program(envelope.event, core_mode="default", max_output_tokens=64),
             correlation_id="req-1",
             control_scope_key=scope_key,
             turn_settings_snapshot={"think_level": "balanced"},
@@ -1666,7 +1735,10 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         continuation = TurnContinuation(
             turn_id="turn-aborted",
-            channel_envelope=envelope,
+            opening_event=envelope.event,
+            delivery_binding=TurnDeliveryBinding.from_envelope(
+                envelope, control_scope_key=self.route.control_scope_key
+            ),
             program=_crashing_program(),
             correlation_id="req-aborted",
             control_scope_key=self.route.control_scope_key,
@@ -1697,10 +1769,12 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             response_handle=response_handle,
         )
         scope_key = self.route.control_scope_key
+        binding = TurnDeliveryBinding.from_envelope(envelope, control_scope_key=scope_key)
         continuation = TurnContinuation(
             turn_id="turn-2",
-            channel_envelope=envelope,
-            program=channel_turn_program(envelope, core_mode="default", max_output_tokens=64),
+            opening_event=envelope.event,
+            delivery_binding=binding,
+            program=channel_turn_program(envelope.event, core_mode="default", max_output_tokens=64),
             correlation_id="req-2",
             control_scope_key=scope_key,
             turn_settings_snapshot={"think_level": "balanced"},

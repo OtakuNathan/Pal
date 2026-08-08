@@ -15,7 +15,8 @@ from pal.failure.contracts import (
     VerificationResult,
 )
 from pal.llm.contracts import LLMGenerationResult
-from pal.shared import ChannelEnvelope, EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus, ToolExecutionResult
+from pal.shared import EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus, ToolExecutionResult, TurnDeliveryBinding
+from pal.foundation import EventEnvelope
 from pal.shared.payloads import extract_text_from_payload
 from pal.memory import L1MessageKind, L1TranscriptMessage
 from pal.shared.agent_io import ChannelStreamUpdate
@@ -98,14 +99,12 @@ class MemoryCompactEffect(EffectRequest):
 
 @dataclass(frozen=True)
 class MailboxReplyEffect(EffectRequest):
-    channel_envelope: ChannelEnvelope = field(default_factory=lambda: ChannelEnvelope(event=None, endpoint=None, response_handle=None))  # type: ignore[arg-type]
     text: str = ""
     kind: str = EffectKind.MAILBOX_REPLY
 
 
 @dataclass(frozen=True)
 class MailboxReplyStreamUpdateEffect(EffectRequest):
-    channel_envelope: ChannelEnvelope = field(default_factory=lambda: ChannelEnvelope(event=None, endpoint=None, response_handle=None))  # type: ignore[arg-type]
     update: ChannelStreamUpdate = field(default_factory=ChannelStreamUpdate)
     kind: str = EffectKind.MAILBOX_REPLY_STREAM
 
@@ -130,9 +129,10 @@ BuildRetryNote = Callable[[LLMGenerationResult | None, list[ToolObservation], in
 @dataclass
 class TurnContinuation:
     turn_id: str
-    channel_envelope: ChannelEnvelope
     program: TurnProgram
     correlation_id: str
+    opening_event: EventEnvelope | None = None
+    delivery_binding: TurnDeliveryBinding | None = None
     control_scope_key: str = ""
     started: bool = False
     waiting_effect_id: str | None = None
@@ -156,7 +156,6 @@ class TurnContinuation:
     prompt_budget_snapshot: dict[str, Any] = field(default_factory=dict)
     echoed_keys: set[str] = field(default_factory=set)
 
-
 @dataclass(frozen=True)
 class FailureFlowOutcome:
     verification: VerificationResult
@@ -164,7 +163,7 @@ class FailureFlowOutcome:
 
 
 def channel_turn_program(
-    channel_envelope: ChannelEnvelope,
+    opening_event: EventEnvelope,
     *,
     core_mode: str = "default",
     max_output_tokens: int = 1024,
@@ -174,27 +173,27 @@ def channel_turn_program(
         if frame.retry_note:
             metadata["retry_note"] = frame.retry_note
         return PromptAssemblyContext(
-            event=channel_envelope.event,
+            event=opening_event,
             core_mode=core_mode,
             metadata=metadata,
         )
 
     def build_commit_payload(final_reply: str, observations: list[ToolObservation], reply_texts: list[str]) -> L1CommitPayload:
         return L1CommitPayload(
-            turn_id=channel_envelope.event.event_id,
-            transcript=_build_turn_transcript(channel_envelope, final_reply, observations=observations, reply_texts=reply_texts),
+            turn_id=opening_event.event_id,
+            transcript=_build_turn_transcript(opening_event, final_reply, observations=observations, reply_texts=reply_texts),
             tool_observations=list(observations),
         )
 
     return (
         yield from agent_turn_program(
-            turn_id=channel_envelope.event.event_id,
+            turn_id=opening_event.event_id,
             build_assembly_context=build_context,
-            render_final_text=lambda outcome: render_final_reply(channel_envelope, outcome) if outcome is not None else "",
+            render_final_text=lambda outcome: outcome.text if outcome is not None else "",
             build_commit_payload=build_commit_payload,
             max_output_tokens=max_output_tokens,
-            emit_mid_text=lambda text: MailboxReplyEffect(channel_envelope=channel_envelope, text=text),
-            emit_final_text=lambda text: MailboxReplyEffect(channel_envelope=channel_envelope, text=text),
+            emit_mid_text=lambda text: MailboxReplyEffect(text=text),
+            emit_final_text=lambda text: MailboxReplyEffect(text=text),
         )
     )
 
@@ -335,11 +334,6 @@ def agent_turn_program(
         )
 
 
-def render_final_reply(channel_envelope: ChannelEnvelope, outcome: LLMGenerationResult) -> str:
-    _ = channel_envelope
-    return outcome.text
-
-
 def _finish_compaction_failure_turn(
     *,
     turn_id: str,
@@ -368,13 +362,13 @@ def _finish_compaction_failure_turn(
 
 
 def _build_turn_transcript(
-    channel_envelope: ChannelEnvelope,
+    opening_event: EventEnvelope,
     final_reply: str,
     observations: list[ToolObservation] | None = None,
     reply_texts: list[str] | tuple[str, ...] | None = None,
 ) -> list[L1TranscriptMessage]:
     _ = observations
-    user_text = extract_text_from_payload(channel_envelope.event.payload)
+    user_text = extract_text_from_payload(opening_event.payload)
     transcript: list[L1TranscriptMessage] = []
     if user_text:
         transcript.append(L1TranscriptMessage(role="user", content=user_text, kind=L1MessageKind.USER_REQUEST))

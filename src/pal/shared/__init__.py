@@ -38,6 +38,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "QueuedStatus": ("pal.shared.agent_io", "QueuedStatus"),
     "QueuedStreamUpdate": ("pal.shared.agent_io", "QueuedStreamUpdate"),
     "ResponseHandle": ("pal.shared.agent_io", "ResponseHandle"),
+    "TurnDeliveryBinding": ("pal.shared.agent_io", "TurnDeliveryBinding"),
     "EffectKind": ("pal.shared.enums", "EffectKind"),
     "EventKind": ("pal.shared.enums", "EventKind"),
     "GuardAction": ("pal.shared.enums", "GuardAction"),

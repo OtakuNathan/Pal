@@ -568,7 +568,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         after = "\n".join(_message_text(message) for message in after_prompt.messages)
         self.assertNotIn("Declared resident", after)
 
-    def test_lsp_provider_declares_resident_code_intelligence_affordance(self) -> None:
+    def test_lsp_provider_declares_discoverable_code_intelligence_affordance(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         register_behavior_with_core(core.context, self.service)
@@ -580,15 +580,25 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIsNone(self.repository.get_affordance("declared.lsp.code_intelligence"))
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
         system = _message_text(prompt.messages[0])
-        reminder = _message_text(prompt.messages[-1])
-        guidance = reminder.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
+        rendered_prompt = "\n".join(_message_text(message) for message in prompt.messages)
 
         self.assertNotIn("\n<behavior_guidance>\n", system)
-        self.assertIn("LSP code intelligence", guidance)
-        self.assertIn("call lsp_prepare_workspace once before using LSP code intelligence", guidance)
-        self.assertIn("lsp_document_symbols/workspace_symbols", guidance)
-        self.assertIn("lsp_diagnostics after edits", guidance)
-        self.assertIn("resident_affordances", prompt.metadata["reminder_sections"])
+        # No longer resident: LSP guidance must not be baked into the canonical prompt.
+        self.assertNotIn("LSP code intelligence", rendered_prompt)
+        self.assertNotIn("lsp_document_symbols/workspace_symbols", rendered_prompt)
+
+        # Still recalled on matching source-code scenarios.
+        result = asyncio.run(
+            self.service.advise_async(
+                BehaviorAdviceRequest(
+                    scenario="Pal is navigating source code and needs symbol-aware language-server information",
+                    top_k=5,
+                )
+            )
+        )
+        self.assertTrue(
+            any(c.affordance_id == "declared.lsp.code_intelligence" for c in result.candidates)
+        )
 
     def test_declared_affordance_canonicalizes_prompt_hint_title_prefix(self) -> None:
         @affordance(

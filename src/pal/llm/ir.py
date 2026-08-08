@@ -71,6 +71,23 @@ class ImagePartIR:
 
 
 @dataclass(frozen=True)
+class ArtifactRefPartIR:
+    """Stable Pal-owned reference carried in L1 until prompt projection."""
+
+    artifact_id: str
+    kind: str = ""
+    file_name: str = ""
+    summary: str = ""
+    status: str = ""
+    available_actions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not str(self.artifact_id or "").strip():
+            raise ValueError("artifact_id must be non-empty")
+        object.__setattr__(self, "available_actions", tuple(self.available_actions))
+
+
+@dataclass(frozen=True)
 class ReasoningPartIR:
     text: str = ""
     redacted: bool = False
@@ -79,6 +96,7 @@ class ReasoningPartIR:
 ContentPartIR: TypeAlias = (
     TextPartIR
     | ImagePartIR
+    | ArtifactRefPartIR
     | ReasoningPartIR
     | _ToolCallIR
     | _ToolResultIR
@@ -134,6 +152,8 @@ class LLMMessageIR:
                 raise ValueError("tool calls are only valid on assistant messages")
             if isinstance(part, _ToolResultIR) and self.role != MessageRole.TOOL:
                 raise ValueError("tool results are only valid on tool messages")
+            if isinstance(part, ArtifactRefPartIR) and self.role != MessageRole.USER:
+                raise ValueError("artifact references are only valid on user messages")
         if self.replay is not None and self.role != MessageRole.ASSISTANT:
             raise ValueError("wire replay is only valid on assistant messages")
 
@@ -194,6 +214,12 @@ class LLMRequestIR:
         object.__setattr__(self, "messages", tuple(self.messages))
         object.__setattr__(self, "tools", tuple(self.tools))
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
+        if any(
+            isinstance(part, ArtifactRefPartIR)
+            for message in self.messages
+            for part in message.parts
+        ):
+            raise ValueError("unresolved artifact reference reached LLM request boundary")
 
 
 @dataclass(frozen=True)

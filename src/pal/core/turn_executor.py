@@ -38,6 +38,8 @@ from pal.failure import FailureSignal
 from pal.llm.contracts import LLMGenerationResult, LLMPreflightRequest
 from pal.llm.conversions import tool_definition_ir_from_dict
 from pal.llm.ir import (
+    ArtifactRefPartIR,
+    ImagePartIR,
     LLMFinishReason,
     LLMMessageIR,
     LLMRequestIR,
@@ -68,6 +70,15 @@ from pal.shared.result_rendering import render_head_tail_preview_for_llm
 from pal.shared.agent_io import ChannelStreamUpdate
 
 LOGGER = logging.getLogger(__name__)
+def _artifact_unavailable_summary(refs: list[ArtifactRefPartIR]) -> str:
+    lines = ["Attached artifact content is currently unavailable; stable references follow:"]
+    for ref in refs:
+        lines.append(
+            f"- artifact_id: {ref.artifact_id}; file_name: {ref.file_name or '<unknown>'}; "
+            f"kind: {ref.kind or '<unknown>'}; status: {ref.status or 'unavailable'}; "
+            f"summary: {ref.summary or '<none>'}"
+        )
+    return "\n".join(lines)
 
 class TurnExecutor:
     def __init__(
@@ -90,6 +101,7 @@ class TurnExecutor:
         config: RuntimeConfig | None = None,
         compaction_engine: CompactionEngine | None = None,
         compaction_clock_provider: Callable[[], int] | None = None,
+        after_tool_batch: Callable[[Any], Awaitable[None]] | None = None,
     ) -> None:
         self.context = context
         self.state = state
@@ -110,6 +122,7 @@ class TurnExecutor:
         self._compaction_clock_provider = (
             compaction_clock_provider or (lambda: 0)
         )
+        self._after_tool_batch = after_tool_batch
 
     # ── public entry point ──────────────────────────────────────────────
 
@@ -437,7 +450,8 @@ class TurnExecutor:
                 continuation.pending_assistant_tool_text = ""
                 continuation.pending_tool_call_batch = []
                 continuation.pending_tool_results = []
-                await self._inject_pending_interjection_async(continuation)
+                if self._after_tool_batch is not None:
+                    await self._after_tool_batch(continuation)
         return EffectResult(
             status=RuntimeStatus.OK if tool_result.ok else RuntimeStatus.ERROR,
             payload=tool_result,
@@ -471,68 +485,13 @@ class TurnExecutor:
             return
         if dedupe_key in continuation.echoed_keys:
             return
-        envelope = getattr(continuation, "channel_envelope", None)
-        if envelope is None:
+        if getattr(continuation, "delivery_binding", None) is None:
             return
         continuation.echoed_keys.add(dedupe_key)
         await self.execute_turn_effect_async(
             continuation,
-            MailboxReplyEffect(channel_envelope=envelope, text=markdown),
+            MailboxReplyEffect(text=markdown),
         )
-
-    async def _inject_pending_interjection_async(self, continuation: Any) -> None:
-        """Consume the head of the pending channel queue and inject its text
-        into the current L1 transcript right after the finished tool batch.
-
-        The next LLM generation therefore sees the user's interjection
-        without interrupting the running tool chain, and the consumed
-        envelope never starts as its own turn afterwards. If L1 is
-        unavailable (closed turn, compaction), the envelope is restored at
-        the head of the queue so nothing is lost and the normal queue flow
-        picks it up as the next turn.
-        """
-        if not self.state.pending_channel_turns:
-            return
-        envelope = None
-        async with self.state.channel_turn_transition_lock:
-            if not self.state.pending_channel_turns:
-                return
-            envelope = self.state.pending_channel_turns.popleft()
-        async def _restore_envelope() -> None:
-            # Restore the envelope at the queue head so the normal queue flow
-            # retries it as the next turn instead of losing it. Never let
-            # interjection delivery break the tool batch completion path.
-            try:
-                async with self.state.channel_turn_transition_lock:
-                    self.state.pending_channel_turns.appendleft(envelope)
-            except Exception:
-                pass
-
-        try:
-            text = extract_text_from_payload(
-                getattr(getattr(envelope, "event", None), "payload", None)
-            ).strip()
-            if not text:
-                await _restore_envelope()
-                return
-            memory_service = self.context.port_registry.get("memory:memory")
-            method = getattr(memory_service, "append_l1_user", None)
-            if not callable(method):
-                await _restore_envelope()
-                return
-            message = LLMMessageIR(
-                role=MessageRole.USER,
-                parts=(TextPartIR(text),),
-                semantic_kind="user_interjection",
-            )
-            result = method(str(continuation.turn_id), message)
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            # Never let interjection delivery break the tool batch
-            # completion path; restore the envelope so it is retried by the
-            # normal queue flow instead of being lost.
-            await _restore_envelope()
 
     def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
         LOGGER.debug(
@@ -582,7 +541,10 @@ class TurnExecutor:
         output_port = self._agent_output_port()
         if output_port is None:
             return EffectResult(status=RuntimeStatus.SKIPPED, text=effect.text)
-        reply_id = await self._call_output_port_async(output_port, "queue_reply", effect.channel_envelope, effect.text)
+        binding = continuation.delivery_binding
+        if binding is None:
+            return EffectResult(status=RuntimeStatus.SKIPPED, text=effect.text)
+        reply_id = await self._call_output_port_async(output_port, "queue_reply", binding, effect.text)
         text = str(effect.text or "").strip()
         if text:
             continuation.emitted_reply_texts.append(text)
@@ -596,10 +558,13 @@ class TurnExecutor:
         output_port = self._agent_output_port()
         if output_port is None:
             return EffectResult(status=RuntimeStatus.SKIPPED)
+        binding = continuation.delivery_binding
+        if binding is None:
+            return EffectResult(status=RuntimeStatus.SKIPPED)
         update_id = await self._call_output_port_async(
             output_port,
             "queue_stream_update",
-            effect.channel_envelope,
+            binding,
             effect.update,
         )
         return EffectResult(status=RuntimeStatus.QUEUED, payload={"update_id": update_id})
@@ -685,7 +650,6 @@ class TurnExecutor:
             await self.execute_turn_effect_async(
                 continuation,
                 MailboxReplyStreamUpdateEffect(
-                    channel_envelope=continuation.channel_envelope,
                     update=channel_update,
                 ),
             )
@@ -716,6 +680,16 @@ class TurnExecutor:
         metadata["artifact_scope_key"] = "pal:resident"
         metadata["artifact_turn_id"] = continuation.turn_id
         metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
+        memory_service = self.context.port_registry.get("memory:memory")
+        active_turn = None
+        active_reader = getattr(memory_service, "active_l1_turn", None)
+        if callable(active_reader):
+            try:
+                active_turn = active_reader(continuation.turn_id)
+            except Exception:
+                active_turn = None
+        if active_turn is not None:
+            metadata["active_l1_owns_primary_input"] = True
         if assembly_context.turn_kind != "failure":
             try:
                 memory_service = self.context.require_port("memory:memory")
@@ -761,14 +735,14 @@ class TurnExecutor:
         )
         base_messages = list(prompt.messages)
         active_messages: list[LLMMessageIR] = []
-        memory_service = self.context.port_registry.get("memory:memory")
-        active_turn = getattr(memory_service, "active_l1_turn", lambda _turn_id: None)(continuation.turn_id)
         if active_turn is not None:
             active_messages = list(active_turn.messages)
-            if active_messages and active_messages[0].role == MessageRole.USER:
-                active_messages = active_messages[1:]
             original_active_messages = list(active_messages)
-            active_messages = self._project_active_messages_for_prompt(active_messages)
+            active_messages = self._project_active_messages_for_prompt(
+                active_messages,
+                turn_id=continuation.turn_id,
+                capabilities=dict(metadata.get("llm_capabilities") or {}),
+            )
             self._reconcile_projected_tool_context(
                 continuation,
                 original_messages=original_active_messages,
@@ -924,10 +898,16 @@ class TurnExecutor:
     def _project_active_messages_for_prompt(
         self,
         messages: list[LLMMessageIR],
+        *,
+        turn_id: str = "",
+        capabilities: dict[str, Any] | None = None,
     ) -> list[LLMMessageIR]:
         """Apply prompt-only size limits without mutating the L1 working set."""
 
-        projected = list(messages)
+        projected = [
+            self._project_artifact_refs(message, turn_id=turn_id, capabilities=capabilities or {})
+            for message in messages
+        ]
         result_indices = [
             index
             for index, message in enumerate(projected)
@@ -967,6 +947,56 @@ class TurnExecutor:
                 parts[part_index] = replace(part, content=minimal)
             projected[index] = replace(message, parts=tuple(parts))
         return projected
+
+    def _project_artifact_refs(
+        self,
+        message: LLMMessageIR,
+        *,
+        turn_id: str,
+        capabilities: dict[str, Any],
+    ) -> LLMMessageIR:
+        refs = [part for part in message.parts if isinstance(part, ArtifactRefPartIR)]
+        if not refs:
+            return message
+        manager = self.context.port_registry.get("artifact:artifact")
+        select = getattr(manager, "select_prompt_exposure", None)
+        exposure = None
+        if callable(select):
+            try:
+                exposure = select(
+                    "pal:resident",
+                    str(turn_id),
+                    message.text,
+                    capabilities,
+                    artifact_ids=tuple(ref.artifact_id for ref in refs),
+                )
+            except Exception:
+                exposure = None
+        replacement: list[Any] = []
+        if exposure is not None:
+            for inline in exposure.inline_parts:
+                source = str(getattr(inline, "source_url", "") or "")
+                if not source:
+                    resolver = getattr(manager, "to_data_url", None)
+                    if callable(resolver):
+                        source = str(resolver(inline.representation_id) or "")
+                if source:
+                    replacement.append(ImagePartIR(source=source, media_type=inline.mime_type or None))
+            if str(exposure.text or "").strip():
+                replacement.append(TextPartIR(str(exposure.text).strip()))
+        if not replacement:
+            replacement.append(TextPartIR(_artifact_unavailable_summary(refs)))
+
+        parts: list[Any] = []
+        inserted = False
+        for part in message.parts:
+            if isinstance(part, ArtifactRefPartIR):
+                if not inserted:
+                    parts.extend(replacement)
+                    inserted = True
+                continue
+            parts.append(part)
+        return replace(message, parts=tuple(parts))
 
     def _reconcile_projected_tool_context(
         self,
@@ -1230,7 +1260,9 @@ class TurnExecutor:
         if memory_service is None:
             return False
         event = getattr(assembly_context, "event", None)
-        text = extract_text_from_payload(getattr(event, "payload", None)).strip()
+        event_payload = getattr(event, "payload", None)
+        user_message = event_payload if isinstance(event_payload, LLMMessageIR) else None
+        text = "" if user_message is not None else extract_text_from_payload(event_payload).strip()
         if not text:
             text = str(dict(getattr(assembly_context, "metadata", {}) or {}).get("proactive_input") or "").strip()
         try:
@@ -1238,6 +1270,7 @@ class TurnExecutor:
             method(
                 str(continuation.turn_id),
                 user_text=text,
+                user_message=user_message,
                 metadata={"_pal_input_id": self._active_input_id(continuation, assembly_context)},
             )
             return True
@@ -1330,11 +1363,7 @@ class TurnExecutor:
     ) -> str:
         event = getattr(assembly_context, "event", None)
         if event is None:
-            event = getattr(
-                getattr(continuation, "channel_envelope", None),
-                "event",
-                None,
-            )
+            event = getattr(continuation, "opening_event", None)
         return (
             str(getattr(event, "event_id", "") or "").strip()
             or str(getattr(continuation, "turn_id", "") or "").strip()

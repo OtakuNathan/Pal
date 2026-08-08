@@ -11,6 +11,7 @@ from typing import Any
 
 
 _EXPORTS: dict[str, tuple[str, str]] = {
+    "ArtifactRefPartIR": ("pal.llm.ir", "ArtifactRefPartIR"),
     "LLMActiveModelSnapshot": ("pal.llm.capabilities", "LLMActiveModelSnapshot"),
     "LLMIntrospectionProvider": ("pal.llm.capabilities", "LLMIntrospectionProvider"),
     "LLMModelListItem": ("pal.llm.capabilities", "LLMModelListItem"),

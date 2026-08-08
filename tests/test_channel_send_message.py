@@ -209,7 +209,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         )
         runtime.register_endpoint(peer_endpoint)
         core.state.active_turns["peer-turn"] = SimpleNamespace(
-            channel_envelope=SimpleNamespace(endpoint=peer_endpoint.endpoint)
+            delivery_binding=SimpleNamespace(endpoint=peer_endpoint.endpoint)
         )
 
         result = await core.context.execution_runtime.execute_tool_async(

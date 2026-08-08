@@ -17,11 +17,13 @@ from pal.channel.contracts import (
     QueuedReply,
     QueuedStatus,
     QueuedStreamUpdate,
+    TurnDeliveryBinding,
 )
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
 from pal.core.mailbox import Mailbox
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
+from pal.channel.ingress import ChannelIngressCompiler
 
 
 @dataclass
@@ -66,6 +68,7 @@ class ChannelRuntime(ChannelRuntimePort):
     stream_update_outbox: deque[QueuedStreamUpdate] = field(default_factory=deque)
     on_ready: Callable[[], None] | None = None
     control_catalog_payload: dict[str, object] | None = None
+    ingress_compiler: ChannelIngressCompiler | None = None
     _loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
 
@@ -250,6 +253,8 @@ class ChannelRuntime(ChannelRuntimePort):
     def emit(self, envelope: ChannelEnvelope) -> None:
         # Channel owns normalization. Everything PalCore sees after this point
         # is already canonical internal ingress.
+        if self.ingress_compiler is not None:
+            envelope = self.ingress_compiler.compile(envelope)
         self.mailbox.put(
             EventEnvelope(
                 event_kind=envelope.event.event_kind,
@@ -263,7 +268,7 @@ class ChannelRuntime(ChannelRuntimePort):
     def inbox(self) -> tuple[EventEnvelope, ...]:
         return self.mailbox.peek_all()
 
-    def queue_reply(self, envelope: ChannelEnvelope, text: str) -> str:
+    def queue_reply(self, envelope: TurnDeliveryBinding, text: str) -> str:
         # Outbox acceptance is the turn-facing completion point; actual delivery
         # is handled later by flush_outbox and surfaced as channel diagnostics.
         endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
@@ -281,7 +286,7 @@ class ChannelRuntime(ChannelRuntimePort):
         self._notify_ready()
         return reply_id
 
-    def queue_stream_update(self, envelope: ChannelEnvelope, update: ChannelStreamUpdate) -> str:
+    def queue_stream_update(self, envelope: TurnDeliveryBinding, update: ChannelStreamUpdate) -> str:
         endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
         if endpoint is not None:
             return endpoint.queue_stream_update(update, response_handle=envelope.response_handle)
@@ -297,7 +302,7 @@ class ChannelRuntime(ChannelRuntimePort):
         self._notify_ready()
         return update_id
 
-    def queue_attachment(self, envelope: ChannelEnvelope, attachment: AttachmentSpec) -> str:
+    def queue_attachment(self, envelope: TurnDeliveryBinding, attachment: AttachmentSpec) -> str:
         endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
         if endpoint is not None:
             return endpoint.queue_attachment(attachment, response_handle=envelope.response_handle)
@@ -332,7 +337,7 @@ class ChannelRuntime(ChannelRuntimePort):
 
     def queue_status(
         self,
-        envelope: ChannelEnvelope,
+        envelope: TurnDeliveryBinding,
         kind: str,
         *,
         payload: dict[str, object] | None = None,
