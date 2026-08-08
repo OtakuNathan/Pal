@@ -139,7 +139,7 @@ class ProactiveIntrospectionProvider:
             do_not_use_when="Listing specific tasks (use proactive_list). Checking one task's details (use proactive_show).",
             failure_next_steps="Read-only diagnostic. If mounted=false, use proactive_attach.",
         ),
-        aliases=("proactive_show",),
+        aliases=("proactive_status",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -157,9 +157,9 @@ class ProactiveIntrospectionProvider:
         action_name="list",
         description="List configured proactive tasks such as reminders, scheduled jobs, recurring reports, and push notifications",
         guidance=ToolGuidance(
-            purpose="List configured proactive tasks with their IDs, goals, schedules, next due time, and enabled status.",
+            purpose="List configured proactive tasks with their names, goals, schedules, next due time, and enabled status.",
             use_when="Checking what scheduled, recurring, reminder, or push tasks exist. The authoritative source for proactive task inventory.",
-            do_not_use_when="Checking module-level health (use proactive_show). Checking one task's run history (use proactive_list_runs).",
+            do_not_use_when="Checking module-level health (use proactive_status). Checking one task's run history (use proactive_list_runs).",
             failure_next_steps="Read-only. If empty, no proactive tasks are configured. Use proactive_create to add one.",
         ),
         aliases=("proactive_list",),
@@ -171,6 +171,7 @@ class ProactiveIntrospectionProvider:
         for definition in sorted(self.manager.registered.values(), key=lambda item: item.proactive_id):
             items.append(
                 {
+                    "name": definition.proactive_id,
                     "proactive_id": definition.proactive_id,
                     "goal": definition.goal,
                     "method": definition.method,
@@ -200,7 +201,7 @@ class ProactiveIntrospectionProvider:
             purpose="Show one proactive task's full configuration — goal, schedule, output channel, skill refs.",
             use_when="Inspecting a specific task's details before modifying or debugging it.",
             do_not_use_when="Listing all tasks (use proactive_list). Checking run history (use proactive_last_run or proactive_list_runs).",
-            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list.",
+            failure_next_steps="If NOT_FOUND, verify the task name with proactive_list.",
         ),
         aliases=("proactive_show",),
     )
@@ -213,6 +214,7 @@ class ProactiveIntrospectionProvider:
                 llm_text="proactive task not found",
             )
         payload = {
+            "name": target.proactive_id,
             "proactive_id": target.proactive_id,
             "goal": target.goal,
             "method": target.method,
@@ -240,7 +242,7 @@ class ProactiveIntrospectionProvider:
             purpose="Show the most recent run result for one proactive task.",
             use_when="Checking if a recurring/scheduled task ran successfully or what it produced.",
             do_not_use_when="Browsing all runs (use proactive_list_runs). Checking task config (use proactive_show).",
-            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list. If no run yet, the task may be newly created.",
+            failure_next_steps="If NOT_FOUND, verify the task name with proactive_list. If no run yet, the task may be newly created.",
         ),
         aliases=("proactive_last_run",),
     )
@@ -254,7 +256,7 @@ class ProactiveIntrospectionProvider:
             )
         repository = self.manager.repository
         if repository is None:
-            payload = {"proactive_id": target.proactive_id, "run": None}
+            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": None}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="proactive run history unavailable",
@@ -263,14 +265,14 @@ class ProactiveIntrospectionProvider:
             )
         run = repository.latest_run(target.proactive_id)
         if run is None:
-            payload = {"proactive_id": target.proactive_id, "run": None}
+            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": None}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="proactive task has not run yet",
                 structured=payload,
                 llm_text=render_titled_structured_for_llm("Proactive latest run", payload),
             )
-        payload = {"proactive_id": target.proactive_id, "run": self._render_run(run)}
+        payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "run": self._render_run(run)}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive latest run",
@@ -287,7 +289,7 @@ class ProactiveIntrospectionProvider:
             purpose="List recent run history for one proactive task.",
             use_when="Debugging a task that keeps failing or checking patterns across multiple runs.",
             do_not_use_when="Just the latest run (use proactive_last_run). Task configuration (use proactive_show).",
-            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list.",
+            failure_next_steps="If NOT_FOUND, verify the task name with proactive_list.",
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput,
         aliases=("proactive_list_runs",),
@@ -302,7 +304,7 @@ class ProactiveIntrospectionProvider:
             )
         repository = self.manager.repository
         if repository is None:
-            payload = {"proactive_id": target.proactive_id, "items": []}
+            payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "items": []}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="proactive run history unavailable",
@@ -311,7 +313,7 @@ class ProactiveIntrospectionProvider:
             )
         limit = max(1, min(50, int(call.args.get("limit") or 10)))
         items = [self._render_run(item) for item in repository.list_runs(target.proactive_id, limit=limit)]
-        payload = {"proactive_id": target.proactive_id, "items": items}
+        payload = {"name": target.proactive_id, "proactive_id": target.proactive_id, "items": items}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive run history",
@@ -329,20 +331,20 @@ class ProactiveIntrospectionProvider:
             purpose="Create or replace a proactive task for future work.",
             use_when="For one-time reminders, scheduled jobs, recurring reports, periodic checks, or push notifications.",
             do_not_use_when="Not for one-shot immediate tasks (handle directly).",
-            failure_next_steps="Correct invalid schedule/cron syntax; verify the output channel exists.",
+            failure_next_steps="Correct invalid schedule/cron syntax; use channel_list to verify an output channel name.",
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput,
         aliases=("proactive_create",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def create(self, call: IntrospectionCall) -> IntrospectionResult:
-        proactive_id = str(call.args.get("proactive_id") or "").strip()
+        proactive_id = str(call.args.get("name") or "").strip()
         goal = str(call.args.get("goal") or "").strip()
         if not proactive_id or not goal:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="proactive_id and goal are required",
-                llm_text="proactive_id and goal are required",
+                text="name and goal are required",
+                llm_text="name and goal are required",
             )
         skill_refs_raw = call.args.get("skill_refs") or []
         if not isinstance(skill_refs_raw, list):
@@ -361,13 +363,14 @@ class ProactiveIntrospectionProvider:
             goal=goal,
             method=str(call.args.get("method") or "").strip(),
             skill_refs=[str(item).strip() for item in skill_refs_raw if str(item).strip()],
-            out_channel_id=str(call.args.get("out_channel_id") or "").strip() or None,
+            out_channel_id=str(call.args.get("out_channel_name") or "").strip() or None,
             schedule=schedule,
             out_reply_target=dict(out_reply_target_raw),
             enabled=enabled_raw,
         )
         self._refresh_capabilities()
         payload = {
+            "name": definition.proactive_id,
             "proactive_id": definition.proactive_id,
             "out_channel_id": definition.out_channel_id,
             "out_reply_target": dict(definition.out_reply_target),
@@ -390,19 +393,19 @@ class ProactiveIntrospectionProvider:
             purpose="Permanently delete a proactive task and its definition.",
             use_when="A scheduled/recurring task is no longer needed and should be fully removed.",
             do_not_use_when="Temporarily stopping a task (use proactive_disable).",
-            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list. Deletion is irreversible.",
+            failure_next_steps="If NOT_FOUND, verify the task name with proactive_list. Deletion is irreversible.",
         ),
         aliases=("proactive_delete",),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput,
         execution=INDIRECT_LOCAL_WRITE,
     )
     def delete(self, call: IntrospectionCall) -> IntrospectionResult:
-        proactive_id = str(call.args.get("target_id") or "").strip()
+        proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="target_id is required",
-                llm_text="target_id is required",
+                text="name is required",
+                llm_text="name is required",
             )
         if not self.manager.destroy_task(proactive_id):
             return IntrospectionResult(
@@ -412,7 +415,7 @@ class ProactiveIntrospectionProvider:
                 llm_text="proactive task not found",
             )
         self._refresh_capabilities()
-        payload = {"proactive_id": proactive_id}
+        payload = {"name": proactive_id, "proactive_id": proactive_id}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive task deleted",
@@ -430,7 +433,7 @@ class ProactiveIntrospectionProvider:
             purpose="Enable a proactive task so it resumes firing on schedule.",
             use_when="Re-enabling a previously disabled task.",
             do_not_use_when="Disabling a task (use proactive_disable). Creating a new task (use proactive_create).",
-            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list.",
+            failure_next_steps="If NOT_FOUND, verify the task name with proactive_list.",
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput,
         aliases=("proactive_enable",),
@@ -449,7 +452,7 @@ class ProactiveIntrospectionProvider:
             purpose="Disable a proactive task so it stops firing without deleting it.",
             use_when="Temporarily pausing a task (e.g. debugging, vacation, maintenance).",
             do_not_use_when="Permanently removing a task (use proactive_delete).",
-            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list. Re-enable with proactive_enable.",
+            failure_next_steps="If NOT_FOUND, verify the task name with proactive_list. Re-enable with proactive_enable.",
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput,
         aliases=("proactive_disable",),
@@ -468,21 +471,21 @@ class ProactiveIntrospectionProvider:
             purpose="Set or clear which channel endpoint receives a proactive task's output.",
             use_when="Routing a task's output to a different channel (e.g. Telegram, socket) or clearing it.",
             do_not_use_when="Setting a specific reply target within a channel (use proactive_set_output_target).",
-            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list. Verify channel_id with channel_list.",
+            failure_next_steps="If NOT_FOUND, verify the task name with proactive_list. Verify the channel name with channel_list.",
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput,
         aliases=("proactive_set_output_channel",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_output_channel(self, call: IntrospectionCall) -> IntrospectionResult:
-        proactive_id = str(call.args.get("target_id") or "").strip()
+        proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="target_id is required",
-                llm_text="target_id is required",
+                text="name is required",
+                llm_text="name is required",
             )
-        raw_channel = call.args.get("out_channel_id")
+        raw_channel = call.args.get("out_channel_name")
         out_channel_id = str(raw_channel or "").strip() or None
         updated = self.manager.set_output_channel(proactive_id, out_channel_id)
         if updated is None:
@@ -494,6 +497,7 @@ class ProactiveIntrospectionProvider:
             )
         self._refresh_capabilities()
         payload = {
+            "name": proactive_id,
             "proactive_id": proactive_id,
             "out_channel_id": updated.out_channel_id,
             "out_reply_target": dict(updated.out_reply_target),
@@ -515,19 +519,19 @@ class ProactiveIntrospectionProvider:
             purpose="Set or clear the specific reply target (e.g. chat ID, thread) within a channel for a proactive task.",
             use_when="Fine-tuning where within a channel the task output goes (e.g. specific chat thread).",
             do_not_use_when="Switching the channel itself (use proactive_set_output_channel).",
-            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list.",
+            failure_next_steps="If NOT_FOUND, verify the task name with proactive_list.",
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput,
         aliases=("proactive_set_output_target",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_output_target(self, call: IntrospectionCall) -> IntrospectionResult:
-        proactive_id = str(call.args.get("target_id") or "").strip()
+        proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="target_id is required",
-                llm_text="target_id is required",
+                text="name is required",
+                llm_text="name is required",
             )
         out_reply_target_raw = call.args.get("out_reply_target") or {}
         if not isinstance(out_reply_target_raw, dict):
@@ -542,7 +546,7 @@ class ProactiveIntrospectionProvider:
                 llm_text="proactive task not found",
             )
         self._refresh_capabilities()
-        payload = {"proactive_id": proactive_id, "out_reply_target": dict(updated.out_reply_target)}
+        payload = {"name": proactive_id, "proactive_id": proactive_id, "out_reply_target": dict(updated.out_reply_target)}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive output target updated",
@@ -560,20 +564,20 @@ class ProactiveIntrospectionProvider:
             purpose="Update the schedule (cron, once, manual) for a proactive task.",
             use_when="Changing when a task fires — switching from manual to cron, updating cron expression, or setting a one-time trigger.",
             do_not_use_when="Changing output destination (use proactive_set_output_channel). Creating a new task (use proactive_create).",
-            failure_next_steps="If NOT_FOUND, verify the proactive_id with proactive_list. If schedule invalid, check cron syntax or run_at_utc format.",
+            failure_next_steps="If NOT_FOUND, verify the task name with proactive_list. If schedule invalid, check cron syntax or run_at_utc format.",
         ),
         InputModel=ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput,
         aliases=("proactive_update_schedule",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def update_schedule(self, call: IntrospectionCall) -> IntrospectionResult:
-        proactive_id = str(call.args.get("target_id") or "").strip()
+        proactive_id = str(call.args.get("name") or "").strip()
         schedule = call.args.get("schedule")
         if not proactive_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="target_id is required",
-                llm_text="target_id is required",
+                text="name is required",
+                llm_text="name is required",
             )
         if not isinstance(schedule, dict):
             return IntrospectionResult(
@@ -593,7 +597,7 @@ class ProactiveIntrospectionProvider:
                 llm_text="proactive task not found",
             )
         self._refresh_capabilities()
-        payload = {"proactive_id": proactive_id, "next_due_at": self.manager.schedule_engine.next_due_at(proactive_id)}
+        payload = {"name": proactive_id, "proactive_id": proactive_id, "next_due_at": self.manager.schedule_engine.next_due_at(proactive_id)}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive schedule updated",
@@ -606,7 +610,7 @@ class ProactiveIntrospectionProvider:
             purpose="Attach proactive module — resume scheduled task processing.",
             use_when="Reconnecting a detached proactive module.",
             do_not_use_when="Enabling one specific task (use proactive_enable). The module is already attached.",
-            failure_next_steps="No external dependencies. If still degraded after attach, check proactive_show.",
+            failure_next_steps="No external dependencies. If still degraded after attach, check proactive_status.",
         ), aliases=("proactive_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -638,12 +642,12 @@ class ProactiveIntrospectionProvider:
         )
 
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
-        proactive_id = str(call.args.get("target_id") or "").strip()
+        proactive_id = str(call.args.get("name") or "").strip()
         if not proactive_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="target_id is required",
-                llm_text="target_id is required",
+                text="name is required",
+                llm_text="name is required",
             )
         updated = self.manager.set_enabled(proactive_id, enabled)
         if updated is None:
@@ -655,6 +659,7 @@ class ProactiveIntrospectionProvider:
             )
         self._refresh_capabilities()
         payload = {
+            "name": proactive_id,
             "proactive_id": proactive_id,
             "enabled": updated.enabled,
             "next_due_at": self.manager.schedule_engine.next_due_at(proactive_id),

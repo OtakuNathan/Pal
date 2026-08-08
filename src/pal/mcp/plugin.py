@@ -125,7 +125,7 @@ class McpManagerPluginProvider:
         ), aliases=("mcp_server_list",))
     def list_servers(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        result = self._request_or_error("list_servers")
+        result = _add_names(self._request_or_error("list_servers"), key="server_id")
         return _introspection_from_rpc("MCP servers", result)
 
     @capability_action(
@@ -143,7 +143,7 @@ class McpManagerPluginProvider:
         aliases=("mcp_server_read",),
     )
     def read_server(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self._request_or_error("read_server", {"server_id": str(call.args.get("server_id") or "")})
+        result = self._request_or_error("read_server", {"server_id": str(call.args.get("name") or "")})
         return _introspection_from_rpc("MCP server", result)
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="attach", description="Attach MCP manager",
@@ -233,7 +233,7 @@ class McpManagerPluginProvider:
     def attach_server(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
             self._ensure_manager_started()
-            result = self.client.attach_server_sync(str(call.args.get("server_id") or ""))
+            result = self.client.attach_server_sync(str(call.args.get("name") or ""))
             self._refresh_projection()
             self._refresh_module_capabilities()
             return _introspection_from_rpc("MCP server attached", result)
@@ -258,7 +258,7 @@ class McpManagerPluginProvider:
     )
     def detach_server(self, call: IntrospectionCall) -> IntrospectionResult:
         try:
-            result = self.client.detach_server_sync(str(call.args.get("server_id") or ""))
+            result = self.client.detach_server_sync(str(call.args.get("name") or ""))
             self._refresh_projection()
             self._refresh_module_capabilities()
             return _introspection_from_rpc("MCP server detached", result)
@@ -275,7 +275,7 @@ class McpManagerPluginProvider:
             purpose="Prepare an image artifact/path/url for external MCP tool arguments.",
             use_when="An MCP tool requires image input and you have an artifact, local path, or URL.",
             do_not_use_when="Reading artifact text content (use read_artifact). The MCP tool accepts URLs directly.",
-            failure_next_steps="If artifact not found, verify with list_artifacts. If path invalid, check with read_file.",
+            failure_next_steps="If an artifact is not found, verify it with list_artifacts. For an invalid local path, use run_shell with a bounded existence/type check; read_file cannot validate binary images. If preparation may have succeeded, inspect the returned artifact/path before retrying to avoid duplicate materialization.",
         ),
         InputModel=McpPluginMcpManagerPluginProviderImagePrepareInput,
         aliases=("mcp_image_prepare",),
@@ -507,6 +507,19 @@ def _introspection_from_rpc(title: str, payload: dict[str, Any]) -> Introspectio
         structured=payload,
         llm_text=render_titled_structured_for_llm(title, payload),
     )
+
+
+def _add_names(payload: dict[str, Any], *, key: str) -> dict[str, Any]:
+    rendered = dict(payload)
+    items = rendered.get("items")
+    if isinstance(items, list):
+        rendered["items"] = [
+            {**dict(item), "name": str(item.get(key) or "")}
+            if isinstance(item, dict)
+            else item
+            for item in items
+        ]
+    return rendered
 
 
 def _error_result(text: str, exc: Exception) -> IntrospectionResult:

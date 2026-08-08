@@ -122,7 +122,7 @@ class _L3ProviderCapabilityMixin:
         guidance=ToolGuidance(
             purpose="Show stub memory provider runtime state.",
             use_when="Diagnosing the stub memory backend.",
-            do_not_use_when="Checking the real sqlite backend (use memory_provider_show on sqlite_vec). Recalling memories (use recall_memory).",
+            do_not_use_when="Checking a real provider (use search_tools to discover its bound provider-state alias). Recalling memories (use recall_memory).",
             failure_next_steps="Read-only. This is a stub provider for testing.",
         ),
         aliases=("memory_provider_show",),
@@ -145,7 +145,7 @@ class _L3ProviderCapabilityMixin:
         guidance=ToolGuidance(
             purpose="Inspect stub memory inventory.",
             use_when="Checking stub memory record counts.",
-            do_not_use_when="Real provider inventory (use memory_provider_inventory on sqlite_vec).",
+            do_not_use_when="Real provider inventory (use search_tools to discover the selected provider's bound inventory alias).",
             failure_next_steps="Read-only. This is a stub provider.",
         ),
         aliases=("memory_provider_inventory",),
@@ -169,9 +169,9 @@ class _L3ProviderCapabilityMixin:
         description="Recall durable memory records.",
         guidance=ToolGuidance(
             purpose="Recall durable memory records.",
-            use_when="When an error, regression, failed repair, repeated pitfall, or unfamiliar debugging situation appears, prefer kind='case' with concrete error/symptom/fix terms to check prior failures and fixes before",
-            do_not_use_when="See recall_memory for boundaries.",
-            failure_next_steps="Correct invalid input.",
+            use_when="Testing provider-level recall behavior with the stub backend, including case queries with concrete error, symptom, and fix terms.",
+            do_not_use_when="Normal Pal memory recall (use recall_memory).",
+            failure_next_steps="Correct invalid queries, view, kind, or limit. The stub has no external retrieval backend to recover.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinRecallInput,
@@ -335,8 +335,8 @@ class _L3ProviderCapabilityMixin:
         guidance=ToolGuidance(
             purpose="Delete one durable memory record by exact mem_ref.",
             use_when="Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record.",
-            do_not_use_when="See recall_memory for boundaries.",
-            failure_next_steps="Correct invalid input.",
+            do_not_use_when="Normal Pal memory deletion (use forget_memory).",
+            failure_next_steps="Provide an exact mem_ref and reason. The stub does not persist external data, so reconcile only against the returned stub result.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3StubsL3ProviderCapabilityMixinDeleteInput,
@@ -362,7 +362,7 @@ class _L3ProviderCapabilityMixin:
         guidance=ToolGuidance(
             purpose="Attach the stub memory provider.",
             use_when="Testing with the stub memory backend.",
-            do_not_use_when="Real provider (use sqlite_vec memory_provider_attach).",
+            do_not_use_when="Real provider lifecycle work (use search_tools to discover the selected provider's bound attach alias).",
             failure_next_steps="This is a stub provider.",
         ), aliases=("memory_provider_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -379,7 +379,7 @@ class _L3ProviderCapabilityMixin:
         guidance=ToolGuidance(
             purpose="Detach the stub memory provider.",
             use_when="Disconnecting the stub memory backend.",
-            do_not_use_when="Real provider (use sqlite_vec memory_provider_detach).",
+            do_not_use_when="Real provider lifecycle work (use search_tools to discover the selected provider's bound detach alias).",
             failure_next_steps="This is a stub provider.",
         ), aliases=("memory_provider_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -401,7 +401,7 @@ class _L3ProviderCapabilityMixin:
         guidance=ToolGuidance(
             purpose="Refresh stub provider indexes.",
             use_when="Testing refresh paths with the stub provider.",
-            do_not_use_when="Real provider (use sqlite_vec memory_provider_refresh).",
+            do_not_use_when="Real provider index refresh (use search_tools to discover the selected provider's bound refresh alias).",
             failure_next_steps="This is a stub provider.",
         ),
         metadata={"omit_family_in_canonical": True},

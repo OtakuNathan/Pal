@@ -18,7 +18,13 @@ from typing import Any
 from uuid import uuid4
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.file_state import FileStateCache, file_cache_key, resolve_file_path
+from pal.execution.file_state import (
+    FileStateCache,
+    UTF8_BOM,
+    file_cache_key,
+    read_utf8_text_exact,
+    resolve_file_path,
+)
 from pal.execution.file_tool_contracts import DEFAULT_FILE_READ_LIMIT
 from pal.execution.session_state import (
     FileDeliveryManifest,
@@ -38,8 +44,9 @@ _ERROR_LLMS: dict[str, str] = {
     ERR_FILE_NOT_FOUND: "The specified file does not exist.",
     ERR_UNSUPPORTED_TEXT_ENCODING: (
         "The file could not be decoded as UTF-8 text. "
-        "Binary files, images, and PDFs are not supported by file_read. "
-        "Use artifact or vision tools instead."
+        "Binary files, images, and PDFs are not supported by read_file. "
+        "For a channel-delivered artifact, use artifact_info to inspect its representations; "
+        "inspect image pixels only when the image is already inline and the active model supports vision."
     ),
     ERR_INVALID_ARGUMENT: "offset and limit must be positive integers.",
 }
@@ -48,6 +55,7 @@ DEFAULT_LIMIT = DEFAULT_FILE_READ_LIMIT
 FILE_UNCHANGED_STUB = (
     "File unchanged; this line range is already available in the current context."
 )
+UTF8_BOM_NOTICE = "(UTF-8 BOM present; preserved by read_file/edit_file)"
 
 
 @dataclass(frozen=True)
@@ -177,44 +185,10 @@ class SessionFileVisibilityCache:
         )
 
     def mark_visible(self, *args: Any, **kwargs: Any) -> None:
-        _ = args
-        file_path = kwargs.get("file_path")
-        # FileVisibilityCache passes file_path positionally. Preserve that
-        # protocol while committing direct host reads immediately: unlike a
-        # Core turn, the returned CapabilityResult is already visible to its
-        # caller and has no later L1 delivery boundary.
-        if file_path is None and len(args) >= 2:
-            file_path = args[1]
-        start_line = int(kwargs.get("start_line") or 0)
-        end_line = int(kwargs.get("end_line") or 0)
-        version = str(kwargs.get("version") or "")
-        if file_path is None or not version or start_line <= 0 or end_line < start_line:
-            return
-        snapshot = self.backend.file_snapshot(
-            execution_lifetime_id=self.context.execution_lifetime_id,
-            file_key=file_cache_key(file_path),
-            digest=version,
-        )
-        total_lines = int(getattr(snapshot, "total_lines", 0) or end_line)
-        self.backend.record_delivery(
-            execution_lifetime_id=self.context.execution_lifetime_id,
-            delivery=FileDeliveryManifest(
-                file_key=file_cache_key(file_path),
-                digest=version,
-                total_lines=total_lines,
-                spans=(
-                    FileDeliverySpan(
-                        start_offset=0,
-                        end_offset=1,
-                        start_line=start_line,
-                        end_line=end_line,
-                        visible_start_in_line=0,
-                        visible_end_in_line=1,
-                        line_length=1,
-                    ),
-                ),
-            ).to_dict(),
-        )
+        # Direct results are committed by FileCapabilityMixin only after the
+        # complete CapabilityResult has been returned successfully. Core-turn
+        # results remain deferred until append_l1_tool_result succeeds.
+        _ = (args, kwargs)
 
     def clear_scope(self, scope: str) -> None:
         _ = scope
@@ -269,7 +243,7 @@ class FileReadTool:
         # sufficient for the mutation guard's fast path, but not for deciding
         # that an LLM can safely reuse text already present in its context.
         try:
-            raw = resolved.read_text(encoding="utf-8")
+            raw = read_utf8_text_exact(resolved)
         except UnicodeDecodeError:
             msg = _ERROR_LLMS[ERR_UNSUPPORTED_TEXT_ENCODING]
             return _result(
@@ -293,15 +267,21 @@ class FileReadTool:
         end = min(start + limit - 1, total_lines)
         full_view = start == 1 and (total_lines == 0 or end == total_lines)
         version = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        utf8_bom = raw.startswith(UTF8_BOM)
 
-        # A logical-session read is authorized only after its result is
-        # delivered into L1. Retire an older snapshot now when the observed
-        # bytes differ, so the new delivery can replace it. If the snapshot
-        # already names these bytes, preserve it (including mutation authority)
-        # and avoid downgrading a complete view on a partial reread.
+        # A logical-session read is authorized only after its result reaches
+        # L1. A failed lookup can still leave leases for an older digest in the
+        # backend, so retire them only when they name bytes different from this
+        # observation. Merely lacking a current grant is not invalidation.
         cached_state = self.cache.get_valid_state(resolved)
         if self.defer_delivery and cached_state is None:
-            self.cache.invalidate(resolved)
+            retire_obsolete = getattr(
+                self.cache,
+                "retire_if_observed_digest_changed",
+                None,
+            )
+            if callable(retire_obsolete):
+                retire_obsolete(resolved, observed_digest=version)
 
         already_visible = self.visibility_cache.covers(
             self.visibility_scope,
@@ -312,9 +292,18 @@ class FileReadTool:
         )
 
         # The state cache stores the complete bytes for stale detection, but
-        # only a complete visible read grants permission to mutate the file.
+        # mutation authority is limited to the exact visible line ranges.
         if not self.defer_delivery:
-            self.cache.mark_read(str(resolved), raw, full_view=full_view)
+            self.cache.mark_read(
+                str(resolved),
+                raw,
+                full_view=full_view,
+                covered_ranges=(
+                    ((start, end),)
+                    if total_lines > 0 and start <= end
+                    else ()
+                ),
+            )
 
         if already_visible:
             return _result(
@@ -328,6 +317,7 @@ class FileReadTool:
                 full_view=full_view,
                 unchanged=True,
                 encoding="utf-8",
+                utf8_bom=utf8_bom,
             )
 
         if (
@@ -353,6 +343,7 @@ class FileReadTool:
                 full_view=True,
                 unchanged=True,
                 encoding="utf-8",
+                utf8_bom=utf8_bom,
                 replay_result_ref=result_ref,
             )
 
@@ -374,6 +365,7 @@ class FileReadTool:
                 full_view=True,
                 unchanged=False,
                 encoding="utf-8",
+                utf8_bom=False,
                 content="",
                 _context_delivery=manifest.to_dict(),
             )
@@ -390,6 +382,7 @@ class FileReadTool:
                 "full_view": False,
                 "unchanged": False,
                 "encoding": "utf-8",
+                "utf8_bom": utf8_bom,
             }
             return _result(RuntimeStatus.OK, msg, **structured)
 
@@ -407,9 +400,15 @@ class FileReadTool:
         selected = lines[start - 1 : end]
         numbered: list[str] = []
         spans: list[FileDeliverySpan] = []
-        cursor = 0
+        bom_notice = f"{UTF8_BOM_NOTICE}\n" if utf8_bom and start == 1 else ""
+        cursor = len(bom_notice)
         for i, line in enumerate(selected, start=start):
-            rendered_line = f"{i:>6}\t{line.rstrip(chr(10)).rstrip(chr(13))}"
+            display_line = line
+            if i == 1 and display_line.startswith(UTF8_BOM):
+                display_line = display_line[len(UTF8_BOM) :]
+            rendered_line = (
+                f"{i:>6}\t{display_line.rstrip(chr(10)).rstrip(chr(13))}"
+            )
             numbered.append(rendered_line)
             spans.append(
                 FileDeliverySpan(
@@ -424,7 +423,7 @@ class FileReadTool:
             )
             cursor += len(rendered_line) + 1
 
-        content = "\n".join(numbered)
+        content = bom_notice + "\n".join(numbered)
         if truncated:
             content += f"\n\n... ({total_lines - end} more lines below)"
 
@@ -437,6 +436,7 @@ class FileReadTool:
             "full_view": full_view,
             "unchanged": False,
             "encoding": "utf-8",
+            "utf8_bom": utf8_bom,
             "content": content,
         }
         manifest = FileDeliveryManifest(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pal.shared.tool_protocol import ToolCallIR, new_tool_call
 
 import unittest
+from types import SimpleNamespace
 
 from pal.core import PalCore as _PalCoreBootstrap
 from pal.execution.contracts import CapabilityCall, CapabilityResult
@@ -207,29 +208,77 @@ class CapabilityAliasRoutingTests(unittest.TestCase):
         finally:
             runtime.shutdown()
 
-    def test_targeted_aliases_are_exact_and_do_not_create_a_base_fallback(self) -> None:
-        runtime = ExecutionRuntime()
-        for target_id in ("worker_a", "worker_b"):
-            mount_test_capability(
-                runtime,
-                **echo_capability(
-                    alias=f"echo__{target_id}",
-                    canonical_path=f"op_test_echo__{target_id}",
-                    target_id=target_id,
-                )
+    def test_targeted_capability_exposes_one_name_parameterized_alias(self) -> None:
+        @capability_node(
+            namespace=OPERATION_NAMESPACE,
+            scope="provider",
+            kind="provider",
+            source="test",
+            target_kind="provider",
+            iterable_resolver="iter_providers",
+            target_id_resolver="provider_name",
+            target_label_resolver="provider_name",
+        )
+        class TargetedProvider:
+            @staticmethod
+            def iter_providers() -> list[str]:
+                return ["worker_a", "worker_b"]
+
+            @staticmethod
+            def provider_name(value: str) -> str:
+                return value
+
+            @capability_action(
+                namespace=OPERATION_NAMESPACE,
+                scope="provider",
+                action_name="echo",
+                aliases=("echo",),
+                InputModel=EchoInput,
+                OutputModel=EchoOutput,
+                execution=INDIRECT_NONE,
+                guidance=ToolGuidance(
+                    purpose="Echo through one named provider.",
+                    use_when="Testing parameterized target routing.",
+                    do_not_use_when="No provider name is known.",
+                    failure_next_steps="List provider names before retrying.",
+                ),
+                examples=({"value": "test"},),
             )
+            def echo(self, call: CapabilityCall) -> CapabilityResult:
+                rendered = f"{call.args['target_id']}:{call.args['value']}"
+                return CapabilityResult(
+                    status=RuntimeStatus.OK,
+                    text=rendered,
+                    structured={"echo": rendered},
+                    llm_text=rendered,
+                )
+
+        runtime = ExecutionRuntime()
+        subtree = compile_provider_subtree(
+            TargetedProvider(),
+            module_id="test",
+            lifecycle_scope="runtime",
+            detachable=False,
+        )
+        handle = SimpleNamespace(mounted_subtree=subtree)
+        runtime.mount_subtree(handle)
         try:
             selected = runtime.invoke_indirect_tool(
-                new_tool_call(name="echo__worker_b", args={"value": "worker_b"})
+                new_tool_call(name="echo", args={"name": "worker_b", "value": "hello"})
             )
-            missing_base = runtime.invoke_indirect_tool(
-                new_tool_call(name="echo", args={"value": "worker_b"})
+            leaked_alias = runtime.invoke_indirect_tool(
+                new_tool_call(name="echo__worker_b", args={"name": "worker_b", "value": "hello"})
             )
 
             self.assertIsInstance(selected, CompleteResult)
-            self.assertEqual(selected.output, {"echo": "worker_b"})
-            self.assertIsInstance(missing_base, RejectedResult)
-            self.assertEqual(missing_base.error_code, "unknown_tool")
+            self.assertEqual(selected.output, {"echo": "worker_b:hello"})
+            self.assertEqual(set(runtime.registry_generation.indirect_aliases), {"echo"})
+            self.assertEqual(
+                runtime.registry_generation.indirect_aliases["echo"].input_schema["required"],
+                ["value", "name"],
+            )
+            self.assertIsInstance(leaked_alias, RejectedResult)
+            self.assertEqual(leaked_alias.error_code, "unknown_tool")
         finally:
             runtime.shutdown()
 

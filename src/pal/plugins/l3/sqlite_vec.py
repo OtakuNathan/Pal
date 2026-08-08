@@ -263,7 +263,7 @@ class SQLiteVecL3Plugin:
             purpose="Inspect sqlite-vec memory inventory and index status.",
             use_when="Checking memory record counts, embedding coverage, or index health.",
             do_not_use_when="Recalling specific memories (use recall_memory). Provider state (use memory_provider_show).",
-            failure_next_steps="Read-only. If embeddings missing, run memory_provider_refresh.",
+            failure_next_steps="Read-only. If embeddings missing, run memory_provider_refresh_indexes.",
         ), aliases=("memory_provider_inventory",))
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -283,9 +283,9 @@ class SQLiteVecL3Plugin:
         description="Recall durable memory records by searching against the source-of-truth text.",
         guidance=ToolGuidance(
             purpose="Recall durable memory records by searching against the source-of-truth text.",
-            use_when="When an error, regression, failed repair, repeated pitfall, or unfamiliar debugging situation appears, prefer kind='case' with concrete error/symptom/fix terms to check prior failures and fixes before",
-            do_not_use_when="See recall_memory for boundaries.",
-            failure_next_steps="Correct invalid input.",
+            use_when="Diagnosing the sqlite provider directly. For errors, regressions, failed repairs, repeated pitfalls, or unfamiliar debugging, prefer kind='case' with concrete error, symptom, and fix terms.",
+            do_not_use_when="Normal Pal memory recall (use recall_memory, which routes to the active provider).",
+            failure_next_steps="Correct invalid queries, kind, view, or limit. If retrieval fails or appears stale, inspect provider state and inventory through search_tools, then refresh indexes if indicated.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginRecallInput,
@@ -331,9 +331,9 @@ class SQLiteVecL3Plugin:
         description="Commit a durable memory record.",
         guidance=ToolGuidance(
             purpose="Commit a durable memory record.",
-            use_when="summary is prompt-ready memory text for future LLM consumption. search_text is source-of-truth retrieval text for indexing. For kind=case, provide star with situation, task, action, and result.",
-            do_not_use_when="See recall_memory for boundaries.",
-            failure_next_steps="Correct invalid input.",
+            use_when="Testing or operating the sqlite provider directly. summary is prompt-ready text; search_text is retrieval source text. For kind=case, provide STAR situation, task, action, and result fields.",
+            do_not_use_when="Normal Pal memory writes (use remember_memory, which routes to the active provider).",
+            failure_next_steps="Correct invalid kind, summary, search_text, or STAR fields. If the write outcome is uncertain, reconcile with recall_memory using the candidate text before retrying so a duplicate record is not created.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginWriteInput,
@@ -402,7 +402,7 @@ class SQLiteVecL3Plugin:
             purpose="Update a memory record in the sqlite backend.",
             use_when="Correcting or superseding a stored memory record at the provider level.",
             do_not_use_when="High-level memory updates (use update_memory — it routes to the active provider).",
-            failure_next_steps="If record not found, verify the mem_ref.",
+            failure_next_steps="If the record is not found, copy the exact mem_ref from recall_memory. If the update outcome is uncertain, recall that mem_ref and reconcile its current content before retrying.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginUpdateInput,
@@ -453,8 +453,8 @@ class SQLiteVecL3Plugin:
         guidance=ToolGuidance(
             purpose="Delete one durable memory record by exact mem_ref.",
             use_when="Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record.",
-            do_not_use_when="See recall_memory for boundaries.",
-            failure_next_steps="Correct invalid input.",
+            do_not_use_when="Normal Pal memory deletion (use forget_memory, which routes to the active provider).",
+            failure_next_steps="Copy the exact mem_ref from recall_memory. If deletion outcome is uncertain, reconcile by recalling that mem_ref before retrying; do not issue a blind duplicate delete.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=PluginsL3SqliteVecSQLiteVecL3PluginDeleteInput,

@@ -713,7 +713,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                     (
                         "Use the named skill safe.git.diff_review and tell me what to do before preparing a git commit. "
                         "You must call skill_search first. When the search result shows safe.git.diff_review is injectable, "
-                        "immediately call skill_inject with skill_id safe.git.diff_review before any final answer. "
+                        "immediately call skill_inject with name safe.git.diff_review before any final answer. "
                         "Do not stop after search."
                     ),
                     ["skill_search", "skill_inject"],

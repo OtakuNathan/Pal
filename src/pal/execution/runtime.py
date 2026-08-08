@@ -66,7 +66,6 @@ from pal.execution.session_state import (
     InMemoryLogicalExecutionState,
     LogicalExecutionContext,
     LogicalExecutionStateBackend,
-    projection_hash,
 )
 from pal.shared import (
     BoundCapabilityAction,
@@ -243,18 +242,65 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 continue
             call_id = str(message.get("tool_call_id") or "")
             content = str(message.get("content") or "")
-            projection.append(projection_hash(call_id, content))
+            projection.append(call_id)
             manifest = FileDeliveryManifest.from_dict(delivery_records.get(call_id))
             source = original_by_call.get(call_id, "")
             if manifest is None or not source:
                 continue
-            # A head/tail preview is useful evidence, but it is not the exact
-            # delivered file range. Only byte-for-byte visible results may
-            # authorize later mutation; projected results use their replay
-            # handle to regain exact delivery grants.
-            if content != source:
+            raw_ranges = message.get("_pal_visible_source_ranges")
+            visible_ranges = tuple(
+                (max(0, int(item[0])), min(len(source), int(item[1])))
+                for item in list(raw_ranges or ())
+                if isinstance(item, (list, tuple))
+                and len(item) == 2
+                and int(item[1]) > int(item[0])
+            )
+            if not visible_ranges and content == source:
+                visible_ranges = ((0, len(source)),)
+            if not visible_ranges:
                 continue
-            deliveries.append(manifest.to_dict())
+            sliced = tuple(
+                candidate
+                for start_offset, end_offset in visible_ranges
+                if (
+                    candidate := manifest.slice(start_offset, end_offset)
+                ) is not None
+            )
+            if not sliced:
+                continue
+            projected_manifest = FileDeliveryManifest(
+                file_key=manifest.file_key,
+                digest=manifest.digest,
+                total_lines=manifest.total_lines,
+                spans=tuple(
+                    span for candidate in sliced for span in candidate.spans
+                ),
+                empty_file=any(candidate.empty_file for candidate in sliced),
+                empty_marker=manifest.empty_marker,
+                replay_result_ref=manifest.replay_result_ref,
+                operation=manifest.operation,
+                before_digest=manifest.before_digest,
+                inherited_ranges=tuple(
+                    item
+                    for candidate in sliced
+                    for item in candidate.inherited_ranges
+                ),
+                parent_result_ids=tuple(
+                    sorted(
+                        {
+                            item
+                            for candidate in sliced
+                            for item in candidate.parent_result_ids
+                        }
+                    )
+                ),
+                complete_file=any(
+                    candidate.complete_file for candidate in sliced
+                ),
+            )
+            delivery = projected_manifest.to_dict()
+            delivery["result_id"] = call_id
+            deliveries.append(delivery)
         return self.logical_state.reconcile_projection(
             execution_lifetime_id=context.execution_lifetime_id,
             projection=tuple(projection),
@@ -266,6 +312,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         turn_id: str | None,
         context_delivery: dict[str, Any] | None,
+        result_id: str = "",
     ) -> LogicalExecutionContext:
         """Commit a tool delivery after its result has entered L1."""
 
@@ -273,9 +320,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
         manifest = FileDeliveryManifest.from_dict(context_delivery)
         if manifest is None:
             return context
+        delivery = manifest.to_dict()
+        delivery["result_id"] = str(result_id or manifest.replay_result_ref)
         return self.logical_state.record_delivery(
             execution_lifetime_id=context.execution_lifetime_id,
-            delivery=manifest.to_dict(),
+            delivery=delivery,
         )
 
     def discard_uncommitted_tool_delivery(
@@ -527,9 +576,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 "tool execution disabled in finalization mode",
                 retry=RetryDirective.DO_NOT_RETRY,
             )
-        lifecycle = self._maybe_handle_lifecycle_action(record.binding.descriptor)
+        binding = self._resolve_record_binding(generation, record, validated)
+        if isinstance(binding, RejectedResult):
+            return binding
+        lifecycle = self._maybe_handle_lifecycle_action(binding.descriptor)
         try:
-            raw = lifecycle if lifecycle is not None else self._call_record_sync(record, call, validated, turn_id, budget, allow_tools)
+            raw = lifecycle if lifecycle is not None else self._call_record_sync(
+                record, binding, call, validated, turn_id, budget, allow_tools
+            )
             return self._normalize_invocation_result(
                 record,
                 call,
@@ -576,10 +630,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 "tool execution disabled in finalization mode",
                 retry=RetryDirective.DO_NOT_RETRY,
             )
-        lifecycle = self._maybe_handle_lifecycle_action(record.binding.descriptor)
+        binding = self._resolve_record_binding(generation, record, validated)
+        if isinstance(binding, RejectedResult):
+            return binding
+        lifecycle = self._maybe_handle_lifecycle_action(binding.descriptor)
         try:
             raw = lifecycle if lifecycle is not None else await self._call_record_async(
-                record, call, validated, turn_id, budget, allow_tools
+                record, binding, call, validated, turn_id, budget, allow_tools
             )
             return self._normalize_invocation_result(
                 record,
@@ -671,6 +728,55 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 ],
                 details=details,
             )
+
+    @staticmethod
+    def _resolve_record_binding(
+        generation: ToolRegistryGeneration,
+        record: CompiledToolRecord,
+        validated: BaseModel | dict[str, Any],
+    ) -> BoundCapabilityAction | RejectedResult:
+        target_argument = str(record.binding.descriptor.metadata.get("target_argument") or "")
+        if not target_argument:
+            return record.binding
+        args = _invocation_args(validated)
+        target_name = str(args.get(target_argument) or "").strip()
+        binding = generation.canonical_bindings.get(record.canonical_path, target_name)
+        if binding is not None:
+            return binding
+        available_names = sorted(
+            {
+                candidate_target
+                for candidate_path, candidate_target in generation.canonical_bindings.actions
+                if candidate_path == record.canonical_path and candidate_target != SINGLETON_TARGET
+            }
+        )
+        discovery_alias = _target_discovery_alias(record.binding.descriptor)
+        discovery_record = generation.record_for_alias(discovery_alias) if discovery_alias else None
+        affordances: list[ToolAffordance] = []
+        if discovery_record is not None:
+            if discovery_record.execution.invocation_mode is InvocationMode.DIRECT:
+                affordances.append(
+                    ToolAffordance(
+                        tool=discovery_alias,
+                        arguments={},
+                        reason=f"List valid {record.binding.descriptor.target_kind} names before retrying.",
+                    )
+                )
+            else:
+                affordances.append(
+                    ToolAffordance(
+                        tool="call_tool",
+                        arguments={"name": discovery_alias, "args": {}},
+                        reason=f"List valid {record.binding.descriptor.target_kind} names before retrying.",
+                    )
+                )
+        return rejection(
+            "unknown_target",
+            f"unknown {record.binding.descriptor.target_kind} name for {record.alias}: {target_name!r}",
+            retry=RetryDirective.CORRECT_INPUT,
+            affordances=affordances,
+            details={"argument": target_argument, "available_names": available_names},
+        )
 
     def _invoke_facade_builtin_sync(
         self,
@@ -1014,6 +1120,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     def _call_record_sync(
         self,
         record: CompiledToolRecord,
+        binding: BoundCapabilityAction,
         call: ToolCallIR,
         validated: BaseModel | dict[str, Any],
         turn_id: str | None,
@@ -1021,7 +1128,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         allow_tools: bool,
     ) -> Any:
         args = _invocation_args(validated)
-        result = record.binding.callable(
+        result = binding.callable(
             CapabilityCall(
                 name=record.canonical_path,
                 args=args,
@@ -1035,6 +1142,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     async def _call_record_async(
         self,
         record: CompiledToolRecord,
+        binding: BoundCapabilityAction,
         call: ToolCallIR,
         validated: BaseModel | dict[str, Any],
         turn_id: str | None,
@@ -1047,11 +1155,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
             args=args,
             meta=self._invocation_meta(call, turn_id=turn_id, budget=budget, allow_tools=allow_tools),
         )
-        if record.binding.async_callable is not None:
-            result = record.binding.async_callable(capability_call)
+        if binding.async_callable is not None:
+            result = binding.async_callable(capability_call)
             return await result if inspect.isawaitable(result) else result
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(self.sync_executor, lambda: record.binding.callable(capability_call))
+        result = await loop.run_in_executor(self.sync_executor, lambda: binding.callable(capability_call))
         return await result if inspect.isawaitable(result) else result
 
     def _normalize_invocation_result(
@@ -1221,6 +1329,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
             execution_lifetime_id=handle.execution_lifetime_id,
         )
         page_text = page.content if page is not None else rendered[:page_size]
+        page_delivery = (
+            dict(page.context_delivery)
+            if page is not None
+            and isinstance(page.context_delivery, dict)
+            else None
+        )
         affordances: list[ToolAffordance] = []
         if handle.page_count > 1:
             affordances.append(
@@ -1243,14 +1357,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
             effect=outcome,
             llm_text=page_text,
             affordances=affordances,
-            # Paging changes presentation, not what the validated handler
-            # actually read.  File-state authority follows the complete
-            # delivery retained by this handle and retires with that handle.
-            context_delivery=(
-                dict(context_delivery)
-                if isinstance(context_delivery, dict)
-                else None
-            ),
+            # Pager backing data is replayable evidence, not live authority.
+            # The initial result owns only the exact first page delivered.
+            context_delivery=page_delivery,
         ), handle.result_ref
 
     @staticmethod
@@ -1479,22 +1588,45 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if singleton is not None:
             return singleton
 
-        target_id = str(call.args.get("target_id") or SINGLETON_TARGET)
+        target_id = str(call.args.get("target_id") or "").strip()
+        if not target_id:
+            for descriptor_name in captured.capability_index.by_canonical.get(call.name, ()):
+                descriptor = captured.capability_index.records.get(descriptor_name)
+                if descriptor is None:
+                    continue
+                target_argument = str(descriptor.metadata.get("target_argument") or "")
+                if target_argument:
+                    target_id = str(call.args.get(target_argument) or "").strip()
+                    if target_id:
+                        break
+        target_id = target_id or SINGLETON_TARGET
         bound = captured.canonical_bindings.get(call.name, target_id)
         if bound is not None:
             return bound
         matching = captured.capability_index.by_canonical.get(call.name, [])
         if matching and target_id == SINGLETON_TARGET:
             descriptors = [captured.capability_index.records[record_id] for record_id in matching]
+            target_argument = next(
+                (
+                    str(descriptor.metadata.get("target_argument") or "")
+                    for descriptor in descriptors
+                    if descriptor.metadata.get("target_argument")
+                ),
+                "target_id",
+            )
             instance_targets = sorted(
                 {
-                    descriptor.target_id
-                    for descriptor in descriptors
-                    if descriptor.target_id and descriptor.target_id != SINGLETON_TARGET
+                    candidate_target
+                    for candidate_path, candidate_target in captured.canonical_bindings.actions
+                    if candidate_path == call.name and candidate_target != SINGLETON_TARGET
                 }
             )
             if instance_targets:
-                return _target_id_required_result(canonical_path=call.name, available_target_ids=instance_targets)
+                return _target_name_required_result(
+                    canonical_path=call.name,
+                    argument=target_argument,
+                    available_names=instance_targets,
+                )
         return CapabilityResult(
             status=RuntimeStatus.ERROR,
             text=f"unknown capability: {call.name}",
@@ -1548,20 +1680,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return False
         if str(metadata.get("action") or "").strip() not in {"attach", "detach"}:
             return False
+        if metadata.get("target_argument"):
+            return False
         return not descriptor.target_id or descriptor.target_id == SINGLETON_TARGET
 
-    def _resolve_descriptor(self, name: str, *, target_id: str = SINGLETON_TARGET) -> CapabilityDescriptor | CapabilityResult | None:
+    def _resolve_descriptor(self, name: str) -> CapabilityDescriptor | CapabilityResult | None:
         candidates: list[CapabilityDescriptor] = []
         raw = str(name or "").strip()
         direct = self.compiled_capability_index.records.get(raw)
         if direct is not None:
             return direct
         canonical_path = self.resolve_capability_address(raw)
-        if target_id != SINGLETON_TARGET:
-            targeted_name = f"{raw}__{target_id}"
-            targeted = self.compiled_capability_index.records.get(targeted_name)
-            if targeted is not None:
-                candidates.append(targeted)
         candidates.extend(
             self.compiled_capability_index.records[record_id]
             for record_id in self.compiled_capability_index.by_canonical.get(canonical_path, [])
@@ -1571,17 +1700,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
             return None
         unique: dict[str, CapabilityDescriptor] = {descriptor.name: descriptor for descriptor in candidates}
         candidates = list(unique.values())
-        if target_id != SINGLETON_TARGET:
-            targeted = [descriptor for descriptor in candidates if (descriptor.target_id or SINGLETON_TARGET) == target_id]
-            if len(targeted) == 1:
-                return targeted[0]
-            if len(targeted) > 1:
-                return CapabilityResult(
-                    status=RuntimeStatus.INVALID,
-                    text="capability alias is ambiguous",
-                    structured={"name": name, "target_id": target_id, "matches": [item.name for item in targeted]},
-                    llm_text="capability alias is ambiguous",
-                )
         singleton = [descriptor for descriptor in candidates if (descriptor.target_id or SINGLETON_TARGET) == SINGLETON_TARGET]
         if len(singleton) == 1:
             return singleton[0]
@@ -1600,7 +1718,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             }
         )
         if instance_targets:
-            return _target_id_required_result(name=name, available_target_ids=instance_targets)
+            return _target_name_required_result(name=name, argument="target_id", available_names=instance_targets)
         return None
 
     def resolve_capability_address(self, name: object) -> str:
@@ -1740,30 +1858,32 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 self._interrupt_handles.pop(turn_id, None)
 
 
-def _target_id_required_result(
+def _target_name_required_result(
     *,
-    available_target_ids: list[str],
+    available_names: list[str],
+    argument: str,
     canonical_path: str = "",
     name: str = "",
 ) -> CapabilityResult:
     payload = {
-        "error_code": "target_id_required",
-        "available_target_ids": list(available_target_ids),
+        "error_code": "target_name_required",
+        "argument": argument,
+        "available_names": list(available_names),
     }
     if canonical_path:
         payload["canonical_path"] = canonical_path
     if name:
         payload["name"] = name
-    target_text = ", ".join(available_target_ids) if available_target_ids else "(none)"
+    target_text = ", ".join(available_names) if available_names else "(none)"
     capability = canonical_path or name or "this capability"
     return CapabilityResult(
         status=RuntimeStatus.INVALID,
-        text="target_id is required for this capability",
+        text=f"{argument} is required for this capability",
         structured=payload,
         llm_text=(
-            f"target_id is required for {capability}. "
-            f"Available target_id values: {target_text}. "
-            "Retry with args.target_id set to one of these values."
+            f"{argument} is required for {capability}. "
+            f"Available names: {target_text}. "
+            f"Retry with args.{argument} set to one of these names."
         ),
     )
 
@@ -1796,6 +1916,23 @@ def _search_facets(records: Any) -> dict[str, Any]:
             for key, count in sorted(counts["families"].items())
         ],
     }
+
+
+def _target_discovery_alias(descriptor: CapabilityDescriptor) -> str:
+    configured = str(descriptor.metadata.get("target_discovery_alias") or "").strip()
+    if configured:
+        return configured
+    if descriptor.target_kind == "endpoint":
+        return "channel_list"
+    if descriptor.target_kind == "proactive_task":
+        return "proactive_list"
+    if descriptor.target_kind == "provider":
+        return {
+            "memory": "memory_list_providers",
+            "web_fetch": "web_fetch_list_providers",
+            "web_search": "web_search_list_providers",
+        }.get(descriptor.module_id, "")
+    return ""
 
 
 def _capability_spec_payload(descriptor: CapabilityDescriptor) -> dict[str, Any]:

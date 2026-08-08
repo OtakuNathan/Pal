@@ -363,7 +363,7 @@ Run the workflow.
         result = core.context.execution_runtime.execute_tool(
             new_tool_call(
                 name="call_tool",
-                args={"name": "skill_inject", "args": {"skill_id": "safe.workflow"}},
+                args={"name": "skill_inject", "args": {"name": "safe.workflow"}},
             )
         )
 

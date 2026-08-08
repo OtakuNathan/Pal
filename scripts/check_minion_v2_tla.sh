@@ -27,7 +27,6 @@ models=(
     ContinuationLifecycle
     ReplanReuseLifecycle
     ImplementationTopology
-    FileMutationAuthorization
     ContractWorkItemLifecycle
     HarnessGenerationLifecycle
     MinionRuntimeAuthority

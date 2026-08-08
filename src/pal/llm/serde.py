@@ -229,6 +229,9 @@ def part_to_payload(part: Any) -> dict[str, Any]:
                 else None
             ),
             "replay_result_ref": part.replay_result_ref,
+            "visible_source_ranges": [
+                [start, end] for start, end in part.visible_source_ranges
+            ],
         }
     raise TypeError(f"unsupported LLM IR part: {type(part).__name__}")
 
@@ -270,5 +273,10 @@ def part_from_payload(payload: Mapping[str, Any]) -> Any:
                 else None
             ),
             replay_result_ref=str(payload.get("replay_result_ref") or ""),
+            visible_source_ranges=tuple(
+                (int(item[0]), int(item[1]))
+                for item in list(payload.get("visible_source_ranges") or ())
+                if isinstance(item, (list, tuple)) and len(item) == 2
+            ),
         )
     raise ValueError(f"unknown LLM IR part kind: {kind}")

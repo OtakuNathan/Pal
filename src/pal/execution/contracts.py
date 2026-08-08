@@ -164,5 +164,6 @@ class ExecutionRuntimePort(Protocol):
         *,
         turn_id: str | None,
         context_delivery: dict[str, Any] | None,
+        result_id: str = "",
     ) -> Any:
         ...

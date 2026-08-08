@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import inspect
 import re
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable
 
 from pydantic import Field, create_model
 
@@ -46,6 +46,12 @@ _CANONICAL_FAMILY_ABBREVIATIONS = {
     "discovery": "disc",
 }
 
+_TARGET_ARGUMENT_NAMES = {
+    "endpoint": "name",
+    "proactive_task": "name",
+    "provider": "name",
+}
+
 
 @dataclass(frozen=True)
 class HydrationTarget:
@@ -65,6 +71,7 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
 
     for node_blueprint in node_blueprints:
         targets = list(_hydrate_targets(provider, node_blueprint, module_id=module_id))
+        hydrated_nodes: dict[str, HydratedCapabilityNode] = {}
         for target in targets:
             node_id = f"{node_blueprint.namespace}:{node_blueprint.scope}:{module_id}:{target.target_id}"
             node = HydratedCapabilityNode(
@@ -81,65 +88,88 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
             )
             subtree.nodes.append(node)
             subtree.node_ids.append(node_id)
+            hydrated_nodes[target.target_id] = node
 
-            for action_blueprint in action_blueprints:
-                if action_blueprint.namespace != node_blueprint.namespace or action_blueprint.scope != node_blueprint.scope:
-                    continue
-                canonical_path = _canonical_path(
-                    module_id=node_blueprint.path_module_id or module_id,
-                    action_blueprint=action_blueprint,
-                    node_blueprint=node_blueprint,
-                )
-                descriptor_name = _bound_alias(action_blueprint, target)
-                input_model = _bound_input_model(
-                    action_blueprint,
-                    target,
-                    descriptor_name,
-                )
-                descriptor = CapabilityDescriptor(
-                    name=descriptor_name,
-                    canonical_path=canonical_path,
-                    family=action_blueprint.family or action_blueprint.namespace,
-                    description=action_blueprint.description or f"{action_blueprint.action_name} {module_id} {node_blueprint.scope}",
-                    source=node_blueprint.source,
-                    display_name=descriptor_name,
-                    aliases=(descriptor_name,),
-                    target_kind=node.target_kind,
-                    target_id=target.target_id,
-                    target_label=target.target_label,
-                    InputModel=input_model,
-                    OutputModel=action_blueprint.OutputModel,
-                    guidance=action_blueprint.guidance or _default_guidance(action_blueprint, module_id),
-                    execution=action_blueprint.execution or _default_execution(action_blueprint),
-                    search_text=(
-                        str(action_blueprint.search_text or "").strip()
-                        or " ".join(
-                            value
-                            for value in (
-                                descriptor_name,
-                                getattr(action_blueprint.guidance, "purpose", None),
-                                action_blueprint.description,
-                                action_blueprint.family,
-                                module_id,
-                            )
-                            if str(value or "").strip()
+        if not targets:
+            continue
+        representative = targets[0]
+        is_targeted = representative.target_id != SINGLETON_TARGET
+        for action_blueprint in action_blueprints:
+            if action_blueprint.namespace != node_blueprint.namespace or action_blueprint.scope != node_blueprint.scope:
+                continue
+            canonical_path = _canonical_path(
+                module_id=node_blueprint.path_module_id or module_id,
+                action_blueprint=action_blueprint,
+                node_blueprint=node_blueprint,
+            )
+            public_alias = _public_alias(action_blueprint)
+            input_model = _bound_input_model(
+                action_blueprint,
+                representative,
+                public_alias,
+                node_blueprint=node_blueprint,
+                module_id=module_id,
+            )
+            descriptor = CapabilityDescriptor(
+                name=public_alias,
+                canonical_path=canonical_path,
+                family=action_blueprint.family or action_blueprint.namespace,
+                description=action_blueprint.description or f"{action_blueprint.action_name} {module_id} {node_blueprint.scope}",
+                source=node_blueprint.source,
+                display_name=public_alias,
+                aliases=(public_alias,),
+                target_kind=node_blueprint.target_kind,
+                target_id=SINGLETON_TARGET,
+                target_label=module_id,
+                InputModel=input_model,
+                OutputModel=action_blueprint.OutputModel,
+                guidance=action_blueprint.guidance or _default_guidance(action_blueprint, module_id),
+                execution=action_blueprint.execution or _default_execution(action_blueprint),
+                search_text=(
+                    str(action_blueprint.search_text or "").strip()
+                    or " ".join(
+                        value
+                        for value in (
+                            public_alias,
+                            getattr(action_blueprint.guidance, "purpose", None),
+                            action_blueprint.description,
+                            action_blueprint.family,
+                            module_id,
                         )
+                        if str(value or "").strip()
+                    )
+                ),
+                examples=_bound_examples(
+                    action_blueprint,
+                    representative,
+                    input_model=input_model,
+                    node_blueprint=node_blueprint,
+                ),
+                metadata={
+                    "namespace": action_blueprint.namespace,
+                    "scope": node_blueprint.scope,
+                    "action": action_blueprint.action_name,
+                    **(
+                        {
+                            "target_argument": _target_argument_name(node_blueprint),
+                            "target_discovery_alias": _target_discovery_alias(
+                                node_blueprint,
+                                module_id=module_id,
+                            ),
+                        }
+                        if is_targeted
+                        else {}
                     ),
-                    examples=_bound_examples(
-                        action_blueprint,
-                        target,
-                        input_model=input_model,
-                    ),
-                    metadata={
-                        "namespace": action_blueprint.namespace,
-                        "scope": node_blueprint.scope,
-                        "action": action_blueprint.action_name,
-                        **dict(action_blueprint.metadata),
-                    },
-                    lifecycle_scope=lifecycle_scope,
-                    module_id=module_id,
-                    detachable=detachable,
-                )
+                    **dict(action_blueprint.metadata),
+                },
+                lifecycle_scope=lifecycle_scope,
+                module_id=module_id,
+                detachable=detachable,
+            )
+            subtree.descriptors.append(descriptor)
+            subtree.search_record_ids.append(descriptor.name)
+            for target in targets:
+                node = hydrated_nodes[target.target_id]
                 handler = getattr(provider, action_blueprint.handler_name)
                 async_handler = (
                     getattr(provider, action_blueprint.async_handler_name)
@@ -157,10 +187,8 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                         else None
                     ),
                 )
-                subtree.descriptors.append(descriptor)
                 subtree.bound_actions.append(bound_action)
                 subtree.bound_action_keys.append((canonical_path, target.target_id))
-                subtree.search_record_ids.append(descriptor.name)
                 node.bound_action_keys.append((canonical_path, target.target_id))
                 node.search_record_ids.append(descriptor.name)
 
@@ -232,7 +260,7 @@ def _underscore_canonical_path(
     return f"{namespace}_{canonical_module_id}_{family}_{action_blueprint.action_name}"
 
 
-def _bound_alias(action_blueprint: CapabilityActionBlueprint, target: HydrationTarget) -> str:
+def _public_alias(action_blueprint: CapabilityActionBlueprint) -> str:
     aliases = tuple(str(value or "").strip() for value in action_blueprint.aliases)
     if len(aliases) != 1 or not aliases[0]:
         raise ValueError(
@@ -240,14 +268,11 @@ def _bound_alias(action_blueprint: CapabilityActionBlueprint, target: HydrationT
         )
     base_name = aliases[0]
     _validate_alias(base_name, capability=action_blueprint.handler_name)
-    if target.target_id == SINGLETON_TARGET:
-        return base_name
-    target_alias = re.sub(r"[^A-Za-z0-9_-]+", "_", target.target_id).strip("_")
-    if not target_alias:
-        raise ValueError(f"target id cannot produce a tool alias: {target.target_id!r}")
-    bound_alias = f"{base_name}__{target_alias}"
-    _validate_alias(bound_alias, capability=action_blueprint.handler_name)
-    return bound_alias
+    return base_name
+
+
+def _target_argument_name(node_blueprint: CapabilityNodeBlueprint) -> str:
+    return _TARGET_ARGUMENT_NAMES.get(node_blueprint.target_kind, "target_id")
 
 
 def _validate_alias(alias: str, *, capability: str) -> None:
@@ -278,18 +303,43 @@ def _bound_input_model(
     action_blueprint: CapabilityActionBlueprint,
     target: HydrationTarget,
     descriptor_name: str,
+    *,
+    node_blueprint: CapabilityNodeBlueprint,
+    module_id: str,
 ):
     if target.target_id == SINGLETON_TARGET:
         return action_blueprint.InputModel
-    target_literal = Literal.__getitem__((target.target_id,))
+    target_argument = _target_argument_name(node_blueprint)
+    discovery_alias = _target_discovery_alias(node_blueprint, module_id=module_id)
+    discovery_hint = f" returned by {discovery_alias}" if discovery_alias else ""
     return create_model(
         f"{_model_name(descriptor_name)}Input",
         __base__=action_blueprint.InputModel,
-        target_id=(
-            target_literal,
-            Field(description=f"Target identifier for {target.target_label}."),
-        ),
+        **{
+            target_argument: (
+                str,
+                Field(
+                    description=(
+                        f"Unique {node_blueprint.target_kind.replace('_', ' ')} name{discovery_hint}."
+                    )
+                ),
+            )
+        },
     )
+
+
+def _target_discovery_alias(node_blueprint: CapabilityNodeBlueprint, *, module_id: str) -> str:
+    if node_blueprint.target_kind == "endpoint":
+        return "channel_list"
+    if node_blueprint.target_kind == "proactive_task":
+        return "proactive_list"
+    if node_blueprint.target_kind == "provider":
+        return {
+            "memory": "memory_list_providers",
+            "web_fetch": "web_fetch_list_providers",
+            "web_search": "web_search_list_providers",
+        }.get(node_blueprint.path_module_id or module_id, "")
+    return ""
 
 
 def _bound_examples(
@@ -297,11 +347,13 @@ def _bound_examples(
     target: HydrationTarget,
     *,
     input_model: type[BaseModel],
+    node_blueprint: CapabilityNodeBlueprint,
 ) -> tuple[dict[str, Any], ...]:
     examples = tuple(dict(item) for item in action_blueprint.examples)
     if target.target_id != SINGLETON_TARGET:
+        target_argument = _target_argument_name(node_blueprint)
         examples = tuple(
-            {**item, "target_id": target.target_id}
+            {**item, target_argument: target.target_id}
             for item in examples
         )
     if examples:
@@ -311,7 +363,10 @@ def _bound_examples(
         return ()
     from pal.execution.tool_registry import _example_from_schema
 
-    return (_example_from_schema(schema),)
+    example = _example_from_schema(schema)
+    if target.target_id != SINGLETON_TARGET:
+        example[_target_argument_name(node_blueprint)] = target.target_id
+    return (example,)
 
 
 def _default_guidance(action_blueprint: CapabilityActionBlueprint, module_id: str) -> ToolGuidance:

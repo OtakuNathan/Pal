@@ -21,8 +21,19 @@ from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.execution.file_state import (
+    FileContentChangedError,
     FileStateCache,
+    atomic_compare_and_swap_utf8,
+    line_number_at_offset,
+    line_range_for_offsets,
     resolve_file_path,
+    text_line_starts,
+)
+from pal.execution.session_state import (
+    FileDeliveryManifest,
+    FileDeliverySpan,
+    content_digest,
+    count_text_lines,
 )
 from pal.shared import RuntimeStatus
 
@@ -39,7 +50,7 @@ ERR_NO_CHANGE = "NO_CHANGE"
 # LLM-friendly short descriptions for each error code
 _ERROR_LLMS: dict[str, str] = {
     ERR_NOT_READ: "File has not been read yet. Read it first before editing.",
-    ERR_PARTIAL_READ: "Only part of the file was read. Read the complete file before editing.",
+    ERR_PARTIAL_READ: "The requested edit is outside the line ranges already read. Read the exact affected range before editing.",
     ERR_STALE_FILE: "File has been modified since read. Read it again before editing.",
     ERR_MULTIPLE_MATCHES: "old_string appears multiple times in the file. Provide more context to uniquely identify the match.",
     ERR_NOT_FOUND_MATCH: "old_string was not found in the file.",
@@ -116,45 +127,27 @@ class FileEditTool:
                     file_path=file_path,
                 )
         else:
-            if not cached_state.full_view:
-                return _err(
-                    RuntimeStatus.FORBIDDEN,
-                    _ERROR_LLMS[ERR_PARTIAL_READ],
-                    error_code=ERR_PARTIAL_READ,
-                    file_path=file_path,
-                )
             cached_content = cached_state.content
 
         try:
             resolved = resolve_file_path(file_path)
-            current_content = resolved.read_text(encoding="utf-8")
         except OSError as exc:
             return _err(
                 RuntimeStatus.ERROR,
-                f"failed to read file before editing: {exc}",
+                f"failed to resolve file before editing: {exc}",
                 error_code="READ_FAILED",
                 file_path=file_path,
             )
 
-        if current_content != cached_content:
-            self.cache.invalidate(file_path)
-            return _err(
-                RuntimeStatus.FORBIDDEN,
-                _ERROR_LLMS[ERR_STALE_FILE],
-                error_code=ERR_STALE_FILE,
-                file_path=file_path,
-            )
-
         # 2. Find occurrences of old_string.
-        actual_old_string = _find_actual_string(cached_content, old_string)
-        if actual_old_string is None:
+        if old_string not in cached_content:
             return _err(
                 RuntimeStatus.ERROR,
                 _ERROR_LLMS[ERR_NOT_FOUND_MATCH],
                 error_code=ERR_NOT_FOUND_MATCH,
                 file_path=file_path,
             )
-        count = cached_content.count(actual_old_string)
+        count = cached_content.count(old_string)
 
         if count > 1 and not replace_all:
             return _err(
@@ -165,17 +158,47 @@ class FileEditTool:
                 match_count=count,
             )
 
+        match_offsets = _match_offsets(cached_content, old_string)
+        required_line_ranges = tuple(
+            _line_range_for_match(cached_content, start, end)
+            for start, end in match_offsets
+        )
+        if not all(
+            cached_state.covers_lines(start_line, end_line)
+            for start_line, end_line in required_line_ranges
+        ):
+            return _err(
+                RuntimeStatus.FORBIDDEN,
+                _ERROR_LLMS[ERR_PARTIAL_READ],
+                error_code=ERR_PARTIAL_READ,
+                file_path=file_path,
+                required_line_ranges=[list(item) for item in required_line_ranges],
+                covered_line_ranges=[list(item) for item in cached_state.covered_ranges],
+            )
+
         # 3. Apply replacement.
-        replacement = _preserve_quote_style(old_string, actual_old_string, new_string)
+        replacement = new_string
         new_content = cached_content.replace(
-            actual_old_string,
+            old_string,
             replacement,
             count if replace_all else 1,
         )
 
-        # 4. Write to disk.
+        # 4. Commit only if the exact authorized pre-image is still current.
         try:
-            resolved.write_text(new_content, encoding="utf-8")
+            atomic_compare_and_swap_utf8(
+                resolved,
+                expected_content=cached_content,
+                new_content=new_content,
+            )
+        except FileContentChangedError:
+            self.cache.invalidate(file_path)
+            return _err(
+                RuntimeStatus.FORBIDDEN,
+                _ERROR_LLMS[ERR_STALE_FILE],
+                error_code=ERR_STALE_FILE,
+                file_path=file_path,
+            )
         except OSError as exc:
             return _err(
                 RuntimeStatus.ERROR,
@@ -189,6 +212,40 @@ class FileEditTool:
 
         # 6. Generate unified diff patch.
         patch = _unified_diff(str(resolved), cached_content, new_content)
+        standalone_ranges, inherited_ranges = _post_edit_authority(
+            old_content=cached_content,
+            new_content=new_content,
+            match_offsets=match_offsets,
+            replacement=replacement,
+            covered_ranges=(
+                ((1, count_text_lines(cached_content)),)
+                if cached_state.full_view and count_text_lines(cached_content) > 0
+                else cached_state.covered_ranges
+            ),
+        )
+        proof_length = max(1, len(patch))
+        manifest = FileDeliveryManifest(
+            file_key=str(resolved),
+            digest=content_digest(new_content),
+            total_lines=count_text_lines(new_content),
+            spans=tuple(
+                FileDeliverySpan(
+                    start_offset=0,
+                    end_offset=proof_length,
+                    start_line=start_line,
+                    end_line=end_line,
+                    visible_start_in_line=0,
+                    visible_end_in_line=proof_length,
+                    line_length=proof_length,
+                )
+                for start_line, end_line in standalone_ranges
+            ),
+            empty_file=(new_content == ""),
+            operation="edit",
+            before_digest=content_digest(cached_content),
+            inherited_ranges=inherited_ranges,
+            parent_result_ids=cached_state.authority_result_ids,
+        )
 
         return CapabilityResult(
             status=RuntimeStatus.OK,
@@ -199,6 +256,7 @@ class FileEditTool:
                 "patch": patch,
                 "match_count": count if replace_all else 1,
             },
+            context_delivery=manifest.to_dict(),
         )
 
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
@@ -222,41 +280,104 @@ def _semantic_bool(value: Any) -> bool | None:
     return None
 
 
-_QUOTE_TRANSLATION = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
+def _match_offsets(content: str, search: str) -> tuple[tuple[int, int], ...]:
+    matches: list[tuple[int, int]] = []
+    cursor = 0
+    while True:
+        start = content.find(search, cursor)
+        if start < 0:
+            return tuple(matches)
+        end = start + len(search)
+        matches.append((start, end))
+        cursor = end
 
 
-def _find_actual_string(content: str, search: str) -> str | None:
-    if search in content:
-        return search
-    normalized_content = content.translate(_QUOTE_TRANSLATION)
-    normalized_search = search.translate(_QUOTE_TRANSLATION)
-    index = normalized_content.find(normalized_search)
-    if index < 0:
-        return None
-    return content[index : index + len(search)]
+def _line_range_for_match(
+    content: str,
+    start_offset: int,
+    end_offset: int,
+) -> tuple[int, int]:
+    return line_range_for_offsets(content, start_offset, end_offset)
 
 
-def _preserve_quote_style(old: str, actual_old: str, new: str) -> str:
-    if old == actual_old:
-        return new
-    if "“" in actual_old or "”" in actual_old:
-        new = _curl_quotes(new, straight='"', left="“", right="”")
-    if "‘" in actual_old or "’" in actual_old:
-        new = _curl_quotes(new, straight="'", left="‘", right="’")
-    return new
+def _post_edit_authority(
+    *,
+    old_content: str,
+    new_content: str,
+    match_offsets: tuple[tuple[int, int], ...],
+    replacement: str,
+    covered_ranges: tuple[tuple[int, int], ...],
+) -> tuple[tuple[tuple[int, int], ...], tuple[tuple[int, int], ...]]:
+    """Return exact post-image ranges and transformed unchanged inheritance."""
 
+    old_affected = tuple(
+        line_range_for_offsets(old_content, start, end)
+        for start, end in match_offsets
+    )
+    new_affected: list[tuple[int, int]] = []
+    delta = 0
+    deltas: list[tuple[int, int]] = []
+    for start, end in match_offsets:
+        new_start = start + delta
+        new_end = new_start + len(replacement)
+        new_affected.append(line_range_for_offsets(new_content, new_start, new_end))
+        delta_change = len(replacement) - (end - start)
+        delta += delta_change
+        deltas.append((end, delta_change))
 
-def _curl_quotes(text: str, *, straight: str, left: str, right: str) -> str:
-    output: list[str] = []
-    opening_predecessors = "([{<"
-    for index, character in enumerate(text):
-        if character != straight:
-            output.append(character)
+    inherited: list[tuple[int, int]] = []
+    old_starts = text_line_starts(old_content)
+    for fragment_start, fragment_end in _subtract_line_ranges(
+        covered_ranges,
+        old_affected,
+    ):
+        if not old_starts or fragment_start > len(old_starts):
             continue
-        previous = text[index - 1] if index else ""
-        is_opening = index == 0 or previous.isspace() or previous in opening_predecessors
-        output.append(left if is_opening else right)
-    return "".join(output)
+        old_offset = old_starts[fragment_start - 1]
+        shifted_offset = old_offset + sum(
+            change for match_end, change in deltas if match_end <= old_offset
+        )
+        new_start_line = line_number_at_offset(new_content, shifted_offset)
+        inherited.append(
+            (new_start_line, new_start_line + (fragment_end - fragment_start))
+        )
+    return _merge_ranges(new_affected), _merge_ranges(inherited)
+
+
+def _subtract_line_ranges(
+    sources: tuple[tuple[int, int], ...],
+    removed: tuple[tuple[int, int], ...],
+) -> tuple[tuple[int, int], ...]:
+    remaining: list[tuple[int, int]] = []
+    for source_start, source_end in _merge_ranges(sources):
+        cursor = source_start
+        for remove_start, remove_end in _merge_ranges(removed):
+            if remove_end < cursor or remove_start > source_end:
+                continue
+            if remove_start > cursor:
+                remaining.append((cursor, min(source_end, remove_start - 1)))
+            cursor = max(cursor, remove_end + 1)
+            if cursor > source_end:
+                break
+        if cursor <= source_end:
+            remaining.append((cursor, source_end))
+    return tuple(remaining)
+
+
+def _merge_ranges(
+    ranges: tuple[tuple[int, int], ...] | list[tuple[int, int]],
+) -> tuple[tuple[int, int], ...]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(
+        (max(1, int(start)), max(1, int(end)))
+        for start, end in ranges
+        if int(end) >= int(start)
+    ):
+        if not merged or start > merged[-1][1] + 1:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return tuple(merged)
 
 
 def _unified_diff(file_path: str, old: str, new: str, context: int = 3) -> str:

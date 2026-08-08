@@ -184,6 +184,7 @@ class SkillSearchTool:
                 continue
             hit = {
                 **skill_summary_dict(skill),
+                "name": skill.skill_id,
                 "score": round(score, 4),
                 "match_reason": reason,
                 "manual_chars": len(skill.manual_text),
@@ -197,12 +198,12 @@ class SkillSearchTool:
         structured = {"hits": hits, "count": len(hits)}
         has_injectable_hit = any(bool(hit.get("injectable")) for hit in hits)
         if has_injectable_hit:
-            structured["next_action"] = "To use a matched active skill, call skill_inject with its skill_id before answering from it."
+            structured["next_action"] = "To use a matched active skill, call skill_inject with its name before answering from it."
         llm_text = _render_skill_tool_payload(self.service, "Skill search", structured)
         if has_injectable_hit:
             llm_text = (
                 "Skill search found an injectable active skill. "
-                "If the user asked to use this skill, the next tool call MUST be skill_inject with the matched skill_id. "
+                "If the user asked to use this skill, the next tool call MUST be skill_inject with the matched name. "
                 "Search alone is not using the skill.\n"
                 f"{llm_text}"
             )

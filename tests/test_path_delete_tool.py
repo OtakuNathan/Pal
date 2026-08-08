@@ -3,20 +3,14 @@ from __future__ import annotations
 import hashlib
 import shutil
 import tempfile
-import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from pal.execution.file_state import FileStateCache
 from pal.execution.path_delete import (
     ERR_DIRECTORY_REQUIRES_RECURSIVE,
     ERR_INVALID_SHA256,
-    ERR_NOT_READ,
-    ERR_PARTIAL_READ,
     ERR_PATH_NOT_FOUND,
     ERR_SHA256_MISMATCH,
-    ERR_STALE_PATH,
     PathDeleteTool,
 )
 from pal.shared import RuntimeStatus
@@ -25,8 +19,7 @@ from pal.shared import RuntimeStatus
 class _TempPathMixin:
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        self.cache = FileStateCache()
-        self.tool = PathDeleteTool(cache=self.cache)
+        self.tool = PathDeleteTool()
 
     def _path(self, name: str) -> Path:
         return Path(self._tmpdir) / name
@@ -35,71 +28,26 @@ class _TempPathMixin:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
 
-class PathDeleteReadSafetyTests(_TempPathMixin, unittest.TestCase):
-    def test_path_delete_file_without_read_or_sha_fails(self) -> None:
+class PathDeleteIndependenceTests(_TempPathMixin, unittest.TestCase):
+    def test_path_delete_file_without_file_state_succeeds(self) -> None:
         path = self._path("sample.txt")
         path.write_text("hello\n", encoding="utf-8")
-
-        result = self.tool.invoke({"file_path": str(path)})
-
-        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
-        self.assertEqual(result.structured["error_code"], ERR_NOT_READ)
-        self.assertTrue(path.exists())
-
-    def test_sandboxed_continuation_retry_does_not_bypass_read_before_delete(self) -> None:
-        path = self._path("retry.txt")
-        path.write_text("hello\n", encoding="utf-8")
-
-        with patch.dict(
-            "os.environ",
-            {
-                "PAL_MINION_SANDBOXED": "1",
-                "PAL_MINION_CONTINUATION_RETRY": "1",
-            },
-            clear=False,
-        ):
-            result = self.tool.invoke({"file_path": str(path)})
-
-        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
-        self.assertTrue(path.exists())
-
-    def test_path_delete_file_after_read_succeeds_and_invalidates_cache(self) -> None:
-        path = self._path("sample.txt")
-        path.write_text("hello\n", encoding="utf-8")
-        self.cache.mark_read(path, "hello\n")
 
         result = self.tool.invoke({"file_path": str(path)})
 
         self.assertEqual(result.status, RuntimeStatus.OK)
         self.assertFalse(path.exists())
-        self.assertNotIn(path, self.cache)
         self.assertEqual(result.structured["path_kind"], "file")
+
+    def test_delete_reports_digest_without_expected_sha(self) -> None:
+        path = self._path("digest.txt")
+        path.write_text("hello\n", encoding="utf-8")
+
+        result = self.tool.invoke({"file_path": str(path)})
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertFalse(path.exists())
         self.assertEqual(result.structured["sha256"], hashlib.sha256(b"hello\n").hexdigest())
-
-    def test_stale_file_read_fails_without_deleting(self) -> None:
-        path = self._path("stale.txt")
-        path.write_text("v1\n", encoding="utf-8")
-        self.cache.mark_read(path, "v1\n")
-        time.sleep(0.05)
-        path.write_text("v2\n", encoding="utf-8")
-
-        result = self.tool.invoke({"file_path": str(path)})
-
-        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
-        self.assertEqual(result.structured["error_code"], ERR_STALE_PATH)
-        self.assertTrue(path.exists())
-        self.assertNotIn(path, self.cache)
-
-    def test_partial_file_read_fails_without_deleting(self) -> None:
-        path = self._path("partial.txt")
-        path.write_text("one\ntwo\n", encoding="utf-8")
-        self.cache.mark_read(path, "one\ntwo\n", full_view=False)
-
-        result = self.tool.invoke({"file_path": str(path)})
-
-        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
-        self.assertEqual(result.structured["error_code"], ERR_PARTIAL_READ)
-        self.assertTrue(path.exists())
 
 
 class PathDeleteShaTests(_TempPathMixin, unittest.TestCase):

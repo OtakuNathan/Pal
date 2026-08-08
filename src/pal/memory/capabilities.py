@@ -200,6 +200,7 @@ class MemoryIntrospectionProvider:
             provider = self.context.execution_runtime.l3_plugin_registry.get(provider_id)
             items.append(
                 {
+                    "name": provider_id,
                     "provider_id": provider_id,
                     "module_id": getattr(provider, "module_id", f"l3.{provider_id}") if provider is not None else f"l3.{provider_id}",
                     "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
@@ -322,8 +323,9 @@ class MemoryIntrospectionProvider:
                 "Do not write duplicates or invent mem_ref values."
             ),
             failure_next_steps=(
-                "Use summary for prompt-ready text, search_text for retrieval. "
-                "mem_ref prefixes (fact:/case:) are part of the ref."
+                "Use summary for prompt-ready text and search_text for retrieval; mem_ref prefixes (fact:/case:) are "
+                "part of the ref. If creation may have succeeded, reconcile with recall_memory using the candidate "
+                "text before retrying so a duplicate record is not created."
             ),
         ),
         metadata={"omit_family_in_canonical": True},
@@ -405,7 +407,7 @@ class MemoryIntrospectionProvider:
                 "Not for new memories (use remember_memory). "
                 "Do not invent or shorten mem_ref values."
             ),
-            failure_next_steps="Correct invalid input; otherwise follow the returned recovery affordances before retrying.",
+            failure_next_steps="Correct invalid input and copy mem_ref exactly from recall_memory. If the update outcome is uncertain, recall that mem_ref and reconcile its current content before following any retry affordance.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderUpdateInput,
@@ -467,7 +469,7 @@ class MemoryIntrospectionProvider:
                 "Not for behavior guidance (use forget_behavior). "
                 "Do not invent or shorten mem_ref values."
             ),
-            failure_next_steps="Correct invalid input; otherwise follow the returned recovery affordances before retrying.",
+            failure_next_steps="Correct invalid input and copy mem_ref exactly from recall_memory. If deletion may have succeeded, reconcile by recalling that mem_ref before following any retry affordance; do not issue a blind duplicate delete.",
         ),
         metadata={"omit_family_in_canonical": True},
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput,
@@ -496,19 +498,19 @@ class MemoryIntrospectionProvider:
             purpose="Switch the active L3 memory provider.",
             use_when="Changing which memory backend handles recall/remember/update/forget.",
             do_not_use_when="Checking the active provider (use memory_active_provider). Listing providers (use memory_list_providers).",
-            failure_next_steps="If provider_id not found, verify with memory_list_providers.",
+            failure_next_steps="If the provider name is not found, verify it with memory_list_providers.",
         ),
         InputModel=MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput,
         aliases=("memory_set_active_provider",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider_id = str(call.args.get("active_provider_id") or "").strip()
+        provider_id = str(call.args.get("name") or "").strip()
         if not provider_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="active_provider_id is required",
-                llm_text="active_provider_id is required",
+                text="name is required",
+                llm_text="name is required",
             )
         if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is None:
             return IntrospectionResult(

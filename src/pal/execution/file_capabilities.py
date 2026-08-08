@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from pal.execution.generated_tool_models import (
     ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput,
     ExecutionFileCapabilitiesFileCapabilityMixinDeleteOutput,
@@ -41,6 +43,58 @@ from pal.execution.tool_semantics import (
 from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, RuntimeStatus, capability_action
 
 
+FILE_READ_GUIDANCE = ToolGuidance(
+    purpose="Read selected lines from a UTF-8 text file and return line-numbered content.",
+    use_when=(
+        "Reading local source, configuration, or other UTF-8 text. Use offset and limit for focused reads. "
+        "A focused edit is authorized once every affected line is present in the current logical context."
+    ),
+    do_not_use_when=(
+        "Binary files, images, PDFs, or channel-delivered artifacts. Do not re-read an unchanged covered range after "
+        "read_file returns an unchanged marker; use the earlier result unless the file changed or another range is needed."
+    ),
+    failure_next_steps=(
+        "For FILE_NOT_FOUND or NOT_A_FILE, correct the path and use run_shell with rg --files or a bounded listing if "
+        "discovery is needed. For INVALID_ARGUMENT, correct offset/limit. For UNSUPPORTED_TEXT_ENCODING, do not retry "
+        "as text; use the appropriate artifact or binary workflow."
+    ),
+)
+
+FILE_EDIT_GUIDANCE = ToolGuidance(
+    purpose="Replace an exact string in a UTF-8 text file after reading every affected line.",
+    use_when=(
+        "Making a focused change to an existing text file whose affected lines are already in the current logical "
+        "context. The match must be unique unless replace_all=true is intentionally requested."
+    ),
+    do_not_use_when=(
+        "Creating a file or replacing its complete contents (use write_file). Do not edit from an unread, partial, "
+        "retired, or stale snapshot."
+    ),
+    failure_next_steps=(
+        "For NOT_READ, PARTIAL_READ, or STALE_FILE, call read_file for the missing/current affected range and then "
+        "retry the exact edit. For NOT_FOUND_MATCH, copy old_string from the current read. For MULTIPLE_MATCHES, add "
+        "enough surrounding context to make the match unique; use replace_all only when every match should change."
+    ),
+)
+
+FILE_WRITE_GUIDANCE = ToolGuidance(
+    purpose="Write complete UTF-8 text content, creating a file or replacing all of an existing file.",
+    use_when=(
+        "Creating a text file, or intentionally replacing an existing file's complete contents after its complete "
+        "current version has been read. Missing parent directories are created."
+    ),
+    do_not_use_when=(
+        "Focused changes to an existing file (use edit_file). Do not overwrite an existing file from a partial, "
+        "retired, or stale read snapshot."
+    ),
+    failure_next_steps=(
+        "For NOT_READ, PARTIAL_READ, or STALE_FILE, read the complete current file with read_file before retrying. "
+        "For PARENT_NOT_DIRECTORY, correct the path. For BINARY_CONTENT or CONTENT_TOO_LARGE, do not retry with the "
+        "same content; use an appropriate binary or large-file workflow."
+    ),
+)
+
+
 def get_file_state_cache() -> FileStateCache:
     """Return an isolated legacy cache for direct business-handler callers."""
 
@@ -49,6 +103,42 @@ def get_file_state_cache() -> FileStateCache:
 
 def _tool_capability_result(tool: object, args: dict[str, object]) -> IntrospectionResult:
     return tool.invoke(dict(args))
+
+
+def _file_tool_result(
+    tool: object,
+    call: IntrospectionCall,
+    *,
+    defer_delivery: bool,
+    context: object,
+) -> IntrospectionResult:
+    result = _tool_capability_result(tool, call.args)
+    delivery = getattr(result, "context_delivery", None)
+    if defer_delivery or not isinstance(delivery, dict):
+        return result
+    runtime = call.meta.get("execution_runtime")
+    commit = getattr(runtime, "commit_tool_delivery", None)
+    if callable(commit):
+        direct_context_id = str(call.meta.get("direct_context_id") or "").strip()
+        commit(
+            turn_id=direct_context_id,
+            context_delivery=dict(delivery),
+            result_id=f"direct:{uuid4().hex}",
+        )
+    else:
+        backend = getattr(runtime, "logical_state", None)
+        record = getattr(backend, "record_delivery", None)
+        execution_lifetime_id = str(
+            getattr(context, "execution_lifetime_id", "") or ""
+        )
+        if callable(record) and execution_lifetime_id:
+            committed = dict(delivery)
+            committed["result_id"] = f"direct:{uuid4().hex}"
+            record(
+                execution_lifetime_id=execution_lifetime_id,
+                delivery=committed,
+            )
+    return result
 
 
 def _session_file_tools(owner: object, call: IntrospectionCall):
@@ -88,6 +178,7 @@ class FileCapabilityMixin:
         family="file",
         action_name="read",
         description=FILE_READ_DESCRIPTION,
+        guidance=FILE_READ_GUIDANCE,
         aliases=("read_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinReadInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinReadOutput,
@@ -96,7 +187,7 @@ class FileCapabilityMixin:
     )
     def file_read(self, call: IntrospectionCall) -> IntrospectionResult:
         state, visibility, context, defer_delivery = _session_file_tools(self, call)
-        return _tool_capability_result(
+        return _file_tool_result(
             FileReadTool(
                 cache=state,
                 visibility_cache=visibility,
@@ -105,7 +196,9 @@ class FileCapabilityMixin:
                 ),
                 defer_delivery=defer_delivery,
             ),
-            call.args,
+            call,
+            defer_delivery=defer_delivery,
+            context=context,
         )
 
     @capability_action(
@@ -114,6 +207,7 @@ class FileCapabilityMixin:
         family="file",
         action_name="edit",
         description=FILE_EDIT_DESCRIPTION,
+        guidance=FILE_EDIT_GUIDANCE,
         aliases=("edit_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinEditOutput,
@@ -121,8 +215,13 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_edit"},
     )
     def file_edit(self, call: IntrospectionCall) -> IntrospectionResult:
-        state, _, _, _ = _session_file_tools(self, call)
-        return _tool_capability_result(FileEditTool(cache=state), call.args)
+        state, _, context, defer_delivery = _session_file_tools(self, call)
+        return _file_tool_result(
+            FileEditTool(cache=state),
+            call,
+            defer_delivery=defer_delivery,
+            context=context,
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -130,6 +229,7 @@ class FileCapabilityMixin:
         family="file",
         action_name="write",
         description=FILE_WRITE_DESCRIPTION,
+        guidance=FILE_WRITE_GUIDANCE,
         aliases=("write_file",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinWriteInput,
         OutputModel=ExecutionFileCapabilitiesFileCapabilityMixinWriteOutput,
@@ -137,8 +237,13 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_write"},
     )
     def file_write(self, call: IntrospectionCall) -> IntrospectionResult:
-        state, _, _, _ = _session_file_tools(self, call)
-        return _tool_capability_result(FileWriteTool(cache=state), call.args)
+        state, _, context, defer_delivery = _session_file_tools(self, call)
+        return _file_tool_result(
+            FileWriteTool(cache=state),
+            call,
+            defer_delivery=defer_delivery,
+            context=context,
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -150,7 +255,7 @@ class FileCapabilityMixin:
             purpose="Delete a file or directory at the given path.",
             use_when="Removing unwanted files or directories from the filesystem.",
             do_not_use_when="Moving or renaming files (use run_shell mv).",
-            failure_next_steps="If NOT_READ, read the file first with read_file or provide expected_sha256. If STALE_PATH, re-read the file. If SHA256_MISMATCH, the file changed since read. If DIRECTORY_REQUIRES_RECURSIVE, set recursive=true.",
+            failure_next_steps="If SHA256_MISMATCH, inspect the file and retry with its current digest. If DIRECTORY_REQUIRES_RECURSIVE, set recursive=true.",
         ),
         aliases=("delete_path",),
         InputModel=ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput,
@@ -159,8 +264,7 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_path_delete"},
     )
     def path_delete(self, call: IntrospectionCall) -> IntrospectionResult:
-        state, _, _, _ = _session_file_tools(self, call)
-        return _tool_capability_result(PathDeleteTool(cache=state), call.args)
+        return _tool_capability_result(PathDeleteTool(), call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,

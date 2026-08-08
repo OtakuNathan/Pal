@@ -332,7 +332,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                     endpoint_invoker=_FailoverInvoker(),
                 )
                 provider = LLMIntrospectionProvider(runtime=runtime)
-                result = provider.set_active_endpoint(type("Call", (), {"args": {"active_endpoint_id": "beta"}})())
+                result = provider.set_active_endpoint(type("Call", (), {"args": {"name": "beta"}})())
 
                 self.assertEqual(result.status, "ok")
                 self.assertEqual(result.structured["active_endpoint_id"], "beta")
@@ -369,12 +369,12 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                     CapabilityCall(name="op_tool_read", args={"name": "llm_set_active_endpoint"})
                 )
                 self.assertEqual(read.status, "ok")
-                self.assertEqual(read.structured["input_schema"]["required"], ["active_endpoint_id"])
+                self.assertEqual(read.structured["input_schema"]["required"], ["name"])
 
                 call = core.context.execution_runtime.execute(
                     CapabilityCall(
                         name="op_tool_call",
-                        args={"name": "llm_set_active_endpoint", "args": {"active_endpoint_id": "beta"}},
+                        args={"name": "llm_set_active_endpoint", "args": {"name": "beta"}},
                     )
                 )
                 self.assertEqual(call.status, "ok")

@@ -75,8 +75,8 @@ class ChecklistIntrospectionProvider:
         description="Open or replace Pal's own task checklist. Land preflight plans here as visible steps, tick them off as you finish, and clear after re-verifying.",
         guidance=ToolGuidance(
             purpose="Open or replace Pal's own task checklist.",
-            use_when="Use when the task feels like it is becoming multi-step or a bit complex, especially once side effects (writing, mutating, sending, executing, creating) are involved — land the action path as visible steps with the step where side effects begin marked as the boundary. If work grows multi-step or complex mid-task after starting without a checklist, open one at that point and mark already-finished steps as completed. If the task is too complex for a scratchpad (large, long-running, or needing architect/coder/verifier gates), skip the checklist and use minion directly.",
-            do_not_use_when="Single-step or conversational work. Durable project plans (use memory). Minion task ledger work (that is Manager-owned). Anything needing gating or enforcement — this is a scratchpad, not a cursor.",
+            use_when="Use when the task feels like it is becoming multi-step or a bit complex, especially once side effects (writing, mutating, sending, executing, creating) are involved — land the action path as visible steps with the step where side effects begin marked as the boundary. If work grows multi-step or complex mid-task after starting without a checklist, open one at that point and mark already-finished steps as completed. If the task requires a durable architect/coder/verifier workflow, use minion_start_workflow instead.",
+            do_not_use_when="Single-step or conversational work. Durable facts or decisions belong in remember_memory, not this checklist. Minion Task ledger work is Manager-owned. Anything needing gating or enforcement — this is a scratchpad, not a cursor.",
             failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a non-empty step string and an optional status of pending/in_progress/completed.",
         ),
         InputModel=ChecklistUpsertInput,
@@ -168,7 +168,7 @@ class ChecklistIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Inspect Pal's own active checklist.",
             use_when="Pal needs to recall exact step texts, confirm what remains, or re-check progress mid-task.",
-            do_not_use_when="Reading the user's durable memory (use recall_memory). Minion task ledger state (use minion status tools).",
+            do_not_use_when="Reading the user's durable memory (use recall_memory). Reading Minion Task ledger state (use minion_task_status).",
             failure_next_steps="Read-only. If inactive, no checklist is open.",
         ),
         execution=DIRECT_LOCAL_READ,
@@ -203,7 +203,7 @@ class ChecklistIntrospectionProvider:
             purpose="Tear down Pal's own task checklist.",
             use_when="Every step is completed and Pal re-verified the work against the list. Before delivering the result, audit the checklist one more time for anything missed; only then clear it. Also clear when the task changed and the list is stale.",
             do_not_use_when="The task is still in progress. Clearing before the final audit skips the delivery self-check this tool exists to support.",
-            failure_next_steps="Read-only-ish. If inactive, nothing to clear.",
+            failure_next_steps="If no checklist is active, the operation is an idempotent no-op. If the result is uncertain, inspect checklist_show before deciding whether another clear is needed.",
         ),
         execution=DIRECT_LOCAL_WRITE,
         metadata={"canonical_path": "op_checklist_clear"},
@@ -232,7 +232,7 @@ class ChecklistIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Inspect the checklist module's current state.",
             use_when="Diagnosing checklist state or verifying the module is mounted.",
-            do_not_use_when="Managing the checklist as Pal (use checklist_show/upsert/check/clear).",
+            do_not_use_when="Managing checklist work as Pal (use checklist_show, checklist_upsert, checklist_check, or checklist_clear).",
             failure_next_steps="Read-only. If inactive, no checklist is open.",
         ),
         execution=DIRECT_LOCAL_READ,

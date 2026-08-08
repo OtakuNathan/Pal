@@ -18,7 +18,7 @@ from pal.execution.file_edit import (
     ERR_STALE_FILE,
     FileEditTool,
 )
-from pal.execution.file_state import FileStateCache
+from pal.execution.file_state import FileStateCache, atomic_compare_and_swap_utf8
 from pal.execution.generated_tool_models import ExecutionFileCapabilitiesFileCapabilityMixinEditInput
 from pal.shared import RuntimeStatus
 
@@ -112,6 +112,57 @@ class StaleFileErrorTests(_TempFileMixin, unittest.TestCase):
         self.assertEqual(path.read_text(), "modified externally")
         self.assertNotIn(path, self.cache)
 
+    def test_content_change_is_stale_even_when_mtime_is_restored(self) -> None:
+        path = self._write_tmp("same-mtime.txt", "alpha\nbeta\n")
+        self.cache.mark_read(
+            path,
+            "alpha\nbeta\n",
+            full_view=False,
+            covered_ranges=((1, 1),),
+        )
+        original = path.stat()
+        path.write_text("omega\nbeta\n", encoding="utf-8")
+        os.utime(
+            path,
+            ns=(original.st_atime_ns, original.st_mtime_ns),
+        )
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": "alpha",
+                "new_string": "ALPHA",
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(result.structured["error_code"], ERR_STALE_FILE)
+        self.assertEqual(path.read_text(encoding="utf-8"), "omega\nbeta\n")
+
+    def test_change_between_validation_and_commit_is_rejected(self) -> None:
+        path = self._write_tmp("cas-race.txt", "alpha\nbeta\n")
+        self.cache.mark_read(path, "alpha\nbeta\n")
+
+        def competing_write(file_path, **kwargs):
+            Path(file_path).write_text("external\nbeta\n", encoding="utf-8")
+            return atomic_compare_and_swap_utf8(file_path, **kwargs)
+
+        with patch(
+            "pal.execution.file_edit.atomic_compare_and_swap_utf8",
+            side_effect=competing_write,
+        ):
+            result = self.tool.invoke(
+                {
+                    "file_path": str(path),
+                    "old_string": "alpha",
+                    "new_string": "omega",
+                }
+            )
+
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(result.structured["error_code"], ERR_STALE_FILE)
+        self.assertEqual(path.read_text(encoding="utf-8"), "external\nbeta\n")
+
 
 class NotFoundMatchErrorTests(_TempFileMixin, unittest.TestCase):
     """NOT_FOUND_MATCH: old_string not present in the cached content."""
@@ -195,6 +246,111 @@ class PartialReadErrorTests(_TempFileMixin, unittest.TestCase):
 
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
         self.assertEqual(result.structured["error_code"], ERR_PARTIAL_READ)
+
+    def test_partial_read_authorizes_exact_visible_line(self) -> None:
+        path = self._write_tmp("visible.txt", "alpha\nbeta\ngamma\n")
+        self.cache.mark_read(
+            path,
+            "alpha\nbeta\ngamma\n",
+            full_view=False,
+            covered_ranges=((2, 2),),
+        )
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": "beta",
+                "new_string": "BETA",
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(path.read_text(encoding="utf-8"), "alpha\nBETA\ngamma\n")
+
+    def test_partial_read_rejects_match_outside_visible_lines(self) -> None:
+        path = self._write_tmp("outside.txt", "alpha\nbeta\ngamma\n")
+        self.cache.mark_read(
+            path,
+            "alpha\nbeta\ngamma\n",
+            full_view=False,
+            covered_ranges=((2, 2),),
+        )
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": "gamma",
+                "new_string": "GAMMA",
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(result.structured["error_code"], ERR_PARTIAL_READ)
+        self.assertEqual(result.structured["required_line_ranges"], [[3, 3]])
+        self.assertEqual(result.structured["covered_line_ranges"], [[2, 2]])
+
+    def test_multiline_edit_requires_every_affected_line(self) -> None:
+        path = self._write_tmp("multiline.txt", "alpha\nbeta\ngamma\n")
+        self.cache.mark_read(
+            path,
+            "alpha\nbeta\ngamma\n",
+            full_view=False,
+            covered_ranges=((1, 1),),
+        )
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": "alpha\nbeta",
+                "new_string": "combined",
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(result.structured["required_line_ranges"], [[1, 2]])
+
+    def test_cr_only_line_boundary_requires_the_following_line(self) -> None:
+        content = "alpha\rbeta\rgamma\r"
+        path = self._write_tmp("cr-only.txt", content)
+        self.cache.mark_read(
+            path,
+            content,
+            full_view=False,
+            covered_ranges=((1, 1),),
+        )
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": "alpha\r",
+                "new_string": "ALPHA\r",
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(result.structured["required_line_ranges"], [[1, 2]])
+
+    def test_replace_all_requires_every_match_to_be_visible(self) -> None:
+        path = self._write_tmp("replace-all-partial.txt", "target\nkeep\ntarget\n")
+        self.cache.mark_read(
+            path,
+            "target\nkeep\ntarget\n",
+            full_view=False,
+            covered_ranges=((1, 1),),
+        )
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": "target",
+                "new_string": "changed",
+                "replace_all": True,
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(result.structured["required_line_ranges"], [[1, 1], [3, 3]])
+        self.assertEqual(path.read_text(encoding="utf-8"), "target\nkeep\ntarget\n")
 
 
 class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
@@ -289,7 +445,7 @@ class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
         self.assertIn("return 42", path.read_text())
         self.assertNotIn("return 1", path.read_text())
 
-    def test_curly_quote_match_preserves_file_typography(self) -> None:
+    def test_straight_quotes_do_not_fuzzily_match_curly_quotes(self) -> None:
         content = "message = “hello”\n"
         path = self._write_tmp("quotes.txt", content)
         self.cache.mark_read(path, content)
@@ -302,8 +458,25 @@ class SuccessfulEditTests(_TempFileMixin, unittest.TestCase):
             }
         )
 
+        self.assertEqual(result.status, RuntimeStatus.ERROR)
+        self.assertEqual(result.structured["error_code"], ERR_NOT_FOUND_MATCH)
+        self.assertEqual(path.read_text(), content)
+
+    def test_exact_curly_match_does_not_rewrite_new_string(self) -> None:
+        content = "message = “hello”\n"
+        path = self._write_tmp("exact-quotes.txt", content)
+        self.cache.mark_read(path, content)
+
+        result = self.tool.invoke(
+            {
+                "file_path": str(path),
+                "old_string": "message = “hello”",
+                "new_string": 'message = "goodbye"',
+            }
+        )
+
         self.assertEqual(result.status, RuntimeStatus.OK)
-        self.assertEqual(path.read_text(), "message = “goodbye”\n")
+        self.assertEqual(path.read_text(), 'message = "goodbye"\n')
 
 
 class ValidationTests(_TempFileMixin, unittest.TestCase):

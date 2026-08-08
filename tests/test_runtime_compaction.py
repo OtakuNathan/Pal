@@ -6,6 +6,7 @@ import asyncio
 import json
 import unittest
 from copy import deepcopy
+from types import SimpleNamespace
 
 from pal.control import ControlAction, ControlRoute
 from pal.core import (
@@ -1218,6 +1219,51 @@ class RuntimeCompactionIntegrationTests(unittest.TestCase):
         compaction_source = llm.generate_requests[0].messages[-1].text
         self.assertIn(marker, compaction_source)
         self.assertFalse(hasattr(core.turn_executor, "_tool_protocol_projector"))
+
+    def test_compaction_reconciles_result_owners_inside_commit_boundary(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        service = _memory_with_turns(1)
+        register_memory_with_core(core.context, service)
+        core.context.port_registry["llm:llm"] = _ScriptedLLM(
+            [generation_result_from_values(text=_valid_pal_payload())]
+        )
+        service.begin_l1_turn("active-result-owner", user_text="continue")
+        continuation = SimpleNamespace(
+            turn_id="active-result-owner",
+            pending_tool_call_batch=[],
+            pending_tool_results=[],
+            pending_assistant_tool_text="",
+            preferred_llm_endpoint_id=None,
+            preferred_llm_model_id=None,
+        )
+        reconciliations: list[dict[str, object]] = []
+        original = core.turn_executor._reconcile_projected_tool_context
+        core.turn_executor._reconcile_projected_tool_context = (
+            lambda _continuation, **kwargs: reconciliations.append(kwargs)
+        )
+        self.addCleanup(
+            setattr,
+            core.turn_executor,
+            "_reconcile_projected_tool_context",
+            original,
+        )
+
+        result = asyncio.run(
+            core.turn_executor.compact_memory_async(
+                service,
+                target_input_budget=8_192,
+                reserved_output_tokens=2_048,
+                continuation=continuation,
+            )
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(reconciliations), 1)
+        self.assertEqual(
+            reconciliations[0]["original_messages"],
+            reconciliations[0]["projected_messages"],
+        )
 
     def test_manual_compact_uses_same_engine_and_opens_candidate_approval(self) -> None:
         core = PalCore()

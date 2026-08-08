@@ -32,7 +32,7 @@ class FailureIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Show failure runtime summary.",
             use_when="Diagnosing reply delivery failures or checking failure tracking health.",
-            do_not_use_when="Checking LLM errors (use llm_usage). Checking proactive task failures (use proactive_list_runs).",
+            do_not_use_when="Checking LLM token or cost metrics (use llm_usage; it does not diagnose transport errors). Checking proactive task failures (use proactive_list_runs). LLM transport errors require the relevant service logs when no structured failure report exists.",
             failure_next_steps="Read-only diagnostic. Use failure_recent_reports for specific failure details.",
         ), aliases=("failure_show",))
     def show(self, call: IntrospectionCall) -> IntrospectionResult:

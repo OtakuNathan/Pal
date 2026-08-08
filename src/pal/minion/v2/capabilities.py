@@ -51,22 +51,7 @@ if TYPE_CHECKING:
 
 
 MINION_START_WORKFLOW_PURPOSE = (
-    "Start one durable Minion workflow for the current actor and capture this turn's delivery target on its Task. Before calling this action, search "
-    "active Pal skills for an operation manual relevant to the requested work. If one or more relevant skills are "
-    "found, ask the user whether to provide them to the workflow and wait for the answer. When the user agrees, pass "
-    "the exact approved IDs in skill_refs; when the user declines, omit skill_refs. Never infer consent. The Manager "
-    "reuses the existing skill_inject projection and places each approved manual in the first user-side context of "
-    "every logical role session as a system reminder; foreground Pal must not copy manuals into task_spec. For a new "
-    "Task, supply its canonical profile, short goal, workspace, and complete structured task_spec. The Manager stores "
-    "task_spec as original in one immutable append-only task.yaml ledger, derives the problem-domain Family from the "
-    "profile, pins the full FamilyBinding for the Task, and creates all internal identities. Use review_then_execute "
-    "with artifact for a named external architecture, execute_trusted only for a Manager-trusted named artifact, "
-    "standalone_review for review-only, and review_and_repair for bounded repair. Never inspect or implement the target "
-    "in the foreground first. After the workflow is accepted, do not repeatedly inspect workflow status or create a "
-    "proactive polling task: completion, clarification, and human-review events return through system callbacks. Tell "
-    "the user the workflow will notify them, then wait; inspect status only when the user asks or when diagnosing or "
-    "recovering a missing callback. Later status and control tools address the Task by its human-readable title; the "
-    "Manager resolves its single current workflow. Internal Manager IDs are never exposed or accepted."
+    "Start one durable Minion workflow and bind its future delivery to the channel that owns the current turn."
 )
 
 MINION_START_WORKFLOW_GUIDANCE = ToolGuidance(
@@ -74,12 +59,19 @@ MINION_START_WORKFLOW_GUIDANCE = ToolGuidance(
     use_when=(
         "Use when the requested work is identity-light executor work: a medium-to-large or long-running project, work "
         "that benefits from architect/coder/verifier gates, or a task the user explicitly asks Minion to perform. "
-        "Choose by identity binding and task nature, not by prose length or step count."
+        "Choose by identity binding and task nature, not by prose length or step count. Before calling, inspect "
+        "skill_search with read_tool and invoke it through call_tool to find a relevant operation manual. If any are "
+        "found, ask whether to provide them and wait; pass only explicitly approved names in skill_refs. Supply the "
+        "canonical profile, short goal, narrow workspace, and complete task_spec. "
+        "Use review_then_execute with an external architecture artifact, execute_trusted only for a Manager-trusted "
+        "artifact, standalone_review for review-only work, and review_and_repair for bounded repair."
     ),
     do_not_use_when=(
         "Do not use for work strongly bound to Pal's relationship with the user, including conversation, Q&A, "
         "check-ins, quizzes, personal technical discussion, a single-point code investigation, or reading code and "
-        "giving conclusions. In the gray area Pal handles the task directly unless the user explicitly requests Minion."
+        "giving conclusions. In the gray area Pal handles the task directly unless the user explicitly requests Minion. "
+        "Do not inspect or implement the target in the foreground first. After acceptance, do not poll status or create "
+        "a proactive polling task; callbacks deliver clarification, review, and completion events."
     ),
     failure_next_steps=(
         "Correct invalid task, profile, workspace, operation, artifact, or approved skill input. If creation may have "
@@ -157,7 +149,7 @@ class MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput(StrictToolMod
     skill_refs: list[str] | None = Field(
         default=None,
         description=(
-            "Exact active Pal skill IDs that the user explicitly approved for this "
+            "Exact active Pal skill names returned by skill_search that the user explicitly approved for this "
             "workflow. The Manager injects their manuals as user-side system reminders "
             "when each logical role session is first spawned."
         ),
@@ -207,9 +199,9 @@ class MinionV2CapabilitiesMinionV2PublicProviderRebindTaskDeliveryInput(StrictTo
     """Public semantic address for changing only a Task's reply target."""
 
     task: str = Field(description="Exact human-readable Task title.")
-    channel_id: str = Field(
+    channel_name: str = Field(
         description=(
-            "Enabled channel endpoint ID that should receive future Task notifications. "
+            "Enabled channel endpoint name returned by channel_list that should receive future Task notifications. "
             "Provider-specific reply-target fields are Manager-owned and are not accepted."
         )
     )
@@ -299,7 +291,7 @@ class MinionV2PublicProvider:
             purpose="Read the effective Minion profile/family catalog from the sidecar.",
             use_when="Checking available Minion profiles and families before starting a workflow.",
             do_not_use_when="Starting a workflow (use minion_start_workflow). Checking task status (use minion_task_status).",
-            failure_next_steps="If sidecar not responding, check mcp_show or plugin attach status.",
+            failure_next_steps="If sidecar not responding, check plugins_list for the minion plugin attach status.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderReadInput,
         aliases=("minion_catalog_read",),
@@ -340,9 +332,14 @@ class MinionV2PublicProvider:
     def set_profile_override(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, _channel = self._actor_and_channel(call)
+            args = dict(call.args or {})
+            changes = dict(args.get("changes") or {})
+            if "preferred_endpoint_name" in changes:
+                changes["preferred_endpoint_id"] = changes.pop("preferred_endpoint_name")
+            args["changes"] = changes
             payload = self._request_manager(
                 "catalog_set_profile_override",
-                {**dict(call.args or {}), "actor": actor},
+                {**args, "actor": actor},
             )
             return _public_result("minion profile override updated", payload)
         except Exception as exc:
@@ -630,7 +627,7 @@ class MinionV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Resume a deliberately paused V2 workflow, or normalize orphaned worker-owned work into TRIAGE_REQUIRED items.",
             use_when="When a workflow was deliberately paused, or after an interrupted worker disappears.",
-            do_not_use_when="Not for triage resolution (use resolve_triage after addressing blockers).",
+            do_not_use_when="Not for triage resolution (use minion_resolve_triage after addressing blockers).",
             failure_next_steps="Correct invalid input; reconcile with minion_task_status before retrying.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderResumeWorkflowInput,
@@ -667,7 +664,7 @@ class MinionV2PublicProvider:
         guidance=ToolGuidance(
             purpose="Discard the current execution attempt and restart from its accepted architecture.",
             use_when="When execution policy or Coder behavior changed but the accepted architecture remains the intended baseline.",
-            do_not_use_when="Not for architecture changes (start a new workflow). Not for transient failures (use resolve_triage).",
+            do_not_use_when="Not for architecture changes (start a new workflow). Not for transient failures (use minion_resolve_triage).",
             failure_next_steps="Correct invalid input; reconcile with minion_task_status before retrying.",
         ),
         InputModel=MinionV2CapabilitiesMinionV2PublicProviderRestartExecutionInput,
@@ -795,7 +792,7 @@ class MinionV2PublicProvider:
             purpose="Rebind one Task's Manager-owned reply target without changing its workflow.",
             use_when="Use only after the user explicitly names a Task and destination channel endpoint.",
             do_not_use_when="Do not use merely because the user contacted Pal from another channel; ordinary conversation never moves Task delivery.",
-            failure_next_steps="List channel endpoints or correct the exact Task title; never edit workflow state to repair delivery.",
+            failure_next_steps="Use channel_list to find endpoint names or correct the exact Task title; never edit workflow state to repair delivery.",
         ),
         execution=DIRECT_CONTROL,
     )
@@ -808,7 +805,7 @@ class MinionV2PublicProvider:
             )
             binding = self._resolve_rebind_binding(
                 call,
-                str(call.args.get("channel_id") or ""),
+                str(call.args.get("channel_name") or ""),
             )
             payload = self._request_manager(
                 "v2_rebind_task_delivery",
@@ -816,6 +813,7 @@ class MinionV2PublicProvider:
             )
             public = {
                 "task": str(call.args.get("task") or "").strip(),
+                "channel_name": str(binding.get("channel_id") or "").strip(),
                 "channel_id": str(binding.get("channel_id") or "").strip(),
                 "changed": bool(payload.get("changed")),
             }

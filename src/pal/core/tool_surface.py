@@ -58,7 +58,7 @@ class ToolSurface:
                 (
                     item
                     for item in generation.direct_aliases.values()
-                    if item.descriptor_name == descriptor.name
+                    if item.alias in descriptor.aliases
                 ),
                 None,
             )
@@ -91,17 +91,13 @@ class ToolSurface:
         # -- dynamic capabilities from config --
         for entry in self._config.get("dynamic", []):
             canonical_path = entry.get("canonical_path", "")
-            provider_setting = entry.get("provider_setting", "")
-            if not canonical_path or not provider_setting:
-                continue
-            active_target_id = self._resolve_dynamic_target(provider_setting)
-            if not active_target_id:
+            if not canonical_path:
                 continue
             for record_id in by_canonical.get(canonical_path, []):
                 descriptor = records[record_id]
-                if descriptor.target_id != active_target_id:
+                if not descriptor.metadata.get("target_argument"):
                     continue
-                key = (descriptor.canonical_path or descriptor.name, descriptor.target_id or SINGLETON_TARGET)
+                key = (descriptor.canonical_path or descriptor.name, SINGLETON_TARGET)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -140,9 +136,13 @@ class ToolSurface:
             for record_id in by_canonical.get(canonical_path, []):
                 descriptor = records[record_id]
                 descriptor_target = descriptor.target_id or SINGLETON_TARGET
-                if target_id is not None and descriptor_target != target_id:
+                is_parameterized = bool(descriptor.metadata.get("target_argument"))
+                if target_id is not None and not is_parameterized and descriptor_target != target_id:
                     continue
-                key = (descriptor.canonical_path or descriptor.name, descriptor_target)
+                key = (
+                    descriptor.canonical_path or descriptor.name,
+                    SINGLETON_TARGET if is_parameterized else descriptor_target,
+                )
                 if key in seen:
                     continue
                 seen.add(key)

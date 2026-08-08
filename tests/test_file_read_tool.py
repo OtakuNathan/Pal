@@ -84,6 +84,26 @@ class BasicReadTests(_TempFileMixin, unittest.TestCase):
         self.assertTrue(result.structured["full_view"])
         self.assertEqual(self.cache.get_valid_full(path), "")
 
+    def test_utf8_bom_is_reported_hidden_from_display_and_preserved_by_edit(self) -> None:
+        path = Path(self._tmpdir) / "bom.txt"
+        path.write_bytes(b"\xef\xbb\xbfalpha\nbeta\n")
+
+        result = self.tool.invoke({"file_path": str(path)})
+        edit = FileEditTool(cache=self.cache).invoke(
+            {
+                "file_path": str(path),
+                "old_string": "alpha",
+                "new_string": "ALPHA",
+            }
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertTrue(result.structured["utf8_bom"])
+        self.assertIn("UTF-8 BOM present", result.text)
+        self.assertNotIn("\ufeff", result.text)
+        self.assertEqual(edit.status, RuntimeStatus.OK)
+        self.assertEqual(path.read_bytes(), b"\xef\xbb\xbfALPHA\nbeta\n")
+
     def test_repeated_unchanged_range_returns_compact_stub(self) -> None:
         path = self._write_tmp("repeat.txt", "one\ntwo\n")
         first = self.tool.invoke({"file_path": str(path)})
@@ -249,7 +269,7 @@ class CacheIntegrationTests(_TempFileMixin, unittest.TestCase):
         self.assertEqual(edit_result.status, RuntimeStatus.OK)
         self.assertEqual(path.read_text(encoding="utf-8"), "gamma beta\n")
 
-    def test_partial_read_caches_bytes_but_does_not_grant_mutation(self) -> None:
+    def test_partial_read_authorizes_edit_only_inside_visible_range(self) -> None:
         content = "\n".join(f"line {i}" for i in range(50))
         path = self._write_tmp("full_cache.txt", content)
         self.tool.invoke({"file_path": str(path), "offset": 1, "limit": 5})
@@ -261,11 +281,43 @@ class CacheIntegrationTests(_TempFileMixin, unittest.TestCase):
         edit_result = FileEditTool(cache=self.cache).invoke(
             {
                 "file_path": str(path),
-                "old_string": "line 1",
-                "new_string": "changed",
+                "old_string": "line 1\n",
+                "new_string": "changed\n",
             }
         )
+        self.assertEqual(edit_result.status, RuntimeStatus.OK)
+        self.assertIn("changed\nline 2", path.read_text(encoding="utf-8"))
+
+    def test_partial_read_does_not_authorize_unseen_match(self) -> None:
+        content = "\n".join(f"line {i}" for i in range(50))
+        path = self._write_tmp("outside_cache.txt", content)
+        self.tool.invoke({"file_path": str(path), "offset": 1, "limit": 5})
+
+        edit_result = FileEditTool(cache=self.cache).invoke(
+            {
+                "file_path": str(path),
+                "old_string": "line 20\n",
+                "new_string": "changed\n",
+            }
+        )
+
         self.assertEqual(edit_result.structured["error_code"], "PARTIAL_READ")
+
+    def test_partial_edit_preserves_crlf_outside_affected_range(self) -> None:
+        path = Path(self._tmpdir) / "crlf.txt"
+        path.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")
+        self.tool.invoke({"file_path": str(path), "offset": 2, "limit": 1})
+
+        edit_result = FileEditTool(cache=self.cache).invoke(
+            {
+                "file_path": str(path),
+                "old_string": "beta",
+                "new_string": "BETA",
+            }
+        )
+
+        self.assertEqual(edit_result.status, RuntimeStatus.OK)
+        self.assertEqual(path.read_bytes(), b"alpha\r\nBETA\r\ngamma\r\n")
 
 
 class ErrorHandlingTests(_TempFileMixin, unittest.TestCase):

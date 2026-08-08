@@ -7,16 +7,20 @@ import unittest
 import tempfile
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.core import PalCore
 from pal.core.turn_executor import TurnExecutor
 from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.contracts import ToolCallBudget
+from pal.execution.file_edit import FileEditTool
+from pal.execution.file_state import SessionFileStateCache, read_utf8_text_exact
 from pal.execution.session_state import (
     FileDeliveryManifest,
     FileDeliverySpan,
     InMemoryLogicalExecutionState,
     PagerHandleManifest,
+    content_digest,
 )
 from pal.minion.scoped_execution import MinionScopedExecutionRuntime
 from pal.llm.ir import LLMMessageIR, MessageRole
@@ -190,7 +194,7 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 input_id="assignment-after-retirement",
             )
 
-    def test_complete_file_retained_by_pager_counts_as_a_full_read(self) -> None:
+    def test_paged_file_initial_result_authorizes_only_its_exact_first_page(self) -> None:
         core = PalCore()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
@@ -220,7 +224,18 @@ class LogicalExecutionStateTests(unittest.TestCase):
             runtime.commit_tool_delivery(
                 turn_id=turn_id,
                 context_delivery=dict(read.context_delivery or {}),
+                result_id="read-large",
             )
+            grant = runtime.logical_state.file_grant(
+                execution_lifetime_id=runtime.logical_context_for_turn(
+                    turn_id
+                ).execution_lifetime_id,
+                file_key=str(path.resolve()),
+                digest=dict(read.context_delivery or {})["digest"],
+            )
+            self.assertIsNotNone(grant)
+            self.assertFalse(grant.complete)
+            self.assertTrue(grant.covered_ranges[0][0] <= 1)
 
             edit = runtime.execute_tool(
                 new_tool_call(
@@ -295,6 +310,143 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 digest="digest-a",
             ).complete
         )
+
+    def test_result_retirement_drops_inherited_ranges_with_their_owner(self) -> None:
+        read = FileDeliveryManifest(
+            file_key="/workspace/owned.txt",
+            digest="digest-before",
+            total_lines=3,
+            spans=(
+                FileDeliverySpan(0, 10, 1, 3, 0, 10, 10),
+            ),
+        ).to_dict()
+        read["result_id"] = "read-owner"
+        self.backend.record_delivery(
+            execution_lifetime_id="session-a",
+            delivery=read,
+        )
+        edit = FileDeliveryManifest(
+            file_key="/workspace/owned.txt",
+            digest="digest-after",
+            total_lines=3,
+            spans=(
+                FileDeliverySpan(0, 10, 2, 2, 0, 10, 10),
+            ),
+            operation="edit",
+            before_digest="digest-before",
+            inherited_ranges=((1, 1), (3, 3)),
+            parent_result_ids=("read-owner",),
+        ).to_dict()
+        edit["result_id"] = "edit-owner"
+        self.backend.record_delivery(
+            execution_lifetime_id="session-a",
+            delivery=edit,
+        )
+
+        complete = self.backend.file_grant(
+            execution_lifetime_id="session-a",
+            file_key="/workspace/owned.txt",
+            digest="digest-after",
+        )
+        self.assertIsNotNone(complete)
+        self.assertTrue(complete.complete)
+
+        self.backend.retire_results(
+            execution_lifetime_id="session-a",
+            result_ids=("read-owner",),
+        )
+        post_image_only = self.backend.file_grant(
+            execution_lifetime_id="session-a",
+            file_key="/workspace/owned.txt",
+            digest="digest-after",
+        )
+        self.assertIsNotNone(post_image_only)
+        self.assertEqual(post_image_only.covered_ranges, ((2, 2),))
+
+        self.backend.retire_results(
+            execution_lifetime_id="session-a",
+            result_ids=("edit-owner",),
+        )
+        self.assertIsNone(
+            self.backend.file_grant(
+                execution_lifetime_id="session-a",
+                file_key="/workspace/owned.txt",
+                digest="digest-after",
+            )
+        )
+
+    def test_session_edit_reads_once_for_authority_and_once_for_locked_cas(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "read-count.txt"
+            content = "alpha\nbeta\n"
+            path.write_text(content, encoding="utf-8")
+            delivery = FileDeliveryManifest(
+                file_key=str(path.resolve()),
+                digest=content_digest(content),
+                total_lines=2,
+                spans=(FileDeliverySpan(0, 10, 1, 2, 0, 10, 10),),
+            ).to_dict()
+            delivery["result_id"] = "read-count-owner"
+            self.backend.record_delivery(
+                execution_lifetime_id="session-a",
+                delivery=delivery,
+            )
+            cache = SessionFileStateCache(
+                backend=self.backend,
+                context=self.context,
+            )
+
+            with patch(
+                "pal.execution.file_state.read_utf8_text_exact",
+                wraps=read_utf8_text_exact,
+            ) as exact_read:
+                result = FileEditTool(cache=cache).invoke(
+                    {
+                        "file_path": str(path),
+                        "old_string": "alpha",
+                        "new_string": "omega",
+                    }
+                )
+
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(exact_read.call_count, 2)
+
+    def test_observed_new_digest_retires_old_session_file_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "changed.txt"
+            old_content = "old\n"
+            path.write_text(old_content, encoding="utf-8")
+            delivery = FileDeliveryManifest(
+                file_key=str(path.resolve()),
+                digest=content_digest(old_content),
+                total_lines=1,
+                spans=(FileDeliverySpan(0, 5, 1, 1, 0, 5, 5),),
+            ).to_dict()
+            delivery["result_id"] = "old-owner"
+            self.backend.record_delivery(
+                execution_lifetime_id="session-a",
+                delivery=delivery,
+            )
+            cache = SessionFileStateCache(
+                backend=self.backend,
+                context=self.context,
+            )
+            new_content = "new\n"
+            path.write_text(new_content, encoding="utf-8")
+
+            retired = cache.retire_if_observed_digest_changed(
+                path,
+                observed_digest=content_digest(new_content),
+            )
+
+            self.assertTrue(retired)
+            self.assertIsNone(
+                self.backend.file_grant(
+                    execution_lifetime_id="session-a",
+                    file_key=str(path.resolve()),
+                    digest=content_digest(old_content),
+                )
+            )
 
     def test_split_line_is_authorized_only_after_every_page_fragment_arrives(
         self,
@@ -611,6 +763,76 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 "omega\nbeta\n",
             )
 
+    def test_partial_l1_delivery_authorizes_only_the_delivered_edit_range(
+        self,
+    ) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        runtime = core.context.execution_runtime
+        runtime.begin_tool_result_turn(
+            turn_id="turn-partial-edit",
+            scope_key="logical-partial-file-session",
+            input_id="assignment-1",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "input.txt"
+            path.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+            read = runtime.execute_tool(
+                new_tool_call(
+                    name="read_file",
+                    args={"file_path": str(path), "offset": 2, "limit": 1},
+                    call_id="read-partial",
+                ),
+                turn_id="turn-partial-edit",
+            )
+            tool_message = {
+                "role": "tool",
+                "tool_call_id": "read-partial",
+                "content": read.llm_text,
+            }
+            runtime.reconcile_tool_context(
+                turn_id="turn-partial-edit",
+                original_messages=[tool_message],
+                projected_messages=[tool_message],
+                delivery_records={
+                    "read-partial": dict(read.context_delivery or {})
+                },
+            )
+
+            unseen = runtime.execute_tool(
+                new_tool_call(
+                    name="edit_file",
+                    args={
+                        "file_path": str(path),
+                        "old_string": "alpha",
+                        "new_string": "ALPHA",
+                    },
+                    call_id="edit-unseen",
+                ),
+                turn_id="turn-partial-edit",
+            )
+            visible = runtime.execute_tool(
+                new_tool_call(
+                    name="edit_file",
+                    args={
+                        "file_path": str(path),
+                        "old_string": "beta",
+                        "new_string": "BETA",
+                    },
+                    call_id="edit-visible",
+                ),
+                turn_id="turn-partial-edit",
+            )
+
+            self.assertFalse(unseen.ok)
+            self.assertEqual(unseen.structured["error_code"], "PARTIAL_READ")
+            self.assertTrue(visible.ok, visible.llm_text)
+            self.assertEqual(
+                path.read_text(encoding="utf-8"),
+                "alpha\nBETA\ngamma\n",
+            )
+
     def test_turn_executor_commits_delivery_after_l1_tool_result_append(self) -> None:
         core = PalCore()
         register_execution_with_core(core.context)
@@ -839,13 +1061,22 @@ class LogicalExecutionStateTests(unittest.TestCase):
             )
             self.assertTrue(first.ok)
 
-            # The old read result remains in L1 on the next round. Replaying
-            # its delivery must not replace the mutation-advanced snapshot.
+            # Mutation authority advances only when the edit result itself is
+            # retained in L1. The historical read remains as the dependency
+            # that owns the unchanged post-image range.
+            edit_message = {
+                "role": "tool",
+                "tool_call_id": "edit-1",
+                "content": first.llm_text,
+            }
             runtime.reconcile_tool_context(
                 turn_id="turn-self-mutation",
-                original_messages=[tool_message],
-                projected_messages=[tool_message],
-                delivery_records=delivery,
+                original_messages=[tool_message, edit_message],
+                projected_messages=[tool_message, edit_message],
+                delivery_records={
+                    **delivery,
+                    "edit-1": dict(first.context_delivery or {}),
+                },
             )
             second = runtime.execute_tool(
                 new_tool_call(
@@ -938,7 +1169,9 @@ class LogicalExecutionStateTests(unittest.TestCase):
                 file_key=str(path.resolve()),
                 digest=dict(read.context_delivery or {})["digest"],
             )
-            self.assertIsNone(compacted)
+            self.assertIsNotNone(compacted)
+            self.assertFalse(compacted.complete)
+            self.assertEqual(compacted.covered_ranges, ((1, 1),))
 
     def test_compaction_projection_clears_file_visibility_without_expiring_pager(
         self,

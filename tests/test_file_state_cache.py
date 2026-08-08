@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pal.execution.file_state import FileStateCache
+from pal.execution.file_state import (
+    MUTATION_LOCK_BUCKET_COUNT,
+    FileStateCache,
+    _mutation_lock_bucket,
+)
 
 
 class FileStateCacheBasicTests(unittest.TestCase):
@@ -57,10 +61,38 @@ class FileStateCacheBasicTests(unittest.TestCase):
 
     def test_partial_view_does_not_authorize_full_mutation(self) -> None:
         cache = FileStateCache()
-        cache.mark_read(__file__, "partial", full_view=False)
+        cache.mark_read(
+            __file__,
+            "partial",
+            full_view=False,
+            covered_ranges=((3, 4),),
+        )
 
         self.assertEqual(cache.get_valid(__file__), "partial")
         self.assertIsNone(cache.get_valid_full(__file__))
+        state = cache.get_valid_state(__file__)
+        self.assertEqual(state.covered_ranges, ((3, 4),))
+        self.assertTrue(state.covers_lines(3, 4))
+        self.assertFalse(state.covers_lines(2, 4))
+
+    def test_partial_ranges_accumulate_for_same_file_version(self) -> None:
+        cache = FileStateCache()
+        cache.mark_read(
+            __file__,
+            "same",
+            full_view=False,
+            covered_ranges=((2, 3),),
+        )
+        cache.mark_read(
+            __file__,
+            "same",
+            full_view=False,
+            covered_ranges=((4, 5),),
+        )
+
+        state = cache.get_valid_state(__file__)
+        self.assertEqual(state.covered_ranges, ((2, 5),))
+        self.assertTrue(state.covers_lines(2, 5))
 
     def test_full_view_is_not_downgraded_by_later_partial_read(self) -> None:
         cache = FileStateCache()
@@ -68,6 +100,15 @@ class FileStateCacheBasicTests(unittest.TestCase):
         cache.mark_read(__file__, "same", full_view=False)
 
         self.assertEqual(cache.get_valid_full(__file__), "same")
+
+    def test_mutation_locks_use_a_fixed_number_of_buckets(self) -> None:
+        buckets = {
+            _mutation_lock_bucket(f"/workspace/file-{index}.txt")
+            for index in range(10_000)
+        }
+
+        self.assertLessEqual(len(buckets), MUTATION_LOCK_BUCKET_COUNT)
+        self.assertTrue(all(0 <= item < MUTATION_LOCK_BUCKET_COUNT for item in buckets))
 
 
 class FileStateCacheLRUTests(unittest.TestCase):

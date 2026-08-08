@@ -147,7 +147,7 @@ class WebSearchIntrospectionProvider:
             purpose="Show the active web search provider.",
             use_when="Checking which search backend handles queries.",
             do_not_use_when="Listing all providers (use web_search_list_providers). Switching (use web_search_set_active_provider).",
-            failure_next_steps="Read-only.",
+            failure_next_steps="If no active provider is reported, use web_search_list_providers to find an enabled provider, then select it with web_search_set_active_provider.",
         ),
         aliases=("web_search_active_provider",),
     )
@@ -173,7 +173,7 @@ class WebSearchIntrospectionProvider:
             purpose="Show one web search provider's metadata.",
             use_when="Inspecting a specific provider's kind, settings, auth keys.",
             do_not_use_when="Module health (use web_search_show). Auth state (use web_search_provider_auth_state).",
-            failure_next_steps="If NOT_FOUND, verify provider_id with web_search_list_providers.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers.",
         ),
         aliases=("web_search_provider_show",),
     )
@@ -198,7 +198,7 @@ class WebSearchIntrospectionProvider:
             purpose="Show one web search provider's authorization state.",
             use_when="Diagnosing auth failures or checking if API keys are configured.",
             do_not_use_when="Applying credentials (use web_search_provider_set_auth_material). Provider metadata (use web_search_provider_show).",
-            failure_next_steps="If NOT_FOUND, verify provider_id. If not authorized, apply credentials.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers. If not authorized, apply credentials.",
         ),
         aliases=("web_search_provider_auth_state",),
     )
@@ -207,6 +207,7 @@ class WebSearchIntrospectionProvider:
         if provider is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web search provider not found", llm_text="web search provider not found")
         payload = self.service.provider_auth_state(provider)
+        payload["name"] = provider.provider_id
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web search provider authorization state",
@@ -232,6 +233,7 @@ class WebSearchIntrospectionProvider:
         if provider is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web search provider not found", llm_text="web search provider not found")
         payload = self.service.provider_health(provider)
+        payload["name"] = provider.provider_id
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web search provider health",
@@ -249,16 +251,16 @@ class WebSearchIntrospectionProvider:
             purpose="Set the active web search provider.",
             use_when="Switching to a different search backend.",
             do_not_use_when="Checking the active provider (use web_search_active_provider).",
-            failure_next_steps="If NOT_FOUND, verify provider_id with web_search_list_providers.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput,
         aliases=("web_search_set_active_provider",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider_id = str(call.args.get("active_provider_id") or "").strip()
+        provider_id = str(call.args.get("name") or "").strip()
         if not provider_id:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="active_provider_id is required", llm_text="active_provider_id is required")
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="name is required", llm_text="name is required")
         record = self.service.set_active_provider(provider_id)
         if record is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web search provider not found", llm_text="web search provider not found")
@@ -335,7 +337,7 @@ class WebSearchIntrospectionProvider:
             purpose="Enable a web search provider.",
             use_when="Re-enabling a disabled search provider.",
             do_not_use_when="Disabling (use web_search_provider_disable). Setting active (use web_search_set_active_provider).",
-            failure_next_steps="If NOT_FOUND, verify provider_id.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers.",
         ),
         aliases=("web_search_provider_enable",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -353,7 +355,7 @@ class WebSearchIntrospectionProvider:
             purpose="Disable a web search provider.",
             use_when="Temporarily removing a provider from the active pool.",
             do_not_use_when="Enabling (use web_search_provider_enable).",
-            failure_next_steps="If NOT_FOUND, verify provider_id.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers.",
         ),
         aliases=("web_search_provider_disable",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -371,7 +373,7 @@ class WebSearchIntrospectionProvider:
             purpose="Apply auth material to a web search provider without exposing secrets.",
             use_when="A provider needs API keys or credentials to function.",
             do_not_use_when="Reading auth state (use web_search_provider_auth_state).",
-            failure_next_steps="If NOT_FOUND, verify provider_id. Check provider docs for required auth fields.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers. Check provider docs for required auth fields.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetAuthMaterialInput,
         aliases=("web_search_provider_set_auth_material",),
@@ -388,6 +390,7 @@ class WebSearchIntrospectionProvider:
         if updated is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web search provider not found", llm_text="web search provider not found")
         payload = self.service.provider_auth_state(updated)
+        payload["name"] = updated.provider_id
         payload["accepted_keys"] = sorted(str(key) for key in material.keys())
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -406,7 +409,7 @@ class WebSearchIntrospectionProvider:
             purpose="Merge config into a web search provider's settings blob.",
             use_when="Tuning provider-specific settings (e.g. result count, safe search defaults).",
             do_not_use_when="Setting auth material (use web_search_provider_set_auth_material).",
-            failure_next_steps="If NOT_FOUND, verify provider_id.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetConfigInput,
         aliases=("web_search_provider_set_config",),
@@ -435,7 +438,7 @@ class WebSearchIntrospectionProvider:
             purpose="Attach web search module.",
             use_when="Reconnecting a detached web search module.",
             do_not_use_when="Enabling one provider (use web_search_provider_enable). Already attached.",
-            failure_next_steps="No external dependencies.",
+            failure_next_steps="This attach is idempotent. If the module still appears detached or degraded, inspect web_search_show and provider health before retrying.",
         ), aliases=("web_search_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -465,7 +468,7 @@ class WebSearchIntrospectionProvider:
         updated = self.service.set_enabled(provider.provider_id, enabled)
         if updated is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web search provider not found", llm_text="web search provider not found")
-        payload = {"provider_id": updated.provider_id, "enabled": bool(updated.enabled)}
+        payload = {"name": updated.provider_id, "provider_id": updated.provider_id, "enabled": bool(updated.enabled)}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web search provider state updated",
@@ -475,6 +478,7 @@ class WebSearchIntrospectionProvider:
 
     def _provider_payload(self, provider: WebSearchProviderModel) -> dict[str, object]:
         return {
+            "name": provider.provider_id,
             "provider_id": provider.provider_id,
             "provider_kind": provider.provider_kind,
             "display_name": provider.display_name,

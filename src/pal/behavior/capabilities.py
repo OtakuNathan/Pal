@@ -123,7 +123,7 @@ class BehaviorIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Learn a future behavior rule: when situation X appears, Pal should consider route/action Y.",
             use_when="The user explicitly asks Pal to learn/adopt/follow a future behavior rule or clearly teaches a durable route preference.",
-            do_not_use_when="Durable facts, preferences, project context, or repair lessons (use remember_memory). Runtime state. Reusable procedures (use skill system).",
+            do_not_use_when="Durable facts, preferences, project context, or repair lessons (use remember_memory). Runtime state. Reusable procedures should be discovered with skill_search or normalized with skill_assimilate.",
             failure_next_steps="If conflict (same scenario exists), default conflict_resolution='ask' returns a user-decision request. Use overwrite or merge to resolve.",
         ),
         InputModel=BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitInput,

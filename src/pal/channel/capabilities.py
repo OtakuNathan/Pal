@@ -75,6 +75,7 @@ class ChannelEndpointTarget:
 
 @dataclass(frozen=True)
 class ChannelEndpointListItem:
+    name: str
     endpoint_id: str
     channel_kind: str
     enabled: bool
@@ -193,9 +194,9 @@ class ChannelIntrospectionProvider:
         action_name="list",
         description="List configured channel endpoints",
         guidance=ToolGuidance(
-            purpose="List configured channel endpoints.",
-            use_when="Need to discover available endpoint IDs, their channel kind, enabled/attached/paired status.",
-            do_not_use_when="You already know the endpoint ID. Diagnosing one endpoint in depth (use channel_endpoint_inspect).",
+            purpose="List configured channel endpoints and their usable names.",
+            use_when="Need to discover available endpoint names, their channel kind, enabled/attached/paired status.",
+            do_not_use_when="You already know the endpoint name. Diagnosing one endpoint in depth (use channel_endpoint_inspect).",
             failure_next_steps="Read-only. If empty, no endpoints are configured — check channel provider configuration.",
         ),
         aliases=("channel_list",),
@@ -204,6 +205,7 @@ class ChannelIntrospectionProvider:
         _ = call
         payload = [
             ChannelEndpointListItem(
+                name=target.endpoint_id,
                 endpoint_id=target.endpoint_id,
                 channel_kind=target.channel_kind,
                 enabled=target.enabled,
@@ -230,7 +232,7 @@ class ChannelIntrospectionProvider:
             purpose="Send a local file attachment back to the channel that started the current turn.",
             use_when="The user asked for a generated file (image, document, code) to be sent back through the channel.",
             do_not_use_when="Sending plain text (use channel_send_message). Writing a local file (use write_file).",
-            failure_next_steps="If file path is invalid, verify with read_file first. If delivery fails, the endpoint may be detached — check channel_list.",
+            failure_next_steps="If the local path is invalid, use run_shell with a bounded existence/type check; read_file is only for UTF-8 text. If the endpoint is unavailable, inspect channel_list. If delivery may have been accepted, reconcile with the recipient before retrying so the attachment is not sent twice.",
         ),
         aliases=("send_channel_attachment",),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentInput,
@@ -262,7 +264,7 @@ class ChannelIntrospectionProvider:
             purpose="Send an ordinary text message through a configured channel endpoint.",
             use_when=(
                 "Use when you need to initiate a message on an attached, enabled endpoint; "
-                "obtain channel_id from channel_list."
+                "obtain the endpoint name from channel_list."
             ),
             do_not_use_when=(
                 "Do not use for the normal reply to the current turn, including a websocket peer turn: "
@@ -282,20 +284,20 @@ class ChannelIntrospectionProvider:
         ),
         examples=(
             {
-                "channel_id": "telegram-main",
+                "name": "telegram-main",
                 "message": "The scheduled task has completed.",
             },
         ),
     )
     async def send_message(self, call: IntrospectionCall) -> IntrospectionResult:
-        channel_id = str(call.args.get("channel_id") or "").strip()
+        channel_id = str(call.args.get("name") or "").strip()
         message = str(call.args.get("message") or "")
         if not channel_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="channel_id is required",
-                structured={"reason": "channel_id_required"},
-                llm_text="channel_id is required; use channel_list to choose an endpoint.",
+                text="name is required",
+                structured={"reason": "channel_name_required"},
+                llm_text="name is required; use channel_list to choose an endpoint.",
             )
         if not message.strip():
             return IntrospectionResult(
@@ -389,7 +391,7 @@ class ChannelIntrospectionProvider:
             purpose="Enable a channel endpoint so it accepts incoming messages.",
             use_when="An endpoint was disabled and needs to resume receiving messages.",
             do_not_use_when="The endpoint runtime is disconnected (use channel_attach). The endpoint is already enabled.",
-            failure_next_steps="If endpoint not found, verify ID with channel_list. Recovery socket endpoints cannot be disabled.",
+            failure_next_steps="If the endpoint is not found, verify its name with channel_list. If durable state commit fails, inspect the endpoint's enabled state in channel_list before retrying; the runtime rolls back to the previous value.",
         ),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderEnableInput,
         aliases=("channel_enable",),
@@ -408,7 +410,7 @@ class ChannelIntrospectionProvider:
             purpose="Disable a channel endpoint so it stops accepting incoming messages.",
             use_when="Temporarily stopping an endpoint without removing its configuration.",
             do_not_use_when="Fully disconnecting the runtime (use channel_detach). Recovery socket endpoints are protected and cannot be disabled.",
-            failure_next_steps="If endpoint not found, verify ID with channel_list. Recovery socket endpoints cannot be disabled.",
+            failure_next_steps="If endpoint not found, verify its name with channel_list. Recovery socket endpoints cannot be disabled.",
         ),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderDisableInput,
         aliases=("channel_disable",),
@@ -434,7 +436,7 @@ class ChannelIntrospectionProvider:
         execution=INDIRECT_CONTROL,
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
-        return self._attach_endpoint_provider(str(call.args.get("target_id") or "").strip())
+        return self._attach_endpoint_provider(str(call.args.get("name") or "").strip())
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -446,7 +448,7 @@ class ChannelIntrospectionProvider:
             purpose="Detach a channel endpoint — disconnect its runtime instance without removing configuration.",
             use_when="Temporarily disconnecting an endpoint's runtime (e.g. maintenance, restart).",
             do_not_use_when="Just stopping message acceptance (use channel_disable — keeps runtime alive).",
-            failure_next_steps="If endpoint not found, verify ID with channel_list. Detached endpoints can be re-attached with channel_attach.",
+            failure_next_steps="If endpoint not found, verify its name with channel_list. Detached endpoints can be re-attached with channel_attach.",
         ),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderDetachInput,
         aliases=("channel_detach",),
@@ -501,7 +503,7 @@ class ChannelIntrospectionProvider:
         execution=INDIRECT_CONTROL,
     )
     def reload_provider(self, call: IntrospectionCall) -> IntrospectionResult:
-        return self._restart_endpoint(str(call.args.get("target_id") or "").strip())
+        return self._restart_endpoint(str(call.args.get("name") or "").strip())
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -512,7 +514,7 @@ class ChannelIntrospectionProvider:
             purpose="Inspect full state of one channel endpoint.",
             use_when="Need detailed status of a specific endpoint (enabled, attached, paired, provider info).",
             do_not_use_when="Just need a list of all endpoints (use channel_list). Checking auth (use channel_endpoint_auth_state).",
-            failure_next_steps="If endpoint not found, verify ID with channel_list.",
+            failure_next_steps="If endpoint not found, verify its name with channel_list.",
         ),
         aliases=("channel_endpoint_inspect",),
     )
@@ -535,7 +537,7 @@ class ChannelIntrospectionProvider:
             purpose="Inspect whether an endpoint is authenticated and authorized.",
             use_when="Diagnosing auth failures or checking if credentials are still valid.",
             do_not_use_when="Applying credentials (use channel_endpoint_set_auth_material). General endpoint state (use channel_endpoint_inspect).",
-            failure_next_steps="If endpoint not found, verify ID with channel_list. If not authenticated, apply credentials with channel_endpoint_set_auth_material.",
+            failure_next_steps="If endpoint not found, verify its name with channel_list. If not authenticated, apply credentials with channel_endpoint_set_auth_material.",
         ),
         aliases=("channel_endpoint_auth_state",),
     )
@@ -559,7 +561,7 @@ class ChannelIntrospectionProvider:
             purpose="Apply endpoint authorization material (tokens, credentials) without exposing secrets in output.",
             use_when="An endpoint needs credentials to authenticate (e.g. Telegram bot token, API key).",
             do_not_use_when="Reading current auth state (use channel_endpoint_auth_state).",
-            failure_next_steps="If endpoint not found, verify ID with channel_list. If material format invalid, check provider documentation for required fields.",
+            failure_next_steps="If endpoint not found, verify its name with channel_list. If material format invalid, check provider documentation for required fields.",
         ),
         InputModel=ChannelCapabilitiesChannelIntrospectionProviderSetAuthMaterialInput,
         aliases=("channel_endpoint_set_auth_material",),
@@ -591,7 +593,7 @@ class ChannelIntrospectionProvider:
             purpose="Inspect undelivered message backlog for one endpoint.",
             use_when="Checking if messages are queued but not yet delivered (endpoint was detached or slow).",
             do_not_use_when="General endpoint health (use channel_endpoint_health). Listing endpoints (use channel_list).",
-            failure_next_steps="If endpoint not found, verify ID with channel_list. Large backlog may indicate the endpoint needs re-attachment.",
+            failure_next_steps="If endpoint not found, verify its name with channel_list. Large backlog may indicate the endpoint needs re-attachment.",
         ),
         aliases=("channel_endpoint_backlog",),
     )
@@ -614,7 +616,7 @@ class ChannelIntrospectionProvider:
             purpose="Inspect network connectivity and delivery health for one endpoint.",
             use_when="Diagnosing message delivery failures or connection issues.",
             do_not_use_when="Checking auth (use channel_endpoint_auth_state). Checking message queue (use channel_endpoint_backlog).",
-            failure_next_steps="If endpoint not found, verify ID with channel_list. If unhealthy, try channel_reload_provider to restart the runtime.",
+            failure_next_steps="If endpoint not found, verify its name with channel_list. If unhealthy, try channel_reload_provider to restart the runtime.",
         ),
         aliases=("channel_endpoint_health",),
     )
@@ -665,12 +667,12 @@ class ChannelIntrospectionProvider:
         return self._manager().provider_for_endpoint_type(target.channel_kind)
 
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
-        endpoint_id = str(call.args.get("target_id") or "").strip()
+        endpoint_id = str(call.args.get("name") or "").strip()
         if not endpoint_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="target_id is required",
-                llm_text="target_id is required",
+                text="name is required",
+                llm_text="name is required",
             )
         endpoint = self.runtime.get_endpoint(endpoint_id)
         record = self.repository.get(endpoint_id)
@@ -725,15 +727,15 @@ class ChannelIntrospectionProvider:
         )
 
     def _set_attached(self, call: IntrospectionCall, *, attached: bool) -> IntrospectionResult:
-        endpoint_id = str(call.args.get("target_id") or "").strip()
+        endpoint_id = str(call.args.get("name") or "").strip()
         return self._set_endpoint_attached(endpoint_id, attached=attached)
 
     def _set_endpoint_attached(self, endpoint_id: str, *, attached: bool) -> IntrospectionResult:
         if not endpoint_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="target_id is required",
-                llm_text="target_id is required",
+                text="name is required",
+                llm_text="name is required",
             )
         if attached:
             return self._manager().attach_endpoint(endpoint_id)

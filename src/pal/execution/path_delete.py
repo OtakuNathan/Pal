@@ -5,15 +5,12 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pal.execution.contracts import CapabilityResult
-from pal.execution.file_state import (
-    FileStateCache,
-    resolve_file_path,
-)
+from pal.execution.file_state import resolve_file_path
 from pal.shared import RuntimeStatus
 
 
@@ -21,12 +18,9 @@ ERR_DELETE_FAILED = "DELETE_FAILED"
 ERR_DIRECTORY_REQUIRES_RECURSIVE = "DIRECTORY_REQUIRES_RECURSIVE"
 ERR_INVALID_SHA256 = "INVALID_SHA256"
 ERR_MISSING_PATH = "MISSING_PATH"
-ERR_NOT_READ = "NOT_READ"
-ERR_PARTIAL_READ = "PARTIAL_READ"
 ERR_PATH_NOT_FOUND = "PATH_NOT_FOUND"
 ERR_READ_FAILED = "READ_FAILED"
 ERR_SHA256_MISMATCH = "SHA256_MISMATCH"
-ERR_STALE_PATH = "STALE_PATH"
 ERR_UNSAFE_PATH = "UNSAFE_PATH"
 ERR_UNSUPPORTED_PATH = "UNSUPPORTED_PATH"
 
@@ -37,12 +31,9 @@ _ERROR_LLMS: dict[str, str] = {
     ERR_DIRECTORY_REQUIRES_RECURSIVE: "The path is a directory. Set recursive=true to delete a directory.",
     ERR_INVALID_SHA256: "expected_sha256 must be a 64-character hexadecimal SHA-256 digest.",
     ERR_MISSING_PATH: "file_path is required.",
-    ERR_NOT_READ: "Path has not been read yet. Read the file first with file_read before deleting, or provide expected_sha256.",
-    ERR_PARTIAL_READ: "Only part of the file was read. Read the complete file before deleting, or provide expected_sha256.",
     ERR_PATH_NOT_FOUND: "The specified path does not exist.",
     ERR_READ_FAILED: "Failed to read file before deleting.",
     ERR_SHA256_MISMATCH: "File SHA-256 does not match expected_sha256. Read or inspect the file again before deleting.",
-    ERR_STALE_PATH: "File has been modified since read. Read it again before deleting, or provide the current expected_sha256.",
     ERR_UNSAFE_PATH: "Refusing to delete an unsafe path.",
     ERR_UNSUPPORTED_PATH: "The specified path is not a regular file or directory.",
 }
@@ -52,7 +43,6 @@ _ERROR_LLMS: dict[str, str] = {
 class PathDeleteTool:
     """Delete a file or directory through a structured, auditable entrypoint."""
 
-    cache: FileStateCache = field(default_factory=FileStateCache)
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         file_path = str(args.get("file_path") or "").strip()
         expected_sha256 = str(args.get("expected_sha256") or "").strip().lower()
@@ -81,11 +71,6 @@ class PathDeleteTool:
 
         if not resolved.is_file():
             return _err(RuntimeStatus.ERROR, ERR_UNSUPPORTED_PATH, file_path=str(resolved))
-
-        if not expected_sha256:
-            snapshot = self._require_current_snapshot(resolved)
-            if isinstance(snapshot, CapabilityResult):
-                return snapshot
 
         try:
             content = resolved.read_bytes()
@@ -117,7 +102,6 @@ class PathDeleteTool:
         except OSError as exc:
             return _err(RuntimeStatus.ERROR, ERR_DELETE_FAILED, file_path=str(resolved), details=str(exc))
 
-        self.cache.invalidate(resolved)
         structured: dict[str, Any] = {
             "file_path": str(resolved),
             "deleted": True,
@@ -132,18 +116,6 @@ class PathDeleteTool:
             llm_text=f"Deleted {path_kind}: {resolved}",
             structured=structured,
         )
-
-    def _require_current_snapshot(self, resolved: Path) -> str | CapabilityResult:
-        had_record = resolved in self.cache
-        cached_state = self.cache.get_valid_state(resolved)
-        if cached_state is None:
-            if not had_record:
-                return _err(RuntimeStatus.FORBIDDEN, ERR_NOT_READ, file_path=str(resolved))
-            return _err(RuntimeStatus.FORBIDDEN, ERR_STALE_PATH, file_path=str(resolved))
-        if not cached_state.full_view:
-            return _err(RuntimeStatus.FORBIDDEN, ERR_PARTIAL_READ, file_path=str(resolved))
-        return cached_state.content
-
 
 def _is_unsafe_delete_target(path: Path) -> bool:
     text = str(path)

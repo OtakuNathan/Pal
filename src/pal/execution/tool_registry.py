@@ -205,6 +205,18 @@ def compile_registry_generation(
             existing = descriptors.get(descriptor.name)
             if existing is not None and existing != descriptor:
                 shared_aliases = set(existing.aliases) & set(descriptor.aliases)
+                same_targeted_action = (
+                    shared_aliases
+                    and existing.canonical_path == descriptor.canonical_path
+                    and existing.metadata.get("target_argument") == descriptor.metadata.get("target_argument")
+                    and bool(existing.metadata.get("target_argument"))
+                )
+                if same_targeted_action:
+                    _assert_compatible_target_descriptors(existing, descriptor)
+                    descriptor_names = descriptor_by_module.setdefault(descriptor.module_id, [])
+                    if descriptor.name not in descriptor_names:
+                        descriptor_names.append(descriptor.name)
+                    continue
                 if shared_aliases:
                     alias = sorted(shared_aliases)[0]
                     raise ValueError(
@@ -235,15 +247,30 @@ def compile_registry_generation(
         canonical_path = str(descriptor.canonical_path or descriptor.name).strip()
         target_id = str(descriptor.target_id or SINGLETON_TARGET)
         binding = bindings.get((canonical_path, target_id))
+        if binding is None and descriptor.metadata.get("target_argument"):
+            binding = next(
+                (
+                    candidate
+                    for (candidate_path, _candidate_target), candidate in sorted(bindings.items())
+                    if candidate_path == canonical_path
+                ),
+                None,
+            )
         if binding is None:
             raise ValueError(f"missing canonical binding: {canonical_path} target={target_id}")
         record = _compile_record(descriptor, binding)
         alias = record.alias
         if alias in alias_to_canonical:
-            raise ValueError(
-                f"tool alias conflict in generation: {alias} -> "
-                f"{alias_to_canonical[alias]}, {canonical_path}"
-            )
+            if alias_to_canonical[alias] != canonical_path:
+                raise ValueError(
+                    f"tool alias conflict in generation: {alias} -> "
+                    f"{alias_to_canonical[alias]}, {canonical_path}"
+                )
+            existing = direct_aliases.get(alias) or indirect_aliases.get(alias)
+            if existing is None:
+                raise ValueError(f"tool alias {alias!r} has no compiled record")
+            _assert_compatible_target_records(existing, record)
+            continue
         if alias == canonical_path:
             raise ValueError(f"tool alias exposes canonical path: {alias}")
         alias_to_canonical[alias] = canonical_path
@@ -477,6 +504,74 @@ def _compile_record(
         is_mcp=is_mcp,
         requires_effect_receipt=execution.effect_kind is not EffectKind.NONE,
     )
+
+
+def _assert_compatible_target_records(
+    existing: CompiledToolRecord,
+    candidate: CompiledToolRecord,
+) -> None:
+    """One public alias may fan out only across equivalent target bindings."""
+
+    target_argument = str(existing.binding.descriptor.metadata.get("target_argument") or "")
+    candidate_argument = str(candidate.binding.descriptor.metadata.get("target_argument") or "")
+    if not target_argument or target_argument != candidate_argument:
+        raise ValueError(
+            f"tool alias conflict in generation: {existing.alias} -> incompatible target routing"
+        )
+    if existing.execution != candidate.execution:
+        raise ValueError(
+            f"tool alias conflict in generation: {existing.alias} -> incompatible execution semantics"
+        )
+    if _schema_without_titles(existing.input_schema) != _schema_without_titles(candidate.input_schema):
+        raise ValueError(
+            f"tool alias conflict in generation: {existing.alias} -> incompatible input schemas"
+        )
+    if _schema_without_titles(existing.output_schema) != _schema_without_titles(candidate.output_schema):
+        raise ValueError(
+            f"tool alias conflict in generation: {existing.alias} -> incompatible output schemas"
+        )
+
+
+def _assert_compatible_target_descriptors(
+    existing: CapabilityDescriptor,
+    candidate: CapabilityDescriptor,
+) -> None:
+    if existing.execution != candidate.execution or existing.target_kind != candidate.target_kind:
+        raise ValueError(
+            f"tool alias conflict in generation: {existing.aliases[0]} -> incompatible target semantics"
+        )
+    if existing.InputModel is None or candidate.InputModel is None:
+        raise ValueError(
+            f"tool alias conflict in generation: {existing.aliases[0]} -> missing target input model"
+        )
+    if _schema_without_titles(model_validation_schema(existing.InputModel)) != _schema_without_titles(
+        model_validation_schema(candidate.InputModel)
+    ):
+        raise ValueError(
+            f"tool alias conflict in generation: {existing.aliases[0]} -> incompatible input schemas"
+        )
+    if existing.OutputModel is None or candidate.OutputModel is None:
+        raise ValueError(
+            f"tool alias conflict in generation: {existing.aliases[0]} -> missing target output model"
+        )
+    if _schema_without_titles(model_validation_schema(existing.OutputModel)) != _schema_without_titles(
+        model_validation_schema(candidate.OutputModel)
+    ):
+        raise ValueError(
+            f"tool alias conflict in generation: {existing.aliases[0]} -> incompatible output schemas"
+        )
+
+
+def _schema_without_titles(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _schema_without_titles(item)
+            for key, item in value.items()
+            if key != "title"
+        }
+    if isinstance(value, list | tuple):
+        return [_schema_without_titles(item) for item in value]
+    return value
 
 
 def _example_from_schema(

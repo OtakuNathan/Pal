@@ -154,7 +154,7 @@ class WebFetchIntrospectionProvider:
             purpose="Show the active web fetch provider.",
             use_when="Checking which fetch backend handles read_web requests.",
             do_not_use_when="Listing all providers (use web_fetch_list_providers). Switching (use web_fetch_set_active_provider).",
-            failure_next_steps="Read-only.",
+            failure_next_steps="If no active provider is reported, use web_fetch_list_providers to find an enabled provider, then select it with web_fetch_set_active_provider.",
         ),
         aliases=("web_fetch_active_provider",),
     )
@@ -180,7 +180,7 @@ class WebFetchIntrospectionProvider:
             purpose="Show one web fetch provider's metadata.",
             use_when="Inspecting a specific provider's kind, settings, auth keys.",
             do_not_use_when="Module health (use web_fetch_show). Auth state (use web_fetch_provider_auth_state).",
-            failure_next_steps="If NOT_FOUND, verify provider_id with web_fetch_list_providers.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
         ),
         aliases=("web_fetch_provider_show",),
     )
@@ -205,7 +205,7 @@ class WebFetchIntrospectionProvider:
             purpose="Show one web fetch provider's authorization state.",
             use_when="Diagnosing auth failures or checking if credentials are configured.",
             do_not_use_when="Applying credentials (use web_fetch_provider_set_auth_material). Provider metadata (use web_fetch_provider_show).",
-            failure_next_steps="If NOT_FOUND, verify provider_id. If not authorized, apply credentials.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers. If not authorized, apply credentials.",
         ),
         aliases=("web_fetch_provider_auth_state",),
     )
@@ -214,6 +214,7 @@ class WebFetchIntrospectionProvider:
         if provider is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
         payload = self.service.provider_auth_state(provider)
+        payload["name"] = provider.provider_id
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web fetch provider authorization state",
@@ -239,6 +240,7 @@ class WebFetchIntrospectionProvider:
         if provider is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
         payload = self.service.provider_health(provider)
+        payload["name"] = provider.provider_id
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web fetch provider health",
@@ -256,16 +258,16 @@ class WebFetchIntrospectionProvider:
             purpose="Set the active web fetch provider.",
             use_when="Switching to a different fetch backend.",
             do_not_use_when="Checking the active provider (use web_fetch_active_provider).",
-            failure_next_steps="If NOT_FOUND, verify provider_id with web_fetch_list_providers.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
         ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput,
         aliases=("web_fetch_set_active_provider",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
-        provider_id = str(call.args.get("active_provider_id") or "").strip()
+        provider_id = str(call.args.get("name") or "").strip()
         if not provider_id:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="active_provider_id is required", llm_text="active_provider_id is required")
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="name is required", llm_text="name is required")
         record = self.service.set_active_provider(provider_id)
         if record is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
@@ -356,7 +358,7 @@ class WebFetchIntrospectionProvider:
             purpose="Render a URL in the browser and save a PNG screenshot as an artifact.",
             use_when="Only when visual page evidence is needed.",
             do_not_use_when="Not for text extraction (use read_web). Not for API calls.",
-            failure_next_steps="Check URL validity and browser availability.",
+            failure_next_steps="Check URL validity and browser availability. If rendering may have produced an artifact before failing, reconcile with list_artifacts or search_artifacts before retrying so a duplicate screenshot is not created.",
         ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput,
         OutputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput,
@@ -383,7 +385,7 @@ class WebFetchIntrospectionProvider:
             purpose="Enable a web fetch provider.",
             use_when="Re-enabling a disabled fetch provider.",
             do_not_use_when="Disabling (use web_fetch_provider_disable). Setting active (use web_fetch_set_active_provider).",
-            failure_next_steps="If NOT_FOUND, verify provider_id.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
         ),
         aliases=("web_fetch_provider_enable",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -401,7 +403,7 @@ class WebFetchIntrospectionProvider:
             purpose="Disable a web fetch provider.",
             use_when="Temporarily removing a provider from the active pool.",
             do_not_use_when="Enabling (use web_fetch_provider_enable).",
-            failure_next_steps="If NOT_FOUND, verify provider_id.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
         ),
         aliases=("web_fetch_provider_disable",),
         execution=INDIRECT_LOCAL_WRITE,
@@ -419,7 +421,7 @@ class WebFetchIntrospectionProvider:
             purpose="Apply auth material to a web fetch provider without exposing secrets.",
             use_when="A provider needs API keys or credentials to function.",
             do_not_use_when="Reading auth state (use web_fetch_provider_auth_state).",
-            failure_next_steps="If NOT_FOUND, verify provider_id.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
         ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetAuthMaterialInput,
         aliases=("web_fetch_provider_set_auth_material",),
@@ -436,6 +438,7 @@ class WebFetchIntrospectionProvider:
         if updated is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
         payload = self.service.provider_auth_state(updated)
+        payload["name"] = updated.provider_id
         payload["accepted_keys"] = sorted(str(key) for key in material.keys())
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -454,7 +457,7 @@ class WebFetchIntrospectionProvider:
             purpose="Merge config into a web fetch provider's settings blob.",
             use_when="Tuning provider-specific settings (e.g. timeout, user agent).",
             do_not_use_when="Setting auth material (use web_fetch_provider_set_auth_material).",
-            failure_next_steps="If NOT_FOUND, verify provider_id.",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
         ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetConfigInput,
         aliases=("web_fetch_provider_set_config",),
@@ -483,7 +486,7 @@ class WebFetchIntrospectionProvider:
             purpose="Attach web fetch module.",
             use_when="Reconnecting a detached web fetch module.",
             do_not_use_when="Enabling one provider (use web_fetch_provider_enable). Already attached.",
-            failure_next_steps="No external dependencies.",
+            failure_next_steps="This attach is idempotent. If the module still appears detached or degraded, inspect web_fetch_show and provider health before retrying.",
         ), aliases=("web_fetch_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -514,7 +517,7 @@ class WebFetchIntrospectionProvider:
         updated = self.service.set_enabled(provider.provider_id, enabled)
         if updated is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
-        payload = {"provider_id": updated.provider_id, "enabled": bool(updated.enabled)}
+        payload = {"name": updated.provider_id, "provider_id": updated.provider_id, "enabled": bool(updated.enabled)}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web fetch provider state updated",
@@ -524,6 +527,7 @@ class WebFetchIntrospectionProvider:
 
     def _provider_payload(self, provider: WebFetchProviderModel) -> dict[str, object]:
         return {
+            "name": provider.provider_id,
             "provider_id": provider.provider_id,
             "provider_kind": provider.provider_kind,
             "display_name": provider.display_name,

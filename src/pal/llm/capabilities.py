@@ -113,7 +113,7 @@ class LLMIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list",
-        description="List enabled llm endpoints ordered by priority. Use endpoint_id with llm show.",
+        description="List enabled LLM endpoints and their usable names, ordered by priority.",
         guidance=ToolGuidance(
             purpose="List enabled LLM endpoints ordered by priority.",
             use_when="Discovering available model endpoints, their provider, wire shape, and priority.",
@@ -125,14 +125,17 @@ class LLMIntrospectionProvider:
     def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = [
-            LLMModelListItem(
+            {
+                **LLMModelListItem(
                 model_id=endpoint.model_id,
                 endpoint_id=endpoint.endpoint_id,
                 display_name=getattr(endpoint, "display_name", None),
                 provider=endpoint.provider,
                 wire_shape=str(getattr(endpoint, "wire_shape", "") or ""),
                 priority=int(getattr(endpoint, "priority", 0) or 0),
-            ).__dict__
+                ).__dict__,
+                "name": endpoint.endpoint_id,
+            }
             for endpoint in self.iter_endpoints()
         ]
         return IntrospectionResult(
@@ -169,23 +172,23 @@ class LLMIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="show",
-        description="Show public metadata for one enabled llm endpoint by endpoint_id",
+        description="Show public metadata for one enabled LLM endpoint by name",
         guidance=ToolGuidance(
-            purpose="Show public metadata for one enabled LLM endpoint by endpoint_id.",
+            purpose="Show public metadata for one enabled LLM endpoint by name.",
             use_when="Inspecting one endpoint's context window, max output, thinking levels, capabilities.",
             do_not_use_when="Checking the active model (use llm_active). Listing all endpoints (use llm_list).",
-            failure_next_steps="If NOT_FOUND, verify endpoint_id with llm_list.",
+            failure_next_steps="If NOT_FOUND, verify the endpoint name with llm_list.",
         ),
         InputModel=LlmCapabilitiesLLMIntrospectionProviderShowInput,
         aliases=("llm_show",),
     )
     def show_model(self, call: IntrospectionCall) -> IntrospectionResult:
-        endpoint_id = str(call.args.get("endpoint_id") or "").strip()
+        endpoint_id = str(call.args.get("name") or "").strip()
         if not endpoint_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="endpoint_id is required",
-                llm_text="endpoint_id is required",
+                text="name is required",
+                llm_text="name is required",
             )
         endpoint = self._find_endpoint(endpoint_id)
         if endpoint is None:
@@ -284,19 +287,19 @@ class LLMIntrospectionProvider:
             purpose="Switch the active LLM endpoint for future requests.",
             use_when="The user asks to switch models (e.g. to a different provider, a faster/cheaper model, or one with vision).",
             do_not_use_when="Checking the current model (use llm_active). Listing endpoints (use llm_list).",
-            failure_next_steps="If NOT_FOUND, verify endpoint_id with llm_list. Only enabled endpoints can be activated.",
+            failure_next_steps="If NOT_FOUND, verify the endpoint name with llm_list. Only enabled endpoints can be activated.",
         ),
         InputModel=LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput,
         aliases=("llm_set_active_endpoint",),
         execution=INDIRECT_LOCAL_WRITE,
     )
     def set_active_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
-        endpoint_id = str(call.args.get("active_endpoint_id") or "").strip()
+        endpoint_id = str(call.args.get("name") or "").strip()
         if not endpoint_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
-                text="active_endpoint_id is required",
-                llm_text="active_endpoint_id is required",
+                text="name is required",
+                llm_text="name is required",
             )
         endpoint = next((item for item in self.runtime.endpoint_resolver.enabled() if item.endpoint_id == endpoint_id), None)
         if endpoint is None:

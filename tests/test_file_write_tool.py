@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pal.execution.file_edit import FileEditTool
-from pal.execution.file_state import FileStateCache
+from pal.execution.file_state import FileStateCache, atomic_compare_and_swap_utf8
 from pal.execution.generated_tool_models import ExecutionFileCapabilitiesFileCapabilityMixinWriteInput
 from pal.execution.file_write import (
     ERR_BINARY_CONTENT,
@@ -145,6 +145,27 @@ class OverwriteTests(_TempFileMixin, unittest.TestCase):
         self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
         self.assertEqual(result.structured["error_code"], ERR_STALE_FILE)
         self.assertEqual(path.read_text(encoding="utf-8"), "v2\n")
+
+    def test_overwrite_change_at_commit_boundary_is_rejected(self) -> None:
+        path = self._path("cas-race.txt")
+        path.write_text("v1\n", encoding="utf-8")
+        self.cache.mark_read(path, "v1\n")
+
+        def competing_write(file_path, **kwargs):
+            Path(file_path).write_text("external\n", encoding="utf-8")
+            return atomic_compare_and_swap_utf8(file_path, **kwargs)
+
+        with patch(
+            "pal.execution.file_write.atomic_compare_and_swap_utf8",
+            side_effect=competing_write,
+        ):
+            result = self.tool.invoke(
+                {"file_path": str(path), "content": "v2\n"}
+            )
+
+        self.assertEqual(result.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(result.structured["error_code"], ERR_STALE_FILE)
+        self.assertEqual(path.read_text(encoding="utf-8"), "external\n")
 
 
 class ValidationTests(_TempFileMixin, unittest.TestCase):

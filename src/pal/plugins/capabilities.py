@@ -69,14 +69,17 @@ class PluginsIntrospectionProvider:
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list", description="List known first-party and third-party plugins",
         guidance=ToolGuidance(
-            purpose="List known first-party and third-party plugins with their module IDs, enabled/attached status.",
+            purpose="List known first-party and third-party plugins with usable names and enabled/attached status.",
             use_when="When you need to find which module owns a capability, or how to detach/attach a specific plugin (e.g. minion, mcp). The authoritative source for module ownership and lifecycle state.",
             do_not_use_when="Checking core/channel/execution internals (use their own show/observe). Searching capabilities by function (use search_tools).",
             failure_next_steps="Read-only. If a plugin is not listed, it may not be installed — check plugin directories or run plugin_rescan.",
         ), aliases=("plugins_list",), execution=DIRECT_LOCAL_READ)
     def list_plugins(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        items = self.host.list_plugins()
+        items = [
+            {**dict(item), "name": str(item.get("plugin_id") or item.get("module_id") or "")}
+            for item in self.host.list_plugins()
+        ]
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="plugin list",
@@ -94,14 +97,14 @@ class PluginsIntrospectionProvider:
             purpose="Attach an enabled plugin's runtime instance to the current runtime.",
             use_when="Reconnecting a detached plugin that is already enabled.",
             do_not_use_when="Attaching a disabled plugin (use plugin_enable — it enables and attaches in one step). Detaching (use plugin_detach).",
-            failure_next_steps="If plugin_disabled, call plugin_enable first. If plugin_id unknown, check plugins_list.",
+            failure_next_steps="If disabled, call plugin_enable first. If the plugin name is unknown, check plugins_list.",
         ),
         aliases=("plugin_attach",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderAttachInput,
         execution=INDIRECT_CONTROL,
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self.host.attach(str(call.args.get("plugin_id") or ""))
+        result = self.host.attach(str(call.args.get("name") or ""))
         return IntrospectionResult(
             status=result["status"],
             text="plugin attach result",
@@ -119,14 +122,14 @@ class PluginsIntrospectionProvider:
             purpose="Detach a plugin's runtime instance without disabling it.",
             use_when="Temporarily removing a plugin's capabilities from the runtime (e.g. isolating a misbehaving plugin).",
             do_not_use_when="Permanently removing a plugin (use plugin_disable). Detaching a channel endpoint (use channel_detach).",
-            failure_next_steps="If plugin_id unknown, check plugins_list. Detached plugins can be re-attached with plugin_attach.",
+            failure_next_steps="If the plugin name is unknown, check plugins_list. Detached plugins can be re-attached with plugin_attach.",
         ),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDetachInput,
         aliases=("plugin_detach",),
         execution=INDIRECT_CONTROL,
     )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self.host.detach(str(call.args.get("plugin_id") or ""))
+        result = self.host.detach(str(call.args.get("name") or ""))
         return IntrospectionResult(
             status=result["status"],
             text="plugin detach result",
@@ -144,14 +147,14 @@ class PluginsIntrospectionProvider:
             purpose="Enable and attach a disabled plugin in one step, including disabled first-party plugins such as mcp.",
             use_when="A plugin is disabled and needs to be fully activated. This is the primary way to turn on a plugin.",
             do_not_use_when="Attaching an already-enabled but detached plugin (use plugin_attach — lighter weight).",
-            failure_next_steps="If plugin_id unknown, check plugins_list. If already enabled, use plugin_attach instead.",
+            failure_next_steps="If the plugin name is unknown, check plugins_list. If already enabled, use plugin_attach instead.",
         ),
         aliases=("plugin_enable",),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderEnableInput,
         execution=INDIRECT_CONTROL,
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self.host.enable(str(call.args.get("plugin_id") or ""))
+        result = self.host.enable(str(call.args.get("name") or ""))
         return IntrospectionResult(
             status=result["status"],
             text="plugin enable result",
@@ -169,14 +172,14 @@ class PluginsIntrospectionProvider:
             purpose="Disable a plugin — detach its runtime and mark it as disabled so it won't auto-attach on restart.",
             use_when="Permanently removing a plugin from the runtime until explicitly re-enabled.",
             do_not_use_when="Temporarily removing capabilities (use plugin_detach — keeps it enabled for quick re-attach). Disabling a channel endpoint (use channel_disable).",
-            failure_next_steps="If plugin_id unknown, check plugins_list. Re-enable with plugin_enable.",
+            failure_next_steps="If the plugin name is unknown, check plugins_list. Re-enable with plugin_enable.",
         ),
         InputModel=PluginsCapabilitiesPluginsIntrospectionProviderDisableInput,
         aliases=("plugin_disable",),
         execution=INDIRECT_CONTROL,
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self.host.disable(str(call.args.get("plugin_id") or ""))
+        result = self.host.disable(str(call.args.get("name") or ""))
         return IntrospectionResult(
             status=result["status"],
             text="plugin disable result",

@@ -57,7 +57,7 @@ def _file_schema() -> dict[str, Any]:
         "properties": {
             "file": {"type": "string"},
             "workspace_root": {"type": "string"},
-            "server_id": {"type": "string"},
+            "name": {"type": "string", "description": "Optional server name returned by lsp_status."},
         },
         "required": ["file"],
     }
@@ -70,7 +70,7 @@ def _doctor_schema() -> dict[str, Any]:
             "file": {"type": "string"},
             "path": {"type": "string"},
             "workspace_root": {"type": "string"},
-            "server_id": {"type": "string"},
+            "name": {"type": "string", "description": "Optional server name returned by lsp_status."},
         },
     }
 
@@ -163,8 +163,10 @@ def _position_schema() -> dict[str, Any]:
         "After selecting a project or worktree, call lsp_prepare_workspace once before using LSP code "
         "intelligence; call it again only when compile commands, include paths, SDK stubs, or language settings "
         "change. Then use LSP capabilities for symbol-aware navigation and verification: "
-        "use lsp_document_symbols/workspace_symbols to map code, lsp_definition/references/hover/call hierarchy "
-        "to understand relationships, and lsp_diagnostics after edits when a matching server is available. "
+        "use read_tool to inspect the exact indirect alias, then invoke it with call_tool. Useful aliases are "
+        "lsp_document_symbols and lsp_workspace_symbols for structure; lsp_definition, lsp_references, lsp_hover, "
+        "lsp_prepare_call_hierarchy, lsp_incoming_calls, and lsp_outgoing_calls for relationships; and "
+        "lsp_diagnostics after edits when a matching server is available. "
         "Pair LSP with source reads, search, and tests; do not treat LSP as a substitute for inspecting source."
     ),
     activation_terms=(
@@ -265,7 +267,7 @@ class LspManagerPluginProvider:
         description="Report the bound worktree's persisted LSP readiness and recognition-probe result, plus configured server health.",
         guidance=ToolGuidance(
             purpose="Report workspace LSP readiness and server health.",
-            use_when="Checking if LSP is ready for navigation before using definition/hover/references.",
+            use_when="Checking if LSP is ready for navigation before invoking lsp_definition, lsp_hover, or lsp_references through read_tool/call_tool.",
             do_not_use_when="Module-level status (use lsp_show). One server health (use lsp_doctor).",
             failure_next_steps="If not ready, run lsp_prepare_workspace first.",
         ),
@@ -287,9 +289,9 @@ class LspManagerPluginProvider:
         description="Prepare and prewarm one workspace before LSP navigation or diagnostics.",
         guidance=ToolGuidance(
             purpose="Prepare and prewarm one workspace before LSP navigation or diagnostics.",
-            use_when="Once after selecting a project/worktree. Again when compile commands, include paths, or language settings change. After preparing, follow up with the LSP tool family: lsp_document_symbols/workspace_symbols to map code, lsp_definition/references/hover/call hierarchy to understand relationships, and lsp_diagnostics after edits when a matching server is available.",
+            use_when="Once after selecting a project/worktree, and again only when compile commands, include paths, or language settings change. After preparing, use read_tool to inspect an indirect LSP alias and call_tool to invoke it. Use lsp_document_symbols or lsp_workspace_symbols to map code; lsp_definition, lsp_references, or lsp_hover for symbol relationships; lsp_prepare_call_hierarchy followed by lsp_incoming_calls or lsp_outgoing_calls for callers/callees; and lsp_diagnostics after edits.",
             do_not_use_when="Not a substitute for reading source. Not for non-LSP projects.",
-            failure_next_steps="Check compile_commands.json and language server availability.",
+            failure_next_steps="If preparation reports an unrecognized workspace or missing server, inspect lsp_status and lsp_doctor through read_tool/call_tool, then correct compile_commands.json, language settings, or server availability before retrying.",
         ),
         InputModel=LspPluginLspManagerPluginProviderPrepareWorkspaceInput,
         aliases=("lsp_prepare_workspace",),
@@ -523,7 +525,17 @@ class LspManagerPluginProvider:
     def _request_or_error(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             self._ensure_manager_started()
-            payload = self.client.operation_sync(method, params or {})
+            routed_params = dict(params or {})
+            server_name = str(routed_params.pop("name", "") or "").strip()
+            if server_name:
+                routed_params["server_id"] = server_name
+            payload = self.client.operation_sync(method, routed_params)
+            for item in list(payload.get("servers") or []):
+                if isinstance(item, dict) and "name" not in item:
+                    item["name"] = str(item.get("server_id") or "")
+            server = payload.get("server")
+            if isinstance(server, dict) and "name" not in server:
+                server["name"] = str(server.get("server_id") or "")
             self.last_health = dict(payload)
             return payload
         except Exception as exc:

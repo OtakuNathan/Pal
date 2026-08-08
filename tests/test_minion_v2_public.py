@@ -605,6 +605,38 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    def test_profile_override_translates_public_endpoint_name_at_manager_boundary(self) -> None:
+        captured: dict[str, object] = {}
+
+        def manager_request(method: str, params: dict[str, object] | None = None) -> dict[str, object]:
+            captured["method"] = method
+            captured["params"] = dict(params or {})
+            return {"updated": True}
+
+        provider = MinionV2PublicProvider(
+            runtime_root=self.runtime_root,
+            manager_request=manager_request,
+        )
+        result = provider.set_profile_override(
+            CapabilityCall(
+                name="op_minion_catalog_set_profile_override",
+                meta={"actor_id": "nathan"},
+                args={
+                    "profile": "software_engineering.v2_coder",
+                    "changes": {"preferred_endpoint_name": "fast-coder"},
+                },
+            )
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(captured["method"], "catalog_set_profile_override")
+        params = captured["params"]
+        self.assertIsInstance(params, dict)
+        self.assertEqual(
+            params["changes"],
+            {"preferred_endpoint_id": "fast-coder"},
+        )
+
     def test_preflight_finding_preserves_exact_authoring_locations(self) -> None:
         path = self.runtime_root / "architect.yaml"
         path.write_text(
@@ -4203,14 +4235,17 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "same exact project repository",
                 workspace_schema["properties"]["repo_root"]["description"],
             )
-            self.assertIn("search active Pal skills", start_descriptor.description)
-            self.assertIn("ask the user whether to provide them", start_descriptor.description)
-            self.assertIn("pass the exact approved IDs in skill_refs", start_descriptor.description)
-            self.assertIn("first user-side context", start_descriptor.description)
-            self.assertIn("Never infer consent", start_descriptor.description)
-            self.assertIn("Never inspect or implement the target in the foreground first", start_descriptor.description)
-            self.assertIn("do not repeatedly inspect workflow status", start_descriptor.description)
-            self.assertIn("system callbacks", start_descriptor.description)
+            self.assertEqual(
+                start_descriptor.guidance.purpose,
+                "Start one durable Minion workflow and bind its future delivery to the channel that owns the current turn.",
+            )
+            self.assertIn("inspect skill_search with read_tool", start_descriptor.guidance.use_when)
+            self.assertIn("invoke it through call_tool", start_descriptor.guidance.use_when)
+            self.assertIn("ask whether to provide them", start_descriptor.guidance.use_when)
+            self.assertIn("explicitly approved names in skill_refs", start_descriptor.guidance.use_when)
+            self.assertIn("Do not inspect or implement", start_descriptor.guidance.do_not_use_when)
+            self.assertIn("do not poll status", start_descriptor.guidance.do_not_use_when)
+            self.assertIn("callbacks deliver", start_descriptor.guidance.do_not_use_when)
             self.assertIn("identity-light executor work", start_descriptor.guidance.use_when)
             self.assertIn("not by prose length or step count", start_descriptor.guidance.use_when)
             self.assertIn("strongly bound to Pal's relationship with the user", start_descriptor.guidance.do_not_use_when)
@@ -4670,7 +4705,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             CapabilityCall(
                 name="op_minion_rebind_task_delivery",
                 meta=new_meta,
-                args={"task": "鸿蒙字体渲染验证", "channel_id": "telegram_main"},
+                args={"task": "鸿蒙字体渲染验证", "channel_name": "telegram_main"},
             )
         )
         self.assertEqual(rebound_result.status, RuntimeStatus.OK)

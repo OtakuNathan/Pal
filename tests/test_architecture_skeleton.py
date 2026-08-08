@@ -45,6 +45,7 @@ from pal.execution.tool_facade import (
     Idempotency,
     InvocationMode,
     PagingMode,
+    RejectedResult,
     StructuredToolOutput,
     RetryPolicy,
     StrictToolModel,
@@ -724,8 +725,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("call_tool", published)
         self.assertIn("memory_show", published)
         self.assertIn("memory_set_active_provider", published)
-        self.assertIn("memory_provider_show__mock_l3", published)
-        self.assertIn("memory_provider_recall__mock_l3", published)
+        self.assertIn("memory_provider_show", published)
+        self.assertIn("memory_provider_recall", published)
         self.assertNotIn("operation_execution_discovery_search", published)
         self.assertNotIn("introspection_module_memory_show", published)
 
@@ -995,6 +996,213 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertFalse(hasattr(core.turn_manager, "_truncate_tool_result_for_l1"))
 
+    def test_every_capability_action_declares_explicit_guidance(self) -> None:
+        source_root = Path(__file__).resolve().parents[1] / "src" / "pal"
+        missing: list[str] = []
+        for source_path in source_root.rglob("*.py"):
+            tree = ast.parse(source_path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for decorator in node.decorator_list:
+                    if not isinstance(decorator, ast.Call):
+                        continue
+                    decorator_name = (
+                        decorator.func.id
+                        if isinstance(decorator.func, ast.Name)
+                        else getattr(decorator.func, "attr", "")
+                    )
+                    if decorator_name != "capability_action":
+                        continue
+                    if not any(keyword.arg == "guidance" for keyword in decorator.keywords):
+                        missing.append(f"{source_path.relative_to(source_root)}:{node.lineno}:{node.name}")
+        self.assertEqual(missing, [])
+
+    def test_tool_guidance_does_not_restore_known_stale_routes(self) -> None:
+        source_root = Path(__file__).resolve().parents[1] / "src" / "pal"
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in source_root.rglob("*.py")
+        )
+        stale_fragments = (
+            "use search for repository text search",
+            "Use file_edit for focused changes",
+            "not supported by file_read",
+            "Use artifact or vision tools",
+            "use vision or the inline image",
+            "If not_text_readable, use vision",
+            "lsp_document_symbols/workspace_symbols",
+            "lsp_definition/references/hover/call hierarchy",
+            "use minion directly",
+            "minion status tools",
+            "checklist_show/upsert/check/clear",
+            'failure_next_steps="Read-only."',
+            'failure_next_steps="No external dependencies."',
+            'failure_next_steps="Correct invalid input."',
+            "Read-only-ish",
+        )
+        for fragment in stale_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, source)
+
+    def test_declared_tool_guidance_is_concise_and_actionable(self) -> None:
+        source_root = Path(__file__).resolve().parents[1] / "src" / "pal"
+        failures: list[str] = []
+        non_actions = {"Read-only.", "No external dependencies.", "Correct invalid input.", "Read-only-ish."}
+
+        for source_path in source_root.rglob("*.py"):
+            tree = ast.parse(source_path.read_text(encoding="utf-8"))
+            constants: dict[str, str] = {}
+            named_guidance: dict[str, ast.Call] = {}
+            for statement in tree.body:
+                if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+                    continue
+                target = statement.targets[0]
+                if not isinstance(target, ast.Name):
+                    continue
+                try:
+                    value = ast.literal_eval(statement.value)
+                except (TypeError, ValueError):
+                    value = None
+                if isinstance(value, str):
+                    constants[target.id] = value
+                if isinstance(statement.value, ast.Call):
+                    call_name = (
+                        statement.value.func.id
+                        if isinstance(statement.value.func, ast.Name)
+                        else getattr(statement.value.func, "attr", "")
+                    )
+                    if call_name == "ToolGuidance":
+                        named_guidance[target.id] = statement.value
+
+            def guidance_value(node: ast.AST) -> str | None:
+                if isinstance(node, ast.Name):
+                    return constants.get(node.id)
+                try:
+                    value = ast.literal_eval(node)
+                except (TypeError, ValueError):
+                    return None
+                return value if isinstance(value, str) else None
+
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for decorator in node.decorator_list:
+                    if not isinstance(decorator, ast.Call):
+                        continue
+                    decorator_name = (
+                        decorator.func.id
+                        if isinstance(decorator.func, ast.Name)
+                        else getattr(decorator.func, "attr", "")
+                    )
+                    if decorator_name != "capability_action":
+                        continue
+                    guidance_node = next(
+                        (keyword.value for keyword in decorator.keywords if keyword.arg == "guidance"),
+                        None,
+                    )
+                    if isinstance(guidance_node, ast.Name):
+                        guidance_node = named_guidance.get(guidance_node.id)
+                    if not isinstance(guidance_node, ast.Call):
+                        failures.append(f"{source_path.name}:{node.lineno}: unresolved guidance")
+                        continue
+                    fields = {
+                        keyword.arg: guidance_value(keyword.value)
+                        for keyword in guidance_node.keywords
+                    }
+                    label = f"{source_path.name}:{node.lineno}:{node.name}"
+                    for field in ("purpose", "use_when", "do_not_use_when", "failure_next_steps"):
+                        if not str(fields.get(field) or "").strip():
+                            failures.append(f"{label}: empty {field}")
+                    purpose = str(fields.get("purpose") or "")
+                    if len(purpose) > 240:
+                        failures.append(f"{label}: purpose is {len(purpose)} characters")
+                    failure = str(fields.get("failure_next_steps") or "").strip()
+                    if failure in non_actions:
+                        failures.append(f"{label}: non-actionable failure guidance {failure!r}")
+
+        self.assertEqual(failures, [])
+
+    def test_tool_input_ids_explain_where_the_exact_value_comes_from(self) -> None:
+        source_root = Path(__file__).resolve().parents[1] / "src" / "pal"
+        input_models: set[str] = set()
+        for source_path in source_root.rglob("*.py"):
+            tree = ast.parse(source_path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                decorator_name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else getattr(node.func, "attr", "")
+                )
+                if decorator_name != "capability_action":
+                    continue
+                input_model = next(
+                    (keyword.value for keyword in node.keywords if keyword.arg == "InputModel"),
+                    None,
+                )
+                if isinstance(input_model, ast.Name):
+                    input_models.add(input_model.id)
+
+        generated_path = source_root / "execution" / "generated_tool_models.py"
+        generated = ast.parse(generated_path.read_text(encoding="utf-8"))
+        failures: list[str] = []
+        provenance_terms = (
+            "returned by ",
+            "from available artifacts",
+            "from current context",
+        )
+        for statement in generated.body:
+            if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+                continue
+            target = statement.targets[0]
+            if not isinstance(target, ast.Name) or "Input" not in target.id:
+                continue
+            if not isinstance(statement.value, ast.Call) or len(statement.value.args) < 2:
+                continue
+            fields = statement.value.args[1]
+            if not isinstance(fields, ast.Dict):
+                continue
+            for key, value in zip(fields.keys, fields.values, strict=True):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                    continue
+                if not key.value.endswith("_id"):
+                    continue
+                description = ""
+                for child in ast.walk(value):
+                    if not isinstance(child, ast.Call):
+                        continue
+                    for keyword in child.keywords:
+                        if keyword.arg == "description" and isinstance(keyword.value, ast.Constant):
+                            description = str(keyword.value.value or "").strip()
+                lowered = description.lower()
+                if not description or not any(term in lowered for term in provenance_terms):
+                    failures.append(f"{target.id}.{key.value}: {description or 'missing description'}")
+
+        for source_path in source_root.rglob("*.py"):
+            tree = ast.parse(source_path.read_text(encoding="utf-8"))
+            for model in (node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)):
+                if model.name not in input_models:
+                    continue
+                for field in model.body:
+                    if not isinstance(field, ast.AnnAssign) or not isinstance(field.target, ast.Name):
+                        continue
+                    if not field.target.id.endswith("_id"):
+                        continue
+                    description = ""
+                    if isinstance(field.value, ast.Call):
+                        for keyword in field.value.keywords:
+                            if keyword.arg == "description" and isinstance(keyword.value, ast.Constant):
+                                description = str(keyword.value.value or "").strip()
+                    lowered = description.lower()
+                    if not description or not any(term in lowered for term in provenance_terms):
+                        failures.append(
+                            f"{model.name}.{field.target.id}: {description or 'missing description'}"
+                        )
+
+        self.assertEqual(failures, [])
+
     def test_tool_read_returns_llm_facing_call_contract(self) -> None:
         core = PalCore()
         register_execution_with_core(core.context)
@@ -1017,7 +1225,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "Pal runtime, module, capability, or Minion state",
             capability["description"],
         )
-        self.assertIn("search for repository text search", capability["description"])
+        self.assertIn("Repository text search remains a run_shell task", capability["description"])
         self.assertIn("cmd", capability["input_schema"]["properties"])
         cmd_description = capability["input_schema"]["properties"]["cmd"]["description"]
         self.assertEqual(
@@ -1154,7 +1362,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 exec_tool.description,
             )
             self.assertIn(
-                "search for repository text search",
+                "Repository text search remains a run_shell task",
                 exec_tool.description,
             )
             self.assertNotIn("op_", exec_tool.description)
@@ -1322,7 +1530,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         tool_names = [tool.name for tool in request.tools]
         self.assertNotIn("op_memory_refresh_indexes", tool_names)
         self.assertIn("read_tool", tool_names)
-        self.assertNotIn("memory_provider_inventory__mock_l3", tool_names)
+        self.assertNotIn("memory_provider_inventory", tool_names)
         self.assertNotIn("shell", tool_names)
 
     def test_failure_flow_llm_blocker_fails_without_work_order(self) -> None:
@@ -1969,7 +2177,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         configured = core.context.execution_runtime.execute(
             CapabilityCall(
                 name="memory_set_active_provider",
-                args={"active_provider_id": "mock_l3"},
+                args={"name": "mock_l3"},
             )
         )
         recall_result = mock_l3.recall(MemoryQuery(level="deep", queries=["redis"]))
@@ -1996,13 +2204,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.context.execution_runtime.execute(
             CapabilityCall(
                 name="memory_set_active_provider",
-                args={"active_provider_id": "mock_l3"},
+                args={"name": "mock_l3"},
             )
         )
         fallback = core.context.execution_runtime.execute(
             CapabilityCall(
                 name="memory_set_active_provider",
-                args={"active_provider_id": "null_l3"},
+                args={"name": "null_l3"},
             )
         )
 
@@ -2019,7 +2227,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertEqual(detached, "ok")
         self.assertIsNone(core.context.execution_runtime.l3_plugin_registry.get("mock_l3"))
-        self.assertNotIn("memory_provider_show__mock_l3", core.context.capability_registry.descriptors)
+        self.assertNotIn("memory_provider_show", core.context.capability_registry.descriptors)
 
         reattached = core.reattach_module(mock_l3.module_id)
 
@@ -2084,7 +2292,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("projected_entries", origin_result.structured)
         self.assertIn("legacy assistant", origin_result.llm_text)
         self.assertNotIn("projected_entries", origin_result.llm_text)
-        self.assertIn("memory_provider_show__mock_l3", core.context.capability_registry.descriptors)
+        self.assertIn("memory_provider_show", core.context.capability_registry.descriptors)
 
     def test_active_memory_update_and_delete_use_mem_ref_without_target_id(self) -> None:
         core = PalCore()
@@ -2211,7 +2419,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_proactive_with_core(core.context, manager)
         core.publish_module_capabilities("proactive")
 
-        self.assertIn("proactive_show", core.context.capability_registry.descriptors)
+        self.assertIn("proactive_status", core.context.capability_registry.descriptors)
         self.assertIn("proactive_list", core.context.capability_registry.descriptors)
         self.assertIn("proactive_create", core.context.capability_registry.descriptors)
         self.assertIn("proactive_delete", core.context.capability_registry.descriptors)
@@ -2241,7 +2449,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 CapabilityCall(
                     name="proactive_create",
                     args={
-                        "proactive_id": "bad_digest",
+                        "name": "bad_digest",
                         "goal": "Summarize repository updates",
                         "schedule": {"cadence": "daily", "hour": 9, "minute": 0, "timezone": "Asia/Shanghai"},
                     },
@@ -2254,11 +2462,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 CapabilityCall(
                     name="proactive_create",
                     args={
-                        "proactive_id": "daily_digest",
+                        "name": "daily_digest",
                         "goal": "Summarize repository updates",
                         "method": "Review recent changes and produce a concise digest.",
                         "skill_refs": ["git", "summary"],
-                        "out_channel_id": "socket_default",
+                        "out_channel_name": "socket_default",
                         "out_reply_target": {"session_id": "session-1", "request_id": "req-1"},
                         "schedule": {"cadence": "cron", "cron": "0 9 * * *", "timezone": "Asia/Shanghai"},
                     },
@@ -2276,7 +2484,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             changed_channel = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="proactive_set_output_channel",
-                    args={"target_id": "daily_digest", "out_channel_id": "telegram_main"},
+                    args={"name": "daily_digest", "out_channel_name": "telegram_main"},
                 )
             )
             self.assertEqual(changed_channel.status, "ok")
@@ -2286,7 +2494,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             changed_target = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="proactive_set_output_target",
-                    args={"target_id": "daily_digest", "out_reply_target": {"chat_id": "12345", "thread_id": "7"}},
+                    args={"name": "daily_digest", "out_reply_target": {"chat_id": "12345", "thread_id": "7"}},
                 )
             )
             self.assertEqual(changed_target.status, "ok")
@@ -2296,7 +2504,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 CapabilityCall(
                     name="proactive_update_schedule",
                     args={
-                        "target_id": "daily_digest",
+                        "name": "daily_digest",
                         "schedule": {"cadence": "cron", "cron": "15 10 * * *", "timezone": "Asia/Shanghai"},
                     },
                 )
@@ -2305,19 +2513,19 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("next_due_at", rescheduled.structured)
 
             disabled = core.context.execution_runtime.execute(
-                CapabilityCall(name="proactive_disable", args={"target_id": "daily_digest"})
+                CapabilityCall(name="proactive_disable", args={"name": "daily_digest"})
             )
             self.assertEqual(disabled.status, "ok")
             self.assertFalse(disabled.structured["enabled"])
 
             enabled = core.context.execution_runtime.execute(
-                CapabilityCall(name="proactive_enable", args={"target_id": "daily_digest"})
+                CapabilityCall(name="proactive_enable", args={"name": "daily_digest"})
             )
             self.assertEqual(enabled.status, "ok")
             self.assertTrue(enabled.structured["enabled"])
 
             deleted = core.context.execution_runtime.execute(
-                CapabilityCall(name="proactive_delete", args={"target_id": "daily_digest"})
+                CapabilityCall(name="proactive_delete", args={"name": "daily_digest"})
             )
             self.assertEqual(deleted.status, "ok")
             self.assertEqual(deleted.text, "proactive task deleted")
@@ -2344,7 +2552,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         created = core.context.execution_runtime.execute(
             CapabilityCall(
                 name="proactive_create",
-                args={"proactive_id": "old_alias", "goal": "Test alias deletion"},
+                args={"name": "old_alias", "goal": "Test alias deletion"},
             )
         )
         self.assertEqual(created.status, "ok")
@@ -2353,7 +2561,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
         self.assertEqual(legacy.status, "error")
         deleted = core.context.execution_runtime.execute(
-            CapabilityCall(name="proactive_delete", args={"target_id": "old_alias"})
+            CapabilityCall(name="proactive_delete", args={"name": "old_alias"})
         )
         self.assertEqual(deleted.status, "ok")
         self.assertEqual(deleted.text, "proactive task deleted")
@@ -2377,35 +2585,43 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             run_id = runner.begin_run(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"))
             runner.complete_run(run_id, turn_id="turn-123", final_reply="Digest sent.")
 
-            self.assertIn("proactive_show__daily_digest", core.context.capability_registry.descriptors)
-            self.assertIn("proactive_last_run__daily_digest", core.context.capability_registry.descriptors)
-            self.assertIn("proactive_list_runs__daily_digest", core.context.capability_registry.descriptors)
+            self.assertIn("proactive_show", core.context.capability_registry.descriptors)
+            self.assertIn("proactive_last_run", core.context.capability_registry.descriptors)
+            self.assertIn("proactive_list_runs", core.context.capability_registry.descriptors)
 
             shown = core.context.execution_runtime.execute(
-                CapabilityCall(name="proactive_show__daily_digest", args={"target_id": "daily_digest"})
+                CapabilityCall(name="proactive_show", args={"name": "daily_digest"})
             )
             self.assertEqual(shown.status, "ok")
             self.assertEqual(shown.structured["proactive_id"], "daily_digest")
             self.assertEqual(shown.structured["out_channel_id"], "socket_default")
 
             latest = core.context.execution_runtime.execute(
-                CapabilityCall(name="proactive_last_run__daily_digest", args={"target_id": "daily_digest"})
+                CapabilityCall(name="proactive_last_run", args={"name": "daily_digest"})
             )
             self.assertEqual(latest.status, "ok")
             self.assertEqual(latest.structured["run"]["turn_id"], "turn-123")
             self.assertEqual(latest.structured["run"]["output_summary"], "Digest sent.")
 
             history = core.context.execution_runtime.execute(
-                CapabilityCall(name="proactive_list_runs__daily_digest", args={"target_id": "daily_digest", "limit": 5})
+                CapabilityCall(name="proactive_list_runs", args={"name": "daily_digest", "limit": 5})
             )
             self.assertEqual(history.status, "ok")
             self.assertEqual(len(history.structured["items"]), 1)
             self.assertEqual(history.structured["items"][0]["proactive_run_id"], run_id)
+
+            missing = core.context.execution_runtime.invoke_indirect_tool(
+                new_tool_call(name="proactive_show", args={"name": "missing_task"})
+            )
+            self.assertIsInstance(missing, RejectedResult)
+            self.assertEqual(missing.error_code, "unknown_target")
+            self.assertEqual(missing.details["available_names"], ["daily_digest"])
+            self.assertEqual(missing.affordances[0].tool, "proactive_list")
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
 
-    def test_instance_level_capability_requires_target_id_and_schema_injects_it(self) -> None:
+    def test_instance_level_capability_uses_one_name_parameterized_tool(self) -> None:
         runtime_root, database = self._create_database()
         try:
             core = PalCore()
@@ -2420,26 +2636,27 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             register_channel_with_core(core.context, channel_runtime)
             core.publish_module_capabilities("channel")
 
-            descriptor = core.context.capability_registry.descriptors["channel_endpoint_inspect__socket_main"]
+            descriptor = core.context.capability_registry.descriptors["channel_endpoint_inspect"]
             input_schema = descriptor.InputModel.model_json_schema(mode="validation")
-            target_schema = input_schema["properties"]["target_id"]
+            target_schema = input_schema["properties"]["name"]
 
-            self.assertEqual(target_schema["const"], "socket_main")
-            self.assertIn("target_id", input_schema["required"])
+            self.assertEqual(target_schema["type"], "string")
+            self.assertIn("channel_list", target_schema["description"])
+            self.assertIn("name", input_schema["required"])
 
             missing_target = core.context.execution_runtime.execute(
                 CapabilityCall(name="intro_endpoint_channel_inspect")
             )
             self.assertEqual(missing_target.status, "invalid")
-            self.assertEqual(missing_target.structured["available_target_ids"], ["socket_main"])
-            self.assertEqual(missing_target.structured["error_code"], "target_id_required")
+            self.assertEqual(missing_target.structured["available_names"], ["socket_main"])
+            self.assertEqual(missing_target.structured["error_code"], "target_name_required")
             self.assertIn("socket_main", missing_target.llm_text)
-            self.assertIn("Retry with args.target_id", missing_target.llm_text)
+            self.assertIn("Retry with args.name", missing_target.llm_text)
 
             resolved = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="channel_endpoint_inspect__socket_main",
-                    args={"target_id": "socket_main"},
+                    name="channel_endpoint_inspect",
+                    args={"name": "socket_main"},
                 )
             )
             self.assertEqual(resolved.status, "ok")
@@ -2531,18 +2748,18 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             published = core.publish_module_capabilities("channel")
 
-            self.assertIn("channel_endpoint_inspect__socket_main", published)
-            self.assertIn("channel_endpoint_auth_state__socket_main", published)
-            self.assertIn("channel_endpoint_set_auth_material__socket_main", published)
-            self.assertIn("channel_endpoint_backlog__socket_main", published)
-            self.assertIn("channel_endpoint_health__socket_main", published)
-            self.assertNotIn("channel_endpoint_attach__socket_main", published)
-            self.assertNotIn("channel_endpoint_detach__socket_main", published)
+            self.assertIn("channel_endpoint_inspect", published)
+            self.assertIn("channel_endpoint_auth_state", published)
+            self.assertIn("channel_endpoint_set_auth_material", published)
+            self.assertIn("channel_endpoint_backlog", published)
+            self.assertIn("channel_endpoint_health", published)
+            self.assertNotIn("channel_endpoint_attach", published)
+            self.assertNotIn("channel_endpoint_detach", published)
 
             configured = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="channel_endpoint_set_auth_material__socket_main",
-                    args={"target_id": "socket_main", "material": {"bot_token": "secret-token", "authorized": True}},
+                    name="channel_endpoint_set_auth_material",
+                    args={"name": "socket_main", "material": {"bot_token": "secret-token", "authorized": True}},
                 )
             )
             self.assertEqual(configured.status, "ok")
@@ -2551,8 +2768,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             auth_state = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="channel_endpoint_auth_state__socket_main",
-                    args={"target_id": "socket_main"},
+                    name="channel_endpoint_auth_state",
+                    args={"name": "socket_main"},
                 )
             )
             self.assertEqual(auth_state.status, "ok")
@@ -2561,8 +2778,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             health = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="channel_endpoint_health__socket_main",
-                    args={"target_id": "socket_main"},
+                    name="channel_endpoint_health",
+                    args={"name": "socket_main"},
                 )
             )
             self.assertEqual(health.status, "ok")
@@ -2571,8 +2788,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             backlog = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="channel_endpoint_backlog__socket_main",
-                    args={"target_id": "socket_main"},
+                    name="channel_endpoint_backlog",
+                    args={"name": "socket_main"},
                 )
             )
             self.assertEqual(backlog.status, "ok")
@@ -2601,7 +2818,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.publish_module_capabilities("channel")
 
             detached = core.context.execution_runtime.execute(
-                CapabilityCall(name="channel_detach", args={"target_id": "socket_main"})
+                CapabilityCall(name="channel_detach", args={"name": "socket_main"})
             )
             self.assertEqual(detached.status, "ok")
             self.assertFalse(endpoint.attached)
@@ -2610,7 +2827,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIsNone(blocked)
 
             attached = core.context.execution_runtime.execute(
-                CapabilityCall(name="channel_attach", args={"target_id": "socket_main"})
+                CapabilityCall(name="channel_attach", args={"name": "socket_main"})
             )
             self.assertEqual(attached.status, "ok")
             active_endpoint = channel_runtime.get_endpoint("socket_main")
@@ -2989,8 +3206,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                         new_tool_call(
                             name="call_tool",
                             args={
-                                "name": "memory_provider_recall__mock_l3",
-                                "args": {"target_id": "mock_l3", "queries": ["test_user"], "view": "summary"},
+                                "name": "memory_provider_recall",
+                                "args": {"name": "mock_l3", "queries": ["test_user"], "view": "summary"},
                             },
                         )
                     ],
@@ -3900,9 +4117,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             new_tool_call(
                 name="call_tool",
                 args={
-                    "name": "memory_provider_recall__mock_l3",
+                    "name": "memory_provider_recall",
                     "args": {
-                        "target_id": "mock_l3",
+                        "name": "mock_l3",
                         "queries": ["用户是谁", "用户身份", "用户个人信息", "用户偏好"],
                         "limit": 10,
                     },

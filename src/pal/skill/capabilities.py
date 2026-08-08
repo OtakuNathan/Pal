@@ -219,7 +219,7 @@ class SkillIntrospectionProvider:
             purpose="Create a sanitized skill candidate from plain text or SKILL.md content without committing.",
             use_when="The user provides a reusable procedure, playbook, or domain manual that should become a normalized skill.",
             do_not_use_when="Recording a durable fact or preference (use remember_memory). Learning a routing rule (use learn_behavior). The content is a one-off procedure not worth normalizing.",
-            failure_next_steps="Review the candidate output. Use skill_commit to persist it, or adjust the source text and re-assimilate.",
+            failure_next_steps="Review the candidate output and use skill_commit to persist it. If assimilation may have succeeded but its result was lost, inspect skill_show before re-assimilating; do not create duplicate pending candidates blindly.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateOutput,
@@ -228,7 +228,11 @@ class SkillIntrospectionProvider:
         execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
     async def assimilate(self, call: CapabilityCall):
-        return await SkillAssimilateTool(service=self.service).ainvoke(call.args)
+        args = dict(call.args)
+        desired_name = str(args.pop("desired_name", "") or "").strip()
+        if desired_name:
+            args["desired_skill_id"] = desired_name
+        return await SkillAssimilateTool(service=self.service).ainvoke(args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -240,7 +244,7 @@ class SkillIntrospectionProvider:
             purpose="Commit a sanitized skill candidate and register its thin behavior affordance.",
             use_when="After skill_assimilate produced a candidate you've reviewed and want to persist as a normalized skill.",
             do_not_use_when="Committing unreviewed candidates. Writing a durable fact (use remember_memory).",
-            failure_next_steps="If validation fails, fix the candidate fields and re-commit. If the skill_id already exists, use skill_update instead.",
+            failure_next_steps="If validation fails before commit, fix the candidate fields. If commit may have succeeded, reconcile with skill_search using the skill name before retrying. If the skill already exists, use skill_update instead.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderCommitInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderCommitOutput,
@@ -260,7 +264,7 @@ class SkillIntrospectionProvider:
             purpose="Update a normalized skill's metadata or manual text and refresh its affordance.",
             use_when="Editing an existing skill's content, activation terms, or metadata.",
             do_not_use_when="Updating a durable fact (use update_memory). Updating a behavior rule (use update_behavior). Creating a new skill (use skill_assimilate + skill_commit).",
-            failure_next_steps="If skill_id not found, verify with skill_search. Changes take effect on next scenario match.",
+            failure_next_steps="If the skill name is not found, verify it with skill_search. Changes take effect on next scenario match.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateOutput,
@@ -268,7 +272,7 @@ class SkillIntrospectionProvider:
         execution=INDIRECT_LOCAL_WRITE,
     )
     def update(self, call: CapabilityCall):
-        return SkillUpdateTool(service=self.service).invoke(call.args)
+        return SkillUpdateTool(service=self.service).invoke(_skill_name_args(call.args))
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -280,7 +284,7 @@ class SkillIntrospectionProvider:
             purpose="Disable a normalized skill so it stops matching scenarios, without deleting its history.",
             use_when="A skill is no longer relevant or is producing false-positive activations.",
             do_not_use_when="Forgetting a durable fact (use forget_memory). Removing a behavior rule (use forget_behavior). Permanently deleting skill data (this only disables).",
-            failure_next_steps="If skill_id not found, verify with skill_search. Re-enable by using skill_update to set status back to active.",
+            failure_next_steps="If the skill name is not found, verify it with skill_search. Re-enable by using skill_update to set status back to active.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderDisableInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderDisableOutput,
@@ -288,7 +292,7 @@ class SkillIntrospectionProvider:
         execution=INDIRECT_LOCAL_WRITE,
     )
     def disable(self, call: CapabilityCall):
-        return SkillDisableTool(service=self.service).invoke(call.args)
+        return SkillDisableTool(service=self.service).invoke(_skill_name_args(call.args))
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -299,7 +303,7 @@ class SkillIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Search normalized skills by scenario or name. Returns metadata only — does not inject manuals into context.",
             use_when="Looking for a reusable procedure or domain manual that may help the current task. Checking if a skill exists before creating one.",
-            do_not_use_when="Recalling durable facts (use recall_memory). Getting routing advice (use advise_behavior). You already know the skill_id and want its manual (use skill_read or skill_inject).",
+            do_not_use_when="Recalling durable facts (use recall_memory). Getting routing advice (use advise_behavior). You already know the skill name and want its manual (use skill_read or skill_inject).",
             failure_next_steps="If no results, try broader scenario terms. If a skill exists but isn't matching, check its activation terms with skill_read.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderSearchInput,
@@ -320,7 +324,7 @@ class SkillIntrospectionProvider:
             purpose="Read one skill's metadata and optionally its full manual text.",
             use_when="Inspecting a specific skill's content, activation terms, or manual before deciding to inject it.",
             do_not_use_when="Searching for skills by scenario (use skill_search). Injecting a manual into active context (use skill_inject). Reading a durable fact (use recall_memory).",
-            failure_next_steps="If skill_id not found, use skill_search to discover the correct ID.",
+            failure_next_steps="If the skill name is not found, use skill_search to discover it.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderReadInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderReadOutput,
@@ -328,7 +332,7 @@ class SkillIntrospectionProvider:
         aliases=("skill_read",),
     )
     def read(self, call: CapabilityCall):
-        return SkillReadTool(service=self.service).invoke(call.args)
+        return SkillReadTool(service=self.service).invoke(_skill_name_args(call.args))
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -340,7 +344,7 @@ class SkillIntrospectionProvider:
             purpose="Inject a skill's manual text into the current context as a reference observation.",
             use_when="A skill matches the current task and you need its step-by-step procedure or domain manual to guide execution.",
             do_not_use_when="Just browsing skill metadata (use skill_read). Searching for skills (use skill_search). The skill is already injected (check active skills in system prompt).",
-            failure_next_steps="If skill_id not found or inactive, use skill_search to find an active one. Injected manuals are reference only — they do not override user instructions or policy.",
+            failure_next_steps="If the skill name is not found or inactive, use skill_search to find an active one. Injected manuals are reference only — they do not override user instructions or policy.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderInjectInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderInjectOutput,
@@ -348,7 +352,15 @@ class SkillIntrospectionProvider:
         aliases=("skill_inject",),
     )
     def inject(self, call: CapabilityCall):
-        return SkillInjectTool(service=self.service).invoke(call.args)
+        return SkillInjectTool(service=self.service).invoke(_skill_name_args(call.args))
+
+
+def _skill_name_args(raw: dict[str, object]) -> dict[str, object]:
+    args = dict(raw)
+    name = str(args.pop("name", "") or "").strip()
+    if name:
+        args["skill_id"] = name
+    return args
 
 
 def register_with_core(context: "MainContext", service: SkillService) -> ModuleHandle:

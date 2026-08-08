@@ -82,11 +82,6 @@ not a second DAG scheduler or semantic lifecycle owner.
   relation used by `TransitionEngine` and checks exhaustive classification,
   finite dynamic targets, recovery actions, control settlement, triage
   refresh, and paused-state resume.
-- `FileMutationAuthorization.tla` models one logical session's read-before-
-  mutate authorization. It proves that a successful self-mutation advances
-  the snapshot atomically, historical read deliveries cannot roll it back,
-  external writes require a fresh read, and partial reads never authorize a
-  mutation.
 - `MinionRuntimeAuthority.tla` models a logical role owning its L1/L2 working
   memory while all LLM requests cross the Manager broker and shared L3 remains
   read-only for the complete role lifecycle.
@@ -94,6 +89,9 @@ not a second DAG scheduler or semantic lifecycle owner.
 The models intentionally abstract prompts, artifact contents, Git, and provider
 details. Those are values carried by transitions, not additional lifecycle
 owners.
+
+Shared file-result authorization is modeled under `spec/execution`; Pal and
+Minion use the same execution state machine.
 
 Run every model with a pinned `tla2tools.jar`:
 

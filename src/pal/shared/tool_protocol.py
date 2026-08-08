@@ -90,6 +90,7 @@ class ToolResultIR:
     structured: Mapping[str, Any] | None = None
     context_delivery: Mapping[str, Any] | None = None
     replay_result_ref: str = ""
+    visible_source_ranges: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         if not str(self.call_id or "").strip():
@@ -105,6 +106,15 @@ class ToolResultIR:
                 freeze_json_mapping(self.context_delivery),
             )
         object.__setattr__(self, "replay_result_ref", str(self.replay_result_ref or ""))
+        object.__setattr__(
+            self,
+            "visible_source_ranges",
+            tuple(
+                (max(0, int(start)), max(0, int(end)))
+                for start, end in self.visible_source_ranges
+                if int(end) > int(start)
+            ),
+        )
 
 
 class EffectOutcome(str, Enum):

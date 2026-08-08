@@ -41,8 +41,8 @@ SHELL_EXEC_GUIDANCE = ToolGuidance(
     ),
     do_not_use_when=(
         "Do not use for Pal runtime, module, capability, or Minion state when a Pal tool is available. "
-        "When the matching dedicated capability is visible, use search for repository text search, read_file for "
-        "file reads, edit_file for edits, write_file for writes, and delete_path for deletion. "
+        "Use read_file for UTF-8 file reads, edit_file for focused edits, write_file for complete writes, and "
+        "delete_path for deletion. Repository text search remains a run_shell task: use rg, as described above. "
         "Do not pipe long-running tests or builds through head, tail, or grep merely to shorten their result; result "
         "budgeting handles large output, while such pipelines hide the command that is stalled."
     ),

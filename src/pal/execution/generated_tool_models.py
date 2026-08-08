@@ -143,7 +143,7 @@ BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceSubmitInput = _strict
         'title': (str, Field(None, description='Optional short label for this behavior guidance.')),
         'activation_terms': (list[str], Field(None, description='Optional concrete terms that help match this scenario later.')),
         'capability_refs': (list[str], Field(None, description='Optional exact tool/capability names this behavior may route toward.')),
-        'skill_refs': (list[str], Field(None, description='Optional skill ids that may provide reference manuals for this scenario.')),
+        'skill_refs': (list[str], Field(None, description='Optional semantic skill names returned by skill_search that may provide reference manuals for this scenario.')),
         'memory_query_hints': (list[str], Field(None, description='Optional recall_memory query hints for facts/cases relevant to this behavior.')),
         'conflict_resolution': (Literal['ask', 'merge', 'overwrite', 'skip'], Field('ask', description='What to do when the same scenario already has behavior guidance. Use ask by default so Pal asks the user whether to merge, overwrite, or leave it unchanged.')),
         'resident': (bool, Field(False, description="Set true only for behavior guidance that should be always visible in Pal's prompt. Leave false for normal guidance that the behavior router recalls when the scenario matches.")),
@@ -170,7 +170,6 @@ BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateInput = _strict
     'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceUpdateInput',
     {
         'affordance': (str, Field(..., description='Original behavior guidance text to match. Pass the affordance text itself; Pal resolves the internal record.')),
-        'affordance_id': (str, Field(None, description='Legacy exact affordance_id. Prefer affordance text instead.')),
         'scenario_text': (str, Field(None, description='Updated activation scenario text. Do not use this when replacing the visible behavior guidance shown in <behavior_guidance>; use prompt_hint for that.')),
         'prompt_hint': (str, Field(None, description='Updated visible behavior guidance body rendered in <behavior_guidance>. Use this when the user asks to replace, edit, or update the guidance/original text. Do not repeat the title as a prefix.')),
         'title': (str, Field(None)),
@@ -199,7 +198,6 @@ BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteInput = _strict
     'BehaviorCapabilitiesBehaviorIntrospectionProviderAffordanceDeleteInput',
     {
         'affordance': (str, Field(..., description='Original behavior guidance text to match. Pass the affordance text itself; Pal resolves the internal record.')),
-        'affordance_id': (str, Field(None, description='Legacy exact affordance_id. Prefer affordance text instead.')),
     },
 )
 
@@ -238,7 +236,7 @@ ChannelCapabilitiesChannelIntrospectionProviderSendAttachmentOutput = _strict_mo
 ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderSendMessageInput',
     {
-        'channel_id': (str, Field(..., min_length=1, description='Configured endpoint id from channel_list.')),
+        'name': (str, Field(..., min_length=1, description='Configured endpoint name returned by channel_list.')),
         'message': (str, Field(..., min_length=1, description='Ordinary text message to send through that endpoint.')),
     },
 )
@@ -255,28 +253,28 @@ ChannelCapabilitiesChannelIntrospectionProviderSendMessageOutput = _strict_model
 ChannelCapabilitiesChannelIntrospectionProviderEnableInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderEnableInput',
     {
-        'target_id': (str, Field(...)),
+        'name': (str, Field(..., description='Endpoint name returned by channel_list.')),
     },
 )
 
 ChannelCapabilitiesChannelIntrospectionProviderDisableInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderDisableInput',
     {
-        'target_id': (str, Field(...)),
+        'name': (str, Field(..., description='Endpoint name returned by channel_list.')),
     },
 )
 
 ChannelCapabilitiesChannelIntrospectionProviderAttachInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderAttachInput',
     {
-        'target_id': (str, Field(...)),
+        'name': (str, Field(..., description='Endpoint name returned by channel_list.')),
     },
 )
 
 ChannelCapabilitiesChannelIntrospectionProviderDetachInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderDetachInput',
     {
-        'target_id': (str, Field(...)),
+        'name': (str, Field(..., description='Endpoint name returned by channel_list.')),
     },
 )
 
@@ -290,7 +288,7 @@ ChannelCapabilitiesChannelIntrospectionProviderRescanInput = _strict_model(
 ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput = _strict_model(
     'ChannelCapabilitiesChannelIntrospectionProviderReloadProviderInput',
     {
-        'target_id': (str, Field(...)),
+        'name': (str, Field(..., description='Endpoint name returned by channel_list.')),
     },
 )
 
@@ -329,6 +327,7 @@ ExecutionFileCapabilitiesFileCapabilityMixinReadOutput = _strict_model(
         'full_view': (bool, Field(None)),
         'unchanged': (bool, Field(None)),
         'encoding': (str, Field(None)),
+        'utf8_bom': (bool, Field(None, description='True when the source begins with a UTF-8 byte-order mark. The marker is preserved but omitted from displayed line text.')),
         'error_code': (str, Field(None)),
     },
 )
@@ -378,7 +377,7 @@ ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput = _strict_model(
     'ExecutionFileCapabilitiesFileCapabilityMixinDeleteInput',
     {
         'file_path': (str, Field(..., description='Path to delete.')),
-        'expected_sha256': (str, Field(None, description='Optional current SHA-256 digest for regular files. If supplied, a prior file_read snapshot is not required.')),
+        'expected_sha256': (str, Field(None, description='Optional expected SHA-256 digest for a regular file. Deletion is rejected if the current bytes differ.')),
         'recursive': (bool, Field(False, description='Required for directory deletion. Regular file deletion does not require this.')),
     },
 )
@@ -490,7 +489,7 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinSearchInput = _strict_model(
         'query': (str, Field(None, description="Natural-language search text or partial capability name, for example 'llm endpoint config' or 'send attachment'.")),
         'namespace': (Literal['inspect', 'action', 'introspection', 'operation'], Field(None, description='Capability namespace. Use inspect to inspect state; use action to perform work.')),
         'family': (str, Field(None, description='Optional family filter such as management, lifecycle, endpoint, or search.')),
-        'module_id': (str, Field(None, description='Optional module filter such as llm, memory, channel, artifact, minion, or web_search.')),
+        'module_name': (str, Field(None, description='Optional semantic module name filter such as llm, memory, channel, artifact, minion, or web_search.')),
         'tags': (list[str], Field(None, description='Optional tags that every result must include.')),
         'top_k': (int, Field(None, description='Maximum number of compact hits to return.', ge=1)),
         'limit': (int, Field(None, description='Alias for top_k.', ge=1)),
@@ -579,14 +578,14 @@ ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageOutput = _strict_m
 LlmCapabilitiesLLMIntrospectionProviderShowInput = _strict_model(
     'LlmCapabilitiesLLMIntrospectionProviderShowInput',
     {
-        'endpoint_id': (str, Field(...)),
+        'name': (str, Field(..., description='Endpoint name returned by llm_list.')),
     },
 )
 
 LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput = _strict_model(
     'LlmCapabilitiesLLMIntrospectionProviderSetActiveEndpointInput',
     {
-        'active_endpoint_id': (str, Field(...)),
+        'name': (str, Field(..., description='Endpoint name returned by llm_list.')),
     },
 )
 
@@ -618,7 +617,7 @@ LspPluginLspManagerPluginProviderDoctorInput = _strict_model(
         'file': (str, Field(None)),
         'path': (str, Field(None)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
     },
 )
 
@@ -627,7 +626,7 @@ LspPluginLspManagerPluginProviderDiagnosticsInput = _strict_model(
     {
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
     },
 )
 
@@ -636,7 +635,7 @@ LspPluginLspManagerPluginProviderHoverInput = _strict_model(
     {
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
         'line': (int, Field(..., description='0-based line number')),
         'character': (int, Field(..., description='0-based UTF-16 character offset')),
     },
@@ -647,7 +646,7 @@ LspPluginLspManagerPluginProviderDefinitionInput = _strict_model(
     {
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
         'line': (int, Field(..., description='0-based line number')),
         'character': (int, Field(..., description='0-based UTF-16 character offset')),
     },
@@ -658,7 +657,7 @@ LspPluginLspManagerPluginProviderImplementationInput = _strict_model(
     {
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
         'line': (int, Field(..., description='0-based line number')),
         'character': (int, Field(..., description='0-based UTF-16 character offset')),
     },
@@ -669,7 +668,7 @@ LspPluginLspManagerPluginProviderReferencesInput = _strict_model(
     {
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
         'line': (int, Field(..., description='0-based line number')),
         'character': (int, Field(..., description='0-based UTF-16 character offset')),
         'include_declaration': (bool, Field(True)),
@@ -681,7 +680,7 @@ LspPluginLspManagerPluginProviderPrepareCallHierarchyInput = _strict_model(
     {
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
         'line': (int, Field(..., description='0-based line number')),
         'character': (int, Field(..., description='0-based UTF-16 character offset')),
     },
@@ -692,7 +691,7 @@ LspPluginLspManagerPluginProviderIncomingCallsInput = _strict_model(
     {
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
         'line': (int, Field(..., description='0-based line number')),
         'character': (int, Field(..., description='0-based UTF-16 character offset')),
     },
@@ -703,7 +702,7 @@ LspPluginLspManagerPluginProviderOutgoingCallsInput = _strict_model(
     {
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
         'line': (int, Field(..., description='0-based line number')),
         'character': (int, Field(..., description='0-based UTF-16 character offset')),
     },
@@ -714,7 +713,7 @@ LspPluginLspManagerPluginProviderDocumentSymbolsInput = _strict_model(
     {
         'file': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
     },
 )
 
@@ -723,35 +722,35 @@ LspPluginLspManagerPluginProviderWorkspaceSymbolsInput = _strict_model(
     {
         'query': (str, Field(...)),
         'workspace_root': (str, Field(None)),
-        'server_id': (str, Field(None)),
+        'name': (str, Field(None, description='Optional LSP server name returned by lsp_status or lsp_prepare_workspace.')),
     },
 )
 
 McpPluginMcpManagerPluginProviderReadInput = _strict_model(
     'McpPluginMcpManagerPluginProviderReadInput',
     {
-        'server_id': (str, Field(...)),
+        'name': (str, Field(..., description='MCP server name returned by mcp_server_list.')),
     },
 )
 
 McpPluginMcpManagerPluginProviderAttachInput = _strict_model(
     'McpPluginMcpManagerPluginProviderAttachInput',
     {
-        'server_id': (str, Field(...)),
+        'name': (str, Field(..., description='MCP server name returned by mcp_server_list.')),
     },
 )
 
 McpPluginMcpManagerPluginProviderDetachInput = _strict_model(
     'McpPluginMcpManagerPluginProviderDetachInput',
     {
-        'server_id': (str, Field(...)),
+        'name': (str, Field(..., description='MCP server name returned by mcp_server_list.')),
     },
 )
 
 McpPluginMcpManagerPluginProviderImagePrepareInput = _strict_model(
     'McpPluginMcpManagerPluginProviderImagePrepareInput',
     {
-        'artifact_id': (str, Field(None)),
+        'artifact_id': (str, Field(None, description='Opaque artifact handle returned by list_artifacts or artifact_search.')),
         'path': (str, Field(None)),
         'url': (str, Field(None)),
         'mode': (Literal['auto', 'url', 'path', 'base64', 'data_url'], Field(None)),
@@ -824,7 +823,7 @@ MemoryCapabilitiesMemoryIntrospectionProviderDeleteInput = _strict_model(
 MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput = _strict_model(
     'MemoryCapabilitiesMemoryIntrospectionProviderSetActiveProviderInput',
     {
-        'active_provider_id': (str, Field(...)),
+        'name': (str, Field(..., description='Provider name returned by memory_list_providers.')),
     },
 )
 
@@ -844,10 +843,10 @@ MinionV2CapabilitiesMinionV2PublicProviderSetProfileOverrideInputChanges = _stri
         'identity_fragment': (str | None, Field(None)),
         'behavior_fragment': (str | None, Field(None)),
         'output_contract_fragment': (str | None, Field(None)),
-        'preferred_endpoint_id': (str | None, Field(None)),
+        'preferred_endpoint_name': (str | None, Field(None, description='LLM endpoint name returned by llm_list_endpoints.')),
         'capability_groups': (list[str] | None, Field(None)),
         'default_allowed_capabilities': (list[str] | None, Field(None)),
-        'skill_refs': (list[str] | None, Field(None)),
+        'skill_refs': (list[str] | None, Field(None, description='Semantic skill names returned by skill_search.')),
         'default_approval_policy': (dict[str, Any] | None, Field(None)),
         'workspace_policy': (dict[str, Any] | None, Field(None)),
         'workspace_environment_policy': (dict[str, Any] | None, Field(None)),
@@ -1008,28 +1007,28 @@ MinionV2CapabilitiesMinionV2PublicProviderArchiveWorkflowInput = _strict_model(
 PluginsCapabilitiesPluginsIntrospectionProviderAttachInput = _strict_model(
     'PluginsCapabilitiesPluginsIntrospectionProviderAttachInput',
     {
-        'plugin_id': (str, Field(...)),
+        'name': (str, Field(..., description='Plugin name returned by plugins_list.')),
     },
 )
 
 PluginsCapabilitiesPluginsIntrospectionProviderDetachInput = _strict_model(
     'PluginsCapabilitiesPluginsIntrospectionProviderDetachInput',
     {
-        'plugin_id': (str, Field(...)),
+        'name': (str, Field(..., description='Plugin name returned by plugins_list.')),
     },
 )
 
 PluginsCapabilitiesPluginsIntrospectionProviderEnableInput = _strict_model(
     'PluginsCapabilitiesPluginsIntrospectionProviderEnableInput',
     {
-        'plugin_id': (str, Field(...)),
+        'name': (str, Field(..., description='Plugin name returned by plugins_list.')),
     },
 )
 
 PluginsCapabilitiesPluginsIntrospectionProviderDisableInput = _strict_model(
     'PluginsCapabilitiesPluginsIntrospectionProviderDisableInput',
     {
-        'plugin_id': (str, Field(...)),
+        'name': (str, Field(..., description='Plugin name returned by plugins_list.')),
     },
 )
 
@@ -1062,7 +1061,7 @@ PluginsL3SqliteVecSQLiteVecL3PluginWriteInput = _strict_model(
         'title': (str, Field(None, description='Optional short label for this memory.')),
         'summary': (str, Field(..., description='Prompt-ready memory text future Pal can read directly.')),
         'search_text': (str, Field(..., description='Retrieval/source text with concrete details for FTS and vector embedding.')),
-        'task_id': (str, Field(None, description='Optional exact task/work order/run id; providing it binds the memory to task scope.')),
+        'task_id': (str, Field(None, description='Optional exact task/work order/run id from current context; providing it binds the memory to task scope.')),
         'topics': (list[str], Field(None, description='Topic tags for filtering')),
         'star': (PluginsL3SqliteVecSQLiteVecL3PluginWriteInputStar, Field(None, description="Required when kind='case'; omit for fact memories.")),
     },
@@ -1134,7 +1133,7 @@ PluginsL3StubsL3ProviderCapabilityMixinWriteInput = _strict_model(
         'title': (str, Field(None, description='Optional short label for this memory.')),
         'summary': (str, Field(..., description='Prompt-ready memory text future Pal can read directly.')),
         'search_text': (str, Field(None, description='Retrieval/source text with concrete details for indexing.')),
-        'task_id': (str, Field(None, description='Optional exact task/work order/run id; providing it binds the memory to task scope.')),
+        'task_id': (str, Field(None, description='Optional exact task/work order/run id from current context; providing it binds the memory to task scope.')),
         'topics': (list[str], Field(None, description='Optional short semantic topic tags.')),
         'star': (PluginsL3StubsL3ProviderCapabilityMixinWriteInputStar, Field(None, description="Required when kind='case'; omit for fact memories.")),
     },
@@ -1181,7 +1180,6 @@ PluginsL3StubsL3ProviderCapabilityMixinRefreshIndexesInput = _strict_model(
 ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput = _strict_model(
     'ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput',
     {
-        'target_id': (str, Field(...)),
         'limit': (int, Field(None)),
     },
 )
@@ -1189,11 +1187,11 @@ ProactiveCapabilitiesProactiveIntrospectionProviderListRunsInput = _strict_model
 ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput = _strict_model(
     'ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput',
     {
-        'proactive_id': (str, Field(..., description='Stable identifier for this proactive task.')),
+        'name': (str, Field(..., description='Stable human-meaningful task name. Use proactive_list before reusing an existing name.')),
         'goal': (str, Field(...)),
         'method': (str, Field(None)),
-        'skill_refs': (list[str], Field(None)),
-        'out_channel_id': (str, Field(None, description='Use channel_list to find available endpoint IDs')),
+        'skill_refs': (list[str], Field(None, description='Semantic skill names returned by skill_search.')),
+        'out_channel_name': (str, Field(None, description='Endpoint name returned by channel_list.')),
         'enabled': (bool, Field(None)),
         'out_reply_target': (dict[str, Any], Field(None, description='Query channel endpoint auth_state for routing info (session_id, request_id)')),
         'schedule': (dict[str, Any], Field(None, description='Scheduling config. cadence=\'cron\': {cadence,cron,timezone} where cron is standard 5-field expression. cadence=\'once\': {cadence,run_at_utc}. cadence=\'manual\': no schedule. Example reminder: {"cadence":"once","run_at_utc":"2026-05-12T09:00:00Z"}. Example recurring push: {"cadence":"cron","cron":"0 9 * * *","timezone":"Asia/Shanghai"}')),
@@ -1203,36 +1201,36 @@ ProactiveCapabilitiesProactiveIntrospectionProviderCreateInput = _strict_model(
 ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput = _strict_model(
     'ProactiveCapabilitiesProactiveIntrospectionProviderDeleteInput',
     {
-        'target_id': (str, Field(...)),
+        'name': (str, Field(..., description='Task name returned by proactive_list.')),
     },
 )
 
 ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput = _strict_model(
     'ProactiveCapabilitiesProactiveIntrospectionProviderEnableInput',
     {
-        'target_id': (str, Field(...)),
+        'name': (str, Field(..., description='Task name returned by proactive_list.')),
     },
 )
 
 ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput = _strict_model(
     'ProactiveCapabilitiesProactiveIntrospectionProviderDisableInput',
     {
-        'target_id': (str, Field(...)),
+        'name': (str, Field(..., description='Task name returned by proactive_list.')),
     },
 )
 
 ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput = _strict_model(
     'ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputChannelInput',
     {
-        'target_id': (str, Field(...)),
-        'out_channel_id': (str, Field(None)),
+        'name': (str, Field(..., description='Task name returned by proactive_list.')),
+        'out_channel_name': (str, Field(None, description='Endpoint name returned by channel_list.')),
     },
 )
 
 ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput = _strict_model(
     'ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput',
     {
-        'target_id': (str, Field(...)),
+        'name': (str, Field(..., description='Task name returned by proactive_list.')),
         'out_reply_target': (dict[str, Any], Field(None, description='Reply routing info: session_id, request_id')),
     },
 )
@@ -1240,7 +1238,7 @@ ProactiveCapabilitiesProactiveIntrospectionProviderSetOutputTargetInput = _stric
 ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput = _strict_model(
     'ProactiveCapabilitiesProactiveIntrospectionProviderUpdateScheduleInput',
     {
-        'target_id': (str, Field(...)),
+        'name': (str, Field(..., description='Task name returned by proactive_list.')),
         'schedule': (dict[str, Any], Field(..., description='Scheduling config. cadence=\'cron\': {cadence,cron,timezone} where cron is standard 5-field expression. cadence=\'once\': {cadence,run_at_utc}. cadence=\'manual\': no schedule. Example reminder: {"cadence":"once","run_at_utc":"2026-05-12T09:00:00Z"}. Example recurring push: {"cadence":"cron","cron":"0 9 * * *","timezone":"Asia/Shanghai"}')),
     },
 )
@@ -1251,7 +1249,7 @@ SkillCapabilitiesSkillIntrospectionProviderAssimilateInput = _strict_model(
         'source_text': (str, Field(..., description='Text or SKILL.md content to turn into an optional Pal operation manual candidate.')),
         'source_format': (Literal['plain_text', 'skill_md'], Field('plain_text')),
         'intent': (Literal['learn', 'summarize', 'sanitize'], Field('learn')),
-        'desired_skill_id': (str, Field(None)),
+        'desired_name': (str, Field(None, description='Optional human-meaningful skill name.')),
         'source_refs': (list[str], Field(None)),
         'source_metadata': (dict[str, Any], Field(None)),
     },
@@ -1266,7 +1264,7 @@ SkillCapabilitiesSkillIntrospectionProviderAssimilateOutput = _strict_model(
 SkillCapabilitiesSkillIntrospectionProviderCommitInput = _strict_model(
     'SkillCapabilitiesSkillIntrospectionProviderCommitInput',
     {
-        'candidate_id': (str, Field(None, description='Pending skill candidate id to save. Prefer this when the user provides candidate_id; no candidate object is needed.')),
+        'candidate_id': (str, Field(None, description='Opaque pending candidate id returned by skill_assimilate. Copy that exact value; no candidate object is needed.')),
         'candidate': (dict[str, Any], Field(None, description='Inline candidate object. Use only when no candidate_id is available.')),
         'replace': (bool, Field(False)),
     },
@@ -1281,7 +1279,7 @@ SkillCapabilitiesSkillIntrospectionProviderCommitOutput = _strict_model(
 SkillCapabilitiesSkillIntrospectionProviderUpdateInput = _strict_model(
     'SkillCapabilitiesSkillIntrospectionProviderUpdateInput',
     {
-        'skill_id': (str, Field(...)),
+        'name': (str, Field(..., description='Skill name returned by skill_search.')),
         'patch': (dict[str, Any], Field(...)),
     },
 )
@@ -1295,7 +1293,7 @@ SkillCapabilitiesSkillIntrospectionProviderUpdateOutput = _strict_model(
 SkillCapabilitiesSkillIntrospectionProviderDisableInput = _strict_model(
     'SkillCapabilitiesSkillIntrospectionProviderDisableInput',
     {
-        'skill_id': (str, Field(...)),
+        'name': (str, Field(..., description='Skill name returned by skill_search.')),
     },
 )
 
@@ -1323,7 +1321,7 @@ SkillCapabilitiesSkillIntrospectionProviderSearchOutput = _strict_model(
 SkillCapabilitiesSkillIntrospectionProviderReadInput = _strict_model(
     'SkillCapabilitiesSkillIntrospectionProviderReadInput',
     {
-        'skill_id': (str, Field(...)),
+        'name': (str, Field(..., description='Skill name returned by skill_search.')),
         'include_manual': (bool, Field(False)),
     },
 )
@@ -1337,7 +1335,7 @@ SkillCapabilitiesSkillIntrospectionProviderReadOutput = _strict_model(
 SkillCapabilitiesSkillIntrospectionProviderInjectInput = _strict_model(
     'SkillCapabilitiesSkillIntrospectionProviderInjectInput',
     {
-        'skill_id': (str, Field(..., description='Skill id to inject.')),
+        'name': (str, Field(..., description='Skill name returned by skill_search.')),
     },
 )
 
@@ -1359,7 +1357,7 @@ SkillCapabilitiesSkillIntrospectionProviderInjectOutput = _strict_model(
 WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput = _strict_model(
     'WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput',
     {
-        'active_provider_id': (str, Field(...)),
+        'name': (str, Field(..., description='Provider name returned by web_fetch_list_providers.')),
     },
 )
 
@@ -1429,7 +1427,7 @@ WebFetchCapabilitiesWebFetchIntrospectionProviderSetConfigInput = _strict_model(
 WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput = _strict_model(
     'WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput',
     {
-        'active_provider_id': (str, Field(...)),
+        'name': (str, Field(..., description='Provider name returned by web_search_list_providers.')),
     },
 )
 

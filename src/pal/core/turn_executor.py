@@ -928,10 +928,16 @@ class TurnExecutor:
             for part_index, part in enumerate(parts):
                 if not isinstance(part, ToolResultIR):
                     continue
-                rendered = self._render_tool_preview(part.content)
+                rendered, visible_ranges = self._render_tool_preview_with_ranges(
+                    part.content
+                )
                 rendered = self._append_replay_affordance(rendered, part.replay_result_ref)
                 total -= len(part.content) - len(rendered)
-                parts[part_index] = replace(part, content=rendered)
+                parts[part_index] = replace(
+                    part,
+                    content=rendered,
+                    visible_source_ranges=visible_ranges,
+                )
             projected[index] = replace(message, parts=tuple(parts))
         for index in result_indices:
             if total <= limit:
@@ -944,7 +950,11 @@ class TurnExecutor:
                 minimal = self._render_minimal_tool_observation(part.content)
                 minimal = self._append_replay_affordance(minimal, part.replay_result_ref)
                 total -= len(part.content) - len(minimal)
-                parts[part_index] = replace(part, content=minimal)
+                parts[part_index] = replace(
+                    part,
+                    content=minimal,
+                    visible_source_ranges=(),
+                )
             projected[index] = replace(message, parts=tuple(parts))
         return projected
 
@@ -1016,6 +1026,10 @@ class TurnExecutor:
                     "role": "tool",
                     "tool_call_id": part.call_id,
                     "content": part.content,
+                    "_pal_visible_source_ranges": [
+                        [start, end]
+                        for start, end in part.visible_source_ranges
+                    ],
                 }
                 for message in messages
                 for part in message.parts
@@ -1047,16 +1061,44 @@ class TurnExecutor:
         )
 
     def _render_tool_preview(self, content: str) -> str:
+        return self._render_tool_preview_with_ranges(content)[0]
+
+    def _render_tool_preview_with_ranges(
+        self,
+        content: str,
+    ) -> tuple[str, tuple[tuple[int, int], ...]]:
         if len(content) <= self._config.active_tool_result_preview:
-            return content
+            return content, ((0, len(content)),) if content else ()
         preview, preview_size = render_head_tail_preview_for_llm(
             content,
             max_chars=self._config.active_tool_result_preview,
         )
-        return (
+        if self._config.active_tool_result_preview < 512:
+            visible = content[: self._config.active_tool_result_preview].rstrip()
+            ranges = ((0, len(visible)),) if visible else ()
+        else:
+            head_chars = max(256, self._config.active_tool_result_preview // 2)
+            tail_chars = self._config.active_tool_result_preview - head_chars
+            if tail_chars < 256:
+                tail_chars = 256
+                head_chars = max(
+                    1,
+                    self._config.active_tool_result_preview - tail_chars,
+                )
+            head = content[:head_chars].rstrip()
+            raw_tail_start = max(0, len(content) - tail_chars)
+            tail = content[raw_tail_start:].lstrip()
+            tail_start = len(content) - len(tail)
+            ranges = tuple(
+                item
+                for item in ((0, len(head)), (tail_start, len(content)))
+                if item[1] > item[0]
+            )
+        rendered = (
             f"{preview}\n\n"
             f"[preview only: original={len(content)} chars, kept={preview_size} chars]"
         )
+        return rendered, ranges
 
     @staticmethod
     def _render_minimal_tool_observation(content: str) -> str:
@@ -1325,6 +1367,7 @@ class TurnExecutor:
                 commit(
                     turn_id=str(continuation.turn_id),
                     context_delivery=dict(delivery),
+                    result_id=call.call_id,
                 )
             except Exception:
                 rollback = getattr(memory_service, "rollback_l1_tool_result", None)
@@ -1488,11 +1531,89 @@ class TurnExecutor:
                 "preferred_model_id": preferred_model_id,
             },
         )
+        execution_runtime = getattr(self.context, "execution_runtime", None)
+        retired_result_ids_by_turn: dict[str, tuple[str, ...]] = {}
+        l1_store = getattr(memory_service, "l1_store", None)
+        turns_store = getattr(l1_store, "turns", None)
+        for turn in list(getattr(turns_store, "turns", ()) or ()):
+            result_ids = tuple(
+                part.call_id
+                for message in turn.messages
+                for part in message.parts
+                if isinstance(part, ToolResultIR)
+            )
+            if result_ids:
+                retired_result_ids_by_turn[str(turn.turn_id)] = result_ids
+
+        after_compact = None
+        if continuation is not None or execution_runtime is not None:
+            def reconcile_compacted_l1() -> None:
+                retire = getattr(
+                    getattr(execution_runtime, "logical_state", None),
+                    "retire_results",
+                    None,
+                )
+                context_for_turn = getattr(
+                    execution_runtime,
+                    "logical_context_for_turn",
+                    None,
+                )
+                if callable(retire) and callable(context_for_turn):
+                    remaining_ids = {
+                        part.call_id
+                        for turn in list(
+                            getattr(
+                                getattr(
+                                    getattr(memory_service, "l1_store", None),
+                                    "turns",
+                                    None,
+                                ),
+                                "turns",
+                                (),
+                            )
+                            or ()
+                        )
+                        for message in turn.messages
+                        for part in message.parts
+                        if isinstance(part, ToolResultIR)
+                    }
+                    for turn_id, result_ids in retired_result_ids_by_turn.items():
+                        removed = tuple(
+                            result_id
+                            for result_id in result_ids
+                            if result_id not in remaining_ids
+                        )
+                        if not removed:
+                            continue
+                        logical_context = context_for_turn(turn_id)
+                        retire(
+                            execution_lifetime_id=(
+                                logical_context.execution_lifetime_id
+                            ),
+                            result_ids=removed,
+                        )
+                if continuation is None:
+                    return
+                active_turn = getattr(
+                    memory_service,
+                    "active_l1_turn",
+                    lambda _turn_id: None,
+                )(continuation.turn_id)
+                retained_messages = (
+                    list(active_turn.messages) if active_turn is not None else []
+                )
+                self._reconcile_projected_tool_context(
+                    continuation,
+                    original_messages=retained_messages,
+                    projected_messages=retained_messages,
+                )
+
+            after_compact = reconcile_compacted_l1
         run_result = await engine.run(
             snapshot,
             llm_runtime=llm_runtime,
             memory_service=memory_service,
-            after_commit=None,
+            after_commit=after_compact,
         )
         if not run_result.success or continuation is None:
             return run_result

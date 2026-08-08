@@ -157,8 +157,8 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(read.ok)
         schema = read.structured["input_schema"]
-        self.assertEqual(set(schema["properties"]), {"channel_id", "message"})
-        self.assertEqual(set(schema["required"]), {"channel_id", "message"})
+        self.assertEqual(set(schema["properties"]), {"name", "message"})
+        self.assertEqual(set(schema["required"]), {"name", "message"})
         self.assertFalse(schema["additionalProperties"])
 
         result = await core.context.execution_runtime.execute_tool_async(
@@ -167,7 +167,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
                 args={
                     "name": "channel_send_message",
                     "args": {
-                        "channel_id": "channel-main",
+                        "name": "channel-main",
                         "message": "hello from Pal",
                     },
                 },
@@ -190,7 +190,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
                 name="call_tool",
                 args={
                     "name": "channel_send_message",
-                    "args": {"channel_id": "channel-main", "message": "/status"},
+                    "args": {"name": "channel-main", "message": "/status"},
                 },
             )
         )
@@ -218,7 +218,7 @@ class ChannelSendMessageTests(unittest.IsolatedAsyncioTestCase):
                 args={
                     "name": "channel_send_message",
                     "args": {
-                        "channel_id": "petra",
+                        "name": "petra",
                         "message": "this would recursively start another peer turn",
                     },
                 },

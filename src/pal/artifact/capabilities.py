@@ -109,7 +109,7 @@ class ArtifactIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="List recent tagged conversation artifacts visible to the current turn.",
             use_when="The user sent a file (PDF, image, audio, document) through a channel and you need to discover what's available.",
-            do_not_use_when="Looking for local filesystem files (use read_file or search). No files were sent in this conversation.",
+            do_not_use_when="Looking for local filesystem files (use run_shell rg or read_file). No files were sent in this conversation.",
             failure_next_steps="If empty, artifacts may have expired (hot state TTL exceeded) or none were sent. Ask the user to resend.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderListInput,
@@ -155,8 +155,8 @@ class ArtifactIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
             use_when="Reading text content from a channel-delivered file (PDF text, text file, transcript). Supports page/chunk selection and max_chars.",
-            do_not_use_when="Reading local filesystem files (use read_file). Inspecting image pixels (use vision or the inline image already attached). Audio without transcript (use artifact_transcribe first).",
-            failure_next_steps="If representation_unavailable, use artifact_info to see available representations. If not_text_readable, use vision. If expired, ask the user to resend.",
+            do_not_use_when="Reading local filesystem files (use read_file). Inspecting image pixels: use the inline image directly when the active model supports vision; read_artifact cannot inspect pixels. Audio without transcript (use artifact_transcribe first).",
+            failure_next_steps="If representation_unavailable, use artifact_info to inspect the available representations. If not_text_readable, inspect an already-inline image directly with a vision-capable model; there is no separate vision tool. If expired, ask the user to resend.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadInput,
         OutputModel=ArtifactCapabilitiesArtifactIntrospectionProviderReadOutput,
@@ -178,7 +178,7 @@ class ArtifactIntrospectionProvider:
         guidance=ToolGuidance(
             purpose="Search recent tagged conversation artifacts by filename, kind, caption, summary, or time hint.",
             use_when="You know roughly what file the user means (by name, type, or when sent) but lack the exact artifact_id.",
-            do_not_use_when="Searching local filesystem or codebase (use search or read_file). You already have the artifact_id.",
+            do_not_use_when="Searching local filesystem or codebase (use run_shell rg or read_file). You already have the artifact_id.",
             failure_next_steps="If no results, try list_artifacts for a broader view, widen the query, or check if the artifact expired.",
         ),
         InputModel=ArtifactCapabilitiesArtifactIntrospectionProviderSearchInput,
