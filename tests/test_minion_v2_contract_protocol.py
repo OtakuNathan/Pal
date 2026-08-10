@@ -244,6 +244,30 @@ class ContractProtocolTests(unittest.TestCase):
         remove_bound_architect_file(workspace)
         self.assertFalse(path.exists())
 
+    def test_artifact_role_workspace_uses_one_visible_architect_path(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "lifestyle.nutrition_checkin.v1"
+        )
+        role_workspace = self.root / "role-workspace"
+        artifact_stage = self.root / "artifact-stage"
+        workspace = bind_architect_file(
+            {
+                "repo_path": str(role_workspace),
+                "artifact_stage_dir": str(artifact_stage),
+                "v2_role_workspace": True,
+            },
+            template=definition.template,
+        )
+
+        path = architect_path(workspace)
+        self.assertEqual(path, role_workspace / "architect.yaml")
+        self.assertTrue(path.is_file())
+        self.assertFalse((artifact_stage / "architect.yaml").exists())
+
+        authored = "schema_version: '2'\ngraph:\n  sink: week_plan\n"
+        path.write_text(authored, encoding="utf-8")
+        self.assertEqual(architect_path(workspace).read_text(encoding="utf-8"), authored)
+
     def test_runner_pack_never_receives_manager_architecture_compiler_state(
         self,
     ) -> None:

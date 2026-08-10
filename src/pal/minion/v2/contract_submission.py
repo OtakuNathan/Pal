@@ -179,6 +179,23 @@ def _architect_root(workspace: Mapping[str, Any]) -> Path:
                     Path(value).expanduser().resolve()
                     / _MANAGER_ARCHITECT_DIRECTORY
                 )
+    # Artifact-family roles author inside the isolated role workspace exposed
+    # to the worker.  Once that workspace exists, the Manager-preseeded file,
+    # workspace tools, and contract_submit must all name the same projection.
+    # Falling through to artifact_stage_dir here creates two architect.yaml
+    # files: the worker edits repo_path/architect.yaml while submission keeps
+    # validating the untouched stage template.
+    if bool(workspace.get("v2_role_workspace")):
+        for key in (
+            "repo_path",
+            "worktree_path",
+            "workspace_path",
+            "root",
+            "path",
+        ):
+            value = str(workspace.get(key) or "").strip()
+            if value:
+                return Path(value).expanduser().resolve()
     keys = (
         "artifact_stage_dir",
         "artifact_dir",
