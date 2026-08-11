@@ -23,11 +23,15 @@ Decisions == {
 
 VARIABLES phase, nodeState, workspaceIdentity, sessionGeneration,
           corpusIdentity, contractVersion, graphDecision,
-          projectionDecision, targetStartState, published
+          projectionDecision, targetStartState, sourceBuildAuthority,
+          sourceBuildOwner, targetBuildOwner, authorityChanges,
+          buildAuthority, published
 
 vars == <<phase, nodeState, workspaceIdentity, sessionGeneration,
           corpusIdentity, contractVersion, graphDecision,
-          projectionDecision, targetStartState, published>>
+          projectionDecision, targetStartState, sourceBuildAuthority,
+          sourceBuildOwner, targetBuildOwner, authorityChanges,
+          buildAuthority, published>>
 
 Init ==
     /\ phase = "SourceAccepted"
@@ -44,6 +48,13 @@ Init ==
     /\ graphDecision = [m \in AuthoredModules |-> "Undecided"]
     /\ projectionDecision = [m \in AuthoredModules |-> "Undecided"]
     /\ targetStartState = [m \in AuthoredModules |-> "Absent"]
+    /\ sourceBuildOwner \in PreservedExecutableModules
+    /\ targetBuildOwner \in PreservedExecutableModules
+    /\ authorityChanges \in BOOLEAN
+    /\ (sourceBuildOwner # targetBuildOwner => authorityChanges)
+    /\ sourceBuildAuthority = [m \in AuthoredModules |->
+        IF m = sourceBuildOwner THEN 1 ELSE 0]
+    /\ buildAuthority = sourceBuildAuthority
     /\ published = FALSE
 
 RequestReplan ==
@@ -51,10 +62,20 @@ RequestReplan ==
     /\ phase' = "ReplanRequired"
     /\ UNCHANGED <<nodeState, workspaceIdentity, sessionGeneration,
                     corpusIdentity, contractVersion, graphDecision,
-                    projectionDecision, targetStartState, published>>
+                    projectionDecision, targetStartState,
+                    sourceBuildAuthority, sourceBuildOwner, targetBuildOwner,
+                    authorityChanges,
+                    buildAuthority,
+                    published>>
+
+AuthorityStaleModules ==
+    IF authorityChanges
+    THEN {sourceBuildOwner, targetBuildOwner}
+    ELSE {}
 
 TargetReuseDecision == [m \in AuthoredModules |->
-    IF m \in ContractOnlyModules THEN "ContractChanged"
+    IF m \in AuthorityStaleModules THEN "ReuseStale"
+    ELSE IF m \in ContractOnlyModules THEN "ContractChanged"
     ELSE IF m \in ExactExecutableModules THEN "ReuseAccepted"
     ELSE IF m \in ChangedPreservedModules THEN "ReuseStale"
     ELSE IF m \in ReplacedModules \union AddedModules THEN "Create"
@@ -62,7 +83,8 @@ TargetReuseDecision == [m \in AuthoredModules |->
     ELSE "Undecided"]
 
 TargetNodeState == [m \in AuthoredModules |->
-    IF m \in DeletedModules THEN "Retired"
+    IF m \in AuthorityStaleModules THEN "Ready"
+    ELSE IF m \in DeletedModules THEN "Retired"
     ELSE IF m \in ExactExecutableModules THEN "Accepted"
     ELSE IF m \in TargetExecutableModules THEN "Ready"
     ELSE "Absent"]
@@ -88,7 +110,13 @@ CompileTarget ==
     /\ graphDecision' = TargetReuseDecision
     /\ projectionDecision' = TargetReuseDecision
     /\ targetStartState' = TargetNodeState
+    /\ buildAuthority' = [m \in AuthoredModules |->
+        IF m = targetBuildOwner
+        THEN IF authorityChanges THEN 2 ELSE 1
+        ELSE 0]
     /\ published' = FALSE
+    /\ UNCHANGED <<sourceBuildAuthority, sourceBuildOwner, targetBuildOwner,
+                    authorityChanges>>
 
 AcceptTargetNode(m) ==
     /\ phase = "TargetRunning"
@@ -97,7 +125,11 @@ AcceptTargetNode(m) ==
     /\ nodeState' = [nodeState EXCEPT ![m] = "Accepted"]
     /\ UNCHANGED <<phase, workspaceIdentity, sessionGeneration,
                     corpusIdentity, contractVersion, graphDecision,
-                    projectionDecision, targetStartState, published>>
+                    projectionDecision, targetStartState,
+                    sourceBuildAuthority, sourceBuildOwner, targetBuildOwner,
+                    authorityChanges,
+                    buildAuthority,
+                    published>>
 
 PublishSink ==
     /\ phase = "TargetRunning"
@@ -107,7 +139,10 @@ PublishSink ==
     /\ published' = TRUE
     /\ UNCHANGED <<nodeState, workspaceIdentity, sessionGeneration,
                     corpusIdentity, contractVersion, graphDecision,
-                    projectionDecision, targetStartState>>
+                    projectionDecision, targetStartState,
+                    sourceBuildAuthority, sourceBuildOwner, targetBuildOwner,
+                    authorityChanges,
+                    buildAuthority>>
 
 Next ==
     \/ RequestReplan
@@ -127,6 +162,11 @@ TypeOK ==
     /\ graphDecision \in [AuthoredModules -> Decisions]
     /\ projectionDecision \in [AuthoredModules -> Decisions]
     /\ targetStartState \in [AuthoredModules -> States]
+    /\ sourceBuildAuthority \in [AuthoredModules -> 0..2]
+    /\ sourceBuildOwner \in PreservedExecutableModules
+    /\ targetBuildOwner \in PreservedExecutableModules
+    /\ authorityChanges \in BOOLEAN
+    /\ buildAuthority \in [AuthoredModules -> 0..2]
     /\ published \in BOOLEAN
 
 ProjectionConsumesGraphDecision ==
@@ -151,9 +191,12 @@ PreservedResponsibilityReusesAssets ==
 
 OnlyExactNodesKeepAcceptance ==
     phase \in {"TargetRunning", "Completed"} =>
-        /\ \A m \in ExactExecutableModules : targetStartState[m] = "Accepted"
-        /\ \A m \in ChangedPreservedModules \union AddedModules \union ReplacedModules :
+        /\ \A m \in ExactExecutableModules \ AuthorityStaleModules :
+            targetStartState[m] = "Accepted"
+        /\ \A m \in (ChangedPreservedModules \union AddedModules \union ReplacedModules)
+                    \ AuthorityStaleModules :
             targetStartState[m] = "Ready"
+        /\ \A m \in AuthorityStaleModules : targetStartState[m] = "Ready"
 
 DeletedNodesRetire ==
     phase \in {"TargetRunning", "Completed"} =>
@@ -174,5 +217,45 @@ PublishedOnlyAfterCompleteSink ==
         /\ phase = "Completed"
         /\ nodeState[Sink] = "Accepted"
         /\ \A m \in TargetExecutableModules : nodeState[m] = "Accepted"
+
+BuildAuthorityIsOwnerOnly ==
+    /\ (phase \in {"SourceAccepted", "ReplanRequired"} =>
+        /\ buildAuthority[sourceBuildOwner] = 1
+        /\ \A m \in AuthoredModules \ {sourceBuildOwner} : buildAuthority[m] = 0)
+    /\ (phase \in {"TargetRunning", "Completed"} =>
+        /\ buildAuthority[targetBuildOwner] =
+            IF authorityChanges THEN 2 ELSE 1
+        /\ \A m \in AuthoredModules \ {targetBuildOwner} : buildAuthority[m] = 0)
+
+SourceGenerationAuthorityIsImmutable ==
+    /\ sourceBuildAuthority[sourceBuildOwner] = 1
+    /\ \A m \in AuthoredModules \ {sourceBuildOwner} :
+        sourceBuildAuthority[m] = 0
+
+ReplanPublishesNewAuthorityWithoutReplacingOwnerAssets ==
+    authorityChanges /\ phase \in {"TargetRunning", "Completed"} =>
+        /\ buildAuthority[targetBuildOwner] = 2
+        /\ graphDecision[sourceBuildOwner] = "ReuseStale"
+        /\ graphDecision[targetBuildOwner] = "ReuseStale"
+        /\ \A m \in {sourceBuildOwner, targetBuildOwner} :
+            /\ workspaceIdentity[m] = 1
+            /\ sessionGeneration[m] = 1
+            /\ corpusIdentity[m] = 1
+
+UnchangedAuthorityPreservesItsOwner ==
+    ~authorityChanges /\ phase \in {"TargetRunning", "Completed"} =>
+        /\ sourceBuildOwner = targetBuildOwner
+        /\ buildAuthority = sourceBuildAuthority
+        /\ (sourceBuildOwner \in ExactExecutableModules =>
+            graphDecision[sourceBuildOwner] = "ReuseAccepted")
+
+BuildOwnerTransferRequeuesBothAuthorityEndpoints ==
+    (/\ sourceBuildOwner # targetBuildOwner
+     /\ phase \in {"TargetRunning", "Completed"})
+    =>
+        /\ targetStartState[sourceBuildOwner] = "Ready"
+        /\ targetStartState[targetBuildOwner] = "Ready"
+        /\ graphDecision[sourceBuildOwner] = "ReuseStale"
+        /\ graphDecision[targetBuildOwner] = "ReuseStale"
 
 =======================================================================

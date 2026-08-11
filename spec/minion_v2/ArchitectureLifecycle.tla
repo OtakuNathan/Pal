@@ -19,12 +19,14 @@ VARIABLES
     reviewerLease,
     decisionIssued,
     taskRevisionCount,
+    workflowRevision,
+    replanRevision,
     managerUp
 
 vars == <<
     state, revision, architectSession, reviewerSession,
     architectLease, reviewerLease, decisionIssued,
-    taskRevisionCount, managerUp
+    taskRevisionCount, workflowRevision, replanRevision, managerUp
 >>
 
 Init ==
@@ -36,6 +38,8 @@ Init ==
     /\ reviewerLease = FALSE
     /\ decisionIssued = FALSE
     /\ taskRevisionCount = 0
+    /\ workflowRevision = 1
+    /\ replanRevision = 1
     /\ managerUp = TRUE
 
 StartArchitect ==
@@ -45,7 +49,7 @@ StartArchitect ==
     /\ architectSession' = "Active"
     /\ architectLease' = TRUE
     /\ UNCHANGED <<revision, reviewerSession, reviewerLease, decisionIssued,
-        taskRevisionCount, managerUp>>
+        taskRevisionCount, workflowRevision, replanRevision, managerUp>>
 
 ArchitectSubmitted ==
     /\ managerUp
@@ -55,7 +59,7 @@ ArchitectSubmitted ==
     /\ architectSession' = "Suspended"
     /\ architectLease' = FALSE
     /\ UNCHANGED <<revision, reviewerSession, reviewerLease, decisionIssued,
-        taskRevisionCount, managerUp>>
+        taskRevisionCount, workflowRevision, replanRevision, managerUp>>
 
 StartReviewer ==
     /\ managerUp
@@ -64,7 +68,7 @@ StartReviewer ==
     /\ reviewerSession' = "Active"
     /\ reviewerLease' = TRUE
     /\ UNCHANGED <<revision, architectSession, architectLease, decisionIssued,
-        taskRevisionCount, managerUp>>
+        taskRevisionCount, workflowRevision, replanRevision, managerUp>>
 
 ReviewerFailed ==
     /\ managerUp
@@ -74,7 +78,7 @@ ReviewerFailed ==
     /\ reviewerSession' = "Suspended"
     /\ reviewerLease' = FALSE
     /\ UNCHANGED <<revision, architectSession, architectLease, decisionIssued,
-        taskRevisionCount, managerUp>>
+        taskRevisionCount, workflowRevision, replanRevision, managerUp>>
 
 ReviewerPassed ==
     /\ managerUp
@@ -85,7 +89,7 @@ ReviewerPassed ==
     /\ reviewerLease' = FALSE
     /\ decisionIssued' = TRUE
     /\ UNCHANGED <<revision, architectSession, architectLease,
-        taskRevisionCount, managerUp>>
+        taskRevisionCount, workflowRevision, replanRevision, managerUp>>
 
 AppendArchitectClarification ==
     /\ managerUp
@@ -93,7 +97,8 @@ AppendArchitectClarification ==
     /\ taskRevisionCount < MaxTaskRevisions
     /\ taskRevisionCount' = taskRevisionCount + 1
     /\ UNCHANGED <<state, revision, architectSession, reviewerSession,
-        architectLease, reviewerLease, decisionIssued, managerUp>>
+        architectLease, reviewerLease, decisionIssued,
+        workflowRevision, replanRevision, managerUp>>
 
 HumanEdit ==
     /\ state = "HumanReview"
@@ -102,7 +107,8 @@ HumanEdit ==
     /\ state' = "Superseded"
     /\ decisionIssued' = FALSE
     /\ UNCHANGED <<revision, architectSession, reviewerSession,
-        architectLease, reviewerLease, taskRevisionCount, managerUp>>
+        architectLease, reviewerLease, taskRevisionCount,
+        workflowRevision, replanRevision, managerUp>>
 
 CreateChildRevision ==
     /\ managerUp
@@ -110,6 +116,11 @@ CreateChildRevision ==
     /\ revision < MaxRevision
     /\ state' = "ArchitectQueued"
     /\ revision' = revision + 1
+    \* The workflow pointer and the execution-epoch replan pointer move in
+    \* the same transaction as child creation. Projection can never select
+    \* the superseded parent while the child is active.
+    /\ workflowRevision' = revision + 1
+    /\ replanRevision' = revision + 1
     /\ UNCHANGED <<architectSession, reviewerSession, architectLease,
         reviewerLease, decisionIssued, taskRevisionCount, managerUp>>
 
@@ -121,7 +132,7 @@ HumanAccept ==
     /\ reviewerSession' = "Completed"
     /\ decisionIssued' = FALSE
     /\ UNCHANGED <<revision, architectLease, reviewerLease,
-        taskRevisionCount, managerUp>>
+        taskRevisionCount, workflowRevision, replanRevision, managerUp>>
 
 HumanReject ==
     /\ state = "HumanReview"
@@ -131,7 +142,7 @@ HumanReject ==
     /\ reviewerSession' = "Completed"
     /\ decisionIssued' = FALSE
     /\ UNCHANGED <<revision, architectLease, reviewerLease,
-        taskRevisionCount, managerUp>>
+        taskRevisionCount, workflowRevision, replanRevision, managerUp>>
 
 Cancel ==
     /\ state \notin TerminalDecisions
@@ -141,7 +152,8 @@ Cancel ==
     /\ architectLease' = FALSE
     /\ reviewerLease' = FALSE
     /\ decisionIssued' = FALSE
-    /\ UNCHANGED <<revision, taskRevisionCount, managerUp>>
+    /\ UNCHANGED <<revision, taskRevisionCount,
+        workflowRevision, replanRevision, managerUp>>
 
 EnterTriage ==
     /\ state \notin TerminalDecisions \cup {"Triage", "Superseded"}
@@ -152,7 +164,8 @@ EnterTriage ==
         IF reviewerSession = "Active" THEN "Suspended" ELSE reviewerSession
     /\ architectLease' = FALSE
     /\ reviewerLease' = FALSE
-    /\ UNCHANGED <<revision, decisionIssued, taskRevisionCount, managerUp>>
+    /\ UNCHANGED <<revision, decisionIssued, taskRevisionCount,
+        workflowRevision, replanRevision, managerUp>>
 
 ResolveTriage ==
     /\ managerUp
@@ -160,7 +173,7 @@ ResolveTriage ==
     /\ state' = "ArchitectQueued"
     /\ UNCHANGED <<revision, architectSession, reviewerSession,
         architectLease, reviewerLease, decisionIssued,
-        taskRevisionCount, managerUp>>
+        taskRevisionCount, workflowRevision, replanRevision, managerUp>>
 
 CrashManager ==
     /\ managerUp
@@ -171,13 +184,15 @@ CrashManager ==
         IF architectSession = "Active" THEN "Suspended" ELSE architectSession
     /\ reviewerSession' =
         IF reviewerSession = "Active" THEN "Suspended" ELSE reviewerSession
-    /\ UNCHANGED <<state, revision, decisionIssued, taskRevisionCount>>
+    /\ UNCHANGED <<state, revision, decisionIssued, taskRevisionCount,
+        workflowRevision, replanRevision>>
 
 RestartManager ==
     /\ ~managerUp
     /\ managerUp' = TRUE
     /\ UNCHANGED <<state, revision, architectSession, reviewerSession,
-        architectLease, reviewerLease, decisionIssued, taskRevisionCount>>
+        architectLease, reviewerLease, decisionIssued, taskRevisionCount,
+        workflowRevision, replanRevision>>
 
 Next ==
     \/ StartArchitect
@@ -207,6 +222,8 @@ TypeOK ==
     /\ reviewerLease \in BOOLEAN
     /\ decisionIssued \in BOOLEAN
     /\ taskRevisionCount \in 0..MaxTaskRevisions
+    /\ workflowRevision \in 1..MaxRevision
+    /\ replanRevision \in 1..MaxRevision
     /\ managerUp \in BOOLEAN
 
 LeaseOwnership ==
@@ -228,5 +245,9 @@ OpenCycleKeepsSessions ==
     state \notin TerminalDecisions =>
         /\ architectSession \notin {"Completed", "Cancelled"}
         /\ reviewerSession \notin {"Completed", "Cancelled"}
+
+RevisionPointersStayAtomic ==
+    /\ workflowRevision = replanRevision
+    /\ workflowRevision = revision
 
 =============================================================================

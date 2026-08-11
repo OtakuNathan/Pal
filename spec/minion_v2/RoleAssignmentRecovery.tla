@@ -1,7 +1,7 @@
 -------------------- MODULE RoleAssignmentRecovery --------------------
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANT OldAssignment, NewAssignment, MaxAttempt, MaxInputRevision, MaxScans
+CONSTANT OldAssignment, NewAssignment, MaxAttempt, MaxStarts, MaxInputRevision, MaxScans
 
 Assignments == {OldAssignment, NewAssignment}
 NoAssignment == "NoAssignment"
@@ -20,6 +20,7 @@ VARIABLES
     assignmentState,
     assignmentLease,
     attemptNumber,
+    failureCount,
     effectAssignment,
     workerAssignment,
     inputRevision,
@@ -33,7 +34,7 @@ VARIABLES
     legacyDuplicate
 
 vars == <<
-    managerUp, assignmentState, assignmentLease, attemptNumber,
+    managerUp, assignmentState, assignmentLease, attemptNumber, failureCount,
     effectAssignment, workerAssignment, inputRevision, promptRevision,
     receipts, terminalAssignment, settledAssignment, recoveryScans,
     lastScanObserved, lastScanOwner, legacyDuplicate
@@ -45,6 +46,7 @@ Init ==
         [a \in Assignments |-> IF a = OldAssignment THEN "Queued" ELSE "Absent"]
     /\ assignmentLease = [a \in Assignments |-> FALSE]
     /\ attemptNumber = [a \in Assignments |-> 0]
+    /\ failureCount = [a \in Assignments |-> 0]
     /\ effectAssignment = OldAssignment
     /\ workerAssignment = NoAssignment
     /\ inputRevision = 0
@@ -63,12 +65,15 @@ ClaimAssignment(a) ==
     /\ workerAssignment = NoAssignment
     /\ a = effectAssignment
     /\ assignmentState[a] \in {"Queued", "RetryQueued"}
-    /\ attemptNumber[a] < MaxAttempt
+    \* A process shell may be rebound more often than the logical role may
+    \* fail. Only charged failures consume the retry budget.
+    /\ attemptNumber[a] < MaxStarts
+    /\ failureCount[a] < MaxAttempt
     /\ assignmentState' = [assignmentState EXCEPT ![a] = "Claimed"]
     /\ assignmentLease' = [assignmentLease EXCEPT ![a] = TRUE]
     /\ attemptNumber' = [attemptNumber EXCEPT ![a] = @ + 1]
     /\ workerAssignment' = a
-    /\ UNCHANGED <<managerUp, effectAssignment, inputRevision, promptRevision,
+    /\ UNCHANGED <<managerUp, failureCount, effectAssignment, inputRevision, promptRevision,
         receipts, terminalAssignment, settledAssignment, recoveryScans,
         lastScanObserved, lastScanOwner, legacyDuplicate>>
 
@@ -79,7 +84,7 @@ StartAssignment(a) ==
     /\ assignmentState[a] = "Claimed"
     /\ assignmentLease[a]
     /\ assignmentState' = [assignmentState EXCEPT ![a] = "Running"]
-    /\ UNCHANGED <<managerUp, assignmentLease, attemptNumber,
+    /\ UNCHANGED <<managerUp, assignmentLease, attemptNumber, failureCount,
         effectAssignment, workerAssignment, inputRevision, promptRevision,
         receipts, terminalAssignment, settledAssignment, recoveryScans,
         lastScanObserved, lastScanOwner, legacyDuplicate>>
@@ -91,7 +96,8 @@ ExpireWorkerLease ==
     /\ assignmentLease' =
         [assignmentLease EXCEPT ![workerAssignment] = FALSE]
     /\ workerAssignment' = NoAssignment
-    /\ UNCHANGED <<managerUp, assignmentState, attemptNumber,
+    \* Expiration/rebind changes the process shell, not the failure budget.
+    /\ UNCHANGED <<managerUp, assignmentState, attemptNumber, failureCount,
         effectAssignment, inputRevision, promptRevision, receipts,
         terminalAssignment, settledAssignment, recoveryScans,
         lastScanObserved, lastScanOwner, legacyDuplicate>>
@@ -103,7 +109,7 @@ RecompileInputs ==
     \* Manager-owned progress journal must not allocate or bind another
     \* durable assignment, and must not replace a submission receipt.
     /\ UNCHANGED <<managerUp, assignmentState, assignmentLease,
-        attemptNumber, effectAssignment, workerAssignment, promptRevision,
+        attemptNumber, failureCount, effectAssignment, workerAssignment, promptRevision,
         receipts, terminalAssignment, settledAssignment, recoveryScans,
         lastScanObserved, lastScanOwner, legacyDuplicate>>
 
@@ -116,7 +122,7 @@ RecoverExpiredAssignment ==
     /\ assignmentState' =
         [assignmentState EXCEPT ![effectAssignment] = "RetryQueued"]
     \* Recovery reuses both the durable identity and its original prompt.
-    /\ UNCHANGED <<managerUp, assignmentLease, attemptNumber,
+    /\ UNCHANGED <<managerUp, assignmentLease, attemptNumber, failureCount,
         effectAssignment, workerAssignment, inputRevision, promptRevision,
         receipts, terminalAssignment, settledAssignment, recoveryScans,
         lastScanObserved, lastScanOwner, legacyDuplicate>>
@@ -132,7 +138,7 @@ RecoveryScan(observed) ==
     /\ lastScanOwner' = effectAssignment
     \* A periodic scan is observational while a worker owns the effect.
     /\ UNCHANGED <<managerUp, assignmentState, assignmentLease,
-        attemptNumber, effectAssignment, workerAssignment, inputRevision,
+        attemptNumber, failureCount, effectAssignment, workerAssignment, inputRevision,
         promptRevision, receipts, terminalAssignment, settledAssignment,
         legacyDuplicate>>
 
@@ -147,7 +153,7 @@ RecordResult(a) ==
     /\ workerAssignment' = NoAssignment
     /\ receipts' = receipts \cup {a}
     /\ terminalAssignment' = a
-    /\ UNCHANGED <<managerUp, attemptNumber, effectAssignment,
+    /\ UNCHANGED <<managerUp, attemptNumber, failureCount, effectAssignment,
         inputRevision, promptRevision, settledAssignment, recoveryScans,
         lastScanObserved, lastScanOwner, legacyDuplicate>>
 
@@ -159,7 +165,7 @@ SettleTerminalResult ==
         [assignmentState EXCEPT ![terminalAssignment] = "Settled"]
     /\ settledAssignment' = terminalAssignment
     \* Settlement follows the immutable terminal identity, not a mutable scan.
-    /\ UNCHANGED <<managerUp, assignmentLease, attemptNumber,
+    /\ UNCHANGED <<managerUp, assignmentLease, attemptNumber, failureCount,
         effectAssignment, workerAssignment, inputRevision, promptRevision,
         receipts, terminalAssignment, recoveryScans, lastScanObserved,
         lastScanOwner, legacyDuplicate>>
@@ -171,7 +177,8 @@ CrashManager ==
         [a \in Assignments |-> IF a = workerAssignment THEN FALSE
                               ELSE assignmentLease[a]]
     /\ workerAssignment' = NoAssignment
-    /\ UNCHANGED <<assignmentState, attemptNumber, effectAssignment,
+    \* A graceful/process loss recovery is not a failed logical attempt.
+    /\ UNCHANGED <<assignmentState, attemptNumber, failureCount, effectAssignment,
         inputRevision, promptRevision, receipts, terminalAssignment,
         settledAssignment, recoveryScans, lastScanObserved, lastScanOwner,
         legacyDuplicate>>
@@ -179,7 +186,7 @@ CrashManager ==
 RestartManager ==
     /\ ~managerUp
     /\ managerUp' = TRUE
-    /\ UNCHANGED <<assignmentState, assignmentLease, attemptNumber,
+    /\ UNCHANGED <<assignmentState, assignmentLease, attemptNumber, failureCount,
         effectAssignment, workerAssignment, inputRevision, promptRevision,
         receipts, terminalAssignment, settledAssignment, recoveryScans,
         lastScanObserved, lastScanOwner, legacyDuplicate>>
@@ -193,7 +200,7 @@ InjectLegacyDuplicate ==
     /\ effectAssignment = OldAssignment
     /\ assignmentState[OldAssignment] \in ActiveStates
     /\ ~assignmentLease[OldAssignment]
-    /\ attemptNumber[NewAssignment] < MaxAttempt
+    /\ attemptNumber[NewAssignment] < MaxStarts
     /\ assignmentState' =
         [assignmentState EXCEPT ![NewAssignment] = "Running"]
     /\ assignmentLease' =
@@ -205,8 +212,25 @@ InjectLegacyDuplicate ==
     /\ promptRevision' =
         [promptRevision EXCEPT ![NewAssignment] = inputRevision]
     /\ legacyDuplicate' = TRUE
-    /\ UNCHANGED <<managerUp, inputRevision, receipts, terminalAssignment,
+    /\ UNCHANGED <<managerUp, failureCount, inputRevision, receipts, terminalAssignment,
         settledAssignment, recoveryScans, lastScanObserved, lastScanOwner>>
+
+FailWorker ==
+    /\ managerUp
+    /\ workerAssignment \in Assignments
+    /\ assignmentState[workerAssignment] \in ActiveStates
+    /\ assignmentLease[workerAssignment]
+    /\ failureCount[workerAssignment] < MaxAttempt
+    /\ assignmentState' =
+        [assignmentState EXCEPT ![workerAssignment] = "RetryQueued"]
+    /\ assignmentLease' =
+        [assignmentLease EXCEPT ![workerAssignment] = FALSE]
+    /\ failureCount' =
+        [failureCount EXCEPT ![workerAssignment] = @ + 1]
+    /\ workerAssignment' = NoAssignment
+    /\ UNCHANGED <<managerUp, attemptNumber, effectAssignment, inputRevision,
+        promptRevision, receipts, terminalAssignment, settledAssignment,
+        recoveryScans, lastScanObserved, lastScanOwner, legacyDuplicate>>
 
 ClaimSomeAssignment ==
     \E a \in Assignments : ClaimAssignment(a)
@@ -224,6 +248,7 @@ Next ==
     \/ ClaimSomeAssignment
     \/ StartSomeAssignment
     \/ ExpireWorkerLease
+    \/ FailWorker
     \/ RecompileInputs
     \/ RecoverExpiredAssignment
     \/ ScanSomeAssignment
@@ -244,7 +269,8 @@ TypeOK ==
     /\ managerUp \in BOOLEAN
     /\ assignmentState \in [Assignments -> AssignmentStates]
     /\ assignmentLease \in [Assignments -> BOOLEAN]
-    /\ attemptNumber \in [Assignments -> 0..MaxAttempt]
+    /\ attemptNumber \in [Assignments -> 0..MaxStarts]
+    /\ failureCount \in [Assignments -> 0..MaxAttempt]
     /\ effectAssignment \in AssignmentIds
     /\ workerAssignment \in AssignmentIds
     /\ inputRevision \in 0..MaxInputRevision
@@ -304,6 +330,9 @@ SettlementUsesTerminalIdentity ==
         /\ settledAssignment = terminalAssignment
         /\ settledAssignment \in receipts
         /\ assignmentState[settledAssignment] = "Settled"
+
+FailureBudgetCountsLogicalFailures ==
+    \A a \in Assignments : failureCount[a] <= attemptNumber[a]
 
 ExpiredOwnerEventuallyChanges ==
     /\ effectAssignment \in Assignments
