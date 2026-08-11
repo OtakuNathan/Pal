@@ -202,7 +202,8 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         session = self._require_session(response_handle)
         request_id = str(response_handle.reply_target.get("request_id") or "")
         session.outbound.put_nowait({"type": "text_delta", "request_id": request_id, "text": text})
-        session.outbound.put_nowait({"type": "done", "request_id": request_id, "finish_reason": "stop"})
+        if not bool(response_handle.reply_target.get("_pal_turn_continues")):
+            session.outbound.put_nowait({"type": "done", "request_id": request_id, "finish_reason": "stop"})
 
     def open_or_update_interaction(
         self,

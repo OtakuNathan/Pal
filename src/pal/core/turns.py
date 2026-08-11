@@ -100,6 +100,7 @@ class MemoryCompactEffect(EffectRequest):
 @dataclass(frozen=True)
 class MailboxReplyEffect(EffectRequest):
     text: str = ""
+    terminal: bool = True
     kind: str = EffectKind.MAILBOX_REPLY
 
 

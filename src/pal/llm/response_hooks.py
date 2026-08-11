@@ -65,12 +65,19 @@ class ProviderResponseHookRegistry:
     @classmethod
     def builtin(cls) -> "ProviderResponseHookRegistry":
         from pal.llm.deepseek_response import normalize_deepseek_updates
+        from pal.llm.zhipu_response import normalize_zhipu_updates
 
-        hook = ProviderResponseHook(
-            provider_id="deepseek",
-            normalize_updates=normalize_deepseek_updates,
+        hooks = (
+            ProviderResponseHook(
+                provider_id="deepseek",
+                normalize_updates=normalize_deepseek_updates,
+            ),
+            ProviderResponseHook(
+                provider_id="zhipu",
+                normalize_updates=normalize_zhipu_updates,
+            ),
         )
-        return cls({hook.provider_id: hook})
+        return cls({hook.provider_id: hook for hook in hooks})
 
     def normalize(
         self,

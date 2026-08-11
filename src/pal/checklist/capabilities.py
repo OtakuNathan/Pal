@@ -72,10 +72,10 @@ class ChecklistIntrospectionProvider:
         scope="module",
         family="checklist",
         action_name="upsert",
-        description="Open or replace Pal's own task checklist. Land preflight plans here as visible steps, tick them off as you finish, and clear after re-verifying.",
+        description="Open or replace a visible checklist for Pal's multi-step work. The user can see progress as steps complete, while Pal uses it to track unfinished work and avoid omissions.",
         guidance=ToolGuidance(
-            purpose="Open or replace Pal's own task checklist.",
-            use_when="Use when the task feels like it is becoming multi-step or a bit complex, especially once side effects (writing, mutating, sending, executing, creating) are involved — land the action path as visible steps with the step where side effects begin marked as the boundary. If work grows multi-step or complex mid-task after starting without a checklist, open one at that point and mark already-finished steps as completed. If the task requires a durable architect/coder/verifier workflow, use minion_start_workflow instead.",
+            purpose="Open or replace a user-visible checklist for multi-step work, keeping concrete progress and unfinished work explicit.",
+            use_when="Strongly prefer using this when work has multiple concrete steps, meaningful side effects, or a realistic risk of missing a follow-up. Open it early, keep steps concrete, clearly mark the first side-effecting step, and update it as work evolves. If the task requires a durable architect/coder/verifier workflow, use minion_start_workflow instead.",
             do_not_use_when="Single-step or conversational work. Durable facts or decisions belong in remember_memory, not this checklist. Minion Task ledger work is Manager-owned. Anything needing gating or enforcement — this is a scratchpad, not a cursor.",
             failure_next_steps="Pass a non-empty plan of 1..64 steps, each with a non-empty step string and an optional status of pending/in_progress/completed.",
         ),

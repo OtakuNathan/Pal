@@ -76,18 +76,66 @@ async def inject_pending_interjection_async(
                 del state.pending_channel_turns[0]
 
         commit = asyncio.create_task(append_and_acknowledge())
+        committed = False
         try:
             await asyncio.shield(commit)
+            committed = True
         except asyncio.CancelledError:
             # The append is idempotent by message_id. Let append+ack finish so
             # cancellation can never strand the message between L1 and queue.
             try:
                 await asyncio.shield(commit)
+                committed = True
             except Exception:
                 pass
+            if committed:
+                await _acknowledge_cross_scope_interjection_async(
+                    context=context,
+                    envelope=envelope,
+                    continuation=continuation,
+                )
             raise
+        if committed:
+            await _acknowledge_cross_scope_interjection_async(
+                context=context,
+                envelope=envelope,
+                continuation=continuation,
+            )
     except Exception:
         # Leave the unacknowledged head in place for the normal queue flow.
+        return
+
+
+async def _acknowledge_cross_scope_interjection_async(
+    *,
+    context: Any,
+    envelope: Any,
+    continuation: Any,
+) -> None:
+    """Finish a consumed request whose reply authority belongs to another scope."""
+
+    source_binding = getattr(envelope, "opening_delivery_binding", None)
+    active_binding = getattr(continuation, "delivery_binding", None)
+    if source_binding is None or active_binding is None:
+        return
+    if str(source_binding.control_scope_key) == str(active_binding.control_scope_key):
+        return
+    output_port = context.port_registry.get("agent_io:output") or context.port_registry.get(
+        "channel:channel"
+    )
+    queue_reply = getattr(output_port, "queue_reply", None)
+    if not callable(queue_reply):
+        return
+    try:
+        result = queue_reply(
+            source_binding,
+            "Message added to the active conversation; its response will be delivered there.",
+        )
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        # The interjection is already durable. A secondary-channel receipt
+        # failure must not duplicate it by restoring the original envelope.
         return
 
 

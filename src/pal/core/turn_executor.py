@@ -490,7 +490,7 @@ class TurnExecutor:
         continuation.echoed_keys.add(dedupe_key)
         await self.execute_turn_effect_async(
             continuation,
-            MailboxReplyEffect(text=markdown),
+            MailboxReplyEffect(text=markdown, terminal=False),
         )
 
     def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
@@ -544,6 +544,16 @@ class TurnExecutor:
         binding = continuation.delivery_binding
         if binding is None:
             return EffectResult(status=RuntimeStatus.SKIPPED, text=effect.text)
+        if not effect.terminal:
+            reply_target = dict(binding.response_handle.reply_target)
+            reply_target["_pal_turn_continues"] = True
+            binding = replace(
+                binding,
+                response_handle=replace(
+                    binding.response_handle,
+                    reply_target=reply_target,
+                ),
+            )
         reply_id = await self._call_output_port_async(output_port, "queue_reply", binding, effect.text)
         text = str(effect.text or "").strip()
         if text:

@@ -1065,7 +1065,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if include_facets:
             result["facets"] = _search_facets(item for _, _, item in scored)
             if result["truncated"]:
-                result["usage_hint"] = "Narrow with namespace, module_id, family, or tags."
+                result["usage_hint"] = "Narrow with namespace, module_name, family, or tags."
         return result
 
     @staticmethod

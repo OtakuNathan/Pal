@@ -117,7 +117,7 @@ class ChecklistService:
         if not items:
             return ""
         done = sum(1 for item in items if item.status == "completed")
-        lines = [f"清单进度 {done}/{len(items)}"]
+        lines = [f"Checklist progress {done}/{len(items)}"]
         for item in items:
             mark = "✅" if item.status == "completed" else "⬜"
             lines.append(f"{mark} {item.step}")

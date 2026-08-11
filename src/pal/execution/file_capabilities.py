@@ -44,7 +44,11 @@ from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResu
 
 
 FILE_READ_GUIDANCE = ToolGuidance(
-    purpose="Read selected lines from a UTF-8 text file and return line-numbered content.",
+    purpose=(
+        "Read selected lines from a UTF-8 text file and return line-numbered content. "
+        "When an unchanged marker is returned, refer to the earlier read result and do not call "
+        "read_file again unless the file changed or another range is needed."
+    ),
     use_when=(
         "Reading local source, configuration, or other UTF-8 text. Use offset and limit for focused reads. "
         "A focused edit is authorized once every affected line is present in the current logical context."
