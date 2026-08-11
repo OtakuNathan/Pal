@@ -801,7 +801,9 @@ def register_with_core(
         EventKind.MINION_TERMINAL,
         EventKind.MINION_STANDALONE_REVIEW_COMPLETED,
         EventKind.MINION_CLARIFICATION_REQUEST,
+        EventKind.MINION_CLARIFICATION_RESOLVED,
         EventKind.MINION_ARCHITECTURE_REVIEW_PENDING,
+        EventKind.MINION_ARCHITECTURE_REVIEW_RESOLVED,
     )
     handle = ModuleHandle(
         module_id="minion",

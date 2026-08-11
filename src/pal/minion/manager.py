@@ -178,6 +178,7 @@ class MinionManager:
             max_parallel_workers=self.max_parallel_modules,
             publish_human_review=self._publish_v2_human_review,
             publish_worker_event=self._publish_v2_worker_event,
+            publish_workflow_event=self._publish_v2_workflow_event,
             register_broker_run=self._register_v2_broker_run,
             unregister_broker_run=self._unregister_v2_broker_run,
             inject_skill=self._inject_skill_for_role,
@@ -185,6 +186,7 @@ class MinionManager:
         self.v2_outbox = MinionV2OutboxProcessor(
             self.v2_service,
             semantic_effects=self.v2_semantic_orchestrator,
+            publish_workflow_event=self._publish_v2_workflow_event,
         )
 
     @property
@@ -605,6 +607,46 @@ class MinionManager:
             ),
         )
 
+    def _publish_v2_workflow_event(self, payload: Mapping[str, Any]) -> None:
+        workflow_id = str(payload.get("workflow_id") or "").strip()
+        event_kind = str(payload.get("event_kind") or "workflow_terminal").strip()
+        if event_kind == "architecture_review_resolved":
+            revision_id = str(
+                payload.get("architecture_revision_id") or ""
+            ).strip()
+            event = {
+                "event_kind": event_kind,
+                "minion_id": "",
+                "run_id": "",
+                "workflow_id": workflow_id,
+                "minion_profile": "minion_v2.reviewer",
+                "role_mode": "architecture",
+                "payload": {**dict(payload), "minion_v2": True},
+                "created_at": str(payload.get("resolved_at") or utc_now()),
+            }
+            self._queue_task_delivery_event(
+                event,
+                dedup_key=(
+                    f"architecture-review-resolved:{workflow_id}:{revision_id}"
+                ),
+            )
+            return
+        status = str(payload.get("status") or "completed").strip().lower()
+        event = {
+            "event_kind": "workflow_terminal",
+            "minion_id": "",
+            "run_id": "",
+            "workflow_id": workflow_id,
+            "minion_profile": "minion_v2.workflow",
+            "role_mode": "workflow",
+            "payload": {**dict(payload), "minion_v2": True},
+            "created_at": str(payload.get("terminal_at") or utc_now()),
+        }
+        self._queue_task_delivery_event(
+            event,
+            dedup_key=f"workflow-terminal:{workflow_id}:{status}",
+        )
+
     async def _publish_v2_worker_event(self, event: Mapping[str, Any]) -> None:
         item = dict(event)
         delivery_attempt_id = str(item.pop("_attempt_id", "") or "")
@@ -627,6 +669,29 @@ class MinionManager:
                 state.pending_clarification = payload
                 state.status = "clarification_pending"
             elif kind == "terminal":
+                resolved_interactions: list[dict[str, str]] = []
+                approval_id = str(state.pending_approval.get("approval_id") or "").strip()
+                if approval_id:
+                    resolved_interactions.append(
+                        {
+                            "interaction_id": approval_id,
+                            "interaction_kind": "minion_approval",
+                        }
+                    )
+                clarification_id = str(
+                    state.pending_clarification.get("clarification_id") or ""
+                ).strip()
+                if clarification_id:
+                    resolved_interactions.append(
+                        {
+                            "interaction_id": clarification_id,
+                            "interaction_kind": "minion_clarification",
+                        }
+                    )
+                if resolved_interactions:
+                    payload["resolved_interactions"] = resolved_interactions
+                state.pending_approval = {}
+                state.pending_clarification = {}
                 # A terminal IPC receipt means the worker has finished its
                 # logical work, not that its process group is gone.  Keep the
                 # run active until the RAII process owner confirms reap.
@@ -922,6 +987,7 @@ class MinionManager:
                 **workflow,
                 "active_worker": "",
                 "active_worker_role": "",
+                "active_role_progress": {},
                 "next_legal_action": ["answer_question", "control_workflow:cancel"],
                 "waiting_for_user": True,
                 "liveness": "human_wait",
@@ -952,7 +1018,7 @@ class MinionManager:
             or (questions[0] if questions else {}).get("id")
             or "question-1"
         )
-        return await self.send_clarification(
+        result = await self.send_clarification(
             {
                 "clarification_id": str(pending.get("clarification_id") or ""),
                 "run_id": state.run_id,
@@ -960,6 +1026,27 @@ class MinionManager:
                 "answers": [{"question_id": question_id, "answer": answer}],
             }
         )
+        event = {
+            "event_kind": "clarification_resolved",
+            "minion_id": state.minion_id,
+            "run_id": state.run_id,
+            "workflow_id": workflow_id,
+            "minion_profile": "",
+            "payload": {
+                "minion_v2": True,
+                "clarification_id": str(pending.get("clarification_id") or ""),
+                "summary": "Minion clarification recorded.",
+            },
+            "created_at": utc_now(),
+        }
+        self._queue_task_delivery_event(
+            event,
+            dedup_key=(
+                f"clarification-resolved:{workflow_id}:"
+                f"{pending.get('clarification_id') or ''}"
+            ),
+        )
+        return result
 
     async def llm_broker_preflight(self, params: dict[str, Any]) -> dict[str, Any]:
         self._require_broker_run(params)
@@ -982,12 +1069,28 @@ class MinionManager:
         state = self._require_broker_run(params)
         runtime = await self._llm_broker_runtime()
         request = llm_request_from_payload(dict(params.get("request") or {}))
-        with scoped_llm_event_sink(self._llm_progress_sink(state)):
-            stream = getattr(runtime, "astream", None)
-            if not callable(stream):
-                raise TypeError("manager LLM runtime does not implement astream")
-            async for update in stream(request):
+        stream = getattr(runtime, "astream", None)
+        if not callable(stream):
+            raise TypeError("manager LLM runtime does not implement astream")
+        iterator = stream(request).__aiter__()
+        progress_sink = self._llm_progress_sink(state)
+        try:
+            while True:
+                try:
+                    # Do not hold a ContextVar token across the public yield.
+                    # A disconnected sidecar may close this generator from a
+                    # different asyncio Context; each source advancement is the
+                    # smallest context-local ownership boundary.
+                    with scoped_llm_event_sink(progress_sink):
+                        update = await anext(iterator)
+                except StopAsyncIteration:
+                    return
                 yield update
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if callable(close):
+                with scoped_llm_event_sink(progress_sink):
+                    await close()
 
     async def llm_broker_resolve_max_output_tokens(self, params: dict[str, Any]) -> dict[str, Any]:
         self._require_broker_run(params)

@@ -143,6 +143,25 @@ def render_minion_task_prompt(pack: MinionInvocationPack) -> str:
     if pack.acceptance_criteria:
         lines.extend(["", "## Invocation Acceptance"])
         lines.extend(f"- {item}" for item in pack.acceptance_criteria)
+    repo_path = str(pack.workspace.get("repo_path") or "").strip()
+    if repo_path:
+        lines.extend(
+            [
+                "",
+                "## Workspace Root",
+                f"- Product workspace: `{repo_path}`",
+                (
+                    "- Shell tools start in that workspace. Keep product-code, "
+                    "build, test, and Git operations there (or use paths relative "
+                    "to it)."
+                ),
+                (
+                    "- `/pal` is only the projection root for immutable "
+                    "references; it is not the product repository. Never `cd "
+                    "/pal` to inspect product code or run Git."
+                ),
+            ]
+        )
     architect_path = str(pack.workspace.get("architect_path") or "").strip()
     if architect_path:
         read_args = json.dumps(

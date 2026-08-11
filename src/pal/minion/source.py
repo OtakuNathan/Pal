@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pal.control import ControlAction, ControlDelivery, ControlRoute
-from pal.control.interactions import delivery_for_reply
+from pal.control.interactions import delivery_for_reply, terminal_delivery_for_interaction
 from pal.core.events import EventHandler, EventSource
 from pal.foundation import EventEnvelope
 from pal.minion.interactions import minion_approval_delivery, minion_architecture_review_delivery, minion_question_delivery
@@ -40,7 +40,9 @@ class MinionControlEventHandler(EventHandler):
         return event_kind in {
             EventKind.APPROVAL_REQUEST,
             EventKind.MINION_CLARIFICATION_REQUEST,
+            EventKind.MINION_CLARIFICATION_RESOLVED,
             EventKind.MINION_ARCHITECTURE_REVIEW_PENDING,
+            EventKind.MINION_ARCHITECTURE_REVIEW_RESOLVED,
             EventKind.MINION_TERMINAL,
             EventKind.MINION_STANDALONE_REVIEW_COMPLETED,
         }
@@ -60,9 +62,38 @@ class MinionControlEventHandler(EventHandler):
         elif event.event_kind == EventKind.MINION_CLARIFICATION_REQUEST:
             delivery = minion_question_delivery(payload, route)
             action_kind = "interactive_open"
+        elif event.event_kind == EventKind.MINION_CLARIFICATION_RESOLVED:
+            clarification_id = str(payload.get("clarification_id") or "").strip()
+            delivery = (
+                terminal_delivery_for_interaction(
+                    route,
+                    interaction_id=clarification_id,
+                    interaction_kind="minion_clarification",
+                    text=str(payload.get("summary") or "Minion clarification recorded."),
+                )
+                if clarification_id
+                else None
+            )
+            action_kind = "interactive_resolve"
         elif event.event_kind == EventKind.MINION_ARCHITECTURE_REVIEW_PENDING:
             delivery = minion_architecture_review_delivery(payload, route)
             action_kind = "interactive_open"
+        elif event.event_kind == EventKind.MINION_ARCHITECTURE_REVIEW_RESOLVED:
+            revision_id = str(payload.get("architecture_revision_id") or "").strip()
+            delivery = (
+                terminal_delivery_for_interaction(
+                    route,
+                    interaction_id=f"minion_v2_architecture_{revision_id}",
+                    interaction_kind="minion_v2_architecture_review",
+                    text=str(
+                        payload.get("summary")
+                        or "Minion architecture decision recorded."
+                    ),
+                )
+                if revision_id
+                else None
+            )
+            action_kind = "interactive_resolve"
         else:
             text = str(payload.get("summary") or payload.get("status") or "Minion workflow completed.")
             delivery = delivery_for_reply(route, text)
@@ -74,6 +105,35 @@ class MinionControlEventHandler(EventHandler):
                     settle(payload, accepted=False, error="minion event has no delivery")
             return []
         deliveries: list[tuple[str, ControlAction]] = []
+        if event.event_kind == EventKind.MINION_TERMINAL:
+            for index, raw in enumerate(list(payload.get("resolved_interactions") or [])):
+                item = dict(raw or {})
+                interaction_id = str(item.get("interaction_id") or "").strip()
+                interaction_kind = str(item.get("interaction_kind") or "").strip()
+                if not interaction_id or not interaction_kind:
+                    continue
+                deliveries.append(
+                    (
+                        f"interaction:{index}",
+                        ControlAction(
+                            action_kind="interactive_resolve",
+                            target_scope="interaction",
+                            target_id=interaction_id,
+                            route=route,
+                            delivery=terminal_delivery_for_interaction(
+                                route,
+                                interaction_id=interaction_id,
+                                interaction_kind=interaction_kind,
+                                text=str(
+                                    payload.get("summary")
+                                    or payload.get("status")
+                                    or "Minion workflow completed."
+                                ),
+                            ),
+                            notes="minion terminal interaction cleanup",
+                        ),
+                    )
+                )
         if event.event_kind == EventKind.MINION_ARCHITECTURE_REVIEW_PENDING:
             for index, attachment in enumerate(list(payload.get("attachments") or [])):
                 item = dict(attachment or {})
@@ -101,7 +161,7 @@ class MinionControlEventHandler(EventHandler):
                 "primary",
                 ControlAction(
                     action_kind=action_kind,
-                    target_scope="interaction" if action_kind == "interactive_open" else "channel",
+                    target_scope="interaction" if action_kind.startswith("interactive_") else "channel",
                     target_id=str(payload.get("workflow_id") or payload.get("run_id") or ""),
                     route=route,
                     delivery=delivery,
@@ -155,9 +215,12 @@ def _event_kind(kind: str) -> str:
     return {
         "approval_requested": EventKind.APPROVAL_REQUEST,
         "clarification_requested": EventKind.MINION_CLARIFICATION_REQUEST,
+        "clarification_resolved": EventKind.MINION_CLARIFICATION_RESOLVED,
         "terminal": EventKind.MINION_TERMINAL,
         "standalone_review_completed": EventKind.MINION_STANDALONE_REVIEW_COMPLETED,
         "architecture_review_pending": EventKind.MINION_ARCHITECTURE_REVIEW_PENDING,
+        "architecture_review_resolved": EventKind.MINION_ARCHITECTURE_REVIEW_RESOLVED,
+        "workflow_terminal": EventKind.MINION_TERMINAL,
     }.get(kind, EventKind.MINION_PROGRESS)
 
 

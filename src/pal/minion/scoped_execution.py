@@ -754,10 +754,6 @@ def _guard_scoped_workspace_mutation(
     raw_path = str(args.get("file_path") or "").strip()
     if not repo_raw or not raw_path:
         return call, None
-    has_compiled_write_scopes = "write_path_scopes" in workspace
-    has_read_only_overlays = "read_only_overlay_paths" in workspace
-    if not has_compiled_write_scopes and not has_read_only_overlays:
-        return call, None
     repo = Path(repo_raw).expanduser().resolve()
     candidate = Path(raw_path).expanduser()
     target = (
@@ -774,6 +770,11 @@ def _guard_scoped_workspace_mutation(
             relative_path="",
             reason="path_outside_workspace",
         )
+    has_compiled_write_scopes = "write_path_scopes" in workspace
+    has_read_only_overlays = "read_only_overlay_paths" in workspace
+    if not has_compiled_write_scopes and not has_read_only_overlays:
+        args["file_path"] = str(target)
+        return _tool_call_with_effective_args(call, args), None
     overlays = [
         str(item or "").replace("\\", "/").strip("/")
         for item in list(workspace.get("read_only_overlay_paths") or [])
