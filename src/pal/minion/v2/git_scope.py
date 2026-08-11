@@ -6,10 +6,18 @@ from typing import Any, Callable, Mapping
 
 
 _READ_SUBCOMMANDS = frozenset(
-    {"status", "diff", "log", "show", "blame", "grep", "ls-files", "rev-parse"}
-)
-_ENUMERATION_FLAGS = frozenset(
-    {"--all", "--branches", "--glob", "--remotes", "--tags"}
+    {
+        "status",
+        "diff",
+        "log",
+        "rev-list",
+        "show",
+        "blame",
+        "branch",
+        "grep",
+        "ls-files",
+        "rev-parse",
+    }
 )
 _SAFE_REV_PARSE = frozenset(
     {"HEAD", "--show-toplevel", "--is-inside-work-tree", "--show-prefix", "--show-cdup"}
@@ -56,13 +64,6 @@ def scoped_role_git_read_command(
         )
     tokens = list(policy.tokens)
     args = tokens[1:]
-    if any(
-        arg in _ENUMERATION_FLAGS
-        or any(arg.startswith(flag + "=") for flag in _ENUMERATION_FLAGS)
-        for arg in args
-    ):
-        raise ValueError("Git repository-wide ref enumeration is not available to role workers")
-
     allowed_paths, allowed_revisions = _authenticated_git_scope(
         prompt_pack=prompt_pack,
         assignment=assignment,
@@ -71,6 +72,10 @@ def scoped_role_git_read_command(
     if subcommand == "rev-parse":
         if not args or any(arg not in _SAFE_REV_PARSE for arg in args):
             raise ValueError("Git rev-parse is limited to HEAD and workspace identity")
+        return shlex.join(tokens)
+    if subcommand == "branch":
+        if args != ["--show-current"]:
+            raise ValueError("Git branch is limited to the current workspace identity")
         return shlex.join(tokens)
     if not allowed_paths:
         raise ValueError(
@@ -95,20 +100,13 @@ def scoped_role_git_read_command(
     before, _separator, explicit_paths = _split_git_pathspec(args)
     if explicit_paths:
         _assert_paths(explicit_paths, allowed_paths)
-    if subcommand in {"diff", "log", "show"}:
+    if subcommand in {"diff", "log", "rev-list", "show"}:
         _assert_revisions(
             before,
             allowed_paths=allowed_paths,
             allowed_revisions=allowed_revisions,
             command=subcommand,
         )
-        if subcommand == "log" and not _revision_positionals(
-            before,
-            allowed_paths=allowed_paths,
-        ):
-            raise ValueError(
-                "Git log requires the Manager-bound Candidate range; repository archaeology is unavailable"
-            )
     elif subcommand in {"status", "ls-files"}:
         positionals = _option_aware_positionals(
             before,
@@ -184,6 +182,12 @@ def _authenticated_git_scope(
 
     workspace = dict(prompt_pack.get("workspace") or {})
     allowed_paths: set[str] = set()
+    workspace_policy = dict(workspace.get("workspace_policy") or {})
+    if str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo":
+        # Submission-scope reviewers are physically bound to a read-only
+        # repository by the sandbox.  Their authenticated surface is the
+        # complete candidate, rather than one implementation module.
+        allowed_paths.add(".")
     for value in (
         workspace.get("write_path_scopes"),
         workspace.get("read_only_overlay_paths"),
@@ -331,6 +335,8 @@ def _path_allowed(path: str, allowed_paths: list[str]) -> bool:
         normalized_scope = _normalize_path(scope).rstrip("/")
         if not normalized_scope:
             continue
+        if normalized_scope == ".":
+            return True
         if any(character in normalized_scope for character in "*?["):
             if fnmatch.fnmatch(normalized, normalized_scope):
                 return True
