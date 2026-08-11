@@ -1,44 +1,56 @@
-# Pal Architecture Docs
+# Pal Documentation
 
-This directory contains the current Pal V1/V2 architecture contracts.
+This directory contains Pal's user guides, product-level explanation, and
+current V1/V2 architecture contracts.
 
 Older design notes are historical references. These docs are the active baseline for the current implementation.
 
 ## Suggested Reading Order
 
-1. [current_implementation_notes.md](current_implementation_notes.md)
-2. [pal_architecture_v1.md](pal_architecture_v1.md)
-3. [pal_runtime_stack.md](pal_runtime_stack.md)
-4. [pal_bootstrap_and_process.md](pal_bootstrap_and_process.md)
-5. [pal_channel_contract.md](pal_channel_contract.md)
-6. [pal_change_admission.md](pal_change_admission.md)
-7. [pal_llm_contract.md](pal_llm_contract.md)
-8. [pal_execution_contract.md](pal_execution_contract.md)
-9. [pal_behavior_contract.md](pal_behavior_contract.md)
-10. [pal_skill_contract.md](pal_skill_contract.md)
-11. [pal_control_plane.md](pal_control_plane.md)
-12. [pal_introspection_contract.md](pal_introspection_contract.md)
-13. [pal_tasking_contract.md](pal_tasking_contract.md)
-14. [pal_minion_v1.md](pal_minion_v1.md)
-15. [pal_engineering_quality_gates.md](pal_engineering_quality_gates.md)
-16. [pal_reviewer_gate_plan.md](pal_reviewer_gate_plan.md)
-17. [minion_repair_bill_replay.md](minion_repair_bill_replay.md)
-18. [minion_layered_architect_planning.md](minion_layered_architect_planning.md)
-19. [minion_v2_contract_orchestration.md](minion_v2_contract_orchestration.md)
-20. [pal_proactive_contract.md](pal_proactive_contract.md)
-21. [pal_memory_contract.md](pal_memory_contract.md)
-22. [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
-23. [pal_migration_map.md](pal_migration_map.md)
-24. [pal_web_search_contract.md](pal_web_search_contract.md)
-25. [pal_web_fetch_contract.md](pal_web_fetch_contract.md)
-26. [pal_tool_surface.md](pal_tool_surface.md)
-27. [pal_mcp_contract.md](pal_mcp_contract.md)
-28. [capability_forest_structure.md](capability_forest_structure.md)
-29. [turn_runtime_structure.md](turn_runtime_structure.md)
-30. [pal_approval_access_design.md](pal_approval_access_design.md)
+Start here if you want to understand or run Pal:
+
+1. [what_is_pal.md](what_is_pal.md)
+2. [getting_started.md](getting_started.md)
+3. [current_implementation_notes.md](current_implementation_notes.md)
+4. [pal_architecture_v1.md](pal_architecture_v1.md)
+5. [pal_runtime_stack.md](pal_runtime_stack.md)
+6. [pal_bootstrap_and_process.md](pal_bootstrap_and_process.md)
+
+Continue with the contract for the subsystem you are changing:
+
+- [pal_channel_contract.md](pal_channel_contract.md)
+- [pal_change_admission.md](pal_change_admission.md)
+- [pal_llm_contract.md](pal_llm_contract.md)
+- [pal_execution_contract.md](pal_execution_contract.md)
+- [pal_behavior_contract.md](pal_behavior_contract.md)
+- [pal_skill_contract.md](pal_skill_contract.md)
+- [pal_control_plane.md](pal_control_plane.md)
+- [pal_introspection_contract.md](pal_introspection_contract.md)
+- [pal_tasking_contract.md](pal_tasking_contract.md)
+- [pal_minion_v1.md](pal_minion_v1.md)
+- [pal_engineering_quality_gates.md](pal_engineering_quality_gates.md)
+- [pal_reviewer_gate_plan.md](pal_reviewer_gate_plan.md)
+- [minion_repair_bill_replay.md](minion_repair_bill_replay.md)
+- [minion_layered_architect_planning.md](minion_layered_architect_planning.md)
+- [minion_v2_contract_orchestration.md](minion_v2_contract_orchestration.md)
+- [pal_proactive_contract.md](pal_proactive_contract.md)
+- [pal_memory_contract.md](pal_memory_contract.md)
+- [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
+- [pal_migration_map.md](pal_migration_map.md)
+- [pal_web_search_contract.md](pal_web_search_contract.md)
+- [pal_web_fetch_contract.md](pal_web_fetch_contract.md)
+- [pal_tool_surface.md](pal_tool_surface.md)
+- [pal_mcp_contract.md](pal_mcp_contract.md)
+- [capability_forest_structure.md](capability_forest_structure.md)
+- [turn_runtime_structure.md](turn_runtime_structure.md)
+- [pal_approval_access_design.md](pal_approval_access_design.md)
 
 ## Document Map
 
+- `what_is_pal.md`: product-level scope, direct turns versus durable Minion
+  workflows, runtime ownership, and current platform boundaries.
+- `getting_started.md`: release installation, setup, service registration,
+  connection, dependency checks, upgrades, and source builds.
 - `current_implementation_notes.md`: short current-code sync point for prompt assembly, memory projection, artifacts, tool surface, MCP, and live-state boundaries.
 - `pal_architecture_v1.md`: system-level invariants and ownership model.
 - `pal_runtime_stack.md`: module skeleton, owning boundaries, and public interfaces.
