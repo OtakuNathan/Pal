@@ -32,6 +32,8 @@
 #       contract_mode: review_guarded  # type: enum review_guarded | file_frozen
 #       contract_paths: ["include/project/module.hpp"]  # type: unique list[non-empty relative path], min 1
 #       implementation_scopes:  # type: list[PathScope]
+#         # Product writes only. Never claim tests/ or another module's corpus;
+#         # Manager derives tests/<module>/developer and verifier separately.
 #         - kind: directory  # type: enum file | directory
 #           path: "src/module"  # type: non-empty relative path
 #       reference_only: []  # type: unique list[non-empty relative path]

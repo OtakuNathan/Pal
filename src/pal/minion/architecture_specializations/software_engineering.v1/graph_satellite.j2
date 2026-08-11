@@ -2,5 +2,16 @@
 # compares this mapping but never interprets its fields.
 satellite_data:
   family_id: software_engineering
-  architecture: {{ document | tojson }}
+  # Build-system authority is compiled separately into only its declared
+  # owner's workspace policy. Keeping it out of this graph-wide semantic
+  # snapshot prevents an authority-only edit from invalidating every node.
+  architecture:
+    schema_version: {{ document.schema_version | tojson }}
+    graph: {{ document.graph | tojson }}
+    context:
+      language: {{ document.context.language | tojson }}
+      external_dependencies: {{ document.context.external_dependencies | tojson }}
+    requirements: {{ document.requirements | tojson }}
+    modules: {{ document.modules | tojson }}
+    scenarios: {{ document.scenarios | tojson }}
 workspace_policy: {{ node.definition.paths | tojson }}

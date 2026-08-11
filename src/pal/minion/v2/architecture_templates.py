@@ -24,6 +24,7 @@ class FamilyArchitectureSpecialization:
     context_template: str
     module_definition_template: str
     graph_satellite_template: str
+    property_data: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,32 @@ class CompiledArchitectureDefinition:
     graph_satellite_template: str
     example: Mapping[str, Any]
     generation_hash: str
+
+    @property
+    def property_data(self) -> tuple[Mapping[str, Any], ...]:
+        return tuple(
+            copy.deepcopy(dict(item))
+            for item in list(
+                dict(self.schema).get("x-pal-property-data") or []
+            )
+        )
+
+    @property
+    def workspace_authority_rules(self) -> tuple[Mapping[str, Any], ...]:
+        rules: list[Mapping[str, Any]] = []
+        for property_value in self.property_data:
+            rule = dict(property_value.get("workspace_authority") or {})
+            if rule:
+                rules.append(
+                    {
+                        "id": str(property_value.get("id") or ""),
+                        "property_pointer": str(
+                            property_value.get("target_pointer") or ""
+                        ),
+                        **copy.deepcopy(rule),
+                    }
+                )
+        return tuple(rules)
 
     def manager_payload(self) -> dict[str, Any]:
         return {
@@ -122,6 +149,11 @@ class ArchitectureTemplateCompiler:
             + specialization.specialization_id
         )
         schema["x-pal-specialization-id"] = specialization.specialization_id
+        if specialization.property_data:
+            schema["x-pal-property-data"] = [
+                copy.deepcopy(dict(item))
+                for item in specialization.property_data
+            ]
         definitions = dict(schema.get("$defs") or {})
         definitions["context"] = copy.deepcopy(
             dict(specialization.context_schema)
@@ -152,6 +184,27 @@ class ArchitectureTemplateCompiler:
                 f"architecture specialization {expected} example is invalid: "
                 + "; ".join(item.message for item in errors[:8])
             )
+        for raw_property in specialization.property_data:
+            property_value = dict(raw_property)
+            context_key = str(
+                property_value["target_pointer"]
+            ).removeprefix("/context/")
+            authoring_example = copy.deepcopy(dict(specialization.example))
+            authoring_example.setdefault("context", {})[context_key] = (
+                copy.deepcopy(dict(property_value["authoring_shape"]))
+            )
+            property_errors = sorted(
+                Draft202012Validator(schema).iter_errors(authoring_example),
+                key=lambda item: list(item.absolute_path),
+            )
+            if property_errors:
+                raise ValueError(
+                    f"architecture specialization {expected} property "
+                    f"{property_value.get('id')} authoring shape is invalid: "
+                    + "; ".join(
+                        item.message for item in property_errors[:8]
+                    )
+                )
 
         environment = Environment(
             loader=BaseLoader(),
@@ -161,7 +214,7 @@ class ArchitectureTemplateCompiler:
         )
         template = environment.from_string(base_template).render(
             preamble=specialization.preamble,
-            context_template=specialization.context_template,
+            context_template=_context_authoring_template(specialization),
             module_definition_template=(
                 specialization.module_definition_template
             ),
@@ -305,6 +358,10 @@ def _specialization_from_mapping(
         graph_satellite_template=str(
             payload.get("graph_satellite_template") or ""
         ),
+        property_data=tuple(
+            copy.deepcopy(dict(item))
+            for item in list(payload.get("property_data") or [])
+        ),
     )
 
 
@@ -339,6 +396,109 @@ def _validate_specialization(
                 f"architecture specialization {value.specialization_id} "
                 f"requires {name}"
             )
+    property_ids: set[str] = set()
+    property_targets: set[str] = set()
+    expected_fields = {
+        "id",
+        "target_pointer",
+        "guidance",
+        "authoring_shape",
+        "workspace_authority",
+    }
+    context_properties = dict(value.context_schema.get("properties") or {})
+    required_context = set(value.context_schema.get("required") or [])
+    for raw_property in value.property_data:
+        property_value = dict(raw_property or {})
+        unknown = set(property_value) - expected_fields
+        missing = expected_fields - set(property_value)
+        if unknown or missing:
+            raise ValueError(
+                f"architecture specialization {value.specialization_id} "
+                "property data has invalid fields"
+            )
+        property_id = str(property_value.get("id") or "").strip()
+        target = str(property_value.get("target_pointer") or "")
+        if not property_id or property_id in property_ids:
+            raise ValueError(
+                f"architecture specialization {value.specialization_id} "
+                "property ids must be non-empty and unique"
+            )
+        property_ids.add(property_id)
+        if target in property_targets or not target.startswith("/context/"):
+            raise ValueError(
+                f"architecture specialization {value.specialization_id} "
+                "property targets must be unique direct context JSON pointers"
+            )
+        property_targets.add(target)
+        context_key = target.removeprefix("/context/")
+        if "/" in context_key or context_key not in context_properties:
+            raise ValueError(
+                f"architecture specialization {value.specialization_id} "
+                f"property target {target} is not declared by context_schema"
+            )
+        if context_key not in required_context:
+            raise ValueError(
+                f"architecture specialization {value.specialization_id} "
+                f"property target {target} must be required"
+            )
+        if not str(property_value.get("guidance") or "").strip():
+            raise ValueError(
+                f"architecture specialization {value.specialization_id} "
+                f"property {property_id} requires authoring guidance"
+            )
+        if not isinstance(property_value.get("authoring_shape"), Mapping):
+            raise ValueError(
+                f"architecture specialization {value.specialization_id} "
+                f"property {property_id} authoring_shape must be an object"
+            )
+        rule = dict(property_value.get("workspace_authority") or {})
+        expected_rule_fields = {
+            "owner_pointer",
+            "scopes_pointer",
+            "owner_collection_pointer",
+            "owner_constraints",
+        }
+        if set(rule) != expected_rule_fields:
+            raise ValueError(
+                f"architecture specialization {value.specialization_id} "
+                f"property {property_id} workspace_authority has invalid fields"
+            )
+        for field in (
+            "owner_pointer",
+            "scopes_pointer",
+            "owner_collection_pointer",
+        ):
+            pointer = str(rule.get(field) or "")
+            if not pointer.startswith("/"):
+                raise ValueError(
+                    f"architecture specialization {value.specialization_id} "
+                    f"property {property_id} {field} must be an absolute JSON pointer"
+                )
+        if not isinstance(rule.get("owner_constraints"), Mapping):
+            raise ValueError(
+                f"architecture specialization {value.specialization_id} "
+                f"property {property_id} owner_constraints must be an object"
+            )
+
+
+def _context_authoring_template(
+    specialization: FamilyArchitectureSpecialization,
+) -> str:
+    parts = [str(specialization.context_template).rstrip()]
+    for raw_property in specialization.property_data:
+        property_value = dict(raw_property)
+        key = str(property_value["target_pointer"]).removeprefix("/context/")
+        rendered = yaml.safe_dump(
+            {key: copy.deepcopy(dict(property_value["authoring_shape"]))},
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        ).rstrip()
+        guidance = " ".join(
+            str(property_value["guidance"]).strip().split()
+        )
+        parts.append(f"# {guidance}\n{rendered}")
+    return "\n".join(part for part in parts if part)
 
 
 def _stable_hash(value: Mapping[str, Any]) -> str:

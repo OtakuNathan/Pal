@@ -4,14 +4,15 @@
   "context_schema": {
     "type": "object",
     "additionalProperties": false,
-    "required": ["language", "external_dependencies"],
+    "required": ["language", "external_dependencies", "build_system"],
     "properties": {
       "language": {"type": "string", "minLength": 1},
       "external_dependencies": {
         "type": "array",
         "items": {"type": "string"},
         "uniqueItems": true
-      }
+      },
+      "build_system": {"$ref": "#/$defs/buildSystem"}
     }
   },
   "module_definition_schema": {
@@ -137,14 +138,58 @@
         "kind": {"enum": ["file", "directory"]},
         "path": {"type": "string", "minLength": 1}
       }
+    },
+    "buildSystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "owner", "write_scopes"],
+      "properties": {
+        "system": {"type": "string", "minLength": 1},
+        "owner": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "write_scopes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/pathScope"},
+          "uniqueItems": true
+        }
+      }
     }
   },
+  "property_data": [
+    {
+      "id": "build_system",
+      "target_pointer": "/context/build_system",
+      "guidance": "Declare the selected or inherited project build system, the module responsible for authoring its project files, and every repository path that responsibility may write. Use an empty write_scopes list only when the build has no project-owned manifest. This is an asset authority declaration, not a semantic graph node.",
+      "authoring_shape": {
+        "system": "replace_with_selected_or_inherited_build_system",
+        "owner": "replace_with_responsible_module",
+        "write_scopes": [
+          {"kind": "file", "path": "replace_with_build_manifest_path"}
+        ]
+      },
+      "workspace_authority": {
+        "owner_pointer": "/context/build_system/owner",
+        "scopes_pointer": "/context/build_system/write_scopes",
+        "owner_collection_pointer": "/modules",
+        "owner_constraints": {"execution": "produce"}
+      }
+    }
+  ],
   "example": {
     "schema_version": "2",
     "graph": {
       "sink": "delivery"
     },
-    "context": {"language": "C++20", "external_dependencies": []},
+    "context": {
+      "language": "C++20",
+      "external_dependencies": [],
+      "build_system": {
+        "system": "cmake",
+        "owner": "delivery",
+        "write_scopes": [
+          {"kind": "file", "path": "CMakeLists.txt"}
+        ]
+      }
+    },
     "requirements": {
       "decode_frames": {
         "claim": "Decode complete frames.",
