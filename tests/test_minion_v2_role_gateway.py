@@ -11,7 +11,11 @@ from pal.minion.v2.graph_protocol import graph_ir_from_mapping
 from pal.minion.v2.git_scope import scoped_role_git_read_command
 from pal.execution.git_tool import classify_git_command
 from pal.minion.v2.service import MinionV2WorkflowService
-from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
+from pal.minion.v2.submission_drafts import (
+    AUTHORING_CONTRACT_VERSION,
+    SubmissionDraftContext,
+    SubmissionDraftStore,
+)
 from pal.minion.v2.role_gateway import (
     RoleAssignmentGateway,
     RoleGatewayArtifactStore,
@@ -251,16 +255,277 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         self.assertTrue(assignment["submission_artifact_ref"]["sha256"])
         self.assertTrue(self.call("submission_status")["recorded"])
 
-    def test_manager_compiles_architect_yaml_against_pinned_family_generation(
+    def test_gateway_reconciles_draft_cas_race_after_canonical_receipt(self) -> None:
+        first = self.call("draft_read", context=self.context, seed={"checks": []})
+        self.assertEqual(first["snapshot"]["version"], 0)
+        original = self.service.repository.record_role_submission
+
+        def record_then_race(**kwargs):
+            receipt = original(**kwargs)
+            store = SubmissionDraftStore(self.runtime_root)
+            context = SubmissionDraftContext.from_mapping(self.context)
+            store.mutate_precomputed(
+                context,
+                operation_key="late-draft-race",
+                request={"check": "late"},
+                expected_version=0,
+                next_payload={"checks": ["late"]},
+                result={"recorded": True},
+                seed={"checks": []},
+            )
+            return receipt
+
+        self.service.repository.record_role_submission = record_then_race
+        receipt = self.call(
+            "draft_submit",
+            context=self.context,
+            expected_version=0,
+            submission={"status": "candidate_ready", "checks": []},
+        )
+
+        self.assertTrue(receipt["submitted"])
+        draft = self.call("draft_read", context=self.context, seed={})
+        self.assertEqual(draft["snapshot"]["status"], "submitted")
+        self.assertEqual(draft["snapshot"]["version"], 1)
+        with self.assertRaisesRegex(ValueError, "receipt already froze authoring"):
+            self.call(
+                "draft_mutate",
+                context=self.context,
+                operation_key="too-late",
+                request={},
+                expected_version=1,
+                next_payload={},
+                result={},
+                seed={},
+            )
+
+    def test_verifier_rejection_before_receipt_keeps_same_attempt_retryable(self) -> None:
+        corpus = self.workspace / "tests" / "router" / "verifier"
+        corpus.mkdir(parents=True)
+        (corpus / "test_router.py").write_text(
+            "def test_router():\n    assert True\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=self.workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Pal Tests",
+                "-c",
+                "user.email=pal-tests@example.invalid",
+                "commit",
+                "-m",
+                "candidate",
+            ],
+            cwd=self.workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        candidate_digest = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.workspace,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        node_id = "node-router-verification"
+        self.service.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=node_id,
+                actor="test",
+                expected_version=0,
+                payload={
+                    "epoch_id": "epoch-router",
+                    "module_name": "router",
+                    "unit_contract_ref": {"sha256": "contract-router"},
+                    "unit_work_view_ref": self.input_ref.to_dict(),
+                    "candidate_digest": candidate_digest,
+                    "path_policy": {
+                        "verification_corpus": {
+                            "kind": "directory",
+                            "path": "tests/router/verifier",
+                        }
+                    },
+                },
+            )
+        )
+        session_id = "session-router-verification"
+        self.service.repository.ensure_role_session(
+            session_id=session_id,
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id=node_id,
+            role="verifier",
+            mode="module",
+            role_profile_id="software_engineering.v2_verifier",
+            family_binding_sha="binding",
+            scope_kind="module",
+            subject_key="router",
+        )
+        assignment = self.service.repository.create_role_assignment(
+            RoleAssignmentRequest(
+                assignment_key="router-verification-cycle-1",
+                session_id=session_id,
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.DAG_NODE_RUN.value,
+                aggregate_id=node_id,
+                role="verifier",
+                mode="module",
+                role_profile_id="software_engineering.v2_verifier",
+                family_binding_sha="binding",
+                input_fingerprint="router-verification-input",
+                required_inputs=(),
+                input_refs={"module_work_view": self.input_ref.to_dict()},
+                execution_spec={"effect_type": "run_verifier_role"},
+                submission_kind="verification",
+            )
+        )
+        assignment_id = str(assignment["assignment_id"])
+        attempt = self.service.repository.claim_role_assignment(assignment_id)
+        attempt_id = str(attempt["attempt_id"])
+        lease_resource = f"assignment:{assignment_id}"
+        fence = self.service.repository.claim_lease(
+            lease_resource,
+            attempt_id,
+            ttl_seconds=120,
+        ).fencing_token
+        review_scratch = self.runtime_root / "verifier-scratch"
+        review_scratch.mkdir()
+        prompt_ref = self.service.artifacts.put_json(
+            {
+                "workspace": {
+                    "repo_path": str(self.workspace),
+                    "review_scratch_dir": str(review_scratch),
+                    "verification_scratch_only": False,
+                }
+            },
+            artifact_type="RolePromptPackArtifact",
+        )
+        self.service.repository.start_role_attempt(
+            assignment_id=assignment_id,
+            attempt_id_value=attempt_id,
+            lease_resource_key=lease_resource,
+            fencing_token=fence,
+            prompt_pack_ref=prompt_ref.to_dict(),
+        )
+        token = self.service.repository.issue_role_attempt_access_token(
+            assignment_id=assignment_id,
+            attempt_id_value=attempt_id,
+            fencing_token=fence,
+        )
+        context = {
+            "workflow_id": "workflow-router",
+            "invocation_id": attempt_id,
+            "lease_resource_key": lease_resource,
+            "fencing_token": fence,
+            "role": "verifier",
+            "mode": "module",
+            "draft_kind": "verification",
+            "input_fingerprint": "router-verification-input",
+            "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
+        }
+        submission = {
+            "schema_version": "4",
+            "outcome": "pass",
+            "findings": [],
+            "advisories": [],
+            "recorded_results": [
+                {
+                    "name": "candidate diff risk",
+                    "case_kind": "diff_risk",
+                    "obligation_tags": ["candidate_delta_review"],
+                }
+            ],
+            "tool_receipts": [
+                {"kind": "command", "ok": True, "output_sha256": "ok"}
+            ],
+        }
+
+        build_file = self.workspace / "build" / "CMakeCache.txt"
+        build_file.parent.mkdir()
+        build_file.write_text("transient\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "outside the bound module corpus"):
+            self.gateway.call(
+                "draft_submit",
+                {
+                    "access_token": token,
+                    "context": context,
+                    "expected_version": 0,
+                    "submission": submission,
+                },
+            )
+
+        rejected_assignment = self.service.repository.read_role_assignment(
+            assignment_id
+        )
+        self.assertEqual(rejected_assignment["state"], "running")
+        self.assertFalse(rejected_assignment["submission_artifact_ref"])
+        draft = self.gateway.call(
+            "draft_read",
+            {"access_token": token, "context": context, "seed": {}},
+        )
+        self.assertEqual(draft["snapshot"]["status"], "active")
+
+        build_file.unlink()
+        build_file.parent.rmdir()
+        receipt = self.gateway.call(
+            "draft_submit",
+            {
+                "access_token": token,
+                "context": context,
+                "expected_version": 0,
+                "submission": submission,
+            },
+        )
+        self.assertTrue(receipt["submitted"])
+        accepted_assignment = self.service.repository.read_role_assignment(
+            assignment_id
+        )
+        self.assertEqual(accepted_assignment["state"], "result_recorded")
+
+    def test_manager_compiles_software_architecture_against_pinned_generation(
         self,
     ) -> None:
+        self._assert_manager_compiles_architecture_generation(
+            family_profile="software_engineering.v2_architect",
+            specialization_id="software_engineering.v1",
+            expect_build_authority=True,
+        )
+
+    def test_manager_compiles_generic_architecture_against_pinned_generation(
+        self,
+    ) -> None:
+        self._assert_manager_compiles_architecture_generation(
+            family_profile="general.generic",
+            specialization_id="general.v1",
+            expect_build_authority=False,
+        )
+
+    def _assert_manager_compiles_architecture_generation(
+        self,
+        *,
+        family_profile: str,
+        specialization_id: str,
+        expect_build_authority: bool,
+    ) -> None:
         binding_ref = self.service.catalog.publish_family_binding(
-            "general.generic"
+            family_profile
         )
         assignment, attempt, token, fence, resource = (
             self._create_architect_assignment(binding_ref.sha256)
         )
-        definition = ArchitectureTemplateCompiler().compile("general.v1")
+        definition = ArchitectureTemplateCompiler().compile(specialization_id)
         contract_context = {
             "workflow_id": "workflow-router",
             "invocation_id": attempt,
@@ -350,7 +615,7 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
                 receipt["submission_artifact_ref"]
             )
         )
-        self.assertEqual(stored["contract_schema"], "general.v1")
+        self.assertEqual(stored["contract_schema"], specialization_id)
         self.assertEqual(stored["source"], "architect.yaml")
         self.assertNotIn("contract_schema", stored["contract"])
         # The authored architecture is revision 2 because revision 1 was
@@ -358,6 +623,19 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         # must nevertheless occupy GraphIR generation 1.
         self.assertEqual(stored["graph_ir"]["generation"], 1)
         graph = graph_ir_from_mapping(stored["graph_ir"])
+        if expect_build_authority:
+            self.assertIn(
+                {"kind": "file", "path": "CMakeLists.txt"},
+                graph.nodes["delivery"].workspace_policy[
+                    "implementation_scopes"
+                ],
+            )
+            self.assertNotIn(
+                {"kind": "file", "path": "CMakeLists.txt"},
+                graph.nodes["decoder"].workspace_policy[
+                    "implementation_scopes"
+                ],
+            )
         WorkflowCoordinator(self.service.repository).install_graph(
             workflow_id="workflow-router",
             graph=graph,
@@ -496,10 +774,25 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
         self.assertEqual(blame_with_separator["returncode"], 0)
         self.assertIn(grep["returncode"], {0, 1})
 
+    def test_git_read_allows_only_current_branch_identity(self) -> None:
+        current = self.call(
+            "git_read",
+            cmd="branch --show-current",
+            cwd=str(self.workspace),
+        )
+
+        self.assertEqual(current["returncode"], 0)
+        self.assertEqual(current["stdout"].strip(), "main")
+        self.assertEqual(current["classification"]["operation_kind"], "read")
+        for command in ("branch", "branch --all", "branch --list"):
+            with self.subTest(command=command), self.assertRaisesRegex(
+                ValueError,
+                "current workspace identity",
+            ):
+                self.call("git_read", cmd=command, cwd=str(self.workspace))
+
     def test_git_read_is_limited_to_candidate_range_and_module_paths(self) -> None:
         for command in (
-            "log --all --oneline",
-            "log --oneline -5",
             "show main",
             "diff -- README.md",
             "show HEAD:README.md",
@@ -520,6 +813,19 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
             cwd=str(self.workspace),
         )
         self.assertEqual(result["classification"]["operation_kind"], "read")
+
+        log = self.call(
+            "git_read",
+            cmd="log --all --oneline -5",
+            cwd=str(self.workspace),
+        )
+        self.assertEqual(log["classification"]["operation_kind"], "read")
+        rev_list = self.call(
+            "git_read",
+            cmd="rev-list --all",
+            cwd=str(self.workspace),
+        )
+        self.assertEqual(rev_list["classification"]["operation_kind"], "read")
 
     def test_git_read_rejects_mutations_unknown_commands_and_out_of_scope_cwd(self) -> None:
         for command in ("restore -- README.md", "commit -am nope", "frobnicate"):
@@ -556,6 +862,22 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
                 policy=policy,
             )
 
+    def test_git_read_uses_complete_candidate_for_read_only_repo_reviewer(self) -> None:
+        policy = classify_git_command("status --short")
+        command = scoped_role_git_read_command(
+            prompt_pack={
+                "workspace": {
+                    "repo_path": str(self.workspace),
+                    "workspace_policy": {"mode": "read_only_repo"},
+                }
+            },
+            assignment={"input_refs": {}},
+            artifact_reader=lambda _ref: {},
+            policy=policy,
+        )
+
+        self.assertEqual(command, "status --short -- .")
+
     def _create_architect_assignment(
         self,
         family_binding_sha: str,
@@ -580,7 +902,7 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
             aggregate_id=architecture_revision_id,
             role="architect",
             mode="author",
-            role_profile_id="general.architect",
+            role_profile_id="software_engineering.v2_architect",
             family_binding_sha=family_binding_sha,
             scope_kind=AggregateType.ARCHITECTURE_REVISION.value,
             subject_key=architecture_revision_id,
@@ -594,7 +916,7 @@ class MinionV2RoleGatewayTests(unittest.TestCase):
                 aggregate_id=architecture_revision_id,
                 role="architect",
                 mode="author",
-                role_profile_id="general.architect",
+                role_profile_id="software_engineering.v2_architect",
                 family_binding_sha=family_binding_sha,
                 input_fingerprint="architecture-input",
                 required_inputs=(),

@@ -106,7 +106,7 @@ class ToolSearchTests(unittest.TestCase):
     def test_filters_apply_to_generation_metadata(self) -> None:
         payload = self.search(
             namespace="action",
-            module_id="memory",
+            module_name="memory",
             family="memory",
             tags=["durable"],
         )
@@ -117,6 +117,8 @@ class ToolSearchTests(unittest.TestCase):
         payload = self.search(query="lookup", top_k=1, facets=True)
         self.assertTrue(payload["truncated"])
         self.assertIn("facets", payload)
+        self.assertIn("module_name", payload["usage_hint"])
+        self.assertNotIn("module_id", payload["usage_hint"])
         modules = {item["module_id"]: item["count"] for item in payload["facets"]["modules"]}
         self.assertEqual(modules["memory"], 1)
         self.assertEqual(modules["web_search"], 1)

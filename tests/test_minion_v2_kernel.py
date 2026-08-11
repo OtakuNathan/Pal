@@ -32,6 +32,7 @@ from pal.minion.v2.contracts import (
     TaskState,
 )
 from pal.minion.v2.recovery import MinionV2Recovery
+from pal.minion.v2.repository import _active_projection_snapshot
 from pal.minion.v2.sessions import (
     architecture_reviewer_session_id,
     architect_session_id,
@@ -447,7 +448,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 {"architecture_cycle_id": "cycle-1"},
             ),
         )
-        self.assertNotEqual(
+        self.assertEqual(
             architecture_reviewer_session_id(
                 "wf-1",
                 "arch-1",
@@ -464,6 +465,24 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     "architecture_cycle_id": "cycle-1",
                     "architecture_submission_cycle": 2,
                     "architecture_manifest_ref": {"sha256": "manifest-b"},
+                },
+            ),
+        )
+        self.assertNotEqual(
+            architecture_reviewer_session_id(
+                "wf-1",
+                "arch-1",
+                {
+                    "architecture_cycle_id": "cycle-1",
+                    "reviewer_session_generation": 1,
+                },
+            ),
+            architecture_reviewer_session_id(
+                "wf-1",
+                "arch-1",
+                {
+                    "architecture_cycle_id": "cycle-1",
+                    "reviewer_session_generation": 2,
                 },
             ),
         )
@@ -852,25 +871,29 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
 
     def test_triage_resolution_preserves_pending_control_intent(self) -> None:
         cases = (
-            (AggregateType.WORKFLOW, "PAUSE_REQUESTED", "reconcile_workflow"),
+            (AggregateType.WORKFLOW, "PAUSE_REQUESTED", ("reconcile_workflow",)),
             (
                 AggregateType.ARCHITECTURE_REVISION,
                 "CANCEL_REQUESTED",
-                "reconcile_semantic_state",
+                ("reconcile_semantic_state",),
             ),
             (
                 AggregateType.EXECUTION_EPOCH,
                 "PAUSE_REQUESTED",
-                "reconcile_execution_epoch",
+                ("reconcile_execution_epoch",),
             ),
-            (AggregateType.DAG_NODE_RUN, "CANCEL_REQUESTED", "reconcile_semantic_state"),
+            (
+                AggregateType.DAG_NODE_RUN,
+                "CANCEL_REQUESTED",
+                ("reconcile_semantic_state", "schedule_ready_nodes"),
+            ),
             (
                 AggregateType.STANDALONE_REVIEW,
                 "PAUSE_REQUESTED",
-                "reconcile_semantic_state",
+                ("reconcile_semantic_state",),
             ),
         )
-        for aggregate_type, resume_state, expected_effect in cases:
+        for aggregate_type, resume_state, expected_effects in cases:
             with self.subTest(aggregate_type=aggregate_type, resume_state=resume_state):
                 snapshot = AggregateSnapshot(
                     aggregate_type=aggregate_type,
@@ -894,8 +917,39 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 self.assertEqual(result.snapshot.state, resume_state)
                 self.assertEqual(
                     [effect.effect_type for effect in result.effects],
-                    [expected_effect],
+                    list(expected_effects),
                 )
+
+    def test_blocked_node_resume_schedules_dependency_readiness(self) -> None:
+        paused = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="paused-blocked-node",
+            workflow_id="wf_test",
+            state=DagNodeRunState.PAUSED,
+            version=4,
+            payload={"resume_state": DagNodeRunState.REVIEW_BLOCKED_BY_DEPS.value},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        result = self.engine.transition(
+            paused,
+            self.action(
+                "RESUME",
+                AggregateType.DAG_NODE_RUN,
+                paused.aggregate_id,
+                expected_version=4,
+            ),
+        )
+
+        self.assertEqual(
+            result.snapshot.state,
+            DagNodeRunState.REVIEW_BLOCKED_BY_DEPS,
+        )
+        self.assertEqual(
+            [effect.effect_type for effect in result.effects],
+            ["resume_semantic_state", "schedule_ready_nodes"],
+        )
 
     def test_node_snapshot_failures_record_a_recoverable_resume_state(self) -> None:
         for state, action_type in (
@@ -1846,13 +1900,50 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertEqual(published.state, ArchitectureRevisionState.HUMAN_REVIEW)
         self.assertEqual(published.payload["human_review_card_ref"], {"sha256": "card"})
 
-        reopened = self.engine.transition(
+        refreshing = self.engine.transition(
             published,
+            self.action(
+                "REFRESH_HUMAN_REVIEW_CARD",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_human_review",
+                expected_version=6,
+                payload={"architecture_manifest_ref": {"sha256": "manifest"}},
+            ),
+        )
+        self.assertEqual(refreshing.snapshot.state, ArchitectureRevisionState.HUMAN_REVIEW)
+        self.assertNotIn("human_review_card_ref", refreshing.snapshot.payload)
+        self.assertEqual(
+            [effect.effect_type for effect in refreshing.effects],
+            ["publish_architecture_review_request"],
+        )
+        self.assertEqual(
+            refreshing.snapshot.payload["architecture_manifest_ref"],
+            {"sha256": "manifest"},
+        )
+        with self.assertRaisesRegex(
+            TransitionGuardError,
+            "must name the active architecture manifest",
+        ):
+            self.engine.transition(
+                published,
+                self.action(
+                    "REFRESH_HUMAN_REVIEW_CARD",
+                    AggregateType.ARCHITECTURE_REVISION,
+                    "arch_human_review",
+                    expected_version=6,
+                    payload={
+                        "architecture_manifest_ref": {"sha256": "other"}
+                    },
+                ),
+            )
+
+        reopened = self.engine.transition(
+            refreshing.snapshot,
             self.action(
                 "REOPEN_ARCHITECTURE_REVIEW",
                 AggregateType.ARCHITECTURE_REVISION,
                 "arch_human_review",
-                expected_version=6,
+                expected_version=7,
                 payload={"reason": "the previous reviewer input omitted Verification Topology"},
             ),
         )
@@ -1973,6 +2064,66 @@ class MinionV2PersistenceTests(unittest.TestCase):
         projection = self.repository.read_workflow_projection("wf_1")
         self.assertEqual(projection["current_phase"], "created")
         self.assertEqual(projection["liveness"], "outbox")
+
+    def test_replan_projection_prefers_workflow_child_revision_over_stale_epoch_pointer(
+        self,
+    ) -> None:
+        def snapshot(
+            aggregate_type: AggregateType,
+            aggregate_id: str,
+            state: str,
+            payload: dict,
+        ) -> AggregateSnapshot:
+            return AggregateSnapshot(
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                workflow_id="wf-replan-projection",
+                state=state,
+                version=1,
+                payload=payload,
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+            )
+
+        workflow = snapshot(
+            AggregateType.WORKFLOW,
+            "wf-replan-projection",
+            "ACTIVE",
+            {
+                "execution_epoch_id": "epoch-replan-projection",
+                "architecture_revision_id": "arch-child",
+            },
+        )
+        epoch = snapshot(
+            AggregateType.EXECUTION_EPOCH,
+            "epoch-replan-projection",
+            "REPLAN_REQUIRED",
+            {"active_replan_revision_id": "arch-root"},
+        )
+        root = snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            "arch-root",
+            "SUPERSEDED",
+            {"source_execution_epoch_id": epoch.aggregate_id},
+        )
+        child = snapshot(
+            AggregateType.ARCHITECTURE_REVISION,
+            "arch-child",
+            "HUMAN_REVIEW",
+            {
+                "parent_revision_id": root.aggregate_id,
+                "architecture_cycle_id": root.aggregate_id,
+            },
+        )
+
+        active = _active_projection_snapshot(
+            [workflow, epoch, root, child],
+            workflow,
+        )
+
+        self.assertIsNotNone(active)
+        self.assertEqual(active.aggregate_id, child.aggregate_id)
+        self.assertEqual(active.state, "HUMAN_REVIEW")
 
     def test_outbox_effect_carries_the_state_and_owner_that_created_it(self) -> None:
         result = self.repository.dispatch(
@@ -2351,6 +2502,106 @@ class MinionV2PersistenceTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(invocation["last_completed_turn"], 7)
         self.assertEqual((event["phase"], event["round_index"], event["tool_call_count"]), ("llm_round_completed", 7, 19))
+
+    def test_role_checklist_progress_reads_current_attempt_durable_cursor(self) -> None:
+        now = "2026-08-10T12:55:08+00:00"
+        self.repository.ensure_schema()
+        items = {
+            "items": [
+                {
+                    "item_id": "internal-requirements",
+                    "kind": "phase",
+                    "summary": "requirements design",
+                    "status": "completed",
+                },
+                {
+                    "item_id": "internal-contract",
+                    "kind": "phase",
+                    "summary": "contract projection",
+                    "status": "in_progress",
+                },
+            ]
+        }
+        with self.repository._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO minion_v2_role_sessions(
+                    session_id, workflow_id, aggregate_type, aggregate_id,
+                    role, mode, status, created_at, updated_at
+                ) VALUES ('inv-checklist', 'wf_1', 'architecture_revision',
+                          'arch-checklist', 'architect', 'author', 'active', ?, ?)
+                """,
+                (now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO minion_v2_role_assignments(
+                    assignment_id, assignment_key, request_hash, session_id,
+                    workflow_id, aggregate_type, aggregate_id, role, mode,
+                    role_profile_id, family_binding_sha, input_fingerprint,
+                    submission_kind, state, active_attempt_id, created_at, updated_at
+                ) VALUES ('asg-checklist', 'key-checklist', 'request-checklist',
+                          'inv-checklist', 'wf_1', 'architecture_revision',
+                          'arch-checklist', 'architect', 'author',
+                          'lifestyle.architect', 'binding', 'input', 'contract',
+                          'running', 'att-checklist', ?, ?)
+                """,
+                (now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO minion_v2_role_attempts(
+                    attempt_id, assignment_id, attempt_index,
+                    lease_resource_key, fencing_token, status,
+                    started_at, updated_at
+                ) VALUES ('att-checklist', 'asg-checklist', 1,
+                          'assignment:asg-checklist', 1, 'running', ?, ?)
+                """,
+                (now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO minion_v2_submission_drafts(
+                    draft_key, workflow_id, invocation_id, lease_resource_key,
+                    fencing_token, role, mode, draft_kind, input_fingerprint,
+                    authoring_contract_version, version, status, payload_json,
+                    created_at, updated_at
+                ) VALUES ('draft-checklist', 'wf_1', 'att-checklist',
+                          'assignment:asg-checklist', 1, 'architect', 'author',
+                          'work_items', 'input', ?, 2, 'active', ?, ?, ?)
+                """,
+                (AUTHORING_CONTRACT_VERSION, json.dumps(items), now, now),
+            )
+
+        progress = self.repository.read_role_checklist_progress("inv-checklist")
+
+        self.assertIsNotNone(progress)
+        self.assertTrue(progress["activity_observed"])
+        self.assertEqual(progress["assignment_state"], "running")
+        self.assertEqual(progress["attempt_state"], "running")
+        self.assertEqual(
+            progress["checklist"],
+            {
+                "status": "active",
+                "version": 2,
+                "completed": 1,
+                "total": 2,
+                "current": "contract projection",
+                "items": [
+                    {
+                        "kind": "phase",
+                        "summary": "requirements design",
+                        "status": "completed",
+                    },
+                    {
+                        "kind": "phase",
+                        "summary": "contract projection",
+                        "status": "in_progress",
+                    },
+                ],
+                "updated_at": now,
+            },
+        )
 
     def test_lease_fencing_rejects_zombie_worker(self) -> None:
         first = self.repository.claim_lease("worktree:node_1", "worker_1", ttl_seconds=60)

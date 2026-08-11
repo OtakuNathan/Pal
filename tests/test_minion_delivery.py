@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from pal.foundation import EventEnvelope
-from pal.minion.source import MinionControlEventHandler
+from pal.minion.source import MinionControlEventHandler, _event_kind
 from pal.shared import EventKind, SourceKind
 
 
@@ -30,10 +30,12 @@ class _Provider:
 class _Core:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.actions: list[object] = []
         self.fail_second_attachment_once = True
 
     async def handle_control_action_async(self, action, *, require_provider):
         self.assert_require_provider(require_provider)
+        self.actions.append(action)
         delivery = action.delivery
         if delivery.delivery_kind == "attachment":
             part = str(delivery.payload.get("path") or "")
@@ -52,6 +54,119 @@ class _Core:
 
 
 class MinionCompositeDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_workflow_terminal_uses_terminal_delivery_path(self) -> None:
+        self.assertEqual(_event_kind("workflow_terminal"), EventKind.MINION_TERMINAL)
+
+    def test_architecture_review_resolution_uses_its_own_delivery_path(self) -> None:
+        self.assertEqual(
+            _event_kind("architecture_review_resolved"),
+            EventKind.MINION_ARCHITECTURE_REVIEW_RESOLVED,
+        )
+
+    async def test_architecture_review_resolution_closes_original_card(self) -> None:
+        provider = _Provider()
+        core = _Core()
+        core.fail_second_attachment_once = False
+        context = SimpleNamespace(port_registry={"core:core": core})
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_ARCHITECTURE_REVIEW_RESOLVED,
+            source_kind=SourceKind.MINION,
+            payload={
+                "delivery_id": "delivery-review-resolved",
+                "workflow_id": "workflow-1",
+                "architecture_revision_id": "revision-1",
+                "summary": "Minion architecture decision recorded (accepted).",
+                "route": {
+                    "endpoint_id": "socket",
+                    "channel_kind": "socket",
+                    "reply_target": {"session_id": "session-1"},
+                },
+            },
+        )
+
+        await MinionControlEventHandler(provider=provider).handle(event, context)
+
+        self.assertEqual(core.calls, ["primary"])
+        action = core.actions[0]
+        self.assertEqual(action.action_kind, "interactive_resolve")
+        self.assertEqual(
+            action.delivery.interaction.interaction_id,
+            "minion_v2_architecture_revision-1",
+        )
+        self.assertEqual(provider.settlements, [True])
+
+    async def test_terminal_closes_worker_owned_pending_interactions(self) -> None:
+        provider = _Provider()
+        core = _Core()
+        core.fail_second_attachment_once = False
+        context = SimpleNamespace(port_registry={"core:core": core})
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_TERMINAL,
+            source_kind=SourceKind.MINION,
+            payload={
+                "delivery_id": "delivery-terminal",
+                "workflow_id": "workflow-1",
+                "status": "cancelled",
+                "summary": "Minion workflow cancelled.",
+                "resolved_interactions": [
+                    {
+                        "interaction_id": "approval-1",
+                        "interaction_kind": "minion_approval",
+                    },
+                    {
+                        "interaction_id": "clarification-1",
+                        "interaction_kind": "minion_clarification",
+                    },
+                ],
+                "route": {
+                    "endpoint_id": "socket",
+                    "channel_kind": "socket",
+                    "reply_target": {"session_id": "session-1"},
+                },
+            },
+        )
+        handler = MinionControlEventHandler(provider=provider)
+
+        await handler.handle(event, context)
+
+        self.assertEqual(
+            [action.action_kind for action in core.actions],
+            ["interactive_resolve", "interactive_resolve", "route_reply"],
+        )
+        self.assertEqual(
+            provider.parts,
+            {"interaction:0", "interaction:1", "primary"},
+        )
+        self.assertEqual(provider.settlements, [True])
+
+    async def test_resolved_clarification_closes_the_original_interaction(self) -> None:
+        provider = _Provider()
+        core = _Core()
+        core.fail_second_attachment_once = False
+        context = SimpleNamespace(port_registry={"core:core": core})
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_CLARIFICATION_RESOLVED,
+            source_kind=SourceKind.MINION,
+            payload={
+                "delivery_id": "delivery-resolved",
+                "workflow_id": "workflow-1",
+                "clarification_id": "clarification-1",
+                "summary": "Minion clarification recorded.",
+                "route": {
+                    "endpoint_id": "socket",
+                    "channel_kind": "socket",
+                    "reply_target": {"session_id": "session-1"},
+                },
+            },
+        )
+        handler = MinionControlEventHandler(provider=provider)
+
+        await handler.handle(event, context)
+
+        self.assertEqual(core.calls, ["primary"])
+        self.assertEqual(provider.parts, {"primary"})
+        self.assertEqual(provider.settlements, [True])
+
     async def test_retry_skips_parts_already_accepted_by_channel(self) -> None:
         provider = _Provider()
         core = _Core()

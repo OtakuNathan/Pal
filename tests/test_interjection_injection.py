@@ -3,7 +3,12 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
+from pal.channel.contracts import (
+    ChannelEnvelope,
+    EndpointConfig,
+    ResponseHandle,
+    TurnDeliveryBinding,
+)
 from pal.core.agent_turn_runtime import AgentTurnRuntime, AgentTurnGuardHost
 from pal.core.interjection import inject_pending_interjection_async
 from pal.core.contracts import CoreRuntimeState
@@ -103,6 +108,15 @@ class _FakeLLMPort:
             ),
             response_mode=LLMResponseMode.CHAT,
         )
+
+
+class _FakeOutputPort:
+    def __init__(self) -> None:
+        self.replies: list[tuple[TurnDeliveryBinding, str]] = []
+
+    def queue_reply(self, binding: TurnDeliveryBinding, text: str) -> str:
+        self.replies.append((binding, text))
+        return "reply-1"
 
 
 class InterjectionInjectionTests(unittest.TestCase):
@@ -339,13 +353,64 @@ class InterjectionInjectionTests(unittest.TestCase):
             "opening-session",
         )
 
+    def test_cross_scope_interjection_finishes_its_source_request(self) -> None:
+        opening = _make_envelope(
+            turn_id="turn-main", text="run", session_id="opening-session"
+        )
+        continuation = self.turn_manager.start(opening)
+        self.context.port_registry["memory:memory"].begin_l1_turn(
+            "turn-main", user_text="run"
+        )
+        queued = _make_envelope(
+            turn_id="interjection-other",
+            text="additional context",
+            session_id="other-session",
+        )
+        queued = ChannelEnvelope(
+            event=queued.event,
+            endpoint=queued.endpoint,
+            response_handle=queued.response_handle,
+            opening_delivery_binding=TurnDeliveryBinding.from_envelope(
+                queued,
+                control_scope_key="scope:other",
+            ),
+        )
+        output = _FakeOutputPort()
+        self.context.port_registry["agent_io:output"] = output
+        self.state.pending_channel_turns.append(queued)
+
+        asyncio.run(
+            inject_pending_interjection_async(
+                context=self.context,
+                state=self.state,
+                continuation=continuation,
+            )
+        )
+
+        self.assertEqual(len(output.replies), 1)
+        binding, text = output.replies[0]
+        self.assertEqual(binding.response_handle.reply_target["session_id"], "other-session")
+        self.assertIn("active conversation", text)
+        self.assertEqual(len(self.state.pending_channel_turns), 0)
+
     def test_cancellation_waits_for_async_l1_append_and_does_not_lose_message(self) -> None:
         backing = self.context.port_registry["memory:memory"]
         opening = _make_envelope(turn_id="turn-main", text="run")
         continuation = self.turn_manager.start(opening)
         backing.begin_l1_turn("turn-main", user_text="run")
         queued = _make_envelope(turn_id="interjection-cancel", text="must survive")
+        queued = ChannelEnvelope(
+            event=queued.event,
+            endpoint=queued.endpoint,
+            response_handle=queued.response_handle,
+            opening_delivery_binding=TurnDeliveryBinding.from_envelope(
+                queued,
+                control_scope_key="scope:cancel-source",
+            ),
+        )
         self.state.pending_channel_turns.append(queued)
+        output = _FakeOutputPort()
+        self.context.port_registry["agent_io:output"] = output
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -379,6 +444,7 @@ class InterjectionInjectionTests(unittest.TestCase):
             [message.text for message in active.messages].count("must survive"),
             1,
         )
+        self.assertEqual(len(output.replies), 1)
 
     def test_double_cancellation_cannot_start_committed_interjection_as_new_turn(self) -> None:
         backing = self.context.port_registry["memory:memory"]

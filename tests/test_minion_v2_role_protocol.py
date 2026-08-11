@@ -12,6 +12,7 @@ from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.semantic_orchestration import SemanticOrchestrator
+from pal.minion.v2.sessions import architecture_reviewer_session_id
 from pal.minion.v2.role_protocol import (
     RoleAssignmentAction,
     RoleAssignmentRequest,
@@ -123,6 +124,51 @@ class MinionV2RoleProtocolTests(unittest.TestCase):
         self.assertEqual(retired, ("orphan-session",))
         self.assertTrue(store.current_path("session-router").is_file())
         self.assertFalse(store.current_path("orphan-session").exists())
+
+    def test_architecture_reviewer_cannot_retire_before_cycle_is_terminal(self) -> None:
+        revision_id = "arch-reviewer-root"
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_ARCHITECTURE_REVISION",
+                workflow_id="workflow-router",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id=revision_id,
+                actor="test",
+                expected_version=0,
+                payload={
+                    "architecture_cycle_id": revision_id,
+                    "requirements_ref": self.input_ref.to_dict(),
+                },
+            )
+        )
+        session_id = architecture_reviewer_session_id(
+            "workflow-router",
+            revision_id,
+            {"architecture_cycle_id": revision_id},
+        )
+        self.repository.ensure_role_session(
+            session_id=session_id,
+            workflow_id="workflow-router",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id=revision_id,
+            role="reviewer",
+            mode="architecture",
+            role_profile_id="software_engineering.v2_reviewer",
+            family_binding_sha="binding",
+            scope_kind="architecture_cycle",
+            subject_key=revision_id,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "architecture role session cannot complete while its correction cycle is open",
+        ):
+            self.repository.complete_role_session(session_id)
+
+        self.assertEqual(
+            self.repository.read_role_session(session_id)["status"],
+            RoleSessionState.ACTIVE.value,
+        )
 
     def start_attempt(self, assignment_id: str) -> tuple[dict, int]:
         attempt = self.repository.claim_role_assignment(assignment_id)

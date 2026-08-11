@@ -28,7 +28,7 @@ from pal.minion.v2 import (
     MinionV2Repository,
 )
 from pal.minion.v2.contracts import AggregateSnapshot, SubmissionInvariantError
-from pal.minion.v2.delivery import DeliveryService
+from pal.minion.v2.delivery import DeliveryService, is_github_pull_request_remote
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.cycle_protocol import (
@@ -86,6 +86,8 @@ from pal.minion.v2.semantic_orchestration.orchestrator import (
     _reject_manager_identity_fields,
     _routable_verification_findings,
     _resolve_dependency_node_id,
+    _semantic_verifier_instruction,
+    _manager_required_system_scenario_work_items,
     _module_verifier_git_diff_refs,
     _validate_skeleton_coder_report,
     _verifier_reference_refs,
@@ -157,6 +159,13 @@ class MinionV2VerificationTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    def test_verifier_instruction_keeps_transient_builds_out_of_worktree(self) -> None:
+        for graph_sink in (False, True):
+            instruction = _semantic_verifier_instruction(graph_sink=graph_sink)
+            self.assertIn("workspace.build_scratch_dir", instruction)
+            self.assertIn("Never create build output in the repository worktree", instruction)
+            self.assertIn("bound verification corpus", instruction)
+
     def _git_repo(self, name: str = "repo") -> tuple[Path, str]:
         root = self.runtime_root / name
         root.mkdir(parents=True)
@@ -184,6 +193,53 @@ class MinionV2VerificationTests(unittest.TestCase):
             check=True,
         ).stdout.strip()
         return root, digest
+
+    def test_repair_path_owners_consume_compiled_property_authority(self) -> None:
+        node = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-cli",
+            workflow_id="wf-build-authority",
+            state="VERIFYING",
+            version=1,
+            payload={
+                "module_name": "cli",
+                "node_kind": "unit",
+                "dependency_node_ids": [],
+                "contract_dependency_node_ids": [],
+                "path_policy": {
+                    "contract_mode": "review_guarded",
+                    "contract_paths": ["include/cli.hpp"],
+                    "implementation_scopes": [
+                        {"kind": "directory", "path": "src/cli"},
+                        {"kind": "file", "path": "CMakeLists.txt"},
+                    ],
+                    "workspace_authorities": [
+                        {
+                            "id": "build_system",
+                            "property": {
+                                "system": "cmake",
+                                "owner": "cli",
+                                "write_scopes": [
+                                    {"kind": "file", "path": "CMakeLists.txt"}
+                                ],
+                            },
+                            "write_scopes": [
+                                {"kind": "file", "path": "CMakeLists.txt"}
+                            ],
+                        }
+                    ],
+                },
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        owners = _verification_repair_path_owners(self.repository, node)
+
+        self.assertIn(
+            {"kind": "file", "path": "CMakeLists.txt"},
+            owners["cli"],
+        )
 
     def test_swe_verifier_uses_semantic_outcomes_and_manager_recorded_evidence(self) -> None:
         repo, _digest = self._git_repo("semantic-tool")
@@ -376,6 +432,47 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "finding_"
             )
         )
+
+    def test_verifier_fail_explains_that_advisory_does_not_reconcile(self) -> None:
+        repo, _digest = self._git_repo("verifier-failed-advisory")
+        policy = self.runtime_root / "failed-advisory-policy.json"
+        policy.write_text(
+            json.dumps({"lsp_policy": "never"}),
+            encoding="utf-8",
+        )
+        workspace = self._bind_workspace(
+            {
+                "repo_path": str(repo),
+                "artifact_dir": str(self.runtime_root / "failed-advisory-artifacts"),
+                "artifact_stage_dir": str(self.runtime_root / "failed-advisory-stage"),
+                "reference_paths": [
+                    {"name": "verification_policy", "path": str(policy)}
+                ],
+            },
+            role="verifier",
+        )
+        failed = self._record_lifecycle_case(workspace, command="exit 7")
+        self.assertTrue(failed.ok, failed.llm_text)
+        advisory = self._verification_call(
+            workspace,
+            ADD_FINDING_CAPABILITY,
+            {
+                "finding_kind": "verification_defect",
+                "priority": "p2",
+                "disposition": "advisory",
+                "summary": "The verifier environment could provide richer diagnostics.",
+            },
+        )
+        self.assertTrue(advisory.ok, advisory.llm_text)
+
+        result = self._verification_call(
+            workspace,
+            "op_minion_verification_submit",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("blocking add_finding", result.llm_text)
+        self.assertIn("advisory findings do not reconcile FAIL", result.llm_text)
 
     def test_swe_verifier_requires_a_case_when_corpus_is_empty(self) -> None:
         repo, _digest = self._git_repo("empty-verifier-corpus")
@@ -715,6 +812,79 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertTrue(pending["submitted_workspace_fingerprint"])
         dispatched_action = dispatch.call_args.args[0]
         self.assertEqual(dispatched_action.action_type, "SUBMIT_SEMANTIC_VERIFICATION")
+
+    def test_post_receipt_verifier_validation_remains_an_invariant_guard(self) -> None:
+        repo, candidate_digest = self._git_repo("semantic-post-receipt-guard")
+        build_file = repo / "build" / "CMakeCache.txt"
+        build_file.parent.mkdir()
+        build_file.write_text("transient\n", encoding="utf-8")
+        candidate_ref = self.store.put_json(
+            {"candidate_digest": candidate_digest},
+            artifact_type="CandidateSnapshotArtifact",
+        )
+        prompt_ref = self.store.put_json(
+            {"role": "verifier"},
+            artifact_type="RolePromptPackArtifact",
+        )
+        terminal_ref = self.store.put_json(
+            {"finish_reason": "stop"},
+            artifact_type="RoleTerminalArtifact",
+        )
+        node = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-post-receipt-guard",
+            workflow_id="wf-post-receipt-guard",
+            state="REVIEWING",
+            version=1,
+            payload={
+                "path_policy": {
+                    "verification_corpus": {
+                        "kind": "directory",
+                        "path": "tests/router/verifier",
+                    }
+                }
+            },
+            created_at="2026-07-19T00:00:00+00:00",
+            updated_at="2026-07-19T00:00:00+00:00",
+        )
+        submission = {
+            "outcome": "pass",
+            "findings": [],
+            "advisories": [],
+            "tool_receipts": [{"kind": "command", "ok": True}],
+            "recorded_results": [
+                {
+                    "name": "current candidate delta",
+                    "case_kind": "diff_risk",
+                    "obligation_tags": ["candidate_delta_review"],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            SubmissionInvariantError,
+            "outside the bound module corpus",
+        ):
+            SemanticOrchestrator(
+                MinionV2WorkflowService(self.runtime_root)
+            )._complete_semantic_verifier(
+                effect={"effect_key": "verify-post-receipt"},
+                node=node,
+                invocation_id="verifier-attempt",
+                lease_resource="node:router:review",
+                fencing_token=1,
+                candidate_ref=candidate_ref,
+                candidate_digest=candidate_digest,
+                candidate={"candidate_digest": candidate_digest},
+                review_workspace=repo,
+                review_scratch=self.runtime_root / "post-receipt-scratch",
+                execution_adapter="software_git.v2",
+                work_view={"requirements": {}},
+                submission=submission,
+                terminal={"payload": {"role_assignment_id": "assignment"}},
+                prompt_ref=prompt_ref,
+                terminal_ref=terminal_ref,
+            )
 
     def test_verifier_settlement_uses_prompt_bound_canonical_worktree(self) -> None:
         canonical_worktree, candidate_digest = self._git_repo(
@@ -2729,6 +2899,32 @@ class MinionV2VerificationTests(unittest.TestCase):
             "op_minion_verification_run_dogfood", platform_capabilities
         )
 
+    def test_manager_seeds_every_system_delivery_scenario_as_required_work(self) -> None:
+        items = _manager_required_system_scenario_work_items(
+            {
+                "scenarios": {
+                    "cli_success": {"entrypoint": "inimerge BASE PATCH"},
+                    "library_api": {"entrypoint": "CTest consumer"},
+                }
+            }
+        )
+
+        self.assertEqual(
+            [item["summary"] for item in items],
+            [
+                "verify system scenario: cli_success",
+                "verify system scenario: library_api",
+            ],
+        )
+        self.assertTrue(all(item["required"] for item in items))
+        self.assertTrue(
+            all(item["origin"] == "manager_system_scenario" for item in items)
+        )
+        self.assertEqual(
+            _manager_required_system_scenario_work_items({"scenarios": []}),
+            (),
+        )
+
     def test_sink_policy_uses_separate_system_delivery_entrypoints(self) -> None:
         local_view = {
             "module_name": "delivery",
@@ -4355,6 +4551,9 @@ class MinionV2DeliveryTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        ), patch(
+            "pal.minion.v2.delivery.is_github_pull_request_remote",
+            return_value=True,
         ):
             receipt_ref = DeliveryService(
                 self.runtime_root,
@@ -4386,6 +4585,160 @@ class MinionV2DeliveryTests(unittest.TestCase):
                 "ls-remote",
                 str(remote),
                 "refs/heads/pal/minion/pr-delivery",
+            ],
+            text=True,
+        ).split()[0]
+        self.assertEqual(remote_sha, commit_sha)
+
+    def test_github_pr_remote_detection_rejects_local_and_other_provider_urls(self) -> None:
+        self.assertTrue(
+            is_github_pull_request_remote("git@github.com:openai/example.git")
+        )
+        self.assertTrue(
+            is_github_pull_request_remote("https://github.com/openai/example.git")
+        )
+        self.assertFalse(is_github_pull_request_remote("/tmp/example.git"))
+        self.assertFalse(
+            is_github_pull_request_remote("git@gitlab.com:openai/example.git")
+        )
+
+    def test_github_preflight_failure_falls_back_before_push_with_safe_detail(self) -> None:
+        remote = self.runtime_root / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        self._git("remote", "add", "origin", str(remote))
+        self._git("push", "-q", "origin", f"{self.base}:refs/heads/main")
+        (self.repo / "delivered.txt").write_text("ready\n", encoding="utf-8")
+        self._git("add", "delivered.txt")
+        self._git("commit", "-qm", "verified delivery")
+        commit_sha = self._git("rev-parse", "HEAD").strip()
+        verification_ref = self.store.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+        fake_bin = self.runtime_root / "bin"
+        fake_bin.mkdir()
+        fake_gh = fake_bin / "gh"
+        fake_gh.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' 'authentication failed for ghp_secretvalue' >&2\n"
+            "exit 4\n",
+            encoding="utf-8",
+        )
+        fake_gh.chmod(0o755)
+
+        with patch.dict(
+            os.environ,
+            {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        ), patch(
+            "pal.minion.v2.delivery.is_github_pull_request_remote",
+            return_value=True,
+        ):
+            receipt_ref = DeliveryService(
+                self.runtime_root,
+                self.store,
+            ).publish(
+                workflow_id="wf-pr-preflight-fallback",
+                workflow_key="pr-preflight-fallback",
+                task_title="PR preflight fallback",
+                repository=self.repo,
+                commit_sha=commit_sha,
+                source_snapshot={
+                    "source_clean": True,
+                    "delivery_mode": "pull_request_preferred",
+                    "source_branch": "main",
+                    "source_repo_path": str(self.repo),
+                    "source_remote_name": "origin",
+                    "original_head": self.base,
+                },
+                verification_ref=verification_ref,
+            )
+
+        receipt = self.store.read_json(receipt_ref)
+        self.assertEqual(receipt["kind"], "local_checkout")
+        self.assertIn("GitHub PR delivery preflight failed (exit 4)", receipt["fallback_reason"])
+        self.assertIn("[REDACTED]", receipt["fallback_reason"])
+        self.assertNotIn("ghp_secretvalue", receipt["fallback_reason"])
+        remote_branch = subprocess.run(
+            [
+                "git",
+                "ls-remote",
+                "--exit-code",
+                str(remote),
+                "refs/heads/pal/minion/pr-preflight-fallback",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(remote_branch.returncode, 2)
+
+    def test_pr_creation_failure_preserves_safe_detail_after_push(self) -> None:
+        remote = self.runtime_root / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        self._git("remote", "add", "origin", str(remote))
+        self._git("push", "-q", "origin", f"{self.base}:refs/heads/main")
+        (self.repo / "delivered.txt").write_text("ready\n", encoding="utf-8")
+        self._git("add", "delivered.txt")
+        self._git("commit", "-qm", "verified delivery")
+        commit_sha = self._git("rev-parse", "HEAD").strip()
+        verification_ref = self.store.put_json(
+            {"status": "PASS"},
+            artifact_type="VerificationArtifact",
+        )
+        fake_bin = self.runtime_root / "bin"
+        fake_bin.mkdir()
+        fake_gh = fake_bin / "gh"
+        fake_gh.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1 $2\" = \"repo view\" ]; then printf '{}\\n'; exit 0; fi\n"
+            "if [ \"$1 $2\" = \"pr list\" ]; then exit 0; fi\n"
+            "printf '%s\\n' 'GraphQL: authentication expired' >&2\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        fake_gh.chmod(0o755)
+
+        with patch.dict(
+            os.environ,
+            {"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        ), patch(
+            "pal.minion.v2.delivery.is_github_pull_request_remote",
+            return_value=True,
+        ):
+            receipt_ref = DeliveryService(
+                self.runtime_root,
+                self.store,
+            ).publish(
+                workflow_id="wf-pr-create-fallback",
+                workflow_key="pr-create-fallback",
+                task_title="PR create fallback",
+                repository=self.repo,
+                commit_sha=commit_sha,
+                source_snapshot={
+                    "source_clean": True,
+                    "delivery_mode": "pull_request_preferred",
+                    "source_branch": "main",
+                    "source_repo_path": str(self.repo),
+                    "source_remote_name": "origin",
+                    "original_head": self.base,
+                },
+                verification_ref=verification_ref,
+            )
+
+        receipt = self.store.read_json(receipt_ref)
+        self.assertEqual(receipt["kind"], "local_checkout")
+        self.assertIn(
+            "delivery branch was pushed but PR creation failed (exit 1)",
+            receipt["fallback_reason"],
+        )
+        self.assertIn("GraphQL: authentication expired", receipt["fallback_reason"])
+        remote_sha = subprocess.check_output(
+            [
+                "git",
+                "ls-remote",
+                str(remote),
+                "refs/heads/pal/minion/pr-create-fallback",
             ],
             text=True,
         ).split()[0]

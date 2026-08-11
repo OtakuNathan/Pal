@@ -998,6 +998,10 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertIn("reference:task: read-only semantic input", prompt)
             self.assertIn("path=/pal/references/task", prompt)
             self.assertIn('read_file_args={"file_path":"/pal/references/architecture_index/manifest.json"}', prompt)
+            self.assertIn("## Workspace Root", prompt)
+            self.assertIn(f"Product workspace: `{repo}`", prompt)
+            self.assertIn("`/pal` is only the projection root", prompt)
+            self.assertIn("Never `cd /pal`", prompt)
             self.assertLess(
                 prompt.index("## Execution Discipline — High Priority"),
                 prompt.index("## Immutable Inputs"),

@@ -85,6 +85,7 @@ workspace_policy: {}
 """,
             ),
             source_ref="architect.yaml",
+            workspace_authority_rules=(),
         )
 
     def _pack(self, profile: str) -> MinionInvocationPack:
@@ -425,6 +426,19 @@ workspace_policy: {}
                         self._pack(profile), activation=activation
                     )
                     self.assertIn("op_minion_add_finding", bound.allowed_capabilities)
+                    if activation.role == OrchestrationRole.VERIFIER:
+                        self.assertIn(
+                            "op_minion_verification_pass",
+                            bound.allowed_capabilities,
+                        )
+                        self.assertIn(
+                            "op_minion_verification_request_module_repair",
+                            bound.allowed_capabilities,
+                        )
+                        self.assertNotIn(
+                            "op_minion_verification_submit",
+                            bound.allowed_capabilities,
+                        )
 
         coder = apply_v2_role_capability_policy(
             self._pack("software_engineering.v2_coder"),
@@ -744,6 +758,58 @@ workspace_policy: {}
         self.assertEqual(verifier_case.read_text(encoding="utf-8"), "assert False\n")
         self.assertTrue(accepted.ok, accepted.llm_text)
         self.assertEqual((repo / "src" / "new_router.py").read_text(), "new\n")
+
+    def test_scoped_file_tools_reject_parent_without_compiled_write_scopes(self) -> None:
+        repo = self.root / "architecture-worktree"
+        repo.mkdir()
+        outside = self.root / "include" / "escaped.hpp"
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        scoped = MinionScopedExecutionRuntime(
+            core.context.execution_runtime,
+            ["op_file_write"],
+            workspace={
+                "run_id": "architecture-file-guard-test",
+                "repo_path": str(repo),
+            },
+        )
+
+        rejected = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="write_file",
+                    args={
+                        "file_path": str(outside),
+                        "content": "escaped\n",
+                    },
+                )
+            )
+        )
+        accepted = asyncio.run(
+            scoped.execute_tool_async(
+                new_tool_call(
+                    name="write_file",
+                    args={
+                        "file_path": "include/inside.hpp",
+                        "content": "inside\n",
+                    },
+                )
+            )
+        )
+
+        self.assertFalse(rejected.ok)
+        self.assertEqual(rejected.structured["reason"], "path_not_writable")
+        self.assertEqual(
+            rejected.structured["policy_reason"],
+            "path_outside_workspace",
+        )
+        self.assertFalse(outside.exists())
+        self.assertTrue(accepted.ok, accepted.llm_text)
+        self.assertEqual(
+            (repo / "include" / "inside.hpp").read_text(),
+            "inside\n",
+        )
 
     def test_private_workspace_search_is_not_registered(self) -> None:
         scoped = MinionScopedExecutionRuntime(
@@ -1106,17 +1172,29 @@ workspace_policy: {}
             for item in self._pack("software_engineering.v2_reviewer")
             .resolved_profile["role"]["playbook"]["steps"]
         }
-        public_surface = architecture_review_playbook["public_surface_consistency"]
-        self.assertIn("parameters, defaults, overload participation", public_surface["instruction"])
-        self.assertIn("smallest real positive or negative consumer", public_surface["instruction"])
-        representation = architecture_review_playbook["representation_invariants"]
-        self.assertIn("unique meaning of each field", representation["instruction"])
-        self.assertIn("raw-versus-normalized forms", representation["instruction"])
+        coverage = architecture_review_playbook["requirement_coverage"]
+        self.assertIn("every binding requirement", coverage["instruction"])
+        composition = architecture_review_playbook["contract_composition"]
+        self.assertIn("required data, state, errors", composition["instruction"])
+        self.assertIn("ownership, lifecycle transitions", composition["instruction"])
+        feasibility = architecture_review_playbook["end_to_end_feasibility"]
+        self.assertIn("ordered contract handoffs", feasibility["instruction"])
+        self.assertIn("without relying on current product implementation", feasibility["done_when"])
         self.assertIn(
             "required production platform/API/backend must remain explicit",
             architecture_review_behavior,
         )
-        self.assertIn("classify an unfamiliar bound path", architecture_review_behavior)
+        standalone_review_behavior = str(
+            _role_mode_profile_payload(
+                dict(
+                    self._pack("software_engineering.v2_reviewer").resolved_profile
+                ),
+                mode="standalone",
+            )["behavior_fragment"]
+        )
+        self.assertNotIn("project tests, build output", architecture_review_behavior)
+        self.assertIn("project tests, build output", standalone_review_behavior)
+        self.assertIn("current implementation", standalone_review_behavior)
         self.assertIn(
             "Do not pass an unclassified bound reference path",
             reviewer_overrides["op_file_read"]["do_not_use_when"],
@@ -1317,19 +1395,29 @@ workspace_policy: {}
         self.assertIn("without unnecessary dynamic allocation", architect)
         self.assertIn("operator-visible entrypoint", architect)
         self.assertIn("MSDN-like normative API documentation", architect)
+        self.assertIn("never tests or another module's corpus", architect)
+        self.assertIn("Manager derives both test corpora", architect)
         self.assertIn("no speculative extension seam", architect)
         self.assertIn("Defer optional capability costs until use", architect_playbook)
         self.assertIn("genuinely irreversible transition", architect_playbook)
         self.assertIn("object-address side table", architecture_review)
-        self.assertIn("Audit requirement preservation", architecture_review)
+        self.assertIn("Audit requirement coverage", architecture_review)
         self.assertIn("Review semantic composition, not private implementation", architecture_review)
+        self.assertIn("never to prove that requested work is not implemented yet", architecture_review)
+        self.assertIn("expected Coder work, not an architecture finding", architecture_review)
         self.assertIn("Every state, worker, object, and resource needs one owner", architecture_review)
         self.assertIn("Perform an ambiguity audit", architecture_review)
         self.assertIn("partial output followed by error", architecture_review)
         self.assertIn("copy/move/share/reset/reuse", architecture_review)
         self.assertIn("Compilation and LSP support", architecture_review)
         self.assertIn("Tests remain verification evidence", architecture_review)
-        self.assertIn("On revision, regress the prior finding", architecture_review)
+        self.assertIn(
+            "The Reviewer logical coroutine persists across Candidates",
+            architecture_review,
+        )
+        self.assertIn("a prior PASS is context rather than evidence", architecture_review)
+        self.assertIn("regress_candidate", reviewer_playbook)
+        self.assertIn("current_delta", reviewer_playbook)
         self.assertIn("disposition=advisory with priority=p2", architecture_review)
         self.assertIn("never fail at the first defect", architecture_review)
         self.assertIn("A real defect remains blocking at p2", architecture_review)
@@ -1340,11 +1428,12 @@ workspace_policy: {}
         self.assertIn("focused SFINAE/detection probes", architecture_review)
         self.assertIn("MSDN-like normative API documentation", architecture_review)
         self.assertIn("speculative seam without one", architecture_review)
-        self.assertIn("operator-visible entrypoints", reviewer_playbook)
-        self.assertIn("optional capabilities defer costs until use", reviewer_playbook)
+        self.assertIn("real scenario from entrypoint", reviewer_playbook)
+        self.assertIn("deferred optional costs", reviewer_playbook)
 
         self.assertIn("Accepted Skeleton declarations", coder)
-        self.assertIn("dependency's public contract as an axiom", coder)
+        self.assertIn("public declaration/code shape", coder)
+        self.assertIn("visible private dependency body is not authority", coder)
         self.assertIn("Work depth-first inside the owned module", coder)
         self.assertIn("standard-library", coder)
         self.assertIn("hand-rolled infrastructure", coder)
@@ -1364,8 +1453,10 @@ workspace_policy: {}
         self.assertIn("deferred optional costs", coder_playbook)
 
         self.assertIn("complete adjudication scope", verifier)
-        self.assertIn("dependency public contract as an axiom", verifier)
-        self.assertIn("Never inspect, audit, or infer", verifier)
+        self.assertIn("public declaration/code shape", verifier)
+        self.assertIn("real public edges", verifier)
+        self.assertIn("may be a stale baseline", verifier)
+        self.assertIn("record a dependency finding", verifier)
         self.assertIn("Do not search for task.yaml", verifier)
         self.assertIn("reuse them across Candidate repairs", verifier)
         self.assertIn("material complexity or resource growth", verifier)

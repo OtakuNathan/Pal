@@ -45,6 +45,36 @@ class PalV2TaskLedgerTests(unittest.TestCase):
         self.assertEqual(task_yaml["original"], original)
         self.assertEqual(task_yaml["revisions"], [])
 
+    def test_materialized_yaml_preserves_authoritative_text_exactly(self) -> None:
+        authoritative_text = (
+            "# Framepipe\n\n"
+            "The stream is split into these chunks exactly:\n"
+            "\n"
+            "    0000 / 0248 / 69\n"
+            "\n"
+            "The expected output is `FRAME 4869`.\n"
+            "Preserve leading zeroes, punctuation, blank lines, and both trailing newlines.\n\n"
+        )
+        original = {
+            "authoritative_text": authoritative_text,
+            "source_name": "TASK.md",
+        }
+        ref = self.service.task_ledger.publish(
+            title="Framepipe contradictory example",
+            task_spec=original,
+            actor="pal",
+            source_channel="test",
+        )
+
+        materialized = self.service.task_ledger.materialize(ref)
+        task_yaml = yaml.safe_load((materialized.root / "task.yaml").read_text(encoding="utf-8"))
+
+        self.assertEqual(task_yaml["original"]["authoritative_text"], authoritative_text)
+        self.assertEqual(
+            task_yaml["original"]["authoritative_text"].encode("utf-8"),
+            authoritative_text.encode("utf-8"),
+        )
+
     def test_manager_appends_exact_authority_without_compiled_delta(self) -> None:
         base = self.service.task_ledger.publish(
             title="Framepipe",

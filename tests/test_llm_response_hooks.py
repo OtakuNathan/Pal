@@ -28,7 +28,7 @@ from pal.llm.response_hooks import (
 )
 from pal.llm.shapes.base import _JSONFrame
 from pal.shared.enums import LLMFinishReason
-from pal.shared.tool_protocol import ToolCallIR
+from pal.shared.tool_protocol import ToolCallIR, ToolDefinitionIR
 
 
 _OFFICIAL_TOKEN = "｜DSML｜"
@@ -198,6 +198,111 @@ class DeepSeekProviderResponseHookTests(unittest.TestCase):
 
         self.assertTrue(any("DSML" in update.text_delta for update in updates))
         self.assertEqual(updates[-1].response.tool_calls, ())
+
+    def test_zhipu_rejects_internal_projection_instead_of_exposing_it(self) -> None:
+        raw = (
+            "<closed_tool_interaction>historical tool evidence"
+            "</closed_tool_interaction>"
+        )
+        invoker = ShapeEndpointInvoker(
+            credential_resolver=lambda endpoint: "secret",
+            transport=_FramesTransport(_anthropic_character_stream(raw)),  # type: ignore[arg-type]
+        )
+
+        with self.assertRaisesRegex(ProviderResponseHookError, "structured tool items"):
+            tuple(
+                invoker.invoke_updates(
+                    _endpoint(provider="zhipu"),
+                    _request(),
+                )
+            )
+
+    def test_zhipu_rejects_textual_tool_call_but_preserves_native_call(self) -> None:
+        textual = ShapeEndpointInvoker(
+            credential_resolver=lambda endpoint: "secret",
+            transport=_FramesTransport(_anthropic_complete("<tool_call>fake</tool_call>")),  # type: ignore[arg-type]
+        )
+        request = LLMRequestIR(
+            messages=_request().messages,
+            tools=(
+                ToolDefinitionIR(
+                    name="read_file",
+                    description="Read a file.",
+                    input_schema={"type": "object"},
+                ),
+            ),
+            policy=_request().policy,
+        )
+        with self.assertRaises(ProviderResponseHookError):
+            textual.invoke(_endpoint(provider="zhipu"), request)
+
+        native = ShapeEndpointInvoker(
+            credential_resolver=lambda endpoint: "secret",
+            transport=_FramesTransport(
+                [{
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call-native",
+                        "name": "read_file",
+                        "input": {"path": "a"},
+                    }],
+                    "stop_reason": "tool_use",
+                }]
+            ),  # type: ignore[arg-type]
+        )
+        response, _ = native.invoke(_endpoint(provider="zhipu"), _request())
+        self.assertEqual(response.tool_calls[0].call_id, "call-native")
+
+    def test_zhipu_ordinary_text_passes_through(self) -> None:
+        invoker = ShapeEndpointInvoker(
+            credential_resolver=lambda endpoint: "secret",
+            transport=_FramesTransport(_anthropic_complete("ordinary answer")),  # type: ignore[arg-type]
+        )
+
+        response, _ = invoker.invoke(_endpoint(provider="zhipu"), _request())
+
+        self.assertEqual(response.text, "ordinary answer")
+
+    def test_zhipu_stream_scans_deltas_without_rewalking_accumulated_response(self) -> None:
+        class NoProjectionResponse:
+            @property
+            def reasoning_text(self):
+                raise AssertionError("stream hook reread accumulated reasoning")
+
+            @property
+            def text(self):
+                raise AssertionError("stream hook reread accumulated text")
+
+        response = NoProjectionResponse()
+        updates = (
+            LLMResponseUpdate(  # type: ignore[arg-type]
+                response,
+                LLMResponseDeltaKind.REASONING,
+                text_delta="ordinary ",
+            ),
+            LLMResponseUpdate(  # type: ignore[arg-type]
+                response,
+                LLMResponseDeltaKind.REASONING,
+                text_delta="reasoning",
+            ),
+            LLMResponseUpdate(  # type: ignore[arg-type]
+                response,
+                LLMResponseDeltaKind.STATE,
+            ),
+        )
+
+        normalized = tuple(
+            ProviderResponseHookRegistry.builtin().normalize(
+                endpoint_id="zhipu-endpoint",
+                provider_id="zhipu",
+                model_id="glm",
+                wire_shape=WireShape.ANTHROPIC_MESSAGES,
+                request=_request(),
+                updates=updates,
+            )
+        )
+
+        self.assertEqual(normalized, updates)
 
     def test_native_structured_tool_call_is_preserved(self) -> None:
         frames = [{

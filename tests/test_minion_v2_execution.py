@@ -23,6 +23,7 @@ from pal.minion.v2.contracts import AggregateSnapshot, AggregateVersionConflict,
 from pal.minion.v2.execution import (
     CandidateSnapshotService,
     DagScheduler,
+    DependencyIntegrationConflict,
     ExecutionCompiler,
     NodeRunJournal,
     UnitWorkViewBuilder,
@@ -130,7 +131,6 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 ["src/router.py"],
                 {**policy, "contract_mode": "file_frozen"},
             )
-
         _validate_skeleton_candidate_paths(
             ["src/router.py"],
             {**policy, "contract_mode": "review_guarded"},
@@ -148,6 +148,39 @@ class MinionV2ExecutionTests(unittest.TestCase):
                     "contract_mode": "review_guarded",
                     "implementation_scopes": [],
                 },
+            )
+
+    def test_compiled_build_scope_is_candidate_authority_not_a_second_policy(self) -> None:
+        policy = {
+            "contract_mode": "review_guarded",
+            "contract_paths": ["include/cli.hpp"],
+            "implementation_scopes": [
+                {"kind": "directory", "path": "src/cli"},
+                {"kind": "file", "path": "CMakeLists.txt"},
+            ],
+            "reference_only": [],
+            "workspace_authorities": [
+                {
+                    "id": "build_system",
+                    "property": {
+                        "system": "cmake",
+                        "owner": "cli",
+                        "write_scopes": [
+                            {"kind": "file", "path": "CMakeLists.txt"}
+                        ],
+                    },
+                    "write_scopes": [
+                        {"kind": "file", "path": "CMakeLists.txt"}
+                    ],
+                }
+            ],
+        }
+
+        _validate_skeleton_candidate_paths(["CMakeLists.txt"], policy)
+        with self.assertRaisesRegex(ValueError, "outside"):
+            _validate_skeleton_candidate_paths(
+                ["Makefile"],
+                policy,
             )
 
     def setUp(self) -> None:
@@ -334,6 +367,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             ),
             satellite_projector=_SelectiveTestFamilyProjector(),
             source_ref="architect.yaml",
+            workspace_authority_rules=(),
         )
         manifest_ref = self.store.put_json(
             {**artifact, "graph_ir": graph.to_dict()},
@@ -532,6 +566,129 @@ class MinionV2ExecutionTests(unittest.TestCase):
         )
         self.assertTrue((worktree / "module_test.cpp").is_file())
 
+    def test_dependency_baseline_replay_recognizes_cherry_picked_candidate(self) -> None:
+        worktree = self.runtime_root / "dependency_replay_repo"
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+        (worktree / "base.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=worktree, check=True)
+        base_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+
+        (worktree / "dependency.cpp").write_text("int dependency();\n", encoding="utf-8")
+        subprocess.run(["git", "add", "dependency.cpp"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "dependency"], cwd=worktree, check=True)
+        dependency_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        subprocess.run(["git", "reset", "--hard", base_sha], cwd=worktree, check=True)
+
+        (worktree / "consumer.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+        subprocess.run(["git", "add", "consumer.cpp"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "consumer"], cwd=worktree, check=True)
+
+        dependency = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="dependency",
+            workflow_id="wf-replay",
+            state="ACCEPTED",
+            version=1,
+            payload={
+                "base_sha": base_sha,
+                "candidate_digest": dependency_sha,
+                "candidate_ref": {"sha256": dependency_sha},
+                "dependency_node_ids": [],
+                "output_hashes": {},
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        consumer_payload = {
+            "workspace_path": str(worktree),
+            "execution_adapter": SOFTWARE_GIT_ADAPTER,
+            "base_sha": base_sha,
+            "dependency_node_ids": [dependency.aggregate_id],
+        }
+        consumer = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="consumer",
+            workflow_id="wf-replay",
+            state="REVIEW_BLOCKED_BY_DEPS",
+            version=1,
+            payload=consumer_payload,
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        prepare_node_dependency_baseline(
+            consumer,
+            {dependency.aggregate_id: dependency, consumer.aggregate_id: consumer},
+        )
+        assembled_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+
+        # A replay without persisted provenance uses Git patch equivalence. The
+        # source SHA is not an ancestor because cherry-pick created a new SHA.
+        prepare_node_dependency_baseline(
+            consumer,
+            {dependency.aggregate_id: dependency, consumer.aggregate_id: consumer},
+        )
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+            ).strip(),
+            assembled_head,
+        )
+
+        # A repair Candidate inherits the previous assembled checkpoint and its
+        # durable dependency provenance, so normal replay skips Git integration.
+        (worktree / "CMakeLists.txt").write_text("# repaired\n", encoding="utf-8")
+        subprocess.run(["git", "add", "CMakeLists.txt"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "repair"], cwd=worktree, check=True)
+        repair_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        repaired = AggregateSnapshot(
+            aggregate_type=consumer.aggregate_type,
+            aggregate_id=consumer.aggregate_id,
+            workflow_id=consumer.workflow_id,
+            state=consumer.state,
+            version=2,
+            payload={
+                **consumer_payload,
+                "verification_base_sha": assembled_head,
+                "accepted_dependency_candidate_digests": [dependency_sha],
+                "dependency_outputs": {
+                    dependency.aggregate_id: {
+                        "candidate_digest": dependency_sha,
+                    }
+                },
+            },
+            created_at=consumer.created_at,
+            updated_at=consumer.updated_at,
+        )
+        prepare_node_dependency_baseline(
+            repaired,
+            {dependency.aggregate_id: dependency, repaired.aggregate_id: repaired},
+        )
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+            ).strip(),
+            repair_head,
+        )
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=worktree, text=True
+            ),
+            "",
+        )
+
     def test_software_verification_assembles_dependencies_after_coder_candidate(self) -> None:
         worktree = self.runtime_root / "verification_assembly_repo"
         worktree.mkdir()
@@ -694,7 +851,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             updated_at="2026-01-01T00:00:00+00:00",
         )
 
-        with self.assertRaises(subprocess.CalledProcessError):
+        with self.assertRaises(DependencyIntegrationConflict):
             prepare_node_dependency_baseline(
                 consumer,
                 {**dependencies, consumer.aggregate_id: consumer},
@@ -988,6 +1145,64 @@ class MinionV2ExecutionTests(unittest.TestCase):
             "A output becomes B input.",
         )
 
+    def test_swe_module_work_view_preserves_accepted_language_context(self) -> None:
+        module = {
+            "responsibility": "Implement the C++ library.",
+            "execution": "produce",
+            "provides": ["library"],
+            "dependencies": {},
+            "definition": {
+                "behavior_kind": "resource_owner",
+                "contract": {"inputs": {}, "outputs": {}, "errors": [], "invariants": []},
+                "ownership": [],
+                "lifecycle": {},
+                "paths": {},
+            },
+        }
+        manifest = self.store.put_json(
+            {
+                "contract": {
+                    "schema_version": "2",
+                    "graph": {"sink": "library"},
+                    "context": {"language": "C++20"},
+                    "requirements": {},
+                    "modules": {"library": module},
+                    "scenarios": {},
+                }
+            },
+            artifact_type="ContractArtifact",
+        )
+        module_contract = self.store.put_json(
+            {
+                "module_name": "library",
+                "module": module,
+                "requirements": {},
+                "scenarios": {},
+                "paths": {},
+            },
+            artifact_type="ContractModuleArtifact",
+        )
+        node = AggregateSnapshot(
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node_cpp_context",
+            workflow_id="wf_cpp_context",
+            state="READY",
+            version=1,
+            payload={
+                "module_name": "library",
+                "architecture_manifest_ref": manifest.to_dict(),
+                "unit_contract_ref": module_contract.to_dict(),
+                "execution_adapter": SOFTWARE_GIT_ADAPTER,
+                "path_policy": {},
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+
+        view = self.store.read_json(UnitWorkViewBuilder(self.contracts).build(node))
+
+        self.assertEqual(view["context"], {"language": "C++20"})
+
     def test_work_view_entrypoint_accepts_string_projection(self) -> None:
         # SWE's compact skeleton projection stores scenario entrypoints as
         # strings; the richer contract form remains a structured mapping.
@@ -1036,7 +1251,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             UnitWorkViewBuilder(self.contracts).build(sink)
         )
         delivery = self.store.read_json(
-            UnitWorkViewBuilder(self.contracts).build_system_delivery_view(sink)
+            UnitWorkViewBuilder(self.contracts).system_delivery_view(sink)
         )
         self.assertEqual(view["module_name"], "delivery")
         self.assertIn("b", view["dependency_contracts"])

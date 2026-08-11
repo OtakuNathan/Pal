@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from pal.checklist.capabilities import ChecklistIntrospectionProvider
 from pal.checklist.service import ChecklistService
 from pal.core.turn_executor import TurnExecutor
-from pal.core.turns import TurnContinuation, channel_turn_program
+from pal.core.turns import MailboxReplyEffect, TurnContinuation, channel_turn_program
 from pal.execution.contracts import CapabilityCall
 from pal.foundation import EventEnvelope
 from pal.shared import (
@@ -77,7 +78,7 @@ class TestChecklistService:
         ]
         assert "✅ inspect the contract" in snapshot.markdown
         assert "⬜ implement the behavior" in snapshot.markdown
-        assert snapshot.markdown.startswith("清单进度 1/3")
+        assert snapshot.markdown.startswith("Checklist progress 1/3")
 
         shown = service.show()
         assert shown is not None and shown.total == 3
@@ -134,6 +135,14 @@ class TestChecklistService:
 class TestChecklistCapabilities:
     def setup_method(self) -> None:
         self.provider = ChecklistIntrospectionProvider(service=ChecklistService())
+
+    def test_upsert_guidance_strongly_encourages_visible_progress_tracking(self):
+        blueprint = ChecklistIntrospectionProvider.upsert.__capability_action_blueprints__[0]
+        assert blueprint.guidance is not None
+        assert "Strongly prefer" in blueprint.guidance.use_when
+        assert "user-visible checklist" in blueprint.guidance.purpose
+        assert "unfinished work explicit" in blueprint.guidance.purpose
+        assert "realistic risk of missing a follow-up" in blueprint.guidance.use_when
 
     def test_upsert_returns_structured_snapshot(self):
         result = self.provider.upsert(
@@ -194,14 +203,41 @@ class TestToolEchoFanOut:
         continuation = _continuation()
         result = _tool_result(
             "checklist_check",
-            structured={"echo": {"markdown": "清单进度 1/1\n✅ a", "dedupe_key": "checklist:check:a"}},
+            structured={"echo": {"markdown": "Checklist progress 1/1\n✅ a", "dedupe_key": "checklist:check:a"}},
         )
         asyncio.run(executor._maybe_echo_tool_result_async(continuation, result, result))
         assert len(captured) == 1
         effect = captured[0][1]
-        assert effect.text == "清单进度 1/1\n✅ a"
+        assert effect.text == "Checklist progress 1/1\n✅ a"
+        assert effect.terminal is False
         assert not hasattr(effect, "delivery_binding")
         assert "checklist:check:a" in continuation.echoed_keys
+
+    def test_nonterminal_echo_marks_only_the_queued_reply_as_continuing(self):
+        captured: list[tuple[TurnDeliveryBinding, str]] = []
+
+        class _OutputPort:
+            def queue_reply(self, binding: TurnDeliveryBinding, text: str) -> str:
+                captured.append((binding, text))
+                return "reply-1"
+
+        executor = object.__new__(TurnExecutor)
+        executor.context = SimpleNamespace(
+            port_registry={"agent_io:output": _OutputPort()}
+        )
+        executor._debug_log_reply = lambda *_args: None
+        continuation = _continuation()
+
+        asyncio.run(
+            executor._handle_mailbox_reply(
+                MailboxReplyEffect(text="Checklist progress 1/3", terminal=False),
+                continuation,
+            )
+        )
+
+        assert captured[0][0].response_handle.reply_target["_pal_turn_continues"] is True
+        assert "_pal_turn_continues" not in continuation.delivery_binding.response_handle.reply_target
+        assert continuation.emitted_reply_texts == ["Checklist progress 1/3"]
 
     def test_no_echo_without_declaration(self):
         captured: list = []

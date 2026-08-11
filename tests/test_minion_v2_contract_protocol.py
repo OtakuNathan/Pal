@@ -23,11 +23,11 @@ from pal.minion.v2.contract_submission import (
     architect_path,
     bind_architect_file,
     contract_submit_tool_result,
-    remove_bound_architect_file,
 )
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.review_submission import review_submit_tool_result
 from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
+from pal.minion.v2.skeleton import compile_skeleton_markdown
 from pal.minion.v2.work_items import (
     ADD_FINDING_CAPABILITY,
     UPDATE_CHECKLIST_CAPABILITY,
@@ -132,6 +132,31 @@ class ContractProtocolTests(unittest.TestCase):
                         "transitions:  # type: map[snake_case_event, Transition]",
                         definition.template,
                     )
+                    self.assertIn(
+                        "build_system:\n    system: replace_with_selected_or_inherited_build_system",
+                        definition.template,
+                    )
+                    self.assertEqual(
+                        definition.workspace_authority_rules[0]["id"],
+                        "build_system",
+                    )
+
+    def test_software_build_property_is_required_and_compiled_from_property_data(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        payload = copy.deepcopy(definition.example)
+        payload["context"].pop("build_system")
+        with self.assertRaisesRegex(ValueError, "build_system.*required"):
+            validate_contract_payload(payload, definition=definition)
+
+        property_data = definition.property_data[0]
+        self.assertEqual(property_data["target_pointer"], "/context/build_system")
+        self.assertIn("project-owned manifest", property_data["guidance"])
+        self.assertEqual(
+            property_data["authoring_shape"]["write_scopes"][0]["kind"],
+            "file",
+        )
 
     def test_contract_graph_rejects_cycles_and_undeclared_outputs(self) -> None:
         definition = ArchitectureTemplateCompiler().compile("general.v1")
@@ -195,6 +220,10 @@ class ContractProtocolTests(unittest.TestCase):
             projected["modules"][module_name]["responsibility"],
             payload["modules"][module_name]["responsibility"],
         )
+        self.assertEqual(
+            projected["context"]["build_system"]["owner"],
+            "delivery",
+        )
         self.assertNotIn("contract_schema", projected)
 
     def test_human_review_renders_only_the_completed_family_specialization(
@@ -225,7 +254,30 @@ class ContractProtocolTests(unittest.TestCase):
         self.assertNotIn("moduleDefinition", markdown)
         self.assertNotIn("specialization_id", markdown)
 
-    def test_git_authoring_contract_uses_manager_path_and_cleans_it(self) -> None:
+    def test_software_human_review_renders_build_authority_context(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        markdown = compile_skeleton_markdown(
+            {
+                "submission": software_contract_projection(
+                    copy.deepcopy(definition.example)
+                )
+            },
+            requirements_payload={
+                "schema_version": "1",
+                "title": "Frame decoder",
+                "original": {"objective": "Decode frames."},
+                "revisions": [],
+            },
+        )
+
+        self.assertIn("## Family Context", markdown)
+        self.assertIn('"build_system"', markdown)
+        self.assertIn('"owner": "delivery"', markdown)
+        self.assertIn('"path": "CMakeLists.txt"', markdown)
+
+    def test_git_authoring_contract_uses_manager_path_and_survives_rebinding(self) -> None:
         definition = ArchitectureTemplateCompiler().compile(
             "software_engineering.v1"
         )
@@ -241,8 +293,17 @@ class ContractProtocolTests(unittest.TestCase):
         path = architect_path(workspace)
         self.assertEqual(path.parent.name, ".pal-minion-architect")
         self.assertTrue(path.is_file())
-        remove_bound_architect_file(workspace)
-        self.assertFalse(path.exists())
+        authored = "schema_version: '1'\ntitle: authored contract\n"
+        path.write_text(authored, encoding="utf-8")
+
+        rebound = bind_architect_file(
+            workspace,
+            template="schema_version: overwritten-template\n",
+            base_contract={"schema_version": "overwritten-base"},
+        )
+
+        self.assertEqual(architect_path(rebound), path)
+        self.assertEqual(path.read_text(encoding="utf-8"), authored)
 
     def test_artifact_role_workspace_uses_one_visible_architect_path(self) -> None:
         definition = ArchitectureTemplateCompiler().compile(

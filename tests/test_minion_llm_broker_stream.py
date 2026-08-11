@@ -390,6 +390,39 @@ class MinionLLMBrokerStreamTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_manager_stream_can_be_closed_from_a_different_asyncio_context(self) -> None:
+        async def scenario() -> None:
+            source = _updates()
+
+            class Runtime:
+                async def astream(self, _request):
+                    yield source[0]
+                    await asyncio.Event().wait()
+
+            class Manager:
+                def _require_broker_run(self, _params):
+                    return object()
+
+                async def _llm_broker_runtime(self):
+                    return Runtime()
+
+                def _llm_progress_sink(self, _state):
+                    return lambda *_args, **_kwargs: None
+
+            manager = Manager()
+            stream = MinionManager.llm_broker_stream_updates(
+                manager,
+                {"run_id": "run", "request": request_to_payload(_request())},
+            )
+            self.assertEqual(await anext(stream), source[0])
+
+            # asyncio may finalize an async generator in a helper task after
+            # its transport peer disconnects. That must not cross-reset a
+            # ContextVar token created around an earlier yield.
+            await asyncio.create_task(stream.aclose())
+
+        asyncio.run(scenario())
+
     def test_manager_to_minion_stream_is_live_end_to_end(self) -> None:
         async def scenario() -> None:
             root = Path(tempfile.mkdtemp(prefix="pal-minion-stream-e2e-"))

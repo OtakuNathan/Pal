@@ -39,7 +39,9 @@ from pal.minion.v2.graph_executor import (
     NodeReuseKind,
     diff_graphs,
 )
-from pal.minion.v2.graph_satellites import FamilyGraphSatelliteProjector
+from pal.minion.v2.graph_satellites import (
+    FamilyGraphSatelliteProjector,
+)
 from pal.minion.v2.graph_protocol import (
     EdgeKind,
     EdgeSpec,
@@ -70,6 +72,200 @@ def _projector(definition) -> FamilyGraphSatelliteProjector:
 
 
 class GraphCompilerTests(unittest.TestCase):
+    def _compile_software(self, payload, *, generation: int = 1):
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        return GraphCompiler().compile(
+            validate_contract_payload(payload, definition=definition),
+            graph_id="build-authority",
+            generation=generation,
+            bindings=_bindings(),
+            satellite_projector=_projector(definition),
+            source_ref="architect.yaml",
+            workspace_authority_rules=definition.workspace_authority_rules,
+        )
+
+    def test_family_property_compiles_build_authority_into_declared_owner(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        graph = self._compile_software(copy.deepcopy(definition.example))
+
+        self.assertNotIn(
+            {"kind": "file", "path": "CMakeLists.txt"},
+            graph.nodes["decoder"].workspace_policy["implementation_scopes"],
+        )
+        owner_policy = dict(graph.nodes["delivery"].workspace_policy)
+        self.assertIn(
+            {"kind": "file", "path": "CMakeLists.txt"},
+            owner_policy["implementation_scopes"],
+        )
+        self.assertEqual(
+            owner_policy["workspace_authorities"][0]["property"]["system"],
+            "cmake",
+        )
+
+    def test_family_rules_not_manager_semantics_choose_build_owner(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        payload = copy.deepcopy(definition.example)
+        payload["context"]["build_system"] = {
+            "system": "direct compiler invocation",
+            "owner": "decoder",
+            "write_scopes": [],
+        }
+
+        graph = self._compile_software(payload)
+
+        self.assertEqual(graph.nodes["decoder"].workspace_policy[
+            "workspace_authorities"
+        ][0]["property"]["owner"], "decoder")
+
+    def test_build_authority_rejects_unavailable_owner_and_cross_owner_scope(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        unknown = copy.deepcopy(definition.example)
+        unknown["context"]["build_system"]["owner"] = "missing"
+        with self.assertRaisesRegex(
+            GraphCompilationError,
+            "owner 'missing' is unavailable",
+        ):
+            self._compile_software(unknown)
+
+        overlap = copy.deepcopy(definition.example)
+        overlap["context"]["build_system"]["write_scopes"] = [
+            {"kind": "file", "path": "src/decoder.cpp"}
+        ]
+        with self.assertRaisesRegex(
+            GraphCompilationError,
+            "overlaps write authority owned by decoder",
+        ):
+            self._compile_software(overlap)
+
+        frozen = copy.deepcopy(definition.example)
+        frozen["modules"]["decoder"]["definition"]["paths"][
+            "contract_mode"
+        ] = "file_frozen"
+        frozen["context"]["build_system"]["write_scopes"] = [
+            {"kind": "file", "path": "include/decoder.hpp"}
+        ]
+        with self.assertRaisesRegex(
+            GraphCompilationError,
+            "overlaps a frozen contract",
+        ):
+            self._compile_software(frozen)
+
+        manager_tests = copy.deepcopy(definition.example)
+        manager_tests["context"]["build_system"]["write_scopes"] = [
+            {"kind": "directory", "path": "tests"}
+        ]
+        with self.assertRaisesRegex(
+            GraphCompilationError,
+            "Manager-owned test corpus",
+        ):
+            self._compile_software(manager_tests)
+
+        duplicate_owner = copy.deepcopy(definition.example)
+        duplicate_owner["context"]["build_system"]["write_scopes"] = [
+            {"kind": "file", "path": "src/main.cpp"}
+        ]
+        with self.assertRaisesRegex(
+            GraphCompilationError,
+            "duplicates write authority already owned by delivery",
+        ):
+            self._compile_software(duplicate_owner)
+
+        for path in (".git/config", "third_party/lib/.git/config"):
+            with self.subTest(control_path=path):
+                control_state = copy.deepcopy(definition.example)
+                control_state["context"]["build_system"]["write_scopes"] = [
+                    {"kind": "file", "path": path}
+                ]
+                with self.assertRaisesRegex(
+                    GraphCompilationError,
+                    "targets Manager or VCS control state",
+                ):
+                    self._compile_software(control_state)
+
+    def test_build_authority_change_is_an_immutable_stale_replan(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        source_payload = copy.deepcopy(definition.example)
+        target_payload = copy.deepcopy(source_payload)
+        target_payload["context"]["build_system"]["write_scopes"].append(
+            {"kind": "directory", "path": "cmake"}
+        )
+        source = self._compile_software(source_payload, generation=1)
+        target = self._compile_software(target_payload, generation=2)
+
+        decisions = diff_graphs(source, target).decisions
+        decision = decisions["delivery"]
+        self.assertEqual(decision.kind, NodeReuseKind.REUSE_STALE)
+        self.assertTrue(decision.reuse_workspace)
+        self.assertTrue(decision.reuse_sessions)
+        self.assertNotIn(
+            {"kind": "directory", "path": "cmake"},
+            source.nodes["delivery"].workspace_policy["implementation_scopes"],
+        )
+        self.assertIn(
+            {"kind": "directory", "path": "cmake"},
+            target.nodes["delivery"].workspace_policy["implementation_scopes"],
+        )
+        self.assertEqual(
+            decisions["decoder"].kind,
+            NodeReuseKind.REUSE_ACCEPTED,
+        )
+
+    def test_unchanged_build_authority_does_not_force_owner_stale(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        payload = copy.deepcopy(definition.example)
+        source = self._compile_software(payload, generation=1)
+        target = self._compile_software(payload, generation=2)
+
+        self.assertEqual(
+            diff_graphs(source, target).decisions["delivery"].kind,
+            NodeReuseKind.REUSE_ACCEPTED,
+        )
+
+    def test_build_owner_transfer_stales_both_authority_endpoints(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        source_payload = copy.deepcopy(definition.example)
+        target_payload = copy.deepcopy(source_payload)
+        target_payload["context"]["build_system"]["owner"] = "decoder"
+        source = self._compile_software(source_payload, generation=1)
+        target = self._compile_software(target_payload, generation=2)
+
+        decisions = diff_graphs(source, target).decisions
+
+        for module_name in ("delivery", "decoder"):
+            with self.subTest(module_name=module_name):
+                self.assertEqual(
+                    decisions[module_name].kind,
+                    NodeReuseKind.REUSE_STALE,
+                )
+                self.assertTrue(decisions[module_name].reuse_workspace)
+                self.assertTrue(decisions[module_name].reuse_sessions)
+        self.assertTrue(
+            source.nodes["delivery"].workspace_policy["workspace_authorities"]
+        )
+        self.assertFalse(
+            target.nodes["delivery"].workspace_policy.get("workspace_authorities")
+        )
+        self.assertFalse(
+            source.nodes["decoder"].workspace_policy.get("workspace_authorities")
+        )
+        self.assertTrue(
+            target.nodes["decoder"].workspace_policy["workspace_authorities"]
+        )
+
     def test_all_family_examples_compile_without_synthesizing_nodes(self) -> None:
         compiler = ArchitectureTemplateCompiler()
         for specialization in compiler.list_specializations():
@@ -90,6 +286,9 @@ class GraphCompilerTests(unittest.TestCase):
                     ),
                     satellite_projector=_projector(definition),
                     source_ref="architect.yaml",
+                    workspace_authority_rules=(
+                        definition.workspace_authority_rules
+                    ),
                 )
                 expected_nodes = {
                     name
@@ -117,6 +316,7 @@ class GraphCompilerTests(unittest.TestCase):
             bindings=_bindings(),
             satellite_projector=_projector(definition),
             source_ref="architect.yaml",
+            workspace_authority_rules=definition.workspace_authority_rules,
         )
         edge = next(
             item
@@ -146,6 +346,7 @@ class GraphCompilerTests(unittest.TestCase):
             bindings=_bindings(),
             satellite_projector=_projector(definition),
             source_ref="architect.yaml",
+            workspace_authority_rules=definition.workspace_authority_rules,
         )
         target_payload = copy.deepcopy(source_payload)
         target_payload["requirements"]["decode_frames"]["claim"] = (
@@ -158,6 +359,7 @@ class GraphCompilerTests(unittest.TestCase):
             bindings=_bindings(),
             satellite_projector=_projector(definition),
             source_ref="architect.yaml",
+            workspace_authority_rules=definition.workspace_authority_rules,
         )
 
         decisions = diff_graphs(source, target).decisions
@@ -191,6 +393,7 @@ class GraphCompilerTests(unittest.TestCase):
                 bindings=_bindings("artifact_bundle.v2"),
                 satellite_projector=_projector(definition),
                 source_ref="architect.yaml",
+                workspace_authority_rules=definition.workspace_authority_rules,
             )
 
     def test_software_transitive_graph_waits_at_sink_checker(self) -> None:
@@ -232,6 +435,7 @@ class GraphCompilerTests(unittest.TestCase):
             bindings=_bindings(),
             satellite_projector=_projector(definition),
             source_ref="architect.yaml",
+            workspace_authority_rules=definition.workspace_authority_rules,
         )
         self.assertEqual(
             set(graph.execution_predecessors(graph.sink)),
@@ -294,6 +498,7 @@ class GraphCompilerTests(unittest.TestCase):
             bindings=_bindings(),
             satellite_projector=_projector(definition),
             source_ref="architect.yaml",
+            workspace_authority_rules=definition.workspace_authority_rules,
         )
         self.assertNotIn("frame_shape", graph.nodes)
         self.assertTrue(
@@ -322,6 +527,7 @@ class GraphCompilerTests(unittest.TestCase):
             bindings=_bindings(),
             satellite_projector=_projector(definition),
             source_ref="architect.yaml",
+            workspace_authority_rules=definition.workspace_authority_rules,
         )
         graph_diff = diff_graphs(graph, revised)
         self.assertEqual(
@@ -352,9 +558,45 @@ class GraphCompilerTests(unittest.TestCase):
                     bindings=_bindings("artifact_bundle.v2"),
                     satellite_projector=_projector(definition),
                     source_ref=str(path),
+                    workspace_authority_rules=definition.workspace_authority_rules,
                     source_map=location,
                 )
         self.assertEqual(raised.exception.semantic_path, "graph.sink")
+        self.assertIsNotNone(raised.exception.location)
+        self.assertIn("architect.yaml:", str(raised.exception))
+
+    def test_authority_error_contains_property_yaml_location(self) -> None:
+        definition = ArchitectureTemplateCompiler().compile(
+            "software_engineering.v1"
+        )
+        payload = copy.deepcopy(definition.example)
+        payload["context"]["build_system"]["write_scopes"] = [
+            {"kind": "file", "path": ".git/config"}
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "architect.yaml"
+            path.write_text(
+                yaml.safe_dump(payload, sort_keys=False),
+                encoding="utf-8",
+            )
+            with self.assertRaises(GraphCompilationError) as raised:
+                GraphCompiler().compile(
+                    validate_contract_payload(payload, definition=definition),
+                    graph_id="framepipe",
+                    generation=1,
+                    bindings=_bindings(),
+                    satellite_projector=_projector(definition),
+                    source_ref=str(path),
+                    workspace_authority_rules=(
+                        definition.workspace_authority_rules
+                    ),
+                    source_map=build_yaml_source_map(path),
+                )
+
+        self.assertEqual(
+            raised.exception.semantic_path,
+            "context.build_system",
+        )
         self.assertIsNotNone(raised.exception.location)
         self.assertIn("architect.yaml:", str(raised.exception))
 
@@ -470,6 +712,7 @@ class GraphExecutionTests(unittest.TestCase):
             bindings=_bindings(),
             satellite_projector=_projector(definition),
             source_ref="architect.yaml",
+            workspace_authority_rules=definition.workspace_authority_rules,
         )
 
     def test_all_software_producers_start_but_sink_checker_waits(self) -> None:
@@ -691,6 +934,7 @@ class GraphExecutionTests(unittest.TestCase):
             bindings=_bindings(),
             satellite_projector=_projector(definition),
             source_ref="architect.yaml",
+            workspace_authority_rules=definition.workspace_authority_rules,
         )
         diff = diff_graphs(source, target)
         decision = diff.decisions["decoder"]
@@ -795,6 +1039,7 @@ class GraphExecutionTests(unittest.TestCase):
                 bindings=_bindings(),
                 satellite_projector=_projector(definition),
                 source_ref="architect.yaml",
+                workspace_authority_rules=definition.workspace_authority_rules,
             )
             installed = coordinator.install_graph(
                 workflow_id=source.graph_id,

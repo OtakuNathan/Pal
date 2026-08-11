@@ -85,6 +85,29 @@ class SocketInteractionProjectionTests(unittest.TestCase):
         self.assertNotIn("action_key", str(interaction))
         self.assertNotIn("model_id", str(interaction))
 
+    def test_nonterminal_reply_keeps_socket_request_open(self) -> None:
+        response_handle = ResponseHandle(
+            endpoint_id="socket_default",
+            reply_target={
+                "session_id": self.session.session_id,
+                "request_id": "request-1",
+                "_pal_turn_continues": True,
+            },
+        )
+
+        self.endpoint.send_reply(response_handle, "Checklist progress 1/3")
+
+        self.assertEqual(
+            self.session.outbound.items,
+            [
+                {
+                    "type": "text_delta",
+                    "request_id": "request-1",
+                    "text": "Checklist progress 1/3",
+                }
+            ],
+        )
+
     def test_selected_token_restores_server_owned_action(self) -> None:
         self.endpoint.send_status(
             self.response_handle,
