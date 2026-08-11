@@ -9,7 +9,11 @@ from typing import Any, Mapping
 import yaml
 
 from pal.minion.v2.contract_protocol import ContractDocument
-from pal.minion.v2.graph_satellites import FamilyGraphSatelliteProjection
+from pal.minion.v2.graph_satellites import (
+    FamilyGraphSatelliteProjection,
+    WorkspaceAuthorityProjectionError,
+    apply_workspace_authority_rules,
+)
 from pal.minion.v2.graph_protocol import (
     EdgeKind,
     EdgeSpec,
@@ -67,6 +71,7 @@ class GraphCompiler:
         bindings: GraphCompileBindings,
         satellite_projector: FamilyGraphSatelliteProjection,
         source_ref: str,
+        workspace_authority_rules: tuple[Mapping[str, Any], ...],
         source_map: GraphSourceMap | None = None,
         source_map_ref: str = "",
     ) -> GraphIR:
@@ -100,14 +105,30 @@ class GraphCompiler:
                 f"modules.{sink}.execution",
                 source_map,
             )
+        projections = {
+            name: satellite_projector.project(
+                document=payload,
+                node_name=name,
+                node=modules[name],
+            )
+            for name in sorted(produced_names)
+        }
+        try:
+            projections = apply_workspace_authority_rules(
+                document=payload,
+                projections=projections,
+                rules=workspace_authority_rules,
+            )
+        except WorkspaceAuthorityProjectionError as exc:
+            semantic_path = _workspace_authority_semantic_path(
+                exc,
+                workspace_authority_rules,
+            )
+            self._fail(str(exc), semantic_path, source_map)
         nodes: dict[str, NodeSpec] = {}
         for name in sorted(produced_names):
             module = modules[name]
-            projection = satellite_projector.project(
-                document=payload,
-                node_name=name,
-                node=module,
-            )
+            projection = projections[name]
             dependencies = {
                 str(provider): dict(dependency or {})
                 for provider, dependency in sorted(
@@ -305,6 +326,30 @@ def build_yaml_source_map(path: Path) -> GraphSourceMap:
     if root is not None:
         visit(root, "")
     return GraphSourceMap(source_ref=str(source), locations=locations)
+
+
+def _workspace_authority_semantic_path(
+    exc: WorkspaceAuthorityProjectionError,
+    rules: tuple[Mapping[str, Any], ...],
+) -> str:
+    message = str(exc)
+    candidates = [
+        dict(rule)
+        for rule in rules
+        if (
+            len(rules) == 1
+            or f"workspace authority {str(dict(rule).get('id') or '')}" in message
+        )
+    ]
+    if len(candidates) != 1:
+        return "context"
+    pointer = str(candidates[0].get("property_pointer") or "")
+    if not pointer.startswith("/"):
+        return "context"
+    return ".".join(
+        token.replace("~1", "/").replace("~0", "~")
+        for token in pointer.split("/")[1:]
+    ) or "context"
 
 
 def _reachable_from(start: str, edges: list[EdgeSpec]) -> set[str]:

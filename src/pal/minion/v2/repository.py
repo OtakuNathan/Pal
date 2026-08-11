@@ -423,6 +423,74 @@ class MinionV2Repository:
             ).fetchall()
         return tuple(dict(row) for row in rows)
 
+    def read_role_checklist_progress(self, session_id: str) -> dict[str, Any] | None:
+        """Read the current attempt's durable work cursor without adding events."""
+
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return None
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT assignment.role, assignment.mode,
+                       assignment.state AS assignment_state,
+                       attempt.status AS attempt_state,
+                       draft.version AS checklist_version,
+                       draft.status AS checklist_status,
+                       draft.payload_json AS checklist_payload_json,
+                       draft.updated_at AS checklist_updated_at
+                FROM minion_v2_role_assignments AS assignment
+                LEFT JOIN minion_v2_role_attempts AS attempt
+                  ON attempt.attempt_id = assignment.active_attempt_id
+                LEFT JOIN minion_v2_submission_drafts AS draft
+                  ON draft.invocation_id = attempt.attempt_id
+                 AND draft.workflow_id = assignment.workflow_id
+                 AND draft.draft_kind = 'work_items'
+                WHERE assignment.session_id = ?
+                ORDER BY assignment.created_at DESC,
+                         assignment.assignment_id DESC,
+                         draft.updated_at DESC
+                LIMIT 1
+                """,
+                (normalized_session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload_value = json.loads(str(row["checklist_payload_json"] or "{}"))
+        payload = dict(payload_value) if isinstance(payload_value, Mapping) else {}
+        items = [
+            {
+                "kind": str(item.get("kind") or "phase"),
+                "summary": str(item.get("summary") or ""),
+                "status": str(item.get("status") or "pending"),
+            }
+            for item in list(payload.get("items") or [])
+            if isinstance(item, Mapping) and str(item.get("summary") or "").strip()
+        ]
+        completed = sum(1 for item in items if item["status"] == "completed")
+        current = next(
+            (item["summary"] for item in items if item["status"] != "completed"),
+            "",
+        )
+        version = int(row["checklist_version"] or 0)
+        return {
+            "role": str(row["role"] or ""),
+            "mode": str(row["mode"] or ""),
+            "assignment_state": str(row["assignment_state"] or ""),
+            "attempt_state": str(row["attempt_state"] or ""),
+            "activity_observed": version > 0,
+            "checklist": {
+                "status": str(row["checklist_status"] or ""),
+                "version": version,
+                "completed": completed,
+                "total": len(items),
+                "current": current,
+                "items": items,
+                "updated_at": str(row["checklist_updated_at"] or ""),
+            },
+        }
+
     def bind_task_delivery(
         self,
         *,
@@ -3481,8 +3549,6 @@ class MinionV2Repository:
                 )
             return
         if scope_kind == "architecture_cycle":
-            if role == "reviewer":
-                return
             rows = connection.execute(
                 """
                 SELECT * FROM minion_v2_aggregate_snapshots
@@ -4743,24 +4809,39 @@ def _active_projection_snapshot(
         match = next((item for item in snapshots if item.aggregate_id == execution_id), None)
         if match is not None:
             if match.state == "REPLAN_REQUIRED":
-                revision_id = str(
-                    match.payload.get("active_replan_revision_id")
-                    or workflow.payload.get("architecture_revision_id")
-                    or ""
+                epoch_revision_id = str(
+                    match.payload.get("active_replan_revision_id") or ""
                 )
-                revision = next(
-                    (
-                        item
-                        for item in snapshots
-                        if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
-                        and item.aggregate_id == revision_id
-                        and str(item.payload.get("source_execution_epoch_id") or "")
-                        == match.aggregate_id
-                    ),
-                    None,
+                workflow_revision_id = str(
+                    workflow.payload.get("architecture_revision_id") or ""
                 )
-                if revision is not None:
-                    return revision
+                for revision_id in dict.fromkeys(
+                    (workflow_revision_id, epoch_revision_id)
+                ):
+                    revision = next(
+                        (
+                            item
+                            for item in snapshots
+                            if item.aggregate_type
+                            == AggregateType.ARCHITECTURE_REVISION
+                            and item.aggregate_id == revision_id
+                            and (
+                                str(
+                                    item.payload.get("source_execution_epoch_id")
+                                    or ""
+                                )
+                                == match.aggregate_id
+                                or item.aggregate_id == epoch_revision_id
+                                or str(
+                                    item.payload.get("architecture_cycle_id") or ""
+                                )
+                                == epoch_revision_id
+                            )
+                        ),
+                        None,
+                    )
+                    if revision is not None:
+                        return revision
             return match
     if architecture_id:
         match = next((item for item in snapshots if item.aggregate_id == architecture_id), None)

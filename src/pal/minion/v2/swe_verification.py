@@ -18,21 +18,28 @@ from typing import Any, Mapping
 
 from pal.execution.tool_facade import EmptyToolInput
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
+from pal.minion.v2.execution import git_changed_paths
 from pal.minion.v2.review_findings import (
     ADD_FINDING_CAPABILITY,
     empty_review_draft,
     partition_findings,
+    structured_advisories,
     structured_findings,
 )
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.semantic_evidence import recorded_cases
 from pal.minion.v2.submission_drafts import SubmissionDraftContext, SubmissionDraftStore
 from pal.minion.v2.verification_builder import semantic_verification_draft_errors
+from pal.minion.v2.verification import (
+    historical_repair_checklist_items,
+    validate_verification_case_order,
+)
 from pal.minion.v2.work_items import (
     assert_work_items_complete,
     findings_from_work_items,
     submission_work_items,
 )
+from pal.minion.v2.workspace_paths import module_developer_test_path
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus, ToolExecutionResult
 
@@ -46,6 +53,195 @@ SWE_VERIFICATION_CAPABILITIES = (
     "op_minion_verification_request_requirements_revision",
     "op_minion_verification_unknown",
 )
+
+
+SEMANTIC_VERIFICATION_OUTCOMES = frozenset(
+    {
+        "pass",
+        "module_repair",
+        "contract_revision",
+        "architecture_revision",
+        "requirements_revision",
+        "unknown",
+    }
+)
+
+
+def semantic_verification_submission_errors(
+    submission: Mapping[str, Any],
+    *,
+    work_view: Mapping[str, Any],
+    changed_paths: list[str],
+    current_case_paths: list[str],
+    corpus_scope: Mapping[str, Any],
+    scratch_only: bool,
+) -> tuple[str, ...]:
+    """Validate one semantic verifier submission against Manager-owned facts.
+
+    This function is shared by the pre-receipt Role Gateway check and the
+    post-receipt semantic effect check.  A gateway rejection therefore leaves
+    the Draft and role attempt live, while a later disagreement is a genuine
+    durable invariant failure.
+    """
+
+    outcome = str(submission.get("outcome") or "").strip()
+    errors: list[str] = []
+    if outcome not in SEMANTIC_VERIFICATION_OUTCOMES:
+        errors.append(
+            f"unknown semantic verification outcome: {outcome or '<missing>'}"
+        )
+    try:
+        findings = structured_findings(submission)
+        structured_advisories(submission)
+    except ValueError as exc:
+        findings = []
+        errors.append(str(exc))
+    reason = str(submission.get("reason") or "").strip()
+    if outcome not in {"pass", "unknown"} and not findings:
+        errors.append("repair and revision outcomes require structured findings")
+    if outcome in {"pass", "unknown"} and findings:
+        errors.append(f"{outcome.upper()} requires an empty finding list")
+    if outcome == "unknown" and not reason:
+        errors.append("UNKNOWN requires an environmental reason")
+
+    recorded_results = [
+        dict(item)
+        for item in list(submission.get("recorded_results") or [])
+        if isinstance(item, Mapping)
+    ]
+    required_historical = historical_repair_checklist_items(work_view)
+    try:
+        validate_verification_case_order(
+            [str(item.get("case_kind") or "") for item in recorded_results],
+            historical_required=bool(required_historical),
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+    historical_names = {
+        str(item.get("name") or "")
+        for item in recorded_results
+        if str(item.get("case_kind") or "") == "historical_regression"
+    }
+    missing_historical = [
+        str(item["case"])
+        for item in required_historical
+        if str(item["case"]) not in historical_names
+    ]
+    if missing_historical:
+        errors.append(
+            "verification must replay every historical RepairBill case before submit: "
+            + ", ".join(missing_historical)
+        )
+    evidence_tags = {
+        str(tag)
+        for item in recorded_results
+        for tag in list(item.get("obligation_tags") or [])
+    }
+    if "candidate_delta_review" not in evidence_tags:
+        errors.append(
+            "verification requires a current-Candidate diff-risk check after regressions"
+        )
+
+    outside = [] if scratch_only else [
+        path
+        for path in changed_paths
+        if not verification_path_scope_matches(path, corpus_scope)
+    ]
+    if outside:
+        errors.append(
+            "verifier changed paths outside the bound module corpus: "
+            + ", ".join(outside)
+        )
+    if outcome != "unknown" and not current_case_paths:
+        errors.append(
+            "verification requires at least one durable verifier-authored case; "
+            "the bound verification corpus is empty"
+        )
+    receipts = [
+        dict(item)
+        for item in list(submission.get("tool_receipts") or [])
+        if isinstance(item, Mapping)
+    ]
+    if not receipts:
+        errors.append(
+            "verification requires Manager-recorded shell, Git, or LSP evidence"
+        )
+    last_write = max(
+        (
+            index
+            for index, item in enumerate(receipts)
+            if item.get("kind") == "test_write"
+        ),
+        default=-1,
+    )
+    final_checks = [
+        item
+        for index, item in enumerate(receipts)
+        if index > last_write and item.get("kind") in {"command", "lsp"}
+    ]
+    if changed_paths and not final_checks:
+        errors.append("run verification again after the final test edit")
+    if outcome == "pass" and not any(bool(item.get("ok")) for item in final_checks):
+        errors.append("PASS requires a successful final command or LSP receipt")
+    return tuple(dict.fromkeys(errors))
+
+
+def verification_workspace_changed_paths(
+    review_workspace: Path,
+    candidate_digest: str,
+) -> list[str]:
+    return git_changed_paths(review_workspace, candidate_digest)
+
+
+def verification_scratch_paths(review_scratch: Path) -> list[str]:
+    if not review_scratch.is_dir():
+        return []
+    return [
+        f"review_scratch/{path.relative_to(review_scratch).as_posix()}"
+        for path in sorted(
+            item
+            for item in review_scratch.rglob("*")
+            if item.is_file() and not item.is_symlink()
+        )
+    ]
+
+
+def verification_corpus_files(
+    review_workspace: Path,
+    corpus_scope: Mapping[str, Any],
+) -> list[str]:
+    root = review_workspace.resolve()
+    target = str(corpus_scope.get("path") or "").replace("\\", "/").strip("/")
+    if not target or not root.is_dir():
+        return []
+    path = (root / target).resolve()
+    if not path.is_relative_to(root):
+        return []
+    if str(corpus_scope.get("kind") or "") == "file":
+        return [target] if path.is_file() and not path.is_symlink() else []
+    if not path.is_dir():
+        return []
+    return [
+        item.relative_to(root).as_posix()
+        for item in sorted(path.rglob("*"))
+        if item.is_file() and not item.is_symlink()
+    ]
+
+
+def verification_path_scope_matches(
+    path: str,
+    scope: Mapping[str, Any],
+) -> bool:
+    normalized = str(path).replace("\\", "/").strip("/")
+    target = str(scope.get("path") or "").replace("\\", "/").strip("/")
+    if not target:
+        return False
+    kind = str(scope.get("kind") or "").strip().lower()
+    if kind == "file":
+        return normalized == target
+    if kind == "directory":
+        return normalized == target or normalized.startswith(target + "/")
+    return False
 
 
 SWE_VERIFICATION_TOOL_SPECS: dict[str, dict[str, Any]] = {
@@ -498,7 +694,7 @@ def _work_view_repair_path_owners(
                 (
                     {
                         "kind": "directory",
-                        "path": f"tests/{module_name}/developer",
+                        "path": module_developer_test_path(module_name),
                     },
                 )
             )

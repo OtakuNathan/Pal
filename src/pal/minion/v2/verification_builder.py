@@ -1004,7 +1004,8 @@ def _verification_submission_errors(
     ]
     if failed_cases and not list(value.get("findings") or []):
         errors.append(
-            "FAIL evidence requires at least one add_finding call: "
+            "FAIL evidence requires at least one blocking add_finding call; "
+            "advisory findings do not reconcile FAIL: "
             + ", ".join(sorted(failed_cases))
         )
     return errors, reference_warnings

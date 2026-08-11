@@ -76,7 +76,10 @@ class DeliveryService:
                 )
                 return self._store(receipt, verification_ref)
         elif str(source_snapshot.get("delivery_mode") or "") == "local_only":
-            fallback_reason = "source workspace was dirty, non-Git, detached, or had no push target"
+            fallback_reason = str(
+                source_snapshot.get("delivery_fallback_reason")
+                or "source workspace was dirty, non-Git, detached, or had no push target"
+            )[-1000:]
 
         local_path = self._publish_local_checkout(
             workflow_id=workflow_id,
@@ -106,16 +109,37 @@ class DeliveryService:
         task_title: str,
         source_snapshot: Mapping[str, Any],
     ) -> str:
-        source_repo = Path(str(source_snapshot.get("source_repo_path") or "")).expanduser()
+        source_repo_value = str(source_snapshot.get("source_repo_path") or "").strip()
         remote_name = str(source_snapshot.get("source_remote_name") or "").strip()
         original_head = str(source_snapshot.get("original_head") or "").strip()
-        if not source_repo.is_dir() or not remote_name or not original_head:
-            raise RuntimeError("source Git delivery context is no longer available")
+        if not source_repo_value:
+            raise RuntimeError("source Git repository path is unavailable")
+        source_repo = Path(source_repo_value).expanduser()
+        if not source_repo.is_dir():
+            raise RuntimeError("source Git repository is no longer available")
+        if not remote_name:
+            raise RuntimeError("source Git repository has no configured push remote")
+        if not original_head:
+            raise RuntimeError("source Git HEAD is unavailable")
         if not _is_ancestor(repository, original_head, commit_sha):
             raise RuntimeError("verified commit does not preserve source Git ancestry")
         remote_url = _git(source_repo, "remote", "get-url", "--push", remote_name).strip()
         if not remote_url:
             raise RuntimeError("source remote has no push URL")
+        if not is_github_pull_request_remote(remote_url):
+            raise RuntimeError("source push target does not support GitHub pull requests")
+        preflight = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner"],
+            cwd=source_repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if preflight.returncode != 0:
+            raise RuntimeError(
+                _command_failure_message("GitHub PR delivery preflight failed", preflight)
+            )
         pushed = subprocess.run(
             [
                 "git",
@@ -131,7 +155,9 @@ class DeliveryService:
             check=False,
         )
         if pushed.returncode != 0:
-            raise RuntimeError("delivery branch push failed")
+            raise RuntimeError(
+                _command_failure_message("delivery branch push failed", pushed)
+            )
         existing = subprocess.run(
             [
                 "gh",
@@ -180,7 +206,12 @@ class DeliveryService:
             check=False,
         )
         if created.returncode != 0 or not created.stdout.strip():
-            raise RuntimeError("delivery branch was pushed but PR creation failed")
+            raise RuntimeError(
+                _command_failure_message(
+                    "delivery branch was pushed but PR creation failed",
+                    created,
+                )
+            )
         return created.stdout.strip().splitlines()[-1].strip()
 
     def _publish_local_checkout(
@@ -271,6 +302,44 @@ def _is_ancestor(repository: Path, ancestor: str, descendant: str) -> bool:
         check=False,
     )
     return result.returncode == 0
+
+
+def is_github_pull_request_remote(remote_url: str) -> bool:
+    """Return whether a push URL identifies a github.com repository."""
+
+    value = remote_url.strip()
+    if re.match(
+        r"^git@github\.com:[^/\s]+/[^/\s]+(?:\.git)?/?$",
+        value,
+        re.IGNORECASE,
+    ):
+        return True
+    return bool(
+        re.match(
+            r"^(?:https?|ssh|git)://(?:[^/@\s]+@)?github\.com/[^/\s]+/[^/\s]+(?:\.git)?/?$",
+            value,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _command_failure_message(
+    prefix: str,
+    completed: subprocess.CompletedProcess[str],
+) -> str:
+    detail = (completed.stderr or completed.stdout or "").strip()
+    detail = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", detail)
+    detail = re.sub(r"(https?://)[^/@\s:]+:[^/@\s]+@", r"\1***@", detail)
+    detail = re.sub(
+        r"\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+)\b",
+        "[REDACTED]",
+        detail,
+    )
+    detail = " ".join(detail.split())[-700:]
+    suffix = f" (exit {completed.returncode})"
+    if detail:
+        suffix += f": {detail}"
+    return prefix + suffix
 
 
 def _git(repository: Path, *args: str) -> str:

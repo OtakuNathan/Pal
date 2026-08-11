@@ -13,6 +13,7 @@ from pal.minion.v2.architecture_templates import (
     compiled_architecture_definition_from_mapping,
 )
 from pal.minion.v2.artifacts import ArtifactRef
+from pal.minion.v2.contracts import AggregateType
 from pal.minion.v2.contract_protocol import (
     ARCHITECT_FILENAME,
     validate_contract_payload,
@@ -33,6 +34,12 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftStore,
 )
 from pal.minion.v2.role_protocol import RoleAssignmentState, stable_hash
+from pal.minion.v2.swe_verification import (
+    semantic_verification_submission_errors,
+    verification_corpus_files,
+    verification_scratch_paths,
+    verification_workspace_changed_paths,
+)
 from pal.minion.v2.work_items import (
     assert_work_items_complete,
     submission_work_items,
@@ -247,7 +254,13 @@ class RoleAssignmentGateway:
             params,
             allow_work_items=True,
         )
-        snapshot = SubmissionDraftStore(self.service.runtime_root).read(
+        store = SubmissionDraftStore(self.service.runtime_root)
+        self._reconcile_draft_from_assignment_receipt(
+            authenticated,
+            context,
+            store,
+        )
+        snapshot = store.read(
             context,
             seed=dict(params.get("seed") or {}),
         )
@@ -258,6 +271,9 @@ class RoleAssignmentGateway:
         authenticated: Mapping[str, Any],
         params: Mapping[str, Any],
     ) -> dict[str, Any]:
+        assignment = dict(authenticated["assignment"])
+        if str(assignment.get("state") or "") != RoleAssignmentState.RUNNING.value:
+            raise ValueError("role assignment receipt already froze authoring")
         context = self._context(
             authenticated,
             params,
@@ -295,6 +311,16 @@ class RoleAssignmentGateway:
             raise ValueError(f"unsupported role submission kind: {context.draft_kind}")
         store = SubmissionDraftStore(self.service.runtime_root)
         snapshot = store.read(context, seed={})
+        # Semantic verifier outcome tools always submit an explicit outcome.
+        # Data-driven families may still use the distinct VerificationPlan
+        # payload under the same durable submission kind; its own compiler
+        # contract is outside this SWE outcome validator.
+        if context.draft_kind == "verification" and "outcome" in payload:
+            self._validate_verification_submission_before_receipt(
+                authenticated,
+                assignment,
+                payload,
+            )
         artifact_ref = self.service.artifacts.put_json(
             payload,
             artifact_type=artifact_type,
@@ -323,17 +349,125 @@ class RoleAssignmentGateway:
         # The assignment receipt is the canonical completion boundary. Freeze
         # the authoring draft only after Manager validation has accepted it so
         # a rejected submit remains editable and retryable in the same process.
-        store.mark_submitted(
-            context,
-            expected_version=int(params.get("expected_version") or 0),
-            submission_artifact_ref=artifact_ref.to_dict(),
-            submission_payload_hash=payload_hash,
-        )
+        try:
+            store.mark_submitted(
+                context,
+                expected_version=int(params.get("expected_version") or 0),
+                submission_artifact_ref=artifact_ref.to_dict(),
+                submission_payload_hash=payload_hash,
+            )
+        except (RuntimeError, OSError):
+            # The assignment receipt above is the canonical completion
+            # boundary.  A Draft CAS race or a crash/replay window must not
+            # turn an accepted submission back into a worker-visible failure.
+            store.reconcile_submitted(
+                context,
+                submission_artifact_ref=artifact_ref.to_dict(),
+                submission_payload_hash=payload_hash,
+            )
         return {
             "submitted": True,
             "submission_artifact_ref": artifact_ref.to_dict(),
             "submission_payload_hash": payload_hash,
         }
+
+    def _reconcile_draft_from_assignment_receipt(
+        self,
+        authenticated: Mapping[str, Any],
+        context: SubmissionDraftContext,
+        store: SubmissionDraftStore,
+    ) -> None:
+        assignment = dict(authenticated["assignment"])
+        if str(assignment.get("submission_kind") or "") != context.draft_kind:
+            return
+        if str(assignment.get("state") or "") not in {
+            RoleAssignmentState.RESULT_RECORDED.value,
+            RoleAssignmentState.SETTLED.value,
+        }:
+            return
+        artifact_ref = dict(assignment.get("submission_artifact_ref") or {})
+        payload_hash = str(assignment.get("submission_payload_hash") or "").strip()
+        if not artifact_ref or not payload_hash:
+            return
+        store.reconcile_submitted(
+            context,
+            submission_artifact_ref=artifact_ref,
+            submission_payload_hash=payload_hash,
+        )
+
+    def _validate_verification_submission_before_receipt(
+        self,
+        authenticated: Mapping[str, Any],
+        assignment: Mapping[str, Any],
+        submission: Mapping[str, Any],
+    ) -> None:
+        """Reject correctable verifier output before freezing its Draft."""
+
+        if str(assignment.get("aggregate_type") or "") != AggregateType.DAG_NODE_RUN.value:
+            return
+        node = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            str(assignment.get("aggregate_id") or ""),
+        )
+        if node is None:
+            return
+        view_value = node.payload.get("unit_work_view_ref")
+        if not isinstance(view_value, Mapping) or not view_value.get("sha256"):
+            return
+        try:
+            work_view = self.service.artifacts.read_json(dict(view_value))
+        except Exception:
+            # Manager-owned identity/corpus corruption is not correctable by
+            # the live role.  Preserve the durable post-submit invariant path
+            # instead of feeding the model an impossible retry instruction.
+            return
+        if not isinstance(work_view, Mapping):
+            return
+
+        prompt_pack = self._authenticated_prompt_pack(authenticated)
+        workspace = dict(prompt_pack.get("workspace") or {})
+        review_workspace = Path(str(workspace.get("repo_path") or ""))
+        review_scratch = Path(str(workspace.get("review_scratch_dir") or ""))
+        scratch_only = bool(workspace.get("verification_scratch_only"))
+        corpus_scope = dict(
+            dict(node.payload.get("path_policy") or {}).get(
+                "verification_corpus"
+            )
+            or {}
+        )
+        if scratch_only:
+            changed_paths = verification_scratch_paths(review_scratch)
+            current_case_paths = list(changed_paths)
+        else:
+            candidate_digest = str(node.payload.get("candidate_digest") or "").strip()
+            if not candidate_digest:
+                return
+            if not review_workspace.is_dir():
+                return
+            try:
+                changed_paths = verification_workspace_changed_paths(
+                    review_workspace,
+                    candidate_digest,
+                )
+            except Exception:
+                return
+            current_case_paths = verification_corpus_files(
+                review_workspace,
+                corpus_scope,
+            )
+        errors = semantic_verification_submission_errors(
+            submission,
+            work_view=dict(work_view),
+            changed_paths=changed_paths,
+            current_case_paths=current_case_paths,
+            corpus_scope=corpus_scope,
+            scratch_only=scratch_only,
+        )
+        if errors:
+            raise ValueError(
+                "verification submission rejected before durable receipt:\n- "
+                + "\n- ".join(errors)
+            )
 
     def _compile_architect_submission(
         self,
@@ -473,6 +607,7 @@ class RoleAssignmentGateway:
                 template=definition.graph_satellite_template,
             ),
             source_ref=ARCHITECT_FILENAME,
+            workspace_authority_rules=definition.workspace_authority_rules,
             source_map=source_map,
             source_map_ref=source_map_ref.sha256,
         )

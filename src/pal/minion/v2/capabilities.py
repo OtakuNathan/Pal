@@ -51,7 +51,8 @@ if TYPE_CHECKING:
 
 
 MINION_START_WORKFLOW_PURPOSE = (
-    "Start one durable Minion workflow and bind its future delivery to the channel that owns the current turn."
+    "Start one durable Minion workflow from the complete, lossless authoritative task specification and bind its "
+    "future delivery to the channel that owns the current turn."
 )
 
 MINION_START_WORKFLOW_GUIDANCE = ToolGuidance(
@@ -62,7 +63,12 @@ MINION_START_WORKFLOW_GUIDANCE = ToolGuidance(
         "Choose by identity binding and task nature, not by prose length or step count. Before calling, inspect "
         "skill_search with read_tool and invoke it through call_tool to find a relevant operation manual. If any are "
         "found, ask whether to provide them and wait; pass only explicitly approved names in skill_refs. Supply the "
-        "canonical profile, short goal, narrow workspace, and complete task_spec. "
+        "canonical profile, short goal, narrow workspace, and complete task_spec. When the authoritative requirements "
+        "are in a file or prior user content, read the complete content and put it directly and losslessly in "
+        "task_spec.authoritative_text. Do not summarize, paraphrase, normalize, reinterpret, omit examples, or replace "
+        "the content with a path or reference. Preserve exact leading and trailing whitespace, including every final "
+        "newline. The short goal and title are routing metadata only and cannot substitute for the full task "
+        "specification. "
         "Use review_then_execute with an external architecture artifact, execute_trusted only for a Manager-trusted "
         "artifact, standalone_review for review-only work, and review_and_repair for bounded repair."
     ),
@@ -133,18 +139,34 @@ class MinionV2CapabilitiesMinionV2PublicProviderStartWorkflowInput(StrictToolMod
     goal: str | None = Field(
         default=None,
         description=(
-            "Short routing objective. For new_requirement, task_spec is the complete "
-            "semantic source of truth."
+            "Short routing objective only. It cannot substitute for, summarize, or carry "
+            "the authoritative requirements; for new_requirement, task_spec is the "
+            "complete semantic source of truth."
         ),
     )
     workspace: MinionV2StartWorkflowWorkspace | None = None
     task_spec: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Complete structured task specification for new_requirement. This becomes "
-            "original in the immutable task.yaml ledger; later user-authorized changes "
-            "are append-only revisions."
+            "Complete, lossless task specification for new_requirement. This becomes "
+            "task.yaml.original in the immutable ledger. When authoritative requirements "
+            "come from a file or prior user content, first read the complete content, then "
+            "put the exact text in an authoritative_text string inside this object. Do not "
+            "summarize, paraphrase, normalize, reinterpret, omit examples, or replace that "
+            "content with a path/reference. Preserve exact leading and trailing whitespace, "
+            "including every final newline. Other structured fields may accompany "
+            "authoritative_text. Later user-authorized changes are append-only revisions."
         ),
+        json_schema_extra={
+            "examples": [
+                {
+                    "authoritative_text": (
+                        "# Complete requirement\n\n"
+                        "Preserve every example exactly, including `0000 / 0248 / 69`.\n\n"
+                    )
+                }
+            ]
+        },
     )
     skill_refs: list[str] | None = Field(
         default=None,

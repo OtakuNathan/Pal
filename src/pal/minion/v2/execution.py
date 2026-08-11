@@ -23,7 +23,13 @@ from pal.minion.v2.adapters import (
     provision_artifact_workspaces,
 )
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
-from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
+from pal.minion.v2.contracts import (
+    ActionEnvelope,
+    AggregateSnapshot,
+    AggregateType,
+    DispatchResult,
+    PermanentEffectError,
+)
 from pal.minion.v2.contract_protocol import (
     CONTRACT_ARTIFACT,
     software_contract_projection,
@@ -54,6 +60,8 @@ from pal.minion.v2.sessions import (
 from pal.minion.v2.skeleton import (
     SKELETON_MODULE_CONTRACT_ARTIFACT,
     compiled_module_write_scopes,
+)
+from pal.minion.v2.workspace_paths import (
     module_developer_test_path,
     module_verification_corpus_path,
 )
@@ -66,6 +74,10 @@ class ExecutionCompilation:
     node_run_ids: tuple[str, ...]
     unit_node_ids: Mapping[str, str]
     sink_node_id: str
+
+
+class DependencyIntegrationConflict(PermanentEffectError):
+    """A dependency delta conflicts with the current immutable Candidate."""
 
 
 @dataclass(frozen=True)
@@ -451,6 +463,12 @@ class ExecutionCompiler:
                                 "path": module_verification_corpus_path(name),
                             },
                             "reference_only": list(paths.get("reference_only") or []),
+                            "workspace_authorities": [
+                                dict(item)
+                                for item in list(
+                                    paths.get("workspace_authorities") or []
+                                )
+                            ],
                         },
                         **({"graph_sink": True} if name == graph.sink else {}),
                         **(
@@ -1878,7 +1896,7 @@ class UnitWorkViewBuilder:
             "unit work view requires a ContractArtifact"
         )
 
-    def build_system_delivery_view(self, node: AggregateSnapshot) -> ArtifactRef:
+    def system_delivery_view(self, node: AggregateSnapshot) -> ArtifactRef:
         """Project whole-graph delivery semantics for the sink verifier only."""
 
         if not bool(node.payload.get("graph_sink")):
@@ -1910,6 +1928,16 @@ class UnitWorkViewBuilder:
                 for scenario in scenarios.values()
                 if isinstance(scenario, Mapping)
                 and self._entrypoint_view(scenario.get("entrypoint"))
+            ],
+            "family_context": dict(full_contract.get("context") or {}),
+            "workspace_authorities": [
+                dict(item)
+                for item in list(
+                    dict(node.payload.get("path_policy") or {}).get(
+                        "workspace_authorities"
+                    )
+                    or []
+                )
             ],
         }
         return self.contracts.artifacts.put_json(
@@ -1987,6 +2015,7 @@ class UnitWorkViewBuilder:
             "schema_version": "3",
             "module_name": module_name,
             "graph_sink": bool(node.payload.get("graph_sink")),
+            "context": dict(submission.get("context") or {}),
             "module": semantic_module,
             "contract_mode": str(path_policy.get("contract_mode") or "review_guarded"),
             "contract_paths": list(path_policy.get("contract_paths") or []),
@@ -1994,6 +2023,10 @@ class UnitWorkViewBuilder:
             "developer_tests": dict(path_policy.get("developer_tests") or {}),
             "verification_corpus": dict(path_policy.get("verification_corpus") or {}),
             "reference_only": list(path_policy.get("reference_only") or []),
+            "workspace_authorities": [
+                dict(item)
+                for item in list(path_policy.get("workspace_authorities") or [])
+            ],
             "requirements": bound_requirements,
             "scenarios": bound_scenarios,
             "entrypoints": [
@@ -2417,6 +2450,11 @@ def prepare_node_dependency_baseline(
         if adapter == SOFTWARE_GIT_ADAPTER and apply_candidates
         else ""
     )
+    recorded_applied_digests = _recorded_applied_dependency_digests(
+        node,
+        workspace=workspace,
+        starting_head=starting_head,
+    )
     accepted_digests: list[str] = []
     output_hashes: dict[str, str] = {}
     dependency_outputs: dict[str, Any] = {}
@@ -2429,7 +2467,11 @@ def prepare_node_dependency_baseline(
             if not candidate_digest:
                 raise ValueError(f"accepted dependency has no candidate digest: {dependency_id}")
             if adapter == SOFTWARE_GIT_ADAPTER:
-                if apply_candidates:
+                if (
+                    apply_candidates
+                    and recorded_applied_digests.get(dependency_id)
+                    != candidate_digest
+                ):
                     _apply_dependency_candidate_delta(workspace, dependency)
             elif adapter != ARTIFACT_BUNDLE_ADAPTER:
                 raise ValueError(f"unsupported execution adapter: {adapter}")
@@ -2628,8 +2670,79 @@ def _apply_dependency_candidate_delta(
         raise ValueError(
             f"accepted dependency Candidate contains no delta: {dependency.aggregate_id}"
         )
+    patch_equivalence = {
+        parts[1]: parts[0]
+        for line in _git(
+            workspace,
+            "cherry",
+            "HEAD",
+            candidate_digest,
+            candidate_base,
+        ).splitlines()
+        if len(parts := line.split()) >= 2 and parts[0] in {"+", "-"}
+    }
     for commit in commits:
-        _git(workspace, "cherry-pick", commit)
+        if _git_is_ancestor(workspace, commit, "HEAD"):
+            continue
+        if patch_equivalence.get(commit) == "-":
+            continue
+        try:
+            _git(workspace, "cherry-pick", commit)
+        except subprocess.CalledProcessError as exc:
+            if _git_ref_exists(workspace, "CHERRY_PICK_HEAD"):
+                raise DependencyIntegrationConflict(
+                    "accepted dependency Candidate conflicts with the current "
+                    f"workspace: {dependency.aggregate_id}"
+                ) from exc
+            raise
+
+
+def _recorded_applied_dependency_digests(
+    node: AggregateSnapshot,
+    *,
+    workspace: Path,
+    starting_head: str,
+) -> dict[str, str]:
+    """Return durable dependency applications inherited by the current Candidate.
+
+    A repair Candidate starts from the previous assembled verification checkpoint.
+    The source dependency SHAs are not ancestors after cherry-pick, so replay must
+    use the Manager-owned dependency provenance rather than raw SHA ancestry.
+    """
+
+    verification_base = str(node.payload.get("verification_base_sha") or "")
+    if (
+        not starting_head
+        or not verification_base
+        or not _git_is_ancestor(workspace, verification_base, starting_head)
+    ):
+        return {}
+    accepted = {
+        str(item)
+        for item in list(
+            node.payload.get("accepted_dependency_candidate_digests") or []
+        )
+        if str(item)
+    }
+    result: dict[str, str] = {}
+    for dependency_id, raw_output in dict(
+        node.payload.get("dependency_outputs") or {}
+    ).items():
+        output = dict(raw_output) if isinstance(raw_output, Mapping) else {}
+        digest = str(output.get("candidate_digest") or "")
+        if digest and (not accepted or digest in accepted):
+            result[str(dependency_id)] = digest
+    return result
+
+
+def _git_ref_exists(workspace: Path, ref_name: str) -> bool:
+    return subprocess.run(
+        ["git", "rev-parse", "--quiet", "--verify", ref_name],
+        cwd=workspace,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
 
 
 def _abort_cherry_pick(workspace: Path) -> None:

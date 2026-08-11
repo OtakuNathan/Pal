@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.minion.v2.delivery import is_github_pull_request_remote
 from pal.minion.v2.paths import (
     minion_data_root,
     project_git_layout_lock,
@@ -21,6 +22,11 @@ from pal.minion.v2.paths import (
 )
 from pal.minion.v2.module_protocol import ModuleDefinition
 from pal.minion.v2.task_ledger import validate_task_ledger
+from pal.minion.v2.workspace_paths import (
+    module_developer_test_path,
+    module_verification_corpus_path,
+    repository_path_targets_control_plane,
+)
 
 
 SOFTWARE_CONTRACT_SNAPSHOT_ARTIFACT = "SoftwareContractSnapshotArtifact"
@@ -203,27 +209,6 @@ def compiled_module_write_scopes(path_policy: Mapping[str, Any]) -> tuple[dict[s
         for kind, path in dict.fromkeys((item["kind"], item["path"]) for item in scopes)
         if kind and path
     )
-
-
-def _module_test_root(module_name: str) -> str:
-    normalized_name = str(module_name or "").strip()
-    if MODULE_NAME_PATTERN.fullmatch(normalized_name) is None:
-        raise ValueError(
-            f"invalid semantic module name: {normalized_name or '<empty>'}"
-        )
-    return f"tests/{normalized_name}"
-
-
-def module_developer_test_path(module_name: str) -> str:
-    """Return the module Coder-owned durable test corpus path."""
-
-    return f"{_module_test_root(module_name)}/developer"
-
-
-def module_verification_corpus_path(module_name: str) -> str:
-    """Return the module Verifier-owned durable test corpus path."""
-
-    return f"{_module_test_root(module_name)}/verifier"
 
 
 @dataclass(frozen=True)
@@ -771,6 +756,16 @@ def compile_skeleton_markdown(
             f"  - {item.get('sequence')}: {authority.get('title', '')} "
             f"({authority.get('origin', 'user')}, {authority.get('observed_at', '')})"
         )
+    lines.extend(["", "## Family Context", "", "```json"])
+    lines.append(
+        json.dumps(
+            dict(submission.get("context") or {}),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    lines.extend(["```", ""])
     lines.extend(["", "## Requirement Mapping", ""])
     for name, raw_requirement in dict(submission.get("requirements") or {}).items():
         requirement = dict(raw_requirement or {})
@@ -1071,8 +1066,41 @@ class GitBackedSkeletonService:
         )
         validation.raise_for_errors()
         normalized = dict(validation.normalized_submission)
-        changed_paths = _git_changed_paths(architecture_workspace.worktree, architecture_workspace.base_sha)
-        _git(architecture_workspace.worktree, "add", "-A")
+        changed_paths = [
+            path
+            for path in _git_changed_paths(
+                architecture_workspace.worktree,
+                architecture_workspace.base_sha,
+            )
+            if not repository_path_targets_control_plane(path)
+        ]
+        private_changes = _architect_private_implementation_changes(
+            architecture_workspace.worktree,
+            changed_paths=changed_paths,
+            submission=normalized,
+            base_sha=architecture_workspace.base_sha,
+            original_head=architecture_workspace.original_head,
+        )
+        if private_changes:
+            raise ValueError(
+                "Architect changed private implementation/build/test paths outside declared "
+                "contract files: "
+                + ", ".join(private_changes)
+                + ". Restore them and leave their implementation to the owning Coder/Verifier."
+            )
+        if changed_paths:
+            # architect.yaml is the live hand-off for the whole Architecture
+            # cycle.  It participates in workspace freezing and recovery, but
+            # it is Manager control state rather than product source.  Stage
+            # only the already-filtered product paths instead of deleting the
+            # hand-off before every snapshot.
+            _git(
+                architecture_workspace.worktree,
+                "add",
+                "-A",
+                "--",
+                *(f":(literal){path}" for path in changed_paths),
+            )
         submission_hash = _stable_hash(normalized)
         commit_key = hashlib.sha256(
             f"{architecture_workspace.base_sha}\0{submission_hash}\0{requirements_ref.sha256}\0{workflow_name}\0{revision_name}".encode("utf-8")
@@ -1152,7 +1180,6 @@ class GitBackedSkeletonService:
             "skeleton_tree_sha": skeleton_tree,
             "contract_file_hashes": contract_file_hashes,
             "changed_paths": changed_paths,
-            "path_policy": _compiled_path_policy(normalized),
             "original_workspace_head": architecture_workspace.original_head,
             "source_fingerprint": architecture_workspace.source_fingerprint,
             "repository_layout": {
@@ -1261,6 +1288,7 @@ class GitBackedSkeletonService:
         source_repo_path = ""
         source_branch = ""
         source_remote_name = ""
+        source_remote_url = ""
         source_clean = False
         files: list[str] = []
         if source is not None:
@@ -1280,6 +1308,14 @@ class GitBackedSkeletonService:
             source_remote_name = (
                 "origin" if "origin" in remotes else remotes[0] if remotes else ""
             )
+            if source_remote_name:
+                source_remote_url = _optional_git(
+                    source,
+                    "remote",
+                    "get-url",
+                    "--push",
+                    source_remote_name,
+                )
             source_clean = bool(original_head) and not bool(
                 _optional_git(source, "status", "--porcelain", "--untracked-files=all")
             )
@@ -1331,6 +1367,17 @@ class GitBackedSkeletonService:
                     common_git_dir, "rev-parse", f"{original_head}^{{tree}}"
                 ).strip()
                 files = list(_workspace_snapshot_paths(source))
+                delivery_fallback_reason = ""
+                if not source_branch:
+                    delivery_fallback_reason = "source Git branch is detached"
+                elif not source_remote_name or not source_remote_url:
+                    delivery_fallback_reason = (
+                        "source Git repository has no configured push remote"
+                    )
+                elif not is_github_pull_request_remote(source_remote_url):
+                    delivery_fallback_reason = (
+                        "source push target does not support GitHub pull requests"
+                    )
                 return {
                     "schema_version": "2",
                     "snapshot_commit_sha": original_head,
@@ -1342,7 +1389,12 @@ class GitBackedSkeletonService:
                     "source_branch": source_branch,
                     "source_remote_name": source_remote_name,
                     "source_clean": True,
-                    "delivery_mode": "pull_request_preferred",
+                    "delivery_mode": (
+                        "local_only"
+                        if delivery_fallback_reason
+                        else "pull_request_preferred"
+                    ),
+                    "delivery_fallback_reason": delivery_fallback_reason,
                 }
         with tempfile.TemporaryDirectory(prefix="pal-workspace-snapshot-") as temporary:
             seed = Path(temporary) / "seed"
@@ -1429,7 +1481,10 @@ def _normalize_module_paths(
         raise ValueError(
             f"contract_only module {module_name} must use file_frozen contract mode"
         )
-    contracts = [_normalized_repo_path(str(item)) for item in list(paths.get("contract_paths") or [])]
+    contracts = [
+        _normalized_authored_module_path(str(item))
+        for item in list(paths.get("contract_paths") or [])
+    ]
     if not contracts:
         raise ValueError(f"module {module_name} requires paths.contract_paths")
     implementation = _normalize_path_scopes(
@@ -1449,7 +1504,10 @@ def _normalize_module_paths(
         raise ValueError(
             f"contract_only module {module_name} cannot declare implementation_scopes"
         )
-    references = [_normalized_repo_path(str(item)) for item in list(paths.get("reference_only") or [])]
+    references = [
+        _normalized_authored_module_path(str(item))
+        for item in list(paths.get("reference_only") or [])
+    ]
     return {
         "contract_mode": contract_mode,
         "contract_paths": list(dict.fromkeys(contracts)),
@@ -1471,7 +1529,7 @@ def _normalize_path_scopes(
         if not isinstance(raw, Mapping):
             raise ValueError(f"{field} path scope must be an object")
         kind = str(raw.get("kind") or "").strip()
-        path = _normalized_repo_path(str(raw.get("path") or ""))
+        path = _normalized_authored_module_path(str(raw.get("path") or ""))
         if kind not in PATH_SCOPE_KINDS:
             raise ValueError(f"{field} path scope kind must be file or directory")
         if not path:
@@ -1594,36 +1652,6 @@ def _validate_declared_paths(
     _raise_architecture_errors(errors)
 
 
-def _compiled_path_policy(submission: Mapping[str, Any]) -> dict[str, Any]:
-    modules: dict[str, Any] = {}
-    for name, raw_module in dict(submission.get("modules") or {}).items():
-        paths = dict(dict(raw_module).get("paths") or {})
-        modules[name] = {
-            "module_kind": str(dict(raw_module).get("module_kind") or ""),
-            "contract_mode": str(paths.get("contract_mode") or "review_guarded"),
-            "contract_paths": list(paths.get("contract_paths") or []),
-            "implementation_scopes": list(paths.get("implementation_scopes") or []),
-            "developer_tests": (
-                {
-                    "kind": "directory",
-                    "path": module_developer_test_path(str(name)),
-                }
-                if str(dict(raw_module).get("module_kind") or "") == "implementation"
-                else None
-            ),
-            "verification_corpus": (
-                {
-                    "kind": "directory",
-                    "path": module_verification_corpus_path(str(name)),
-                }
-                if str(dict(raw_module).get("module_kind") or "") == "implementation"
-                else None
-            ),
-            "reference_only": list(paths.get("reference_only") or []),
-        }
-    return {"modules": modules}
-
-
 def _path_scopes_overlap(left: PathScope, right: PathScope) -> bool:
     probes = {left.path, right.path}
     if left.kind == "directory":
@@ -1718,6 +1746,51 @@ def _git_changed_paths(worktree: Path, base_sha: str) -> list[str]:
     result = _git_null_paths(worktree, "diff", "--name-only", "--no-renames", "-z", base_sha)
     result.extend(_git_null_paths(worktree, "ls-files", "--others", "--exclude-standard", "-z"))
     return sorted(dict.fromkeys(result))
+
+
+def _architect_private_implementation_changes(
+    worktree: Path,
+    *,
+    changed_paths: Iterable[str],
+    submission: Mapping[str, Any],
+    base_sha: str = "",
+    original_head: str = "",
+) -> list[str]:
+    """Reject product implementation authored by the Architecture role.
+
+    Contract paths are the Architect's code-level declaration surface. Other
+    paths belong to Coders/Verifiers or the Manager-owned build metadata. A
+    revision may still restore a leaked private path to the immutable original
+    workspace snapshot, which keeps human-edit recovery possible.
+    """
+
+    modules = tuple(dict(module) for module in dict(submission.get("modules") or {}).values())
+    contract_paths = {
+        str(path).replace("\\", "/").strip().lstrip("./")
+        for module in modules
+        for path in list(dict(module.get("paths") or {}).get("contract_paths") or [])
+        if str(path).strip()
+    }
+    violations: list[str] = []
+    for raw_path in changed_paths:
+        path = str(raw_path).replace("\\", "/").strip().lstrip("./")
+        if not path:
+            continue
+        restored_to_original = False
+        if original_head:
+            restored = subprocess.run(
+                ["git", "-C", str(worktree), "diff", "--quiet", original_head, "--", path],
+                capture_output=True,
+                check=False,
+            )
+            if restored.returncode == 0:
+                restored_to_original = True
+        if restored_to_original:
+            continue
+        if path in contract_paths:
+            continue
+        violations.append(path)
+    return sorted(set(violations))
 
 
 def architecture_revision_path_states(worktree: Path, base_sha: str) -> dict[str, str]:
@@ -1846,6 +1919,15 @@ def _normalized_repo_path(value: str) -> str:
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError(f"repository path must be normalized and relative: {value}")
     return str(path)
+
+
+def _normalized_authored_module_path(value: str) -> str:
+    path = _normalized_repo_path(value)
+    if repository_path_targets_control_plane(path):
+        raise ValueError(
+            f"repository path targets Manager or VCS control state: {value}"
+        )
+    return path
 
 
 def _unique_text(value: Any) -> list[str]:

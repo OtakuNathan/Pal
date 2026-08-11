@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from pal.minion.v2.artifacts import ArtifactRef
 from pal.minion.v2.contracts import (
@@ -16,6 +16,10 @@ from pal.minion.v2.contracts import (
 )
 from pal.minion.v2.execution import DagScheduler, ExecutionCompiler
 from pal.minion.v2.machine_dsl import ControlDisposition, ControlIntent
+from pal.minion.v2.human_review import (
+    HUMAN_REVIEW_RENDER_VERSION,
+    human_review_card_is_current,
+)
 from pal.minion.v2.machines import machine_spec_for
 from pal.minion.v2.paths import cleanup_workflow_worktrees
 from pal.minion.v2.replan import collect_architecture_finding_batch
@@ -105,6 +109,7 @@ TRIAGE_FREEZE_EFFECT_TYPES = frozenset(
 class MinionV2OutboxProcessor:
     service: MinionV2WorkflowService
     semantic_effects: SemanticEffectPort = field(default_factory=RejectingSemanticEffectPort)
+    publish_workflow_event: Callable[[Mapping[str, Any]], None] | None = None
     worker_id: str = "minion-v2-outbox"
     effect_lease_seconds: int = 120
     _background_tasks: set[asyncio.Task[str]] = field(default_factory=set, init=False, repr=False)
@@ -170,6 +175,9 @@ class MinionV2OutboxProcessor:
                 result = await self.semantic_effects.execute_semantic_effect(effect)
             self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
             self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
+            self._publish_terminal_workflow_if_any(
+                str(effect.get("workflow_id") or "")
+            )
             result_ref = dict(result.get("result_artifact_ref") or {}) if isinstance(result, Mapping) else {}
             provider_request_id = str(result.get("provider_request_id") or "") if isinstance(result, Mapping) else ""
             self.repository.complete_outbox_effect(
@@ -209,6 +217,9 @@ class MinionV2OutboxProcessor:
                 self.repository.complete_outbox_effect(effect_id, worker_id=self.worker_id)
                 self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
                 self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
+                self._publish_terminal_workflow_if_any(
+                    str(effect.get("workflow_id") or "")
+                )
                 return "completed"
             error = f"{exc.__class__.__name__}: {exc}"
             if isinstance(exc, PermanentEffectError):
@@ -244,6 +255,9 @@ class MinionV2OutboxProcessor:
                     )
             self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
             self._reconcile_replan_collections(str(effect.get("workflow_id") or ""))
+            self._publish_terminal_workflow_if_any(
+                str(effect.get("workflow_id") or "")
+            )
             return "failed"
         finally:
             heartbeat.cancel()
@@ -675,6 +689,36 @@ class MinionV2OutboxProcessor:
         snapshots: list[AggregateSnapshot],
         effect: Mapping[str, Any],
     ) -> Mapping[str, Any]:
+        if revision.state == "HUMAN_REVIEW":
+            manifest_ref = dict(revision.payload.get("architecture_manifest_ref") or {})
+            card_ref = dict(revision.payload.get("human_review_card_ref") or {})
+            if card_ref:
+                card_payload: dict[str, Any] = {}
+                record = self.repository.read_artifact_record(
+                    str(card_ref.get("sha256") or "")
+                )
+                if record and str(record.get("artifact_type") or "") == "HumanReviewCardArtifact":
+                    card_payload = dict(self.service.artifacts.read_json(card_ref))
+                if not human_review_card_is_current(
+                    card_payload,
+                    manifest_sha=str(manifest_ref.get("sha256") or ""),
+                ):
+                    self.repository.dispatch(
+                        ActionEnvelope(
+                            action_type="REFRESH_HUMAN_REVIEW_CARD",
+                            workflow_id=revision.workflow_id,
+                            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                            aggregate_id=revision.aggregate_id,
+                            actor="minion-v2-recovery",
+                            expected_version=revision.version,
+                            idempotency_key=(
+                                f"effect:{effect['effect_key']}:refresh-human-review:"
+                                f"v{HUMAN_REVIEW_RENDER_VERSION}"
+                            ),
+                            payload={"architecture_manifest_ref": manifest_ref},
+                        )
+                    )
+            return {}
         if revision.state == "ACCEPTED":
             return self._reconcile_accepted_revision(workflow, revision, snapshots, effect)
         if revision.state == "SUPERSEDED":
@@ -797,6 +841,45 @@ class MinionV2OutboxProcessor:
             )
         )
         self.repository.complete_workflow_role_sessions(workflow.workflow_id)
+
+    def _publish_terminal_workflow_if_any(self, workflow_id: str) -> None:
+        normalized_workflow_id = str(workflow_id or "").strip()
+        if self.publish_workflow_event is None or not normalized_workflow_id:
+            return
+        workflow = self.repository.read_snapshot(
+            AggregateType.WORKFLOW,
+            normalized_workflow_id,
+        )
+        if workflow is None or workflow.state not in {
+            "COMPLETED",
+            "REJECTED",
+            "CANCELLED",
+        }:
+            return
+        normalized_status = workflow.state.lower()
+        revision_id = str(workflow.payload.get("architecture_revision_id") or "").strip()
+        resolved_interactions = (
+            [
+                {
+                    "interaction_id": f"minion_v2_architecture_{revision_id}",
+                    "interaction_kind": "minion_v2_architecture_review",
+                }
+            ]
+            if revision_id
+            else []
+        )
+        self.publish_workflow_event(
+            {
+                "workflow_id": normalized_workflow_id,
+                "status": normalized_status,
+                "summary": f"Minion workflow {normalized_status}.",
+                "terminal_at": workflow.updated_at,
+                "resolved_interactions": resolved_interactions,
+                "result_artifact_ref": dict(
+                    workflow.payload.get("result_artifact_ref") or {}
+                ),
+            }
+        )
 
     def _submit_effect_action(self, effect: Mapping[str, Any], payload: Mapping[str, Any]) -> Mapping[str, Any]:
         action_type = str(payload.get("action_type") or "")
@@ -970,6 +1053,7 @@ class MinionV2OutboxProcessor:
     def _create_revision(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         previous = self._effect_snapshot(effect)
         revision_id = _derived_id("arch", str(effect["effect_key"]))
+        source_epoch_id = str(previous.payload.get("source_execution_epoch_id") or "")
         with self.repository.transaction() as connection:
             WorkflowCoordinator(self.repository).begin_plan_revision(
                 workflow_id=previous.workflow_id,
@@ -997,10 +1081,43 @@ class MinionV2OutboxProcessor:
                         "edit_instruction_ref": previous.payload.get("edit_instruction_ref"),
                         "base_architecture_manifest_ref": previous.payload.get("architecture_manifest_ref"),
                         "research_mode": previous.payload.get("research_mode", "local_only"),
+                        **(
+                            {
+                                "source_execution_epoch_id": source_epoch_id,
+                                "replan_generation": previous.payload.get("replan_generation"),
+                                "replan_finding_batch_ref": previous.payload.get(
+                                    "replan_finding_batch_ref"
+                                ),
+                            }
+                            if source_epoch_id
+                            else {}
+                        ),
                     },
                 ),
                 _connection=connection,
             )
+            if source_epoch_id:
+                epoch = self.repository.read_snapshot(
+                    AggregateType.EXECUTION_EPOCH,
+                    source_epoch_id,
+                    _connection=connection,
+                )
+                if epoch is not None and epoch.state == "REPLAN_REQUIRED":
+                    self.repository.dispatch(
+                        ActionEnvelope(
+                            action_type="REPLAN_REVISION_LINKED",
+                            workflow_id=previous.workflow_id,
+                            aggregate_type=AggregateType.EXECUTION_EPOCH,
+                            aggregate_id=source_epoch_id,
+                            actor="minion-v2-router",
+                            expected_version=epoch.version,
+                            idempotency_key=(
+                                f"effect:{effect['effect_key']}:replan-revision-linked"
+                            ),
+                            payload={"active_replan_revision_id": revision_id},
+                        ),
+                        _connection=connection,
+                    )
             self._link_workflow(
                 previous.workflow_id,
                 "LINK_ARCHITECTURE_REVISION",

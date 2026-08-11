@@ -14,12 +14,12 @@ from pal.minion.v2.submission_drafts import (
     SubmissionDraftContext,
     SubmissionDraftStore,
 )
+from pal.minion.v2.workspace_paths import MANAGER_ARCHITECT_DIRECTORY
 from pal.minion.v2.work_items import assert_work_items_complete
 from pal.shared import RuntimeStatus, ToolExecutionResult
 
 
 CONTRACT_SUBMIT_CAPABILITY = "op_minion_contract_submit"
-_MANAGER_ARCHITECT_DIRECTORY = ".pal-minion-architect"
 
 CONTRACT_SUBMIT_TOOL_SPEC: dict[str, Any] = {
     "alias": "contract_submit",
@@ -151,19 +151,6 @@ def architect_path(workspace: Mapping[str, Any]) -> Path:
     return (_architect_root(workspace) / ARCHITECT_FILENAME).resolve()
 
 
-def remove_bound_architect_file(workspace: Mapping[str, Any]) -> None:
-    """Remove the Manager-owned authoring projection before a Git snapshot."""
-
-    path = architect_path(workspace)
-    if path.parent.name != _MANAGER_ARCHITECT_DIRECTORY:
-        return
-    path.unlink(missing_ok=True)
-    try:
-        path.parent.rmdir()
-    except OSError:
-        pass
-
-
 def _architect_root(workspace: Mapping[str, Any]) -> Path:
     if bool(workspace.get("contract_authoring_mode")):
         for key in (
@@ -177,7 +164,7 @@ def _architect_root(workspace: Mapping[str, Any]) -> Path:
             if value:
                 return (
                     Path(value).expanduser().resolve()
-                    / _MANAGER_ARCHITECT_DIRECTORY
+                    / MANAGER_ARCHITECT_DIRECTORY
                 )
     # Artifact-family roles author inside the isolated role workspace exposed
     # to the worker.  Once that workspace exists, the Manager-preseeded file,

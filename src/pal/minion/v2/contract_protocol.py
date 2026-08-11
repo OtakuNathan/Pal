@@ -190,6 +190,7 @@ def software_contract_projection(
     return {
         "schema_version": 5,
         "graph": dict(contract.get("graph") or {}),
+        "context": copy.deepcopy(dict(contract.get("context") or {})),
         "requirements": {
             str(name): dict(value or {})
             for name, value in dict(contract.get("requirements") or {}).items()

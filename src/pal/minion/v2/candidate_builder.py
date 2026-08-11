@@ -75,7 +75,10 @@ CANDIDATE_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             ),
             "do_not_use_when": (
                 "Do not use for ordinary implementation difficulty, a local code defect, a test "
-                "failure, or an environment problem that can be handled within the bound module."
+                "failure, or an environment problem that can be handled within the bound module. "
+                "Do not use because a parallel dependency's private definition is absent, unfinished, "
+                "or fails to link in this isolated worktree: trust its public contract and continue the "
+                "owned implementation. Dependency behavior and real composition belong to verification."
             ),
             "failure_next_steps": (
                 "Correct the semantic conflict report or location from the returned error; do not "

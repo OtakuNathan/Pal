@@ -323,6 +323,29 @@ def _architecture_review_reopened_reducer(
     return updated
 
 
+def _human_review_card_refresh_reducer(
+    payload: Mapping[str, Any],
+    action: ActionEnvelope,
+) -> Mapping[str, Any]:
+    updated = dict(payload)
+    updated.pop("human_review_card_ref", None)
+    updated["last_action_type"] = action.action_type
+    updated["last_actor"] = action.actor
+    return updated
+
+
+def _human_review_card_refresh_guard(
+    payload: Mapping[str, Any],
+    action: ActionEnvelope,
+) -> None:
+    active = dict(payload.get("architecture_manifest_ref") or {})
+    requested = dict(action.payload.get("architecture_manifest_ref") or {})
+    if not active or requested != active:
+        raise TransitionGuardError(
+            "REFRESH_HUMAN_REVIEW_CARD must name the active architecture manifest"
+        )
+
+
 def _architecture_submission_reducer(
     payload: Mapping[str, Any],
     action: ActionEnvelope,
@@ -895,6 +918,15 @@ def _architecture_transitions() -> list[TransitionSpec]:
         _spec(
             kind,
             S.HUMAN_REVIEW,
+            "REFRESH_HUMAN_REVIEW_CARD",
+            S.HUMAN_REVIEW,
+            guard=_human_review_card_refresh_guard,
+            reducer=_human_review_card_refresh_reducer,
+            effects=_effect("publish_architecture_review_request"),
+        ),
+        _spec(
+            kind,
+            S.HUMAN_REVIEW,
             "REOPEN_ARCHITECTURE_REVIEW",
             S.REVIEW_QUEUED,
             guard=_required("reason"),
@@ -1423,7 +1455,7 @@ def _node_transitions() -> list[TransitionSpec]:
             "RESUME",
             _mapped_resume_target(node_resume),
             reducer=_resume_cleanup_reducer,
-            effects=_effect("resume_semantic_state"),
+            effects=_effects("resume_semantic_state", "schedule_ready_nodes"),
         )
     )
     cancellable = pausable | {S.BLOCKED_BY_DEPS, S.QUIESCING, S.SNAPSHOTTING, S.REVIEW_QUIESCING, S.REVIEW_SNAPSHOTTING, S.STALE, S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED}
@@ -1508,7 +1540,7 @@ def _node_transitions() -> list[TransitionSpec]:
             "RESOLVE_TRIAGE",
             _mapped_triage_resume_target(node_resume),
             reducer=_node_resume_cleanup_reducer,
-            effects=_effect("reconcile_semantic_state"),
+            effects=_effects("reconcile_semantic_state", "schedule_ready_nodes"),
         )
     )
     return transitions

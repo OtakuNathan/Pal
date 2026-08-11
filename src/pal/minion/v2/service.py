@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from pal.minion.v2.contract_runtime import ContractArtifactAccess, ResearchMode
@@ -23,6 +23,10 @@ from pal.minion.v2.contract_protocol import (
 )
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
 from pal.minion.v2.machines import LIVENESS_REQUIRED_STATES
+from pal.minion.v2.human_review import (
+    human_review_card_is_current,
+    task_revision_review_markdown,
+)
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.cycle_protocol import CycleAction
 from pal.minion.v2.workflow_runtime import WorkflowCoordinator
@@ -41,6 +45,7 @@ from pal.minion.v2.task_ledger import (
     TASK_LEDGER_ARTIFACT,
     TaskLedgerService,
     TaskRevisionAuthority,
+    validate_task_ledger,
 )
 
 
@@ -738,6 +743,11 @@ class MinionV2WorkflowService:
         waiting_for_user = bool(projection["waiting_for_user"])
         active_worker = "" if waiting_for_user else str(projection.get("active_worker_id") or "")
         invocation = self.repository.read_role_invocation(active_worker) if active_worker else None
+        role_progress = (
+            self.repository.read_role_checklist_progress(active_worker)
+            if active_worker
+            else None
+        )
         worker_node = next(
             (
                 item
@@ -776,6 +786,7 @@ class MinionV2WorkflowService:
             ),
             "active_worker": active_worker,
             "active_worker_role": str((invocation or {}).get("role") or ""),
+            "active_role_progress": dict(role_progress or {}),
             "blocker": projection["blocker"],
             "next_legal_action": _public_next_actions(
                 workflow_state,
@@ -788,6 +799,7 @@ class MinionV2WorkflowService:
             "human_review_available": active_state == "HUMAN_REVIEW",
             "liveness": projection["liveness"],
             "metrics": projection["metrics"],
+            "metrics_basis": "completed_role_turns",
             "last_progress_event": dict(latest_event or {}),
             "modules": self._workflow_module_statuses(
                 workflow_id=workflow_id,
@@ -927,53 +939,18 @@ class MinionV2WorkflowService:
         if card_ref:
             record = self.repository.read_artifact_record(str(card_ref.get("sha256") or ""))
             if record and str(record.get("artifact_type") or "") == "HumanReviewCardArtifact":
-                card = dict(self.artifacts.read_json(card_ref))
-                if str(card.get("manifest_sha") or "") != str(manifest_ref.get("sha256") or ""):
-                    raise ValueError("human review card is stale for the active architecture revision")
+                candidate = dict(self.artifacts.read_json(card_ref))
+                if human_review_card_is_current(
+                    candidate,
+                    manifest_sha=str(manifest_ref.get("sha256") or ""),
+                ):
+                    card = candidate
         if card:
             markdown = str(card.get("markdown") or "")
             actions = [str(item) for item in list(card.get("actions") or [])]
         else:
-            manifest = dict(self.artifacts.read_json(manifest_ref))
-            record = self.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
-            if (
-                record
-                and str(record.get("artifact_type") or "")
-                == CONTRACT_ARTIFACT
-            ):
-                requirements = self.artifacts.read_json(dict(manifest.get("requirements_ref") or {}))
-                contract = dict(manifest.get("contract") or {})
-                if self._workflow_uses_git_strategy(
-                    revision.workflow_id
-                ):
-                    markdown = compile_skeleton_markdown(
-                        {
-                            **manifest,
-                            "submission": software_contract_projection(
-                                contract
-                            ),
-                        },
-                        requirements_payload=requirements,
-                    )
-                else:
-                    markdown = compile_contract_markdown(
-                        contract,
-                        requirements_payload=requirements,
-                    )
-            else:
-                raise ValueError(
-                    "human architecture review requires a ContractArtifact"
-                )
+            markdown = self.render_human_review_markdown(revision)
             actions = ["accept", "edit", "reject"]
-        replan_batch_value = revision.payload.get("replan_finding_batch_ref")
-        if replan_batch_value and not card:
-            markdown = (
-                compile_architecture_finding_markdown(
-                    dict(self.artifacts.read_json(dict(replan_batch_value)))
-                )
-                + "\n"
-                + markdown
-            )
         review_ref = dict(revision.payload.get("review_artifact_ref") or {})
         review = dict(self.artifacts.read_json(review_ref)) if review_ref else {}
         return {
@@ -982,6 +959,54 @@ class MinionV2WorkflowService:
             "review_verdict": str(review.get("verdict") or ""),
             "findings": list(review.get("findings") or []),
         }
+
+    def render_human_review_markdown(
+        self,
+        revision: AggregateSnapshot,
+    ) -> str:
+        """Compile the complete current human-review document once."""
+
+        manifest_ref = dict(revision.payload.get("architecture_manifest_ref") or {})
+        record = self.repository.read_artifact_record(
+            str(manifest_ref.get("sha256") or "")
+        )
+        if not record or str(record.get("artifact_type") or "") != CONTRACT_ARTIFACT:
+            raise ValueError(
+                "human architecture review requires a ContractArtifact"
+            )
+        manifest = dict(self.artifacts.read_json(manifest_ref))
+        requirements = validate_task_ledger(
+            self.artifacts.read_json(
+                dict(manifest.get("requirements_ref") or {})
+            )
+        )
+        contract = dict(manifest.get("contract") or {})
+        if self._workflow_uses_git_strategy(revision.workflow_id):
+            markdown = compile_skeleton_markdown(
+                {
+                    **manifest,
+                    "submission": software_contract_projection(contract),
+                },
+                requirements_payload=requirements,
+            )
+        else:
+            markdown = compile_contract_markdown(
+                contract,
+                requirements_payload=requirements,
+            )
+        revision_markdown = task_revision_review_markdown(requirements)
+        if revision_markdown:
+            markdown = markdown.rstrip() + "\n\n" + revision_markdown
+        replan_batch_value = revision.payload.get("replan_finding_batch_ref")
+        if replan_batch_value:
+            markdown = (
+                compile_architecture_finding_markdown(
+                    dict(self.artifacts.read_json(dict(replan_batch_value)))
+                )
+                + "\n"
+                + markdown
+            )
+        return markdown
 
     def control_workflow(
         self,
@@ -1225,12 +1250,32 @@ class MinionV2WorkflowService:
         }
 
     def _triage_candidates(self, workflow_id: str) -> tuple[AggregateSnapshot, ...]:
+        snapshots = self.repository.list_workflow_snapshots(workflow_id)
+        workflow = next(
+            (
+                item
+                for item in snapshots
+                if item.aggregate_type == AggregateType.WORKFLOW
+                and item.aggregate_id == workflow_id
+            ),
+            None,
+        )
+        projection = self.repository.read_workflow_projection(workflow_id) or {}
+        active_lineage_ids = _active_workflow_lineage_ids(
+            workflow,
+            snapshots,
+            active_aggregate_id=str(projection.get("active_aggregate_id") or ""),
+        )
         return tuple(
             sorted(
                 (
                     item
-                    for item in self.repository.list_workflow_snapshots(workflow_id)
+                    for item in snapshots
                     if item.state == "TRIAGE_REQUIRED"
+                    and (
+                        active_lineage_ids is None
+                        or item.aggregate_id in active_lineage_ids
+                    )
                     and "RESOLVE_TRIAGE"
                     in self.repository.engine.legal_actions(item.aggregate_type, item.state)
                 ),
@@ -1249,7 +1294,24 @@ class MinionV2WorkflowService:
 
         normalized: list[dict[str, str]] = []
         snapshots = self.repository.list_workflow_snapshots(workflow_id)
+        workflow = next(
+            (
+                item
+                for item in snapshots
+                if item.aggregate_type == AggregateType.WORKFLOW
+                and item.aggregate_id == workflow_id
+            ),
+            None,
+        )
+        projection = self.repository.read_workflow_projection(workflow_id) or {}
+        active_lineage_ids = _active_workflow_lineage_ids(
+            workflow,
+            snapshots,
+            active_aggregate_id=str(projection.get("active_aggregate_id") or ""),
+        )
         for item in snapshots:
+            if active_lineage_ids is not None and item.aggregate_id not in active_lineage_ids:
+                continue
             required_states = LIVENESS_REQUIRED_STATES.get(item.aggregate_type, frozenset())
             if item.state not in required_states:
                 continue
@@ -1882,6 +1944,58 @@ def _public_triage_candidate(snapshot: AggregateSnapshot) -> dict[str, Any]:
             "requires": ["resolution"],
         },
     }
+
+
+def _active_workflow_lineage_ids(
+    workflow: AggregateSnapshot | None,
+    snapshots: Iterable[AggregateSnapshot],
+    *,
+    active_aggregate_id: str = "",
+) -> set[str] | None:
+    """Return the aggregates that still own live Workflow state.
+
+    Historic epochs and their nodes remain durable audit records, but a linked
+    successor retires their liveness and operator-triage ownership. ``None``
+    keeps the fallback for imported/test Workflows with no lineage pointers.
+    """
+
+    if workflow is None:
+        return None
+    execution_id = str(workflow.payload.get("execution_epoch_id") or "")
+    architecture_id = str(workflow.payload.get("architecture_revision_id") or "")
+    if not execution_id and not architecture_id:
+        return None
+
+    items = tuple(snapshots)
+    result = {workflow.aggregate_id}
+    if active_aggregate_id:
+        result.add(active_aggregate_id)
+    if architecture_id:
+        result.add(architecture_id)
+    if execution_id:
+        result.add(execution_id)
+        execution = next(
+            (
+                item
+                for item in items
+                if item.aggregate_type == AggregateType.EXECUTION_EPOCH
+                and item.aggregate_id == execution_id
+            ),
+            None,
+        )
+        if execution is not None:
+            replan_revision_id = str(
+                execution.payload.get("active_replan_revision_id") or ""
+            )
+            if replan_revision_id:
+                result.add(replan_revision_id)
+        result.update(
+            item.aggregate_id
+            for item in items
+            if item.aggregate_type == AggregateType.DAG_NODE_RUN
+            and str(item.payload.get("epoch_id") or "") == execution_id
+        )
+    return result
 
 
 def _select_triage_candidate(
