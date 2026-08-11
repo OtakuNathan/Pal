@@ -458,6 +458,78 @@ class SubmissionDraftStore:
             "submission_payload_hash": payload_hash,
         }
 
+    def reconcile_submitted(
+        self,
+        context: SubmissionDraftContext,
+        *,
+        submission_artifact_ref: Mapping[str, Any],
+        submission_payload_hash: str,
+    ) -> Mapping[str, Any]:
+        """Freeze a Draft from an already-canonical assignment receipt.
+
+        Assignment receipt recording and Draft freezing intentionally use
+        separate store APIs.  If the process exits or the Draft version moves
+        between those calls, the receipt remains authoritative.  This method
+        makes that narrow half-submit window replayable without asking the
+        worker to author or submit a second result.
+        """
+
+        self._assert_authoring_contract(context)
+        if self._role_gateway is not None:
+            raise ValueError("Draft receipt reconciliation is Manager-owned")
+        artifact_ref = dict(submission_artifact_ref or {})
+        payload_hash = str(submission_payload_hash or "").strip()
+        if not artifact_ref or not payload_hash:
+            raise ValueError("Draft reconciliation requires a complete receipt")
+        self._ensure_schema()
+        with self._transaction() as connection:
+            self._assert_submission_artifact_locked(connection, artifact_ref)
+            row = connection.execute(
+                "SELECT * FROM minion_v2_submission_drafts WHERE draft_key = ?",
+                (context.draft_key,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("canonical receipt has no submission Draft to reconcile")
+            snapshot = _snapshot_from_row(row)
+            if snapshot.status == SUBMITTED_DRAFT_STATUS:
+                if (
+                    snapshot.submission_artifact_ref != artifact_ref
+                    or snapshot.submission_payload_hash != payload_hash
+                ):
+                    raise RuntimeError("submission Draft receipt changed after freeze")
+                return {
+                    "submitted": True,
+                    "submission_artifact_ref": artifact_ref,
+                    "submission_payload_hash": payload_hash,
+                }
+            if snapshot.status != ACTIVE_DRAFT_STATUS:
+                raise RuntimeError("submission Draft cannot be reconciled from its current state")
+            submitted_at = utc_now()
+            updated = connection.execute(
+                """
+                UPDATE minion_v2_submission_drafts
+                SET status = ?, submitted_artifact_ref_json = ?,
+                    submission_payload_hash = ?, submitted_at = ?, updated_at = ?
+                WHERE draft_key = ? AND status = ?
+                """,
+                (
+                    SUBMITTED_DRAFT_STATUS,
+                    _json(artifact_ref),
+                    payload_hash,
+                    submitted_at,
+                    submitted_at,
+                    context.draft_key,
+                    ACTIVE_DRAFT_STATUS,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("submission Draft changed during receipt reconciliation")
+        return {
+            "submitted": True,
+            "submission_artifact_ref": artifact_ref,
+            "submission_payload_hash": payload_hash,
+        }
+
     def read_submitted(self, draft_key: str) -> SubmissionDraftSnapshot:
         """Read an immutable submission receipt without requiring the expired worker lease."""
 
