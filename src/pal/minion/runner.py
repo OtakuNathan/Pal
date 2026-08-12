@@ -2713,7 +2713,11 @@ def build_slim_minion_runtime(
     context = MainContext()
     context.execution_runtime.runtime_root = Path(runtime_root)
     lifecycle = ModuleLifecycle(context, CoreRuntimeState())
-    artifact_service = ArtifactManager(runtime_root=Path(runtime_root), repository=ArtifactRepository())
+    artifact_service = ArtifactManager(
+        runtime_root=Path(runtime_root),
+        repository=ArtifactRepository(),
+        writable=not read_only_database,
+    )
     if llm_authority == "manager_proxy":
         endpoint_resolver = EndpointResolver(repository=llm_repository)
         local_settings = RuntimeSettingSnapshot(

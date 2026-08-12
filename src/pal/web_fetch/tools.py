@@ -16,7 +16,7 @@ from pal.web_fetch.service import WebFetchService
 @dataclass
 class WebScreenshotTool:
     service: WebFetchService
-    artifact_manager: Any | None = None
+
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args
         return CapabilityResult(
@@ -56,7 +56,6 @@ class WebScreenshotTool:
                 mime_type="image/png",
             )
             payload: dict[str, Any] = {
-                "artifact_id": stored.artifact_id,
                 "stored_artifact_id": stored.artifact_id,
                 "local_cached_path": stored.local_cached_path,
                 "mime_type": stored.mime_type or "image/png",
@@ -72,9 +71,7 @@ class WebScreenshotTool:
                 "full_page": screenshot.full_page,
                 "viewport_width": screenshot.viewport_width,
                 "viewport_height": screenshot.viewport_height,
-                "registered_artifact": False,
             }
-            self._register_conversation_artifact(payload, stored, runtime=runtime, turn_id=turn_id, source_url=url)
             return _result(RuntimeStatus.OK, "Web screenshot saved", payload, text="web screenshot saved")
         except Exception as exc:
             return _result(
@@ -84,73 +81,11 @@ class WebScreenshotTool:
                 text="web screenshot failed",
             )
 
-    def _register_conversation_artifact(
-        self,
-        payload: dict[str, Any],
-        stored: Any,
-        *,
-        runtime: Any,
-        turn_id: str,
-        source_url: str,
-    ) -> None:
-        manager = self.artifact_manager or _artifact_manager_from_runtime(runtime)
-        register_ingested = getattr(manager, "register_ingested", None)
-        if not callable(register_ingested):
-            return
-        try:
-            scope_key = _scope_from_runtime(runtime, turn_id)
-            ref = register_ingested(
-                {
-                    "local_cached_path": stored.local_cached_path,
-                    "file_name": Path(stored.local_cached_path).name,
-                    "mime_type": stored.mime_type or "image/png",
-                },
-                scope_key=scope_key,
-                turn_id=turn_id,
-                source_channel="web_fetch",
-                metadata={
-                    "source_url": source_url,
-                    "final_url": payload.get("final_url"),
-                    "capture_kind": "op_web_screenshot",
-                    "stored_artifact_id": stored.artifact_id,
-                },
-            )
-            ref_payload = ref.to_dict() if hasattr(ref, "to_dict") else dict(ref)
-            payload["artifact"] = ref_payload
-            payload["artifact_id"] = ref_payload.get("artifact_id") or payload["artifact_id"]
-            payload["registered_artifact"] = True
-            info = getattr(manager, "info", lambda *_args, **_kwargs: {})(payload["artifact_id"], scope_key)
-            local_file = dict(dict(info.get("artifact") or {}).get("metadata", {}).get("local_file") or {})
-            preferred = str(local_file.get("preferred_path") or "").strip()
-            if preferred:
-                payload["local_cached_path"] = preferred
-        except Exception as exc:
-            payload["artifact_registration_error"] = f"{exc.__class__.__name__}: {exc}"
-
-
 def _runtime_root(runtime: Any, service: WebFetchService) -> Path:
     root = getattr(runtime, "runtime_root", None)
     if root is not None:
         return Path(root)
     return Path(service.browser_manager.runtime_root)
-
-
-def _artifact_manager_from_runtime(runtime: Any) -> Any | None:
-    registry = getattr(runtime, "provider_registry", {}) if runtime is not None else {}
-    if isinstance(registry, dict):
-        return registry.get("artifact:artifact")
-    return None
-
-
-def _scope_from_runtime(runtime: Any, turn_id: str) -> str:
-    registry = getattr(runtime, "provider_registry", {}) if runtime is not None else {}
-    turn_io = registry.get("core:turn_io") if isinstance(registry, dict) else None
-    scope_for_turn = getattr(turn_io, "artifact_scope_for_turn", None)
-    if callable(scope_for_turn):
-        scope = scope_for_turn(turn_id)
-        if scope:
-            return str(scope)
-    raise KeyError("artifact_scope_unavailable")
 
 
 def _screenshot_file_name(url: str) -> str:

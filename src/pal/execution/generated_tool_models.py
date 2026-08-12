@@ -1388,7 +1388,6 @@ WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput = _strict_model
 WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput = _strict_model(
     'WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput',
     {
-        'artifact_id': (str, Field(...)),
         'stored_artifact_id': (str, Field(...)),
         'local_cached_path': (str, Field(...)),
         'mime_type': (str, Field(...)),
@@ -1404,9 +1403,6 @@ WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput = _strict_mode
         'full_page': (bool, Field(...)),
         'viewport_width': (int, Field(...)),
         'viewport_height': (int, Field(...)),
-        'registered_artifact': (bool, Field(...)),
-        'artifact': (dict[str, Any], Field(None)),
-        'artifact_registration_error': (str, Field(None)),
     },
 )
 

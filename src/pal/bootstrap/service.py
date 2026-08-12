@@ -94,6 +94,7 @@ def compose_runtime(
         runtime_root=registration.runtime.runtime_root,
         repository=ArtifactRepository(),
     )
+    artifact_service.recover_lifecycle()
     channel_runtime = ChannelRuntime()
     secrets_path = registration.runtime.runtime_root / "secrets.json"
     secret_store = EncryptedFileSecretStore(secrets_path=str(secrets_path))

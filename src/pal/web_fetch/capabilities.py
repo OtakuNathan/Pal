@@ -87,7 +87,6 @@ class WebFetchModuleSnapshot:
 @dataclass
 class WebFetchIntrospectionProvider:
     service: WebFetchService
-    artifact_manager: Any | None = None
     read_delegate: Callable[[dict[str, object]], IntrospectionResult] | None = None
     module_id: str = "web_fetch"
     mounted: bool = True
@@ -345,10 +344,10 @@ class WebFetchIntrospectionProvider:
         scope="module",
         action_name="screenshot",
         guidance=ToolGuidance(
-            purpose="Render a URL in the browser and save a PNG screenshot as an artifact.",
+            purpose="Render a URL in the browser and save a PNG screenshot as an ordinary local file.",
             use_when="Only when visual page evidence is needed.",
             do_not_use_when="Not for text extraction (use read_web). Not for API calls.",
-            failure_next_steps="Check URL validity and browser availability. If rendering may have produced an artifact before failing, reconcile with list_artifacts or search_artifacts before retrying so a duplicate screenshot is not created.",
+            failure_next_steps="Check error_type, URL validity, and browser availability, then correct the cause and retry. Failed calls do not return a reusable local_cached_path.",
         ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotInput,
         OutputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderScreenshotOutput,
@@ -357,10 +356,7 @@ class WebFetchIntrospectionProvider:
         execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
     async def screenshot(self, call: IntrospectionCall) -> IntrospectionResult:
-        return await WebScreenshotTool(
-            service=self.service,
-            artifact_manager=self.artifact_manager,
-        ).ainvoke(
+        return await WebScreenshotTool(service=self.service).ainvoke(
             dict(call.args),
             turn_id=str(call.meta.get("turn_id") or "") or None,
         )
@@ -555,7 +551,6 @@ def register_with_core(
 ) -> ModuleHandle:
     provider = WebFetchIntrospectionProvider(
         service=service,
-        artifact_manager=context.port_registry.get("artifact:artifact"),
         read_delegate=read_delegate,
     )
     handle = ModuleHandle(

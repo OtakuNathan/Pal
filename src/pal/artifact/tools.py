@@ -29,6 +29,12 @@ def _result(status: str, title: str, structured: dict[str, Any], text: str = "")
     )
 
 
+def _key_error_reason(exc: KeyError) -> str:
+    """Expose stable machine-readable reasons without KeyError's repr quotes."""
+
+    return str(exc.args[0]) if exc.args else "artifact_not_found"
+
+
 @dataclass
 class ArtifactListTool:
     service: ArtifactManager
@@ -44,7 +50,7 @@ class ArtifactListTool:
             structured = {"artifacts": [ref.to_dict() for ref in refs]}
             return _result(RuntimeStatus.OK, "Visible artifacts", structured, text=f"{len(refs)} artifact(s)")
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact list failed", {"reason": str(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact list failed", {"reason": _key_error_reason(exc)})
 
 
 @dataclass
@@ -61,7 +67,7 @@ class ArtifactInfoTool:
             structured = self.service.info(str(args.get("artifact_id") or ""), scope_key)
             return _result(RuntimeStatus.OK, "Artifact info", structured)
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact info failed", {"reason": str(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact info failed", {"reason": _key_error_reason(exc)})
 
 
 @dataclass
@@ -86,7 +92,7 @@ class ArtifactReadTool:
             status = RuntimeStatus.OK if result.ok else RuntimeStatus.UNSUPPORTED
             return _result(status, "Artifact read", result.to_dict(), text=result.text)
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact read failed", {"reason": str(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact read failed", {"reason": _key_error_reason(exc)})
 
 
 @dataclass
@@ -110,7 +116,7 @@ class ArtifactSearchTool:
             structured = {"results": [item.to_dict() for item in results], "ttl_refreshed": False}
             return _result(RuntimeStatus.OK, "Artifact search results", structured, text=f"{len(results)} artifact candidate(s)")
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact search failed", {"reason": str(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact search failed", {"reason": _key_error_reason(exc)})
 
 
 @dataclass
@@ -127,7 +133,7 @@ class ArtifactSelectTool:
             structured = self.service.select(str(args.get("artifact_id") or ""), scope_key)
             return _result(RuntimeStatus.OK, "Artifact selected", structured)
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact select failed", {"reason": str(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact select failed", {"reason": _key_error_reason(exc)})
 
 
 @dataclass
@@ -148,10 +154,13 @@ class ArtifactContentSearchTool:
                 top_k=_optional_int(args.get("top_k")) or 5,
                 max_chars_per_result=_optional_int(args.get("max_chars_per_result")) or 2000,
             )
-            structured = {"results": [item.to_dict() for item in results], "ttl_refreshed": True}
+            structured = {
+                "results": [item.to_dict() for item in results],
+                "ttl_refreshed": self.service.writable,
+            }
             return _result(RuntimeStatus.OK, "Artifact content search results", structured, text=f"{len(results)} content match(es)")
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact content search failed", {"reason": str(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact content search failed", {"reason": _key_error_reason(exc)})
 
 
 @dataclass
@@ -173,7 +182,7 @@ class ArtifactTranscribeTool:
             structured = {"reason": "needs_transcription", "artifact": info.get("artifact", {})}
             return _result(RuntimeStatus.UNSUPPORTED, "Artifact transcription needed", structured)
         except KeyError as exc:
-            return _result(RuntimeStatus.NOT_FOUND, "Artifact transcription failed", {"reason": str(exc)})
+            return _result(RuntimeStatus.NOT_FOUND, "Artifact transcription failed", {"reason": _key_error_reason(exc)})
 
 
 def _optional_int(value: Any) -> int | None:

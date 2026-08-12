@@ -7,13 +7,13 @@ import os
 from pathlib import Path
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelDeliveryError, ChannelStreamUpdate, EndpointConfig, ResponseHandle
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
-from pal.foundation.artifact import ArtifactIngestor
+from pal.foundation.artifact import ArtifactIngestor, StoredArtifact
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import ChannelStreamUpdateKind, EventKind, LLMFinishReason, SourceKind
 
@@ -878,8 +878,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     def _matches_binding(self, *, chat_id: int | None, user_id: int | None) -> bool:
         return self.binding.matches(chat_id=chat_id, user_id=user_id)
 
-    async def _extract_attachments(self, message: Any, *, chat_id: int | None) -> list[dict[str, Any]]:
-        attachments: list[dict[str, Any]] = []
+    async def _extract_attachments(self, message: Any, *, chat_id: int | None) -> list[StoredArtifact]:
+        attachments: list[StoredArtifact] = []
         if self._ingestor is None or self.application is None or chat_id is None:
             return attachments
         document = getattr(message, "document", None)
@@ -932,7 +932,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         file_name: str,
         mime_type: str | None,
         chat_id: int,
-    ) -> dict[str, Any] | None:
+    ) -> StoredArtifact | None:
         if not provider_file_id or self._ingestor is None or self.application is None:
             return None
         try:
@@ -957,17 +957,22 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             else:
                 base = self.base_url.rstrip("/")
                 source_url = f"{base}/file/bot{self.bot_token}/{tg_file_path.lstrip('/')}"
-        return {
-            "attachment_id": f"telegram_{provider_file_id}",
-            "provider_file_id": provider_file_id,
-            "file_name": file_name,
-            "mime_type": stored.mime_type,
-            "size_bytes": stored.size_bytes,
-            "local_cached_path": stored.local_cached_path,
-            "sha256": stored.sha256,
-            "source_channel": "telegram",
-            "source_metadata": {"telegram_file_path": tg_file_path, "source_url": source_url},
-        }
+        # Preserve the trusted StoredArtifact object until core ingress claims
+        # it. Flattening it to a user-shaped dict would lose the ownership
+        # proof and leave the provider download cache outside artifact RAII.
+        return replace(
+            stored,
+            metadata={
+                "attachment_id": f"telegram_{provider_file_id}",
+                "provider_file_id": provider_file_id,
+                "file_name": file_name,
+                "source_channel": "telegram",
+                "source_metadata": {
+                    "telegram_file_path": tg_file_path,
+                    "source_url": source_url,
+                },
+            },
+        )
 
     async def _send_receipt_marker_async(self, response_handle: ResponseHandle, payload: dict[str, Any]) -> None:
         _ = payload

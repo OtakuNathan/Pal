@@ -22,6 +22,7 @@ from pal.llm.endpoint import ShapeEndpointInvoker
 from pal.llm.endpoint_spec import LLMEndpointSpec
 from pal.llm.ir import (
     GenerationPolicyIR,
+    ImagePartIR,
     LLMFinishReason,
     LLMMessageIR,
     LLMRequestIR,
@@ -386,6 +387,11 @@ class LLMRuntime(LLMRuntimePort):
                 "context_window": None,
                 "max_output_tokens": None,
                 "supports_streaming": False,
+                "supports_tools": False,
+                "supports_vision": False,
+                "input_modalities": [],
+                "output_modalities": [],
+                "capabilities": {},
                 "thinking_levels": [],
                 "default_thinking_level": None,
             }
@@ -397,6 +403,11 @@ class LLMRuntime(LLMRuntimePort):
             "max_output_tokens": endpoint.max_output_tokens,
             "max_output_tokens_upper_limit": endpoint_output_upper_limit(endpoint),
             "supports_streaming": bool(endpoint.supports_streaming),
+            "supports_tools": bool(endpoint.supports_tools),
+            "supports_vision": bool(endpoint.supports_vision),
+            "input_modalities": list(endpoint.input_modalities_blob or ()),
+            "output_modalities": list(endpoint.output_modalities_blob or ()),
+            "capabilities": dict(endpoint.capabilities_blob or {}),
             "thinking_levels": list(endpoint.thinking_levels_blob or ()),
             "default_thinking_level": endpoint.default_thinking_level,
         }
@@ -794,11 +805,14 @@ class LLMRuntime(LLMRuntimePort):
 
     def _enabled_endpoints(self, request: LLMRequestIR | None) -> list[LLMEndpointModel]:
         metadata = dict(request.metadata) if request is not None else {}
-        return self._enabled_endpoints_for_preference(
+        endpoints = self._enabled_endpoints_for_preference(
             preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
             preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
             endpoint_fallback_policy=str(metadata.get("endpoint_fallback_policy") or "").strip() or None,
         )
+        if request is not None and _request_has_image_input(request):
+            return [endpoint for endpoint in endpoints if bool(endpoint.supports_vision)]
+        return endpoints
 
     def _enabled_endpoints_for_preference(
         self,
@@ -1207,6 +1221,14 @@ def _estimate_request_tokens(request: LLMRequestIR) -> int:
     for tool in request.tools:
         chars += len(tool.name) + len(tool.description) + len(json.dumps(thaw_json(tool.input_schema), ensure_ascii=False))
     return max(1, (chars + 3) // 4)
+
+
+def _request_has_image_input(request: LLMRequestIR) -> bool:
+    return any(
+        isinstance(part, ImagePartIR)
+        for message in request.messages
+        for part in message.parts
+    )
 
 
 def _retry_delay(attempt: int) -> float:

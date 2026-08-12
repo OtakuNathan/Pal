@@ -477,8 +477,9 @@ class PromptCompiler:
                     if isinstance(raw_part, dict):
                         resolved_parts.append(dict(raw_part))
                     continue
-                source = str(raw_part.get("source_url") or "").strip()
                 representation_id = str(raw_part.get("representation_id") or "").strip()
+                candidate = str(raw_part.get("source_url") or "").strip()
+                source = candidate if candidate.startswith("data:image/") else ""
                 if not source and manager is not None:
                     to_data_url = getattr(manager, "to_data_url", None)
                     if callable(to_data_url):

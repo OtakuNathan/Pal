@@ -56,6 +56,9 @@ Rules:
 - The endpoint must not expose platform callback/file details beyond normalized metadata.
 - `PalCore` hands normalized attachments to `pal.artifact`.
 - After registration, inner layers use `artifact_id` and artifact tools, not channel-specific file handles.
+- In-process endpoints using `ArtifactIngestor` preserve its typed
+  `StoredArtifact` result through core ingress when ownership should transfer;
+  flattening it to a dictionary intentionally downgrades the source to borrowed.
 
 For the full managed artifact lifecycle, see [artifact_manager.md](artifact_manager.md).
 

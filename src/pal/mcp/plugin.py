@@ -277,7 +277,10 @@ class McpManagerPluginProvider:
     )
     def image_prepare(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            payload = self._prepare_image_payload(call.args)
+            payload = self._prepare_image_payload(
+                call.args,
+                turn_id=str(call.meta.get("turn_id") or "") or None,
+            )
         except Exception as exc:
             return CapabilityResult(
                 status=RuntimeStatus.ERROR,
@@ -393,7 +396,12 @@ class McpManagerPluginProvider:
         payload.update(dict(self.last_health or {}))
         return payload
 
-    def _prepare_image_payload(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _prepare_image_payload(
+        self,
+        args: dict[str, Any],
+        *,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
         mode = str(args.get("mode") or "auto").strip() or "auto"
         url = str(args.get("url") or "").strip()
         if url and mode in {"auto", "url"}:
@@ -402,19 +410,27 @@ class McpManagerPluginProvider:
         path_text = str(args.get("path") or "").strip()
         mime_type = ""
         file_name = ""
-        source_url = ""
         if artifact_id:
             artifact_manager = self.core_context.port_registry.get("artifact:artifact")
-            repository = getattr(artifact_manager, "repository", None)
-            record = repository.get_record(artifact_id) if repository is not None else None
-            if record is None:
-                raise ValueError(f"unknown artifact_id: {artifact_id}")
-            source_url = str((record.metadata.get("source_metadata") or {}).get("source_url") or record.metadata.get("source_url") or "").strip()
-            if source_url and mode in {"auto", "url"}:
-                return {"kind": "url", "url": source_url, "artifact_id": artifact_id, "mime_type": record.normalized_mime_type or record.original_mime_type}
-            path_text = record.normalized_path or record.original_path
-            mime_type = record.normalized_mime_type or record.original_mime_type
-            file_name = record.file_name
+            info = getattr(artifact_manager, "info", None)
+            if not callable(info):
+                raise ValueError("artifact service unavailable")
+            runtime = getattr(self.core_context, "execution_runtime", None)
+            registry = getattr(runtime, "provider_registry", {})
+            turn_io = registry.get("core:turn_io") if isinstance(registry, dict) else None
+            scope_for_turn = getattr(turn_io, "artifact_scope_for_turn", None)
+            scope_key = scope_for_turn(turn_id) if callable(scope_for_turn) else None
+            if not scope_key:
+                raise ValueError("artifact_scope_unavailable")
+            artifact = dict(info(artifact_id, str(scope_key)).get("artifact") or {})
+            local_file = dict((artifact.get("metadata") or {}).get("local_file") or {})
+            path_text = str(local_file.get("preferred_path") or "")
+            mime_type = str(
+                local_file.get("preferred_mime_type")
+                or artifact.get("mime_type")
+                or ""
+            )
+            file_name = str(artifact.get("file_name") or "")
         if not path_text:
             raise ValueError("artifact_id, path, or url is required")
         path = Path(path_text).expanduser()
@@ -436,7 +452,11 @@ class McpManagerPluginProvider:
         raw = path.read_bytes()
         encoded = base64.b64encode(raw).decode("ascii")
         payload = {
-            "kind": "base64" if mode != "data_url" else "data_url",
+            "kind": (
+                "data_url"
+                if mode == "data_url" or (artifact_id and mode in {"auto", "url"})
+                else "base64"
+            ),
             "base64": encoded,
             "mime_type": detected_mime,
             "file_name": file_name or path.name,

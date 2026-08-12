@@ -24,7 +24,7 @@ from pal.channel.capabilities import ChannelIntrospectionProvider
 from pal.control import InteractionButtonSpec, InteractionMessageSpec
 from pal.core.turns import EffectResult, MailboxReplyEffect, channel_turn_program
 from pal.execution import CapabilityCall
-from pal.foundation import EventEnvelope
+from pal.foundation import EventEnvelope, StoredArtifact
 from pal.core.runtime_config import RuntimeConfig
 from pal.identity import DEFAULT_PERSONA_ID, IdentityRepository
 from pal.llm import (
@@ -3589,12 +3589,14 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         attachments = envelopes[0].event.payload["attachments"]
         self.assertEqual(len(attachments), 1)
         attachment = attachments[0]
-        self.assertTrue(str(attachment["local_cached_path"]).startswith(str(self.runtime_root / "artifacts" / "telegram" / "777")))
+        self.assertIsInstance(attachment, StoredArtifact)
+        self.assertTrue(str(attachment.local_cached_path).startswith(str(self.runtime_root / "artifacts" / "telegram" / "777")))
         self.assertFalse("hello telegram" in str(attachment))
         self.assertEqual(
-            attachment["source_metadata"]["source_url"],
+            attachment.metadata["source_metadata"]["source_url"],
             "https://api.telegram.org/file/bottoken-123/docs/file.txt",
         )
+        self.assertNotIn("token-123", repr(attachment))
 
     async def test_telegram_endpoint_preserves_absolute_file_url(self) -> None:
         absolute = "https://api.telegram.org/file/bottoken-123/photos/file_31.jpg"
@@ -3613,8 +3615,8 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         envelopes = self.endpoint.poll()
         attachment = envelopes[0].event.payload["attachments"][0]
-        self.assertEqual(attachment["source_metadata"]["source_url"], absolute)
-        self.assertNotIn("/https://", attachment["source_metadata"]["source_url"].removeprefix("https://"))
+        self.assertEqual(attachment.metadata["source_metadata"]["source_url"], absolute)
+        self.assertNotIn("/https://", attachment.metadata["source_metadata"]["source_url"].removeprefix("https://"))
 
     async def test_telegram_endpoint_registers_control_commands_and_menu(self) -> None:
         self.endpoint.queue_status(

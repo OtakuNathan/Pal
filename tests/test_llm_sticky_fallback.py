@@ -180,6 +180,111 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
         facts = runtime.resolve_endpoint_facts(preferred_endpoint_id="missing", preferred_endpoint_source="profile")
         self.assertEqual(facts["endpoint_id"], "missing")
         self.assertIsNone(facts["max_output_tokens"])
+        self.assertFalse(facts["supports_vision"])
+        self.assertEqual(facts["input_modalities"], [])
+        self.assertEqual(facts["capabilities"], {})
+
+    def test_endpoint_facts_preserve_declared_model_capabilities(self) -> None:
+        settings = _MemorySettingsRepository()
+        settings.active_endpoint_id = "vision"
+        endpoint = _fake_endpoint("vision", "vision-model")
+        endpoint.supports_vision = True
+        endpoint.input_modalities_blob = ["text", "image"]
+        endpoint.output_modalities_blob = ["text"]
+        endpoint.capabilities_blob = {"image_detail": "high"}
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(endpoint,)),
+            settings_repository=settings,
+            endpoint_invoker=_FailoverInvoker(),
+        )
+
+        facts = runtime.resolve_endpoint_facts()
+
+        self.assertTrue(facts["supports_tools"])
+        self.assertTrue(facts["supports_vision"])
+        self.assertEqual(facts["input_modalities"], ["text", "image"])
+        self.assertEqual(facts["output_modalities"], ["text"])
+        self.assertEqual(facts["capabilities"], {"image_detail": "high"})
+
+    def test_image_request_filters_text_only_fallback_once_before_invocation(self) -> None:
+        class _Invoker:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def invoke(self, endpoint, request, **kwargs):
+                _ = request, kwargs
+                self.calls.append(endpoint.endpoint_id)
+                if endpoint.endpoint_id == "vision-primary":
+                    raise RuntimeError("primary unavailable")
+                return generation_result_from_values(text="vision fallback").response, ()
+
+        settings = _MemorySettingsRepository()
+        settings.active_endpoint_id = "vision-primary"
+        primary = _fake_endpoint("vision-primary", "vision-primary-model")
+        primary.supports_vision = True
+        primary.input_modalities_blob = ["text", "image"]
+        text_only = _fake_endpoint("text-only", "text-only-model")
+        fallback = _fake_endpoint("vision-fallback", "vision-fallback-model")
+        fallback.supports_vision = True
+        fallback.input_modalities_blob = ["text", "image"]
+        invoker = _Invoker()
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(primary, text_only, fallback)),
+            settings_repository=settings,
+            endpoint_invoker=invoker,
+            endpoint_retry_attempts=1,
+        )
+        request = request_ir_from_prompt(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,AA==",
+                        },
+                    ],
+                }
+            ],
+            max_output_tokens=64,
+        )
+
+        result = runtime.generate(request)
+
+        self.assertEqual(result.text, "vision fallback")
+        self.assertEqual(invoker.calls, ["vision-primary", "vision-fallback"])
+
+    def test_image_request_fails_without_invoking_text_only_endpoint(self) -> None:
+        settings = _MemorySettingsRepository()
+        settings.active_endpoint_id = "text-only"
+        endpoint = _fake_endpoint("text-only", "text-only-model")
+        invoker = _FailoverInvoker()
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(endpoint,)),
+            settings_repository=settings,
+            endpoint_invoker=invoker,
+        )
+        request = request_ir_from_prompt(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,AA==",
+                        }
+                    ],
+                }
+            ],
+            max_output_tokens=64,
+        )
+
+        result = runtime.generate(request)
+
+        self.assertEqual(result.finish_reason, LLMFinishReason.ERROR)
+        self.assertIn("no enabled endpoints", result.text)
+        self.assertEqual(invoker.calls, [])
 
     def test_endpoint_fallback_policy_none_uses_only_selected_endpoint(self) -> None:
         settings = _MemorySettingsRepository()

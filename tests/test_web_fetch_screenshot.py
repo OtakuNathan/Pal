@@ -90,9 +90,9 @@ class WebScreenshotToolTests(unittest.TestCase):
         self.database.close()
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def test_screenshot_registers_conversation_artifact_and_returns_local_path(self) -> None:
+    def test_screenshot_stays_an_ordinary_stored_file(self) -> None:
         service = _FakeScreenshotService(self.root)
-        tool = WebScreenshotTool(service=service, artifact_manager=self.manager)
+        tool = WebScreenshotTool(service=service)
         runtime = SimpleNamespace(
             runtime_root=self.root,
             provider_registry={"core:turn_io": _FakeTurnIO(self.scope_key), "artifact:artifact": self.manager},
@@ -107,13 +107,12 @@ class WebScreenshotToolTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "ok")
-        self.assertTrue(result.structured["registered_artifact"])
-        self.assertTrue(str(result.structured["artifact_id"]).startswith("art_"))
+        self.assertTrue(str(result.structured["stored_artifact_id"]).startswith("artifact_"))
         self.assertTrue(Path(result.structured["local_cached_path"]).is_file())
         self.assertEqual(result.structured["final_url"], "https://example.com/final")
         self.assertEqual(service.requests[0].viewport_width, 1024)
-        info = self.manager.info(result.structured["artifact_id"], self.scope_key)
-        self.assertEqual(info["artifact"]["kind"], "image")
+        self.assertEqual(self.manager.repository.list_records(scope_key=self.scope_key), ())
+        self.assertNotIn("registered_artifact", result.structured)
 
     def test_screenshot_falls_back_to_stored_file_without_artifact_scope(self) -> None:
         service = _FakeScreenshotService(self.root)
@@ -123,8 +122,7 @@ class WebScreenshotToolTests(unittest.TestCase):
         result = asyncio.run(tool.ainvoke({"url": "https://example.com"}, runtime=runtime, turn_id=""))
 
         self.assertEqual(result.status, "ok")
-        self.assertFalse(result.structured["registered_artifact"])
-        self.assertTrue(str(result.structured["artifact_id"]).startswith("artifact_"))
+        self.assertTrue(str(result.structured["stored_artifact_id"]).startswith("artifact_"))
         self.assertTrue(Path(result.structured["local_cached_path"]).is_file())
 
     def test_tool_call_reaches_async_screenshot_tool(self) -> None:
@@ -183,7 +181,7 @@ class WebScreenshotToolTests(unittest.TestCase):
         self.assertNotIn("configured_provider_id", result.structured)
         self.assertNotIn("effective_provider_id", result.structured)
 
-    def test_facade_declares_artifact_registration_degradation(self) -> None:
+    def test_facade_does_not_register_generated_screenshot_as_input_artifact(self) -> None:
         service = _FakeScreenshotService(self.root)
         core = PalCore()
         register_execution_with_core(core.context)
@@ -208,8 +206,9 @@ class WebScreenshotToolTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result.llm_text)
         self.assertEqual(result.invocation_result.kind, "complete")
-        self.assertFalse(result.structured["registered_artifact"])
-        self.assertIn("artifact_registration_error", result.structured)
+        self.assertNotIn("registered_artifact", result.structured)
+        self.assertNotIn("artifact_registration_error", result.structured)
+        self.assertEqual(self.manager.repository.list_records(scope_key=self.scope_key), ())
 
 
 if __name__ == "__main__":

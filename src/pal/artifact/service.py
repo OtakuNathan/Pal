@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import shutil
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any
 from uuid import uuid4
 
@@ -15,7 +17,10 @@ from pal.artifact.contracts import (
     ARTIFACT_KIND_PDF,
     ARTIFACT_KIND_TEXT,
     ARTIFACT_STATUS_FAILED,
+    ARTIFACT_STATUS_PENDING,
     ARTIFACT_STATUS_READY,
+    ARTIFACT_STATUS_RETIRED,
+    ARTIFACT_STATUS_RETIRING,
     ArtifactContentSearchResult,
     ArtifactHotState,
     ArtifactInlinePart,
@@ -38,6 +43,9 @@ from pal.artifact.contracts import (
 from pal.artifact.processors import ArtifactProcessingContext, ArtifactProcessorRegistry, image_data_url
 from pal.artifact.repository import ArtifactRepository
 from pal.foundation import StoredArtifact
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -89,6 +97,8 @@ class ArtifactManager:
     processor_registry: ArtifactProcessorRegistry = None  # type: ignore[assignment]
     representation_registry: ArtifactRepresentationRegistry = None  # type: ignore[assignment]
     transcriber: ArtifactTranscriberPort | None = None
+    writable: bool = True
+    _lifecycle_lock: Any = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.repository is None:
@@ -102,7 +112,278 @@ class ArtifactManager:
         if self.transcriber is None:
             self.transcriber = NoopArtifactTranscriber()
 
+    def reap_expired(
+        self,
+        *,
+        scope_key: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Retire expired handlers and reclaim only manager-owned resources."""
+
+        if not self.writable:
+            return {"retired": 0, "cleaned": 0, "pending": 0}
+        with self._lifecycle_lock:
+            current = now or _utc_now_dt()
+            candidates: dict[str, str] = {}
+            for record in self.repository.list_pending_cleanup_records(scope_key=scope_key):
+                candidates[record.artifact_id] = str(
+                    record.metadata.get("retirement_reason") or "handler_retired"
+                )
+            for record in self.repository.list_records_missing_hot_state(scope_key=scope_key):
+                candidates.setdefault(record.artifact_id, "handler_missing")
+            for state in self.repository.list_expired_hot_states(
+                expires_at=current.isoformat(),
+                scope_key=scope_key,
+            ):
+                record = self.repository.get_record(state.artifact_id)
+                if record is None:
+                    self.repository.delete_hot_states(state.artifact_id)
+                    continue
+                if record.scope_key == state.scope_key:
+                    candidates.setdefault(state.artifact_id, "hot_ttl_expired")
+
+            retired = 0
+            cleaned = 0
+            pending = 0
+            for artifact_id, reason in candidates.items():
+                was_retired, cleanup_complete = self._retire_artifact_locked(
+                    artifact_id,
+                    reason=reason,
+                    retired_at=current,
+                )
+                retired += int(was_retired)
+                cleaned += int(cleanup_complete)
+                pending += int(not cleanup_complete)
+            return {"retired": retired, "cleaned": cleaned, "pending": pending}
+
+    def recover_lifecycle(self) -> dict[str, int]:
+        """Recover legacy state, orphaned trees, and expired handlers at startup."""
+
+        if not self.writable:
+            return {
+                "migrated": 0,
+                "orphaned_removed": 0,
+                "retired": 0,
+                "cleaned": 0,
+                "pending": 0,
+            }
+        with self._lifecycle_lock:
+            migrated = self.repository.migrate_legacy_pending_cleanup_records()
+            orphaned_removed = self.reap_orphaned_managed_files()
+            reaped = self.reap_expired()
+            return {
+                "migrated": migrated,
+                "orphaned_removed": orphaned_removed,
+                **reaped,
+            }
+
+    def _retire_artifact_locked(
+        self,
+        artifact_id: str,
+        *,
+        reason: str,
+        retired_at: datetime | None = None,
+    ) -> tuple[bool, bool]:
+        record = self.repository.get_record(str(artifact_id or "").strip())
+        if record is None:
+            self.repository.delete_hot_states(artifact_id)
+            return False, True
+
+        already_retired = record.status in {
+            ARTIFACT_STATUS_RETIRING,
+            ARTIFACT_STATUS_RETIRED,
+        }
+        retired_time = retired_at or _utc_now_dt()
+        retirement_reason = str(
+            record.metadata.get("retirement_reason") or reason or "handler_retired"
+        )
+        tombstone_metadata = {
+            "retired_at": str(
+                record.metadata.get("retired_at") or retired_time.isoformat()
+            ),
+            "retirement_reason": retirement_reason,
+            "managed_cleanup": "pending",
+        }
+        owned_source_root = str(record.metadata.get("_owned_source_root") or "").strip()
+        if owned_source_root:
+            tombstone_metadata["_owned_source_root"] = owned_source_root
+        tombstone = replace(
+            record,
+            original_path="",
+            original_size_bytes=0,
+            normalized_path="",
+            normalized_size_bytes=0,
+            status=ARTIFACT_STATUS_RETIRING,
+            notes=f"artifact handler retired: {retirement_reason}",
+            metadata=tombstone_metadata,
+            updated_at="",
+        )
+        tombstone = self.repository.upsert_record(tombstone)
+
+        try:
+            self._remove_managed_artifact_tree(tombstone)
+            self._remove_owned_source_tree(tombstone)
+        except Exception as exc:
+            self.repository.upsert_record(
+                replace(
+                    tombstone,
+                    metadata={
+                        **tombstone_metadata,
+                        "cleanup_error": exc.__class__.__name__,
+                    },
+                    updated_at="",
+                )
+            )
+            return not already_retired, False
+
+        self.repository.delete_representations(tombstone.artifact_id)
+        self.repository.delete_hot_states(tombstone.artifact_id)
+        complete_metadata = {
+            key: value
+            for key, value in tombstone_metadata.items()
+            if key != "_owned_source_root"
+        }
+        self.repository.upsert_record(
+            replace(
+                tombstone,
+                status=ARTIFACT_STATUS_RETIRED,
+                metadata={**complete_metadata, "managed_cleanup": "complete"},
+                updated_at="",
+            )
+        )
+        return not already_retired, True
+
+    def _remove_managed_artifact_tree(self, record: ArtifactRecord) -> None:
+        managed_root = self._managed_root()
+        artifact_id = str(record.artifact_id or "")
+        if not artifact_id or artifact_id in {".", ".."} or Path(artifact_id).name != artifact_id:
+            raise OSError("refusing to remove an invalid artifact path component")
+        artifact_root = self._artifact_root(record.scope_key, record.artifact_id)
+        resolved_parent = artifact_root.parent.resolve(strict=False)
+        if resolved_parent == managed_root or not resolved_parent.is_relative_to(managed_root):
+            raise OSError("refusing to remove an artifact path outside the managed root")
+        # Unlink a malicious/replaced root symlink itself; never resolve and
+        # recursively delete its target.
+        if artifact_root.is_symlink():
+            artifact_root.unlink()
+            return
+        resolved = artifact_root.resolve(strict=False)
+        if resolved == managed_root or not resolved.is_relative_to(managed_root):
+            raise OSError("refusing to remove an artifact path outside the managed root")
+        if artifact_root.exists():
+            shutil.rmtree(artifact_root)
+
+    def _remove_owned_source_tree(self, record: ArtifactRecord) -> None:
+        raw_root = str(record.metadata.get("_owned_source_root") or "").strip()
+        if not raw_root:
+            return
+        managed_root = self._managed_root()
+        artifacts_root = managed_root.parent
+        source_root = Path(raw_root).expanduser()
+        resolved_parent = source_root.parent.resolve(strict=False)
+        resolved = source_root.resolve(strict=False)
+        if (
+            resolved == artifacts_root
+            or not resolved.is_relative_to(artifacts_root)
+            or resolved.is_relative_to(managed_root)
+            or not resolved_parent.is_relative_to(artifacts_root)
+        ):
+            raise OSError("refusing to remove a source path outside the owned artifact cache")
+        if source_root.is_symlink():
+            source_root.unlink()
+        elif source_root.exists():
+            shutil.rmtree(source_root)
+        parent = source_root.parent
+        while parent != artifacts_root and parent.is_relative_to(artifacts_root):
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+    def reap_orphaned_managed_files(self) -> int:
+        """Remove manager-owned trees that were never published to SQLite."""
+
+        if not self.writable:
+            return 0
+        with self._lifecycle_lock:
+            managed_root = self._managed_root()
+            if not managed_root.exists():
+                return 0
+            expected = {
+                self._artifact_root(record.scope_key, record.artifact_id).absolute()
+                for record in self.repository.list_records()
+                if record.status != ARTIFACT_STATUS_RETIRED
+            }
+            removed = 0
+            try:
+                scope_roots = tuple(managed_root.iterdir())
+            except OSError as exc:
+                logger.warning("artifact orphan scan deferred for %s: %s", managed_root, exc)
+                return 0
+            for scope_root in scope_roots:
+                if scope_root.is_symlink():
+                    try:
+                        scope_root.unlink()
+                    except OSError as exc:
+                        logger.warning("artifact orphan cleanup deferred for %s: %s", scope_root, exc)
+                    else:
+                        removed += 1
+                    continue
+                if not scope_root.is_dir():
+                    try:
+                        scope_root.unlink()
+                    except OSError as exc:
+                        logger.warning("artifact orphan cleanup deferred for %s: %s", scope_root, exc)
+                    else:
+                        removed += 1
+                    continue
+                try:
+                    artifact_roots = tuple(scope_root.iterdir())
+                except OSError as exc:
+                    logger.warning("artifact orphan scan deferred for %s: %s", scope_root, exc)
+                    continue
+                for artifact_root in artifact_roots:
+                    try:
+                        if artifact_root.is_symlink():
+                            artifact_root.unlink()
+                        elif artifact_root.absolute() in expected:
+                            continue
+                        elif artifact_root.is_dir():
+                            shutil.rmtree(artifact_root)
+                        else:
+                            artifact_root.unlink()
+                    except OSError as exc:
+                        logger.warning("artifact orphan cleanup deferred for %s: %s", artifact_root, exc)
+                    else:
+                        removed += 1
+                try:
+                    scope_root.rmdir()
+                except OSError:
+                    pass
+            return removed
+
     def register_ingested(
+        self,
+        stored_or_path: Any,
+        *,
+        scope_key: str,
+        turn_id: str,
+        source_channel: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> ArtifactRef:
+        if not self.writable:
+            raise RuntimeError("artifact_manager_read_only")
+        with self._lifecycle_lock:
+            return self._register_ingested_locked(
+                stored_or_path,
+                scope_key=scope_key,
+                turn_id=turn_id,
+                source_channel=source_channel,
+                metadata=metadata,
+            )
+
+    def _register_ingested_locked(
         self,
         stored_or_path: Any,
         *,
@@ -113,14 +394,19 @@ class ArtifactManager:
     ) -> ArtifactRef:
         source_path, file_name, mime_type, source_metadata = _extract_ingested_source(stored_or_path)
         merged_metadata = {**source_metadata, **dict(metadata or {})}
+        # Ownership is an internal capability, never provider/user metadata.
+        # Strip any serialized claim before deriving it from the trusted type.
+        merged_metadata.pop("_owned_source_root", None)
+        owned_source_root = _owned_source_root_for_ingest(stored_or_path, self.runtime_root)
+        if owned_source_root:
+            merged_metadata["_owned_source_root"] = owned_source_root
         size = source_path.stat().st_size if source_path.is_file() else 0
         artifact_id = f"art_{uuid4().hex[:16]}"
         kind = self.processor_registry.resolve_kind(mime_type=mime_type, file_name=file_name)
         artifact_root = self._artifact_root(scope_key, artifact_id)
         original_dir = artifact_root / "original"
-        original_dir.mkdir(parents=True, exist_ok=True)
         original_path = original_dir / _safe_file_name(file_name or source_path.name or "payload.bin")
-        status = ARTIFACT_STATUS_READY
+        status = ARTIFACT_STATUS_PENDING
         notes = ""
         if not source_path.is_file():
             status = ARTIFACT_STATUS_FAILED
@@ -128,8 +414,6 @@ class ArtifactManager:
         elif size > self.policy.limits.max_original_bytes:
             status = ARTIFACT_STATUS_FAILED
             notes = f"artifact exceeds max size {self.policy.limits.max_original_bytes}"
-        else:
-            shutil.copy2(source_path, original_path)
         record = ArtifactRecord(
             artifact_id=artifact_id,
             scope_key=scope_key,
@@ -137,7 +421,7 @@ class ArtifactManager:
             kind=kind,
             source_channel=source_channel,
             file_name=file_name or original_path.name,
-            original_path=str(original_path if status != ARTIFACT_STATUS_FAILED else source_path),
+            original_path=str(original_path if status == ARTIFACT_STATUS_PENDING else source_path),
             original_mime_type=mime_type or mimetypes.guess_type(file_name)[0] or "",
             original_size_bytes=size,
             summary=file_name or source_path.name,
@@ -146,7 +430,12 @@ class ArtifactManager:
             metadata=merged_metadata,
         )
         record = self.repository.upsert_record(record)
-        if status != ARTIFACT_STATUS_FAILED:
+        if status == ARTIFACT_STATUS_PENDING:
+            original_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, original_path)
+            record = self.repository.upsert_record(
+                replace(record, status=ARTIFACT_STATUS_READY, updated_at="")
+            )
             processor = self.processor_registry.processor_for(kind)
             context = ArtifactProcessingContext(
                 record=record,
@@ -297,7 +586,11 @@ class ArtifactManager:
     def select(self, artifact_id: str, scope_key: str) -> dict[str, Any]:
         record = self._require_visible_record(artifact_id, scope_key)
         hot = self._refresh_hot(record.artifact_id, scope_key)
-        return {"artifact": self._record_dict(record), "hot_state": hot.__dict__}
+        return {
+            "artifact": self._record_dict(record),
+            "hot_state": hot.__dict__,
+            "ttl_refreshed": self.writable,
+        }
 
     def content_search(
         self,
@@ -346,92 +639,126 @@ class ArtifactManager:
         *,
         artifact_ids: tuple[str, ...] = (),
     ) -> ArtifactPromptExposure:
-        capabilities = dict(llm_capabilities or {})
-        supports_vision = bool(capabilities.get("supports_vision"))
-        records = self._visible_records_for_prompt(
-            scope_key=scope_key,
-            turn_id=turn_id,
-            user_text=user_text,
-            artifact_ids=tuple(artifact_ids or ()),
-        )
-        if not records:
-            return ArtifactPromptExposure()
-        inline_parts: list[ArtifactInlinePart] = []
-        manifest_lines: list[str] = []
-        inline_count = 0
-        needs_tool_handling = False
-        for record in records:
-            inlined = False
-            if supports_vision and inline_count < self.policy.image.max_inline_images:
-                image_rep = self._first_image_representation(record)
-                source_url = _resolve_source_url(record)
-                if image_rep is not None and (source_url or _representation_base64_fits(image_rep, self.policy)):
-                    inline_parts.append(
-                        ArtifactInlinePart(
-                            part_type="artifact_image",
-                            artifact_id=record.artifact_id,
-                            representation_id=image_rep.representation_id,
-                            mime_type=image_rep.mime_type,
-                            source_url=source_url,
-                        )
-                    )
-                    inline_count += 1
-                    inlined = True
+        with self._lifecycle_lock:
+            self.reap_expired(scope_key=scope_key)
+            capabilities = dict(llm_capabilities or {})
+            supports_vision = bool(capabilities.get("supports_vision"))
+            records = self._visible_records_for_prompt(
+                scope_key=scope_key,
+                turn_id=turn_id,
+                user_text=user_text,
+                artifact_ids=tuple(artifact_ids or ()),
+            )
+            if not records:
+                return ArtifactPromptExposure()
+            inline_parts: list[ArtifactInlinePart] = []
+            manifest_lines: list[str] = []
+            inline_count = 0
+            needs_tool_handling = False
+            live_count = 0
+            retired_count = 0
+            for record in records:
+                if _artifact_handler_retired(record):
+                    manifest_lines.append(_retired_handler_manifest(record))
+                    retired_count += 1
+                    continue
+                live_count += 1
+                inlined = False
+                if supports_vision and inline_count < self.policy.image.max_inline_images:
+                    image_rep = self._first_image_representation(record)
+                    if image_rep is not None and _representation_base64_fits(image_rep, self.policy):
+                        source = self.to_data_url(image_rep.representation_id)
+                        if source:
+                            inline_parts.append(
+                                ArtifactInlinePart(
+                                    part_type="artifact_image",
+                                    artifact_id=record.artifact_id,
+                                    representation_id=image_rep.representation_id,
+                                    mime_type=image_rep.mime_type,
+                                    source_url=source,
+                                )
+                            )
+                            inline_count += 1
+                            inlined = True
+                            manifest_lines.append(
+                                f"- artifact_id: {record.artifact_id}\n"
+                                f"  file_name: {record.file_name}\n"
+                                f"  kind: {record.kind}\n"
+                                f"  visual_content: attached_inline\n"
+                                f"  summary: {record.summary}\n"
+                                f"  use: answer from the attached image pixels directly\n"
+                                f"  optional_tools: {', '.join(_prompt_actions_for(record, image_inlined=True))}"
+                            )
+                text_rep = self._first_short_text_representation(record)
+                if text_rep is not None:
                     manifest_lines.append(
                         f"- artifact_id: {record.artifact_id}\n"
                         f"  file_name: {record.file_name}\n"
                         f"  kind: {record.kind}\n"
-                        f"  visual_content: attached_inline\n"
-                        f"  summary: {record.summary}\n"
-                        f"  use: answer from the attached image pixels directly\n"
-                        f"  optional_tools: {', '.join(_prompt_actions_for(record, image_inlined=True))}"
+                        f"  included_text: {text_rep.text_preview}"
                     )
-            text_rep = self._first_short_text_representation(record)
-            if text_rep is not None:
-                manifest_lines.append(
-                    f"- artifact_id: {record.artifact_id}\n"
-                    f"  file_name: {record.file_name}\n"
-                    f"  kind: {record.kind}\n"
-                    f"  included_text: {text_rep.text_preview}"
+                    continue
+                if not inlined:
+                    manifest_lines.append(self._tool_handling_manifest(record))
+                    needs_tool_handling = True
+            if retired_count and not live_count:
+                text = (
+                    "The referenced artifact handlers have retired. Their managed bytes and representations "
+                    "are no longer available. Do not call artifact or vision tools for them; ask the user to "
+                    "attach the source again if its content is still required.\n"
+                    + "\n".join(manifest_lines)
                 )
-                continue
-            if not inlined:
-                manifest_lines.append(self._tool_handling_manifest(record))
-                needs_tool_handling = True
-        if not manifest_lines and inline_parts:
-            text = "Attached artifact content is included in this user message."
-        elif manifest_lines:
-            handling_reminder = ""
-            if needs_tool_handling:
-                handling_reminder = (
-                    "Some artifact content below is not directly attached or readable by this model. "
-                    "Use the metadata to check the current capability/tool surface for a suitable processor. "
-                    "If one exists, call it with the supported path, URL, base64 payload, or representation. "
-                    "If none exists, say the current runtime cannot process that artifact content directly. "
+            elif manifest_lines:
+                handling_reminder = ""
+                if needs_tool_handling:
+                    handling_reminder = (
+                        "Some live artifact content below is not directly attached or readable by this model. "
+                        "Use the metadata to check the current capability/tool surface for a suitable processor. "
+                        "If one exists, call it with the supported local path, base64 payload, or representation. "
+                        "If none exists, say the current runtime cannot process that artifact content directly. "
+                    )
+                retired_reminder = (
+                    "Entries marked retired are tombstones: do not call tools for them; ask the user to attach them again. "
+                    if retired_count
+                    else ""
                 )
-            text = (
-                "These are short-lived conversation artifacts Pal can read by artifact_id. "
-                "Use artifact tools only when the current user request depends on them. "
-                "Do not treat artifact_id as a local path. "
-                "Use local_file.preferred_path only with a tool/capability that explicitly accepts local paths. "
-                "If visual_content is attached_inline, image pixels are already attached to this same user message; "
-                "answer from vision directly. Do not search for or call artifact tools to inspect visual image content. "
-                + handling_reminder
-                + "\n"
-                + "\n".join(manifest_lines)
-            )
-        else:
-            text = ""
-        return ArtifactPromptExposure(text=text, inline_parts=tuple(inline_parts))
+                text = (
+                    "These are short-lived conversation artifacts Pal can read by artifact_id. "
+                    "Use artifact tools only when the current user request depends on them. "
+                    "Do not treat artifact_id as a local path. "
+                    "Managed artifact files are read-only inputs; copy one to an ordinary workspace path before modifying it. "
+                    "Use local_file.preferred_path only with a tool/capability that explicitly accepts local paths. "
+                    "If visual_content is attached_inline, image pixels are already attached to this same user message; "
+                    "answer from vision directly. Do not search for or call artifact tools to inspect visual image content. "
+                    + retired_reminder
+                    + handling_reminder
+                    + "\n"
+                    + "\n".join(manifest_lines)
+                )
+            else:
+                text = ""
+            return ArtifactPromptExposure(text=text, inline_parts=tuple(inline_parts))
 
     def to_data_url(self, representation_id: str) -> str | None:
-        representation = self.repository.get_representation(str(representation_id or ""))
-        if representation is None or not representation.path:
-            return None
-        path = Path(representation.path)
-        if not path.is_file():
-            return None
-        return image_data_url(path, mime_type=representation.mime_type or "image/jpeg")
+        with self._lifecycle_lock:
+            representation = self.repository.get_representation(str(representation_id or ""))
+            if representation is None or not representation.path:
+                return None
+            record = self.repository.get_record(representation.artifact_id)
+            if record is None or _artifact_handler_retired(record):
+                return None
+            state = self.repository.get_hot_state(_hot_id(record.scope_key, record.artifact_id))
+            if state is None or _parse_dt(state.expires_at) <= _utc_now_dt():
+                if self.writable:
+                    self._retire_artifact_locked(
+                        record.artifact_id,
+                        reason="handler_missing" if state is None else "hot_ttl_expired",
+                    )
+                return None
+            path = Path(representation.path)
+            if not path.is_file():
+                return None
+            return image_data_url(path, mime_type=representation.mime_type or "image/jpeg")
 
     def _visible_records_for_prompt(
         self,
@@ -447,11 +774,41 @@ class ArtifactManager:
             for state in self.repository.list_hot_states(scope_key=scope_key)
             if _parse_dt(state.expires_at) > now
         }
-        records = [record for record in self.repository.list_records(scope_key=scope_key) if record.artifact_id in hot]
+        all_records = self.repository.list_records(scope_key=scope_key)
         explicit_ids = tuple(str(item or "").strip() for item in artifact_ids if str(item or "").strip())
         if explicit_ids:
-            by_id = {record.artifact_id: record for record in records}
-            return [by_id[artifact_id] for artifact_id in explicit_ids if artifact_id in by_id]
+            by_id = {record.artifact_id: record for record in all_records}
+            visible: list[ArtifactRecord] = []
+            for artifact_id in explicit_ids:
+                record = by_id.get(artifact_id)
+                if record is None:
+                    continue
+                if _artifact_handler_retired(record) or artifact_id in hot:
+                    visible.append(record)
+                    continue
+                # A read-only runtime cannot persist retirement or reclaim files,
+                # but it must project the same handler state and never expose the
+                # stale bytes merely because the writer has not reaped them yet.
+                visible.append(
+                    replace(
+                        record,
+                        original_path="",
+                        original_size_bytes=0,
+                        normalized_path="",
+                        normalized_size_bytes=0,
+                        status=ARTIFACT_STATUS_RETIRED,
+                        metadata={
+                            "retirement_reason": "handler_missing",
+                            "managed_cleanup": "pending",
+                        },
+                    )
+                )
+            return visible
+        records = [
+            record
+            for record in all_records
+            if record.artifact_id in hot and not _artifact_handler_retired(record)
+        ]
         current = [record for record in records if record.turn_id == turn_id]
         if current:
             return current
@@ -549,18 +906,30 @@ class ArtifactManager:
         return None
 
     def _require_visible_record(self, artifact_id: str, scope_key: str) -> ArtifactRecord:
-        record = self.repository.get_record(str(artifact_id or "").strip())
-        if record is None or record.scope_key != scope_key:
-            raise KeyError("artifact_not_found")
-        state = self.repository.get_hot_state(_hot_id(scope_key, record.artifact_id))
-        if state is None or _parse_dt(state.expires_at) <= _utc_now_dt():
-            raise KeyError("artifact_expired")
-        return record
+        with self._lifecycle_lock:
+            record = self.repository.get_record(str(artifact_id or "").strip())
+            if record is None or record.scope_key != scope_key:
+                raise KeyError("artifact_not_found")
+            if _artifact_handler_retired(record):
+                raise KeyError("artifact_handler_retired")
+            state = self.repository.get_hot_state(_hot_id(scope_key, record.artifact_id))
+            if state is None or _parse_dt(state.expires_at) <= _utc_now_dt():
+                if self.writable:
+                    self._retire_artifact_locked(
+                        record.artifact_id,
+                        reason="handler_missing" if state is None else "hot_ttl_expired",
+                    )
+                raise KeyError("artifact_handler_retired")
+            return record
 
     def _refresh_hot(self, artifact_id: str, scope_key: str) -> ArtifactHotState:
         now = _utc_now_dt()
         hot_id = _hot_id(scope_key, artifact_id)
         existing = self.repository.get_hot_state(hot_id)
+        if not self.writable:
+            if existing is None or _parse_dt(existing.expires_at) <= now:
+                raise KeyError("artifact_handler_retired")
+            return existing
         hard_expires_at = (
             _parse_dt(existing.hard_expires_at)
             if existing is not None
@@ -580,7 +949,20 @@ class ArtifactManager:
         return self.repository.upsert_hot_state(state)
 
     def _artifact_root(self, scope_key: str, artifact_id: str) -> Path:
-        return self.runtime_root / "artifacts" / "managed" / _safe_scope(scope_key) / artifact_id
+        return self._managed_root() / _safe_scope(scope_key) / artifact_id
+
+    def _managed_root(self) -> Path:
+        artifacts_path = self.runtime_root / "artifacts"
+        if artifacts_path.is_symlink():
+            raise OSError("refusing to use a symlinked runtime artifact root")
+        artifacts_root = artifacts_path.resolve()
+        raw = artifacts_path / "managed"
+        if raw.is_symlink():
+            raise OSError("refusing to use a symlinked managed artifact root")
+        resolved = raw.resolve(strict=False)
+        if resolved.parent != artifacts_root:
+            raise OSError("managed artifact root escapes the runtime artifact directory")
+        return resolved
 
     def _ref_from_record(self, record: ArtifactRecord) -> ArtifactRef:
         reps = self.repository.list_representations(record.artifact_id)
@@ -635,6 +1017,7 @@ def _extract_ingested_source(value: Any) -> tuple[Path, str, str, dict[str, Any]
     if isinstance(value, StoredArtifact):
         path = Path(value.local_cached_path)
         return path, path.name, str(value.mime_type or ""), {
+            **dict(value.metadata),
             "sha256": value.sha256,
             "size_bytes": value.size_bytes,
         }
@@ -652,6 +1035,34 @@ def _extract_ingested_source(value: Any) -> tuple[Path, str, str, dict[str, Any]
         )
     path = Path(str(value or "")).expanduser()
     return path, path.name, mimetypes.guess_type(str(path))[0] or "", {}
+
+
+def _owned_source_root_for_ingest(value: Any, runtime_root: Path) -> str:
+    if not isinstance(value, StoredArtifact):
+        # Plain dictionaries cross channel/user serialization boundaries and
+        # cannot prove ownership merely by asserting an owned_by_pal flag.
+        return ""
+    source_id = str(value.artifact_id or "").strip()
+    raw_path = str(value.local_cached_path or "").strip()
+    owned = bool(value.owned_by_pal)
+    if not owned or not source_id or not raw_path:
+        return ""
+
+    artifacts_root = (Path(runtime_root) / "artifacts").resolve()
+    managed_root = (artifacts_root / "managed").resolve(strict=False)
+    source_path = Path(raw_path).expanduser().resolve(strict=False)
+    source_root = source_path.parent
+    try:
+        relative = source_root.relative_to(artifacts_root)
+    except ValueError:
+        return ""
+    if (
+        source_root.name != source_id
+        or len(relative.parts) < 3
+        or source_root.is_relative_to(managed_root)
+    ):
+        return ""
+    return str(source_root)
 
 
 def _clamp_max_chars(value: int | None, policy: ArtifactPolicy) -> int:
@@ -678,13 +1089,19 @@ def _representation_base64_fits(representation: ArtifactRepresentation, policy: 
         return False
 
 
-def _resolve_source_url(record: ArtifactRecord) -> str:
-    source_url = str(
-        (record.metadata.get("source_metadata") or {}).get("source_url") or ""
-    ).strip()
-    if source_url.startswith(("http://", "https://")):
-        return source_url
-    return ""
+def _retired_handler_manifest(record: ArtifactRecord) -> str:
+    return (
+        f"- artifact_id: {record.artifact_id}\n"
+        f"  file_name: {_prompt_scalar(record.file_name)}\n"
+        f"  kind: {record.kind}\n"
+        "  status: retired\n"
+        "  content: managed bytes and representations deleted\n"
+        "  next_step: ask the user to attach the source again if its content is still required"
+    )
+
+
+def _artifact_handler_retired(record: ArtifactRecord) -> bool:
+    return record.status in {ARTIFACT_STATUS_RETIRING, ARTIFACT_STATUS_RETIRED}
 
 
 def _representation_prompt_dict(representation: ArtifactRepresentation) -> dict[str, Any]:
@@ -732,7 +1149,7 @@ def _existing_path_text(value: str) -> str:
     return str(path.resolve())
 
 
-_LLVM_HIDDEN_METADATA_KEYS = frozenset({"local_cached_path", "path", "telegram_file_path", "source_url"})
+_LLVM_HIDDEN_METADATA_KEYS = frozenset({"_owned_source_root", "local_cached_path", "path", "telegram_file_path", "source_url"})
 _LLVM_HIDDEN_NESTED_KEYS = frozenset({"source_url", "telegram_file_path"})
 
 

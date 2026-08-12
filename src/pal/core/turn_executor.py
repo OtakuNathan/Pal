@@ -1761,7 +1761,24 @@ class TurnExecutor:
             except Exception:
                 pass
         self._tick_behavior_lifecycle()
+        self._reap_expired_artifacts()
         return result
+
+    def _reap_expired_artifacts(self) -> None:
+        service = self.context.port_registry.get("artifact:artifact")
+        reap = getattr(service, "reap_expired", None)
+        if not callable(reap):
+            return
+        try:
+            reap()
+        except Exception as exc:
+            self.state.diagnostics.append(
+                {
+                    "kind": "artifact.lifecycle.reap_failed",
+                    "status": RuntimeStatus.ERROR,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            )
 
     @staticmethod
     def _tool_result_ids(turn: Any | None) -> tuple[str, ...]:

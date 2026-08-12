@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from peewee import DoesNotExist
+from peewee import DoesNotExist, fn
 
 from pal.artifact.contracts import (
+    ARTIFACT_STATUS_RETIRED,
+    ARTIFACT_STATUS_RETIRING,
     ArtifactHotState,
     ArtifactRecord,
     ArtifactRepresentation,
@@ -57,6 +59,41 @@ class ArtifactRepository:
         query = query.order_by(ArtifactRecordModel.created_at.desc(), ArtifactRecordModel.artifact_id)
         return tuple(_record_from_model(row) for row in query)
 
+    def list_pending_cleanup_records(self, *, scope_key: str | None = None) -> tuple[ArtifactRecord, ...]:
+        query = ArtifactRecordModel.select().where(
+            ArtifactRecordModel.status == ARTIFACT_STATUS_RETIRING
+        )
+        if scope_key:
+            query = query.where(ArtifactRecordModel.scope_key == scope_key)
+        return tuple(_record_from_model(row) for row in query)
+
+    def migrate_legacy_pending_cleanup_records(self) -> int:
+        cleanup_state = ArtifactRecordModel.metadata_blob["managed_cleanup"]
+        return int(
+            ArtifactRecordModel.update(status=ARTIFACT_STATUS_RETIRING)
+            .where(
+                (ArtifactRecordModel.status == ARTIFACT_STATUS_RETIRED)
+                & (fn.COALESCE(cleanup_state, "") != "complete")
+            )
+            .execute()
+        )
+
+    def list_records_missing_hot_state(self, *, scope_key: str | None = None) -> tuple[ArtifactRecord, ...]:
+        hot = ArtifactHotStateModel.alias()
+        matching_hot = hot.select(hot.hot_id).where(
+            (hot.artifact_id == ArtifactRecordModel.artifact_id)
+            & (hot.scope_key == ArtifactRecordModel.scope_key)
+        )
+        query = ArtifactRecordModel.select().where(
+            ArtifactRecordModel.status.not_in(
+                (ARTIFACT_STATUS_RETIRING, ARTIFACT_STATUS_RETIRED)
+            )
+            & ~fn.EXISTS(matching_hot)
+        )
+        if scope_key:
+            query = query.where(ArtifactRecordModel.scope_key == scope_key)
+        return tuple(_record_from_model(row) for row in query)
+
     def upsert_representation(self, representation: ArtifactRepresentation) -> ArtifactRepresentation:
         now = utc_now()
         existing = ArtifactRepresentationModel.get_or_none(
@@ -99,6 +136,13 @@ class ArtifactRepository:
         query = query.order_by(ArtifactRepresentationModel.representation_kind, ArtifactRepresentationModel.representation_id)
         return tuple(_representation_from_model(row) for row in query)
 
+    def delete_representations(self, artifact_id: str) -> int:
+        return int(
+            ArtifactRepresentationModel.delete()
+            .where(ArtifactRepresentationModel.artifact_id == str(artifact_id or ""))
+            .execute()
+        )
+
     def upsert_hot_state(self, state: ArtifactHotState) -> ArtifactHotState:
         ArtifactHotStateModel.insert(
             hot_id=state.hot_id,
@@ -123,6 +167,26 @@ class ArtifactRepository:
             query = query.where(ArtifactHotStateModel.scope_key == scope_key)
         query = query.order_by(ArtifactHotStateModel.last_accessed_at.desc(), ArtifactHotStateModel.artifact_id)
         return tuple(_hot_from_model(row) for row in query)
+
+    def list_expired_hot_states(
+        self,
+        *,
+        expires_at: str,
+        scope_key: str | None = None,
+    ) -> tuple[ArtifactHotState, ...]:
+        query = ArtifactHotStateModel.select().where(
+            ArtifactHotStateModel.expires_at <= str(expires_at)
+        )
+        if scope_key:
+            query = query.where(ArtifactHotStateModel.scope_key == scope_key)
+        return tuple(_hot_from_model(row) for row in query)
+
+    def delete_hot_states(self, artifact_id: str) -> int:
+        return int(
+            ArtifactHotStateModel.delete()
+            .where(ArtifactHotStateModel.artifact_id == str(artifact_id or ""))
+            .execute()
+        )
 
 
 def _record_from_model(row: ArtifactRecordModel) -> ArtifactRecord:
@@ -176,4 +240,3 @@ def _hot_from_model(row: ArtifactHotStateModel) -> ArtifactHotState:
         hard_expires_at=row.hard_expires_at,
         access_count=int(row.access_count),
     )
-
