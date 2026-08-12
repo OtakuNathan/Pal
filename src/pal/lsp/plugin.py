@@ -299,8 +299,8 @@ class LspManagerPluginProvider:
             do_not_use_when="Not a substitute for reading source. Not for non-LSP projects.",
             failure_next_steps="If preparation reports an unrecognized workspace or missing server, inspect lsp_status and lsp_doctor through read_tool/call_tool, then correct compile_commands.json, language settings, or server availability before retrying.",
             next_tool_hints=(
-                NextToolHint(name="lsp_status", use_when="Preparation completed and workspace readiness must be confirmed."),
-                NextToolHint(name="lsp_doctor", use_when="A selected language server failed to become ready."),
+                NextToolHint(name="lsp_status", use_when="Preparation was partial or failed and workspace-wide readiness must be inspected."),
+                NextToolHint(name="lsp_doctor", use_when="Preparation was partial or failed and one selected language server needs diagnosis."),
             ),
         ),
         InputModel=LspPluginLspManagerPluginProviderPrepareWorkspaceInput,
@@ -430,7 +430,7 @@ class LspManagerPluginProvider:
             purpose="Attach LSP manager — start sidecar and discover servers.",
             use_when="Reconnecting a detached LSP manager.",
             do_not_use_when="The manager is already attached. Preparing a workspace (use lsp_prepare_workspace).",
-            failure_next_steps="If sidecar fails to start, check LSP config and binary availability.",
+            failure_next_steps="Inspect lsp_show to reconcile manager state. If the sidecar is not running, correct LSP config or binary availability before retrying.",
         ), aliases=("lsp_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
@@ -442,7 +442,14 @@ class LspManagerPluginProvider:
             self.last_error = f"{exc.__class__.__name__}: {exc}"
             self.last_health = {"healthy": False, "startup_error": self.last_error}
         payload = self._status_payload()
-        return IntrospectionResult(status=RuntimeStatus.OK, text="lsp manager attached", structured=payload, llm_text=render_titled_structured_for_llm("LSP manager attached", payload))
+        attached = not self.last_error
+        title = "LSP manager attached" if attached else "LSP manager attach failed"
+        return IntrospectionResult(
+            status=RuntimeStatus.OK if attached else RuntimeStatus.ERROR,
+            text=title.lower(),
+            structured=payload,
+            llm_text=render_titled_structured_for_llm(title, payload),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="detach",
         guidance=ToolGuidance(
@@ -462,7 +469,7 @@ class LspManagerPluginProvider:
             purpose="Rescan LSP server configs and refresh health.",
             use_when="After adding or modifying LSP server configuration.",
             do_not_use_when="Restarting the manager (use lsp_detach then lsp_attach).",
-            failure_next_steps="If rescan fails, check LSP config file syntax.",
+            failure_next_steps="Inspect lsp_show and lsp_status to reconcile manager readiness. Correct LSP config syntax or server availability before retrying.",
         ), aliases=("lsp_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call

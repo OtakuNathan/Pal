@@ -247,9 +247,9 @@ class WebFetchIntrospectionProvider:
         action_name="set_active_provider",
         guidance=ToolGuidance(
             purpose="Set the active web fetch provider.",
-            use_when="Switching to a different fetch backend.",
-            do_not_use_when="Checking the active provider (use web_fetch_active_provider).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers.",
+            use_when="Switching to a different enabled fetch backend.",
+            do_not_use_when="Checking the active provider (use web_fetch_active_provider). The target provider is disabled (enable it first).",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_fetch_list_providers. If disabled, enable the provider before selecting it.",
         ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderSetActiveProviderInput,
         aliases=("web_fetch_set_active_provider",),
@@ -259,6 +259,14 @@ class WebFetchIntrospectionProvider:
         provider_id = str(call.args.get("name") or "").strip()
         if not provider_id:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text="name is required", llm_text="name is required")
+        existing = self.service.get_provider(provider_id)
+        if existing is not None and not existing.enabled:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="web fetch provider is disabled",
+                structured={"name": provider_id, "reason": "provider_disabled"},
+                llm_text="web fetch provider is disabled; enable it before selecting it",
+            )
         record = self.service.set_active_provider(provider_id)
         if record is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web fetch provider not found", llm_text="web fetch provider not found")
@@ -281,7 +289,7 @@ class WebFetchIntrospectionProvider:
             purpose="Fetch a webpage using the configured browser fetch provider and internal fallback.",
             use_when="Reading a specific webpage's text content, title, and links.",
             do_not_use_when="Searching the web (use search_web). Reading local files (use read_file). API calls (use run_shell curl).",
-            failure_next_steps="If fetch fails, the provider may be unhealthy — check web_fetch_provider_health. Internal fallback may still work.",
+            failure_next_steps="A failed call has already exhausted the configured fallback providers. Inspect provider health and authorization, then enable, repair, or select a healthy provider before retrying.",
         ),
         InputModel=WebFetchCapabilitiesWebFetchIntrospectionProviderReadInput,
         execution=DIRECT_EXTERNAL_READ,

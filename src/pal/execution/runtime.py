@@ -33,12 +33,14 @@ from pal.execution.tool_facade import (
     EffectOutcome,
     EffectReceipt,
     FailedResult,
+    Idempotency,
     InvocationMode,
     McpToolOutput,
     PagingMode,
     PagedResult,
     RejectedResult,
     RetryDirective,
+    RetryPolicy,
     ToolAffordance,
     ToolHandlerResult,
     ToolInvocationResult,
@@ -991,29 +993,50 @@ class ExecutionRuntime(ExecutionRuntimePort):
         origin = dict(details.get("origin") or {})
         alias = str(origin.get("alias") or "")
         arguments = dict(origin.get("arguments") or {})
-        invocation_mode = str(origin.get("invocation_mode") or "")
         execution = dict(origin.get("execution") or {})
         retry_policy = str(execution.get("retry_policy") or "")
         idempotency = str(execution.get("idempotency") or "")
+        effect_kind = str(execution.get("effect_kind") or "")
         current = self.registry_generation.record_for_alias(alias) if alias else None
+        replayable_effects = {
+            EffectKind.NONE.value,
+            EffectKind.LOCAL_READ.value,
+            EffectKind.EXTERNAL_READ.value,
+        }
         if (
             current is not None
             and retry_policy == "automatic"
             and idempotency == "idempotent"
+            and effect_kind in replayable_effects
+            and current.execution.effect_kind.value in replayable_effects
+            and current.execution.idempotency is Idempotency.IDEMPOTENT
+            and current.execution.retry_policy is RetryPolicy.AUTOMATIC
         ):
-            if invocation_mode == InvocationMode.INDIRECT.value:
+            if current.execution.invocation_mode is InvocationMode.INDIRECT:
                 return [
                     ToolAffordance(
                         tool="call_tool",
                         arguments={"name": alias, "args": arguments},
-                        reason="The materialized result expired; rerun the original idempotent read.",
+                        reason="The materialized result expired; reacquire it with the current idempotent read.",
                     )
                 ]
             return [
                 ToolAffordance(
                     tool=alias,
                     arguments=arguments,
-                    reason="The materialized result expired; rerun the original idempotent read.",
+                    reason="The materialized result expired; reacquire it with the current idempotent read.",
+                )
+            ]
+        if current is not None:
+            return [
+                ToolAffordance(
+                    tool="read_tool",
+                    arguments={"name": alias},
+                    reason=(
+                        "The result expired. Inspect the current tool's retry semantics and reconcile "
+                        "whether its effect happened; do not automatically repeat an effectful or "
+                        "non-idempotent call."
+                    ),
                 )
             ]
         query = str(origin.get("search_text") or alias or "original tool")
@@ -1022,8 +1045,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 tool="search_tools",
                 arguments={"query": query},
                 reason=(
-                    "The handle expired. Rediscover the current tool and inspect its retry semantics; "
-                    "do not automatically repeat an effectful or non-idempotent call."
+                    "The result expired and the original tool is no longer registered. Rediscover its "
+                    "replacement and inspect retry semantics before taking further action."
                 ),
             )
         ]

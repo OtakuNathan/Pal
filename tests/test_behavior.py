@@ -1253,6 +1253,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("<operating_rules>", system)
         self.assertIn("<priority>", system)
         self.assertNotIn("<task_flow>", system)
+        self.assertIn("<tool_routing>", system)
         self.assertIn("<tool_efficiency>", system)
         self.assertIn("<mutation_policy>", system)
         self.assertIn("<behavior_guidance_guide>", system)
@@ -1264,6 +1265,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertLess(system.index("<source_of_truth>"), system.index("<prompt_context_policy>"))
         self.assertLess(system.index("<prompt_context_policy>"), system.index("<operating_rules>"))
         self.assertLess(system.index("<operating_rules>"), system.index("<priority>"))
+        self.assertLess(system.index("<priority>"), system.index("<tool_routing>"))
+        self.assertLess(system.index("<tool_routing>"), system.index("<tool_efficiency>"))
         self.assertLess(system.index("<mutation_policy>"), system.index("<behavior_guidance_guide>"))
         self.assertEqual(
             prompt.metadata["fragment_sections"],
@@ -1273,6 +1276,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
                 "prompt_context_policy",
                 "operating_rules",
                 "priority",
+                "tool_routing",
                 "tool_efficiency",
                 "mutation_policy",
                 "behavior_guidance_guide",
@@ -1532,6 +1536,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
                 "prompt_context_policy",
                 "operating_rules",
                 "priority",
+                "tool_routing",
                 "tool_efficiency",
                 "mutation_policy",
                 "behavior_guidance_guide",

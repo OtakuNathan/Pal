@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pal.execution.tool_semantics import (
     INDIRECT_CONTROL,
-    INDIRECT_UNSAFE_LOCAL_WRITE,
+    INDIRECT_LOCAL_READ,
 )
 from pal.execution.tool_facade import ToolGuidance
 
@@ -146,9 +146,9 @@ class McpManagerPluginProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="attach",
         guidance=ToolGuidance(
             purpose="Attach MCP manager — start sidecar and discover servers.",
-            use_when="Reconnecting a detached MCP manager or after config changes.",
-            do_not_use_when="Attaching one server (use mcp_server_attach). The manager is already attached.",
-            failure_next_steps="If sidecar fails to start, check MCP config and binary availability.",
+            use_when="Reconnecting a detached MCP manager.",
+            do_not_use_when="Attaching one server (use mcp_server_attach). The manager is already attached; use mcp_rescan after config changes.",
+            failure_next_steps="Inspect mcp_show to reconcile manager and projection state. If the manager is running but projection is absent, use mcp_rescan; otherwise correct MCP config or binary availability before retrying.",
         ), aliases=("mcp_attach",), execution=INDIRECT_CONTROL)
     def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
@@ -159,15 +159,19 @@ class McpManagerPluginProvider:
                 request_timeout_seconds=_STARTUP_RESCAN_TIMEOUT_SECONDS,
             ).rescan_sync()
             self._refresh_projection()
+            self._refresh_module_capabilities()
             self.last_error = ""
         except Exception as exc:
             self.last_error = f"{exc.__class__.__name__}: {exc}"
             self.projection = None
             self.last_health = {"healthy": False, "startup_error": self.last_error}
+            with contextlib.suppress(Exception):
+                self._refresh_module_capabilities()
         payload = self._status_payload()
-        text = "mcp manager attached" if not self.last_error else "mcp manager attached without sidecar"
+        attached = not self.last_error
+        text = "mcp manager attached" if attached else "mcp manager attach failed"
         return IntrospectionResult(
-            status=RuntimeStatus.OK,
+            status=RuntimeStatus.OK if attached else RuntimeStatus.ERROR,
             text=text,
             structured=payload,
             llm_text=render_titled_structured_for_llm(text, payload),
@@ -178,7 +182,7 @@ class McpManagerPluginProvider:
             purpose="Detach MCP manager — stop sidecar and withdraw all MCP capabilities.",
             use_when="Temporarily stopping all MCP server connections.",
             do_not_use_when="Detaching one server (use mcp_server_detach).",
-            failure_next_steps="Re-attach with mcp_attach when ready.",
+            failure_next_steps="If detach outcome is uncertain, inspect mcp_show first. Re-attach with mcp_attach only when the manager is confirmed detached and should be restored.",
         ), aliases=("mcp_detach",), execution=INDIRECT_CONTROL)
     def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
@@ -198,7 +202,7 @@ class McpManagerPluginProvider:
             purpose="Rescan MCP server configs and refresh the tool projection.",
             use_when="After adding or modifying MCP server configuration files.",
             do_not_use_when="Restarting the manager (use mcp_detach then mcp_attach). Attaching one server (use mcp_server_attach).",
-            failure_next_steps="If rescan fails, check MCP config file syntax.",
+            failure_next_steps="Inspect mcp_show and mcp_server_list to reconcile current manager and server state. Correct config syntax or projection errors before retrying.",
         ), aliases=("mcp_rescan",), execution=INDIRECT_CONTROL)
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -220,7 +224,7 @@ class McpManagerPluginProvider:
             purpose="Attach one configured MCP server inside the manager.",
             use_when="Enabling a specific MCP server's tools without affecting others.",
             do_not_use_when="Attaching the whole manager (use mcp_attach). Detaching a server (use mcp_server_detach).",
-            failure_next_steps="If server not found, verify with mcp_server_list or run mcp_rescan.",
+            failure_next_steps="Inspect mcp_server_list to reconcile whether the server attached. If absent, verify its name and run mcp_rescan after config changes before retrying.",
         ),
         InputModel=McpPluginMcpManagerPluginProviderAttachInput,
         aliases=("mcp_server_attach",),
@@ -245,7 +249,7 @@ class McpManagerPluginProvider:
             purpose="Detach one MCP server inside the manager.",
             use_when="Temporarily disabling one MCP server's tools.",
             do_not_use_when="Detaching the whole manager (use mcp_detach). Attaching a server (use mcp_server_attach).",
-            failure_next_steps="If server not found, verify with mcp_server_list.",
+            failure_next_steps="Inspect mcp_server_list to reconcile whether the server detached. Retry only if it is still attached; verify the exact server name first.",
         ),
         InputModel=McpPluginMcpManagerPluginProviderDetachInput,
         aliases=("mcp_server_detach",),
@@ -266,14 +270,14 @@ class McpManagerPluginProvider:
         family="mcp",
         action_name="image_prepare",
         guidance=ToolGuidance(
-            purpose="Prepare an image artifact/path/url for external MCP tool arguments.",
-            use_when="An MCP tool requires image input and you have an artifact, local path, or URL.",
-            do_not_use_when="Reading artifact text content (use read_artifact). The MCP tool accepts URLs directly.",
-            failure_next_steps="If an artifact is not found, verify it with list_artifacts. For an invalid local path, use run_shell with a bounded existence/type check; read_file cannot validate binary images. If preparation may have succeeded, inspect the returned artifact/path before retrying to avoid duplicate materialization.",
+            purpose="Convert an image artifact or local file into the path, base64, or data-URL representation required by an external MCP tool.",
+            use_when="An MCP tool requires an image representation that differs from the artifact, local path, or URL already available.",
+            do_not_use_when="Reading artifact text content (use read_artifact). The MCP tool already accepts the available URL or path directly. The active model can inspect an inline image itself.",
+            failure_next_steps="For an unknown artifact, recover its current artifact_id with list_artifacts. For an invalid local path, use run_shell with a bounded existence/type check; read_file cannot validate binary images. Correct the source or mode and retry; this tool is read-only.",
         ),
         InputModel=McpPluginMcpManagerPluginProviderImagePrepareInput,
         aliases=("mcp_image_prepare",),
-        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
+        execution=INDIRECT_LOCAL_READ,
     )
     def image_prepare(self, call: CapabilityCall) -> CapabilityResult:
         try:

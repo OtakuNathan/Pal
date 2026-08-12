@@ -413,40 +413,6 @@ ExecutionFileCapabilitiesFileCapabilityMixinStateOutput = _strict_model(
     },
 )
 
-ExecutionGitCapabilitiesGitCapabilityMixinGitInput = _strict_model(
-    'ExecutionGitCapabilitiesGitCapabilityMixinGitInput',
-    {
-        'cmd': (str, Field(..., description='Git command without shell syntax, for example `status --short`, `diff -- src/app.py`, `log --oneline -5`, `restore -- path.py`, or `revert --no-commit HEAD`. An optional leading `git` is accepted.')),
-        'cwd': (str, Field(None, description='Optional repository working directory.')),
-        'timeout_ms': (int, Field(None, description='Optional timeout in milliseconds.', ge=1)),
-    },
-)
-
-ExecutionGitCapabilitiesGitCapabilityMixinGitOutput = _strict_model(
-    'ExecutionGitCapabilitiesGitCapabilityMixinGitOutput',
-    {
-        'cmd': (str, Field(None)),
-        'tokens': (list[str], Field(None)),
-        'cwd': (str, Field(None)),
-        'classification': (dict[str, Any], Field(None)),
-        'returncode': (int, Field(None)),
-        'stdout': (str, Field(None)),
-        'stderr': (str, Field(None)),
-        'stdout_truncated': (bool, Field(None)),
-        'stderr_truncated': (bool, Field(None)),
-        'timeout_ms': (int, Field(None)),
-        'changed_files': (list[str], Field(None)),
-        'audit_id': (str, Field(None)),
-        'before_head': (str, Field(None)),
-        'after_head': (str, Field(None)),
-        'before_status': (str, Field(None)),
-        'after_status': (str, Field(None)),
-        'diff_stat': (str, Field(None)),
-        'undo_hint': (str, Field(None)),
-        'error_code': (str, Field(None)),
-    },
-)
-
 ExecutionShellExecShellExecCapabilityMixinShellInput = _strict_model(
     'ExecutionShellExecShellExecCapabilityMixinShellInput',
     {

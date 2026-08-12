@@ -182,8 +182,8 @@ class SkillIntrospectionProvider:
         scope="module",
         action_name="show",
         guidance=ToolGuidance(
-            purpose="Show skill management state.",
-            use_when="Diagnosing skill system health — how many skills exist, how many are active, pending candidate count.",
+            purpose="Show skill management state and pending assimilation candidates.",
+            use_when="Diagnosing skill system health, or recovering a candidate_id after an uncertain skill_assimilate result.",
             do_not_use_when="Searching for a specific skill (use skill_search). Checking behavior routing rules (use behavior_show). Checking memory state (use memory_show).",
             failure_next_steps="Read-only diagnostic. If no skills are active, use skill_search to find relevant ones.",
         ),
@@ -200,6 +200,18 @@ class SkillIntrospectionProvider:
             "active_skill_count": len([skill for skill in skills if skill.active]),
             "status_counts": by_status,
             "pending_candidate_count": len(self.service.pending_candidates),
+            "pending_candidates": [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "decision": candidate.decision,
+                    "name": candidate.skill.skill_id,
+                    "title": candidate.skill.title,
+                }
+                for candidate in sorted(
+                    self.service.pending_candidates.values(),
+                    key=lambda item: item.candidate_id,
+                )
+            ],
         }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -217,7 +229,7 @@ class SkillIntrospectionProvider:
             purpose="Create a sanitized skill candidate from plain text or SKILL.md content without committing.",
             use_when="The user provides a reusable procedure, playbook, or domain manual that should become a normalized skill.",
             do_not_use_when="Recording a durable fact or preference (use remember_memory). Learning a routing rule (use learn_behavior). The content is a one-off procedure not worth normalizing.",
-            failure_next_steps="Review the candidate output and use skill_commit to persist it. If assimilation may have succeeded but its result was lost, inspect skill_show before re-assimilating; do not create duplicate pending candidates blindly.",
+            failure_next_steps="Review the candidate output and use skill_commit to persist it. If assimilation may have succeeded but its result was lost, inspect skill_show and recover the matching pending candidate_id before considering another assimilation.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderAssimilateOutput,
@@ -260,12 +272,12 @@ class SkillIntrospectionProvider:
             purpose="Update a normalized skill's metadata or manual text and refresh its affordance.",
             use_when="Editing an existing skill's content, activation terms, or metadata.",
             do_not_use_when="Updating a durable fact (use update_memory). Updating a behavior rule (use update_behavior). Creating a new skill (use skill_assimilate + skill_commit).",
-            failure_next_steps="If the skill name is not found, verify it with skill_search. Changes take effect on next scenario match.",
+            failure_next_steps="If the skill name is not found, verify it with skill_search. If the update outcome is uncertain, read the skill by name and compare the intended patch before retrying; every applied update advances its version.",
         ),
         InputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateInput,
         OutputModel=SkillCapabilitiesSkillIntrospectionProviderUpdateOutput,
         aliases=("skill_update",),
-        execution=INDIRECT_LOCAL_WRITE,
+        execution=INDIRECT_UNSAFE_LOCAL_WRITE,
     )
     def update(self, call: CapabilityCall):
         return SkillUpdateTool(service=self.service).invoke(_skill_name_args(call.args))

@@ -19,8 +19,8 @@ from pal.behavior import (
     register_with_core as register_behavior_with_core,
 )
 from pal.core import PalCore, register_with_core as register_core_with_core
-from pal.execution import register_with_core as register_execution_with_core
-from pal.execution.tool_facade import CompleteResult, EffectKind, RetryPolicy
+from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
+from pal.execution.tool_facade import CompleteResult, EffectKind, Idempotency, RetryPolicy
 from pal.foundation import PalV2Database
 from pal.llm import generation_result_from_values
 from pal.lsp import build_lsp_plugin
@@ -33,6 +33,7 @@ from pal.skill import (
     SkillDescriptor,
     SkillDisableTool,
     SkillInjectTool,
+    SkillIntrospectionProvider,
     SkillReadTool,
     SkillRepository,
     SkillSearchTool,
@@ -86,6 +87,34 @@ class SkillSubsystemTests(unittest.TestCase):
         self.assertIn("use_when", result.structured["skill"])
         self.assertIn("avoid_when", result.structured["skill"])
         self.assertIsNone(self.skill_repository.get_skill("safe.git.commit"))
+
+    def test_skill_show_exposes_pending_candidate_names_for_reconciliation(self) -> None:
+        candidate = asyncio.run(
+            self.service.assimilate_async(
+                {
+                    "source_text": "When reviewing changes, inspect the complete diff before approval.",
+                    "desired_skill_id": "review.complete.diff",
+                }
+            )
+        )
+
+        result = SkillIntrospectionProvider(service=self.service).show(
+            CapabilityCall(name="skill_show", args={})
+        )
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.structured["pending_candidate_count"], 1)
+        self.assertEqual(
+            result.structured["pending_candidates"],
+            [
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "decision": candidate.decision,
+                    "name": "review.complete.diff",
+                    "title": candidate.skill.title,
+                }
+            ],
+        )
 
     def test_assimilate_preserves_long_manual_and_source_metadata(self) -> None:
         source_text = "When building software, preserve the full reusable workflow.\n" + ("Follow the verified step.\n" * 600)
@@ -375,6 +404,12 @@ Run the workflow.
         ]
         self.assertEqual(record.execution.effect_kind, EffectKind.LOCAL_READ)
         self.assertEqual(record.execution.retry_policy, RetryPolicy.AUTOMATIC)
+        update_record = core.context.execution_runtime.registry_generation.indirect_aliases[
+            "skill_update"
+        ]
+        self.assertEqual(update_record.execution.effect_kind, EffectKind.LOCAL_WRITE)
+        self.assertEqual(update_record.execution.idempotency, Idempotency.NON_IDEMPOTENT)
+        self.assertEqual(update_record.execution.retry_policy, RetryPolicy.RECONCILE_FIRST)
 
     def test_skill_module_declares_internal_plugin_development_skill(self) -> None:
         core = PalCore()

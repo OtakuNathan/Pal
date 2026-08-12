@@ -180,6 +180,15 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
+            elif normalized_section == "tool_routing":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="tool_routing",
+                        title="Tool Routing",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
             elif normalized_section == "tool_efficiency":
                 system_blocks.append(
                     PromptIRBlock(
@@ -549,6 +558,7 @@ class PromptCompiler:
             "operating_rules",
             "priority",
             "task_flow",
+            "tool_routing",
             "tool_efficiency",
             "mutation_policy",
             "memory_guide",
@@ -645,6 +655,7 @@ class PromptCompiler:
         rule_blocks = [block for block in blocks if block.block_id == "operating_rules"]
         priority_blocks = [block for block in blocks if block.block_id == "priority"]
         task_flow_blocks = [block for block in blocks if block.block_id == "task_flow"]
+        tool_routing_blocks = [block for block in blocks if block.block_id == "tool_routing"]
         tool_efficiency_blocks = [block for block in blocks if block.block_id == "tool_efficiency"]
         mutation_policy_blocks = [block for block in blocks if block.block_id == "mutation_policy"]
         memory_guide_blocks = [block for block in blocks if block.block_id == "memory_guide"]
@@ -669,6 +680,7 @@ class PromptCompiler:
             *rule_blocks,
             *priority_blocks,
             *task_flow_blocks,
+            *tool_routing_blocks,
             *tool_efficiency_blocks,
             *mutation_policy_blocks,
             *memory_guide_blocks,

@@ -176,7 +176,7 @@ class ExecutionDiscoveryCapabilityMixin:
             purpose="Read a page of a prior large tool result.",
             use_when="When a prior tool result was truncated or paginated. Use anchor='tail' for log-like output ends.",
             do_not_use_when="Not for new tool invocations.",
-            failure_next_steps="Use the result_ref returned by the original paged result (normally its tool_call_id). For an unknown or expired handle, follow the returned recovery affordance: rerun only an idempotent read marked safe to retry; otherwise rediscover the origin with search_tools and reconcile its effect before any retry.",
+            failure_next_steps="Use the result_ref returned by the original paged result (normally its tool_call_id). For an unknown or expired handle, follow the returned recovery affordance: rerun only an idempotent read marked safe to retry; otherwise inspect the registered origin with read_tool, or use search_tools only if that origin was retired, and reconcile its effect before any retry.",
         ),
         aliases=("read_tool_result",),
         InputModel=ExecutionToolSearchExecutionDiscoveryCapabilityMixinResultPageInput,

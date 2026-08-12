@@ -243,9 +243,9 @@ class WebSearchIntrospectionProvider:
         action_name="set_active_provider",
         guidance=ToolGuidance(
             purpose="Set the active web search provider.",
-            use_when="Switching to a different search backend.",
-            do_not_use_when="Checking the active provider (use web_search_active_provider).",
-            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers.",
+            use_when="Switching to a different enabled search backend.",
+            do_not_use_when="Checking the active provider (use web_search_active_provider). The target provider is disabled (enable it first).",
+            failure_next_steps="If NOT_FOUND, verify the provider name with web_search_list_providers. If disabled, enable the provider before selecting it.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderSetActiveProviderInput,
         aliases=("web_search_set_active_provider",),
@@ -255,6 +255,14 @@ class WebSearchIntrospectionProvider:
         provider_id = str(call.args.get("name") or "").strip()
         if not provider_id:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text="name is required", llm_text="name is required")
+        existing = self.service.get_provider(provider_id)
+        if existing is not None and not existing.enabled:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="web search provider is disabled",
+                structured={"name": provider_id, "reason": "provider_disabled"},
+                llm_text="web search provider is disabled; enable it before selecting it",
+            )
         record = self.service.set_active_provider(provider_id)
         if record is None:
             return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="web search provider not found", llm_text="web search provider not found")
@@ -277,7 +285,7 @@ class WebSearchIntrospectionProvider:
             purpose="Search the web with the configured provider and internal fallback.",
             use_when="Looking up current external facts, documentation, or comparing sources.",
             do_not_use_when="Fetching a specific webpage (use read_web). Reading local files (use read_file).",
-            failure_next_steps="If search fails, the provider may be unhealthy — check web_search_provider_health. The internal fallback may still work.",
+            failure_next_steps="A failed call has already exhausted the configured fallback providers. Inspect provider health and authorization, then enable, repair, or select a healthy provider before retrying.",
         ),
         InputModel=WebSearchCapabilitiesWebSearchIntrospectionProviderQueryInput,
         execution=DIRECT_EXTERNAL_READ,

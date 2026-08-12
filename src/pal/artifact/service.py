@@ -704,7 +704,7 @@ class ArtifactManager:
             if retired_count and not live_count:
                 text = (
                     "The referenced artifact handlers have retired. Their managed bytes and representations "
-                    "are no longer available. Do not call artifact or vision tools for them; ask the user to "
+                    "are no longer available. Do not call artifact capabilities for them; ask the user to "
                     "attach the source again if its content is still required.\n"
                     + "\n".join(manifest_lines)
                 )

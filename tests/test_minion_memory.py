@@ -33,6 +33,7 @@ from pal.memory import (
     MemoryService,
 )
 from pal.memory.prompt import MemoryPromptFragmentProvider
+from pal.minion.prompt_adapter import MinionPromptFragmentProvider
 from pal.memory.runtime_state import MemoryRuntimeStatePort
 from pal.minion.compact import (
     MinionCompactionPolicy,
@@ -101,6 +102,22 @@ class MinionMemoryIntegrationTests(unittest.TestCase):
         memory_providers = [provider for provider in providers if isinstance(provider, MemoryPromptFragmentProvider)]
         self.assertEqual(len(memory_providers), 1)
         self.assertTrue(memory_providers[0].include_l1_recent_context)
+
+    def test_minion_hardcodes_shared_tool_routing_in_system_fragments(self) -> None:
+        providers = self._runner()._build_minion_prompt_fragment_registry().list_for_prompt()
+        prompt_provider = next(
+            provider for provider in providers if isinstance(provider, MinionPromptFragmentProvider)
+        )
+
+        fragments = prompt_provider.build_prompt_fragments(
+            PromptAssemblyContext(core_mode="minion", turn_kind="minion")
+        )
+        routing = next(fragment for fragment in fragments if fragment.section == "tool_routing")
+
+        self.assertEqual(routing.title, "Tool Routing")
+        self.assertIn("result-specific recovery affordances", routing.content)
+        self.assertIn("suggested next tool only when", routing.content)
+        self.assertIn("never blindly retry a mutation", routing.content)
 
     def test_minion_role_timeout_is_forwarded_to_the_host_llm_request(self) -> None:
         pack = MinionInvocationPack(

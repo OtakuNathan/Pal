@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
+from pal.shared.tool_routing import TOOL_ROUTING_SYSTEM_GUIDANCE
 
 
 @dataclass
@@ -108,6 +109,12 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 priority=91,
             ),
             PromptFragment(
+                section="tool_routing",
+                title="Tool Routing",
+                content=TOOL_ROUTING_SYSTEM_GUIDANCE,
+                priority=92,
+            ),
+            PromptFragment(
                 section="tool_efficiency",
                 title="Tool Efficiency",
                 content=(
@@ -115,7 +122,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "- Avoid dumping large files or re-reading inspected regions unless necessary.\n"
                     "- If tool output grows quickly, stop and reassess; use the simplest viable path."
                 ),
-                priority=92,
+                priority=93,
             ),
             PromptFragment(
                 section="mutation_policy",
@@ -130,7 +137,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "- Verify after mutation.\n"
                     "- Report what changed, what was verified, and what remains uncertain."
                 ),
-                priority=93,
+                priority=94,
             ),
             PromptFragment(
                 section="knowledge_storage_boundary",

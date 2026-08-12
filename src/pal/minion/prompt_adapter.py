@@ -17,6 +17,7 @@ from pal.shared import (
     MinionInvocationPack,
 )
 from pal.shared.payloads import extract_text_from_payload
+from pal.shared.tool_routing import TOOL_ROUTING_SYSTEM_GUIDANCE
 
 
 def prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
@@ -78,6 +79,7 @@ class MinionPromptFragmentProvider(PromptFragmentProvider):
                 },
             )
         add("operating_rules", "Execution Rules", _render_execution_rules(scaffold), 60)
+        add("tool_routing", "Tool Routing", TOOL_ROUTING_SYSTEM_GUIDANCE, 65)
         add("output_contract", "Output Contract", str(scaffold.get("output_contract") or ""), 70)
         retry = str(dict(context.metadata or {}).get("retry_note") or "")
         if retry:

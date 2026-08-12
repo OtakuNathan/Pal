@@ -554,11 +554,18 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         old_bridge_alias = "codex_" + "proxy"
         old_app_alias = "codex_" + "app_server"
         old_migration_hook = "migrate_" + "legacy_service_tables"
+        retired_git_canonical = "op_" + "git"
+        retired_workspace_aliases = (
+            "op_" + "search",
+            "op_" + "tree",
+            "op_memory_" + "refresh_indexes",
+        )
         for relative_path in (
             "tests/" + "telegram_endpoint.py",
             "src/pal/proactive/" + "schema.py",
             f"src/pal/llm/{old_bridge_alias}.py",
             f"src/pal/llm/{old_app_alias}.py",
+            "src/pal/execution/" + "git_capabilities.py",
         ):
             self.assertFalse((ROOT / relative_path).exists(), relative_path)
         self.assertFalse((ROOT / "src/pal/llm/adapters.py").exists())
@@ -571,6 +578,15 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn(old_bridge_alias, content)
             self.assertNotIn(old_app_alias, content)
             self.assertNotIn(old_migration_hook, content)
+        for relative_path in (
+            "src/pal/core/tool_surface.toml",
+            "src/pal/execution/generated_tool_models.py",
+            "src/pal/minion/profiles.py",
+        ):
+            content = (ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertNotIn(retired_git_canonical, content)
+            for retired_alias in retired_workspace_aliases:
+                self.assertNotIn(retired_alias, content)
 
     def test_identity_contracts_do_not_import_models(self) -> None:
         self._assert_no_forbidden_imports(
@@ -907,7 +923,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("delete_path", hit_names)
         self.assertFalse(any(name.startswith("op_") or name.startswith("intro_") for name in hit_names))
 
-    def test_main_runtime_tool_search_does_not_expose_minion_scoped_repo_tools(self) -> None:
+    def test_main_runtime_tool_search_returns_only_public_aliases(self) -> None:
         core = PalCore()
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
@@ -918,8 +934,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         hit_names = [item["alias"] for item in result.structured["hits"]]
-        self.assertNotIn("op_tree", hit_names)
-        self.assertNotIn("op_search", hit_names)
+        self.assertFalse(any(name.startswith("op_") or name.startswith("intro_") for name in hit_names))
 
     def test_file_capabilities_share_read_before_edit_cache(self) -> None:
         temp_dir = tempfile.mkdtemp()
@@ -1037,6 +1052,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "Use file_edit for focused changes",
             "not supported by file_read",
             "Use artifact or vision tools",
+            "artifact / vision tools",
+            "Use this git tool",
             "use vision or the inline image",
             "If not_text_readable, use vision",
             "lsp_document_symbols/workspace_symbols",
@@ -1537,7 +1554,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(any(entry.kind == "case" for entry in memory_service.l2_store.items.values()))
         request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "astream"})
         tool_names = [tool.name for tool in request.tools]
-        self.assertNotIn("op_memory_refresh_indexes", tool_names)
+        self.assertNotIn("memory_provider_refresh_indexes", tool_names)
         self.assertIn("read_tool", tool_names)
         self.assertNotIn("memory_provider_inventory", tool_names)
         self.assertNotIn("shell", tool_names)
@@ -1673,6 +1690,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "operating_rules",
                     "operating_guidance",
                     "priority",
+                    "tool_routing",
                     "tool_efficiency",
                     "mutation_policy",
                     "knowledge_storage_boundary",
@@ -1707,6 +1725,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "prompt_context_policy",
                     "operating_rules",
                     "priority",
+                    "tool_routing",
                     "tool_efficiency",
                     "mutation_policy",
                     "memory_guide",
@@ -1729,6 +1748,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("<prompt_context_policy>", prompt.messages[0].text)
             self.assertIn("<operating_rules>", prompt.messages[0].text)
             self.assertIn("<priority>", prompt.messages[0].text)
+            self.assertIn("<tool_routing>", prompt.messages[0].text)
             self.assertNotIn("<task_flow>", prompt.messages[0].text)
             self.assertNotIn("minion_task_search", prompt.messages[0].text)
             self.assertNotIn("minion_dispatch_workflow", prompt.messages[0].text)
@@ -1757,6 +1777,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertLess(system_text.index("<source_of_truth>"), system_text.index("<prompt_context_policy>"))
             self.assertLess(system_text.index("<prompt_context_policy>"), system_text.index("<operating_rules>"))
             self.assertLess(system_text.index("<operating_rules>"), system_text.index("<priority>"))
+            self.assertLess(system_text.index("<priority>"), system_text.index("<tool_routing>"))
+            self.assertLess(system_text.index("<tool_routing>"), system_text.index("<tool_efficiency>"))
             self.assertLess(system_text.index("<mutation_policy>"), system_text.index("<memory_guide>"))
             self.assertNotIn("<runtime_overlay>", system_text)
             self.assertNotIn("<memory_projection>", system_text)
@@ -3709,6 +3731,38 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertFalse(expired.ok)
         self.assertEqual(expired.structured["details"]["reason"], "expired_handle")
 
+    def test_expired_pager_recovery_replays_reads_but_never_mutations(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        runtime = core.context.execution_runtime
+
+        def details(alias: str, arguments: dict[str, object]) -> dict[str, object]:
+            record = runtime.registry_generation.record_for_alias(alias)
+            self.assertIsNotNone(record)
+            return {
+                "origin": {
+                    "alias": alias,
+                    "arguments": arguments,
+                    "invocation_mode": record.execution.invocation_mode.value,
+                    "execution": record.execution.model_dump(mode="json"),
+                }
+            }
+
+        read_recovery = runtime._pager_recovery_affordances(
+            details("read_file", {"path": "/tmp/example.txt"})
+        )
+        write_recovery = runtime._pager_recovery_affordances(
+            details("write_file", {"path": "/tmp/example.txt", "content": "new"})
+        )
+
+        self.assertEqual(read_recovery[0].tool, "read_file")
+        self.assertIn("idempotent read", read_recovery[0].reason)
+        self.assertEqual(write_recovery[0].tool, "read_tool")
+        self.assertEqual(write_recovery[0].arguments, {"name": "write_file"})
+        self.assertNotEqual(write_recovery[0].tool, "write_file")
+        self.assertIn("do not automatically repeat", write_recovery[0].reason)
+
     def test_turn_runtime_recompacts_when_generate_requests_budget_for_fallback_endpoint(self) -> None:
         class FallbackBudgetLLMRuntime:
             def __init__(self) -> None:
@@ -4255,6 +4309,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         prompt_context_policy = by_section["prompt_context_policy"]
         rules = by_section["operating_rules"]
         priority = by_section["priority"]
+        tool_routing = by_section["tool_routing"]
         tool_efficiency = by_section["tool_efficiency"]
         mutation_policy = by_section["mutation_policy"]
         knowledge_storage_boundary = by_section["knowledge_storage_boundary"]
@@ -4269,6 +4324,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("Pal capabilities are the execution path", rules.content)
         self.assertIn("shell", rules.content)
         self.assertIn("Source-of-truth, verification, and mutation rules", priority.content)
+        self.assertIn("result-specific recovery affordances", tool_routing.content)
+        self.assertIn("suggested next tool only when", tool_routing.content)
+        self.assertIn("never blindly retry a mutation", tool_routing.content)
         self.assertIn("targeted search", tool_efficiency.content)
         self.assertIn("Runtime capability calls are governed actions", mutation_policy.content)
         self.assertIn("Future route hint or recurring decision rule -> behavior guidance", knowledge_storage_boundary.content)

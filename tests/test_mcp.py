@@ -8,11 +8,12 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pal.behavior import BehaviorAffordanceModel, BehaviorRepository, BehaviorService, BehaviorSkillModel, register_with_core as register_behavior_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
+from pal.execution.tool_facade import EffectKind, Idempotency, RetryPolicy
 from pal.foundation import PalV2Database, SidecarEndpoint, SidecarRpcClient, SidecarRpcError
 from pal.mcp import AsyncStdioMcpConnector, McpCompiler, McpDiscoverySnapshot, McpProtocolError, McpServerConfig, load_mcp_server_file
 from pal.mcp.connector import _expand_env_vars
@@ -20,7 +21,7 @@ from pal.mcp.ipc import McpManagerClient
 from pal.mcp.manager import McpManager
 from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpToolSpec
 from pal.mcp.normalize import normalize_tool_payload
-from pal.mcp.plugin import build_mcp_plugin
+from pal.mcp.plugin import McpManagerPluginProvider, build_mcp_plugin
 from pal.plugins.host import PluginHost
 from pal.plugins.models import PluginBundleModel
 from pal.shared import RuntimeStatus
@@ -451,6 +452,45 @@ class McpPluginSidecarTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def test_attach_failure_is_reported_as_failure_not_applied_success(self) -> None:
+        refreshed: list[bool] = []
+        provider = McpManagerPluginProvider(
+            runtime_root=self.root,
+            core_context=object(),
+            refresh_capabilities=lambda: refreshed.append(provider.projection is None),
+        )
+
+        def fail_startup() -> None:
+            raise RuntimeError("sidecar unavailable")
+
+        provider._ensure_manager_started = fail_startup  # type: ignore[method-assign]
+
+        result = provider.attach()
+
+        self.assertEqual(result.status, RuntimeStatus.ERROR)
+        self.assertEqual(result.text, "mcp manager attach failed")
+        self.assertIn("sidecar unavailable", str(result.structured))
+        self.assertEqual(refreshed, [True])
+
+    def test_attach_success_republishes_the_rebuilt_projection(self) -> None:
+        refreshed: list[bool] = []
+        provider = McpManagerPluginProvider(
+            runtime_root=self.root,
+            core_context=object(),
+            refresh_capabilities=lambda: refreshed.append(True),
+        )
+        provider._ensure_manager_started = lambda: None  # type: ignore[method-assign]
+        provider._refresh_projection = lambda: None  # type: ignore[method-assign]
+        manager_client = Mock()
+        manager_client.rescan_sync.return_value = {"status": RuntimeStatus.OK}
+
+        with patch("pal.mcp.plugin.McpManagerClient", return_value=manager_client):
+            result = provider.attach()
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(refreshed, [True])
+        manager_client.rescan_sync.assert_called_once_with()
+
     def test_plugin_attach_projects_capabilities_and_skills_through_sidecar(self) -> None:
         self._write_config_and_server()
         core, skill_service = self._core_with_services()
@@ -478,6 +518,12 @@ class McpPluginSidecarTests(unittest.TestCase):
             )
             self.assertEqual(path_image.structured["kind"], "path")
             self.assertEqual(Path(path_image.structured["path"]), image_path.resolve())
+            image_record = core.context.execution_runtime.registry_generation.indirect_aliases[
+                "mcp_image_prepare"
+            ]
+            self.assertEqual(image_record.execution.effect_kind, EffectKind.LOCAL_READ)
+            self.assertEqual(image_record.execution.idempotency, Idempotency.IDEMPOTENT)
+            self.assertEqual(image_record.execution.retry_policy, RetryPolicy.AUTOMATIC)
         finally:
             host._do_detach(handle)
         missing = core.context.execution_runtime.execute(CapabilityCall(name="mcp_demo_alpha", args={}))

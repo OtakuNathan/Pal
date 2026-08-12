@@ -811,15 +811,6 @@ workspace_policy: {}
             "inside\n",
         )
 
-    def test_private_workspace_search_is_not_registered(self) -> None:
-        scoped = MinionScopedExecutionRuntime(
-            ExecutionRuntime(),
-            ["op_search"],
-            workspace={"repo_path": str(self.root)},
-        )
-        self.assertIsNone(scoped.get_capability_spec("op_search"))
-        self.assertNotIn("search", scoped.registry_generation.direct_aliases)
-
     def test_workspace_tool_replaces_inherited_descriptor_once(self) -> None:
         core = PalCore()
         register_execution_with_core(core.context)
@@ -1081,17 +1072,13 @@ workspace_policy: {}
         self.assertIn("test_debugging", coder.allowed_skills)
         architect = self._pack("software_engineering.v2_architect")
         self.assertIn("op_exec_shell", architect.allowed_capabilities)
-        self.assertNotIn("op_search", architect.allowed_capabilities)
         self.assertIn("op_file_read", architect.allowed_capabilities)
-        self.assertNotIn("op_git", architect.allowed_capabilities)
-        self.assertNotIn("op_tree", architect.allowed_capabilities)
         self.assertIn("op_lsp_definition", coder.allowed_capabilities)
         self.assertIn("op_lsp_references", coder.allowed_capabilities)
         self.assertIn("op_lsp_diagnostics", coder.allowed_capabilities)
         self.assertNotIn("op_lsp_prepare_workspace", coder.allowed_capabilities)
         self.assertNotIn("op_lsp_doctor", coder.allowed_capabilities)
         self.assertNotIn("op_minion_developer_note", coder.allowed_capabilities)
-        self.assertNotIn("op_git", coder.allowed_capabilities)
         self.assertEqual(
             coder.workspace.get("workspace_policy", {}).get("mode"),
             "writable_git_branch",
@@ -1120,7 +1107,6 @@ workspace_policy: {}
         )
         self.assertIn("cross-file text search", overrides["op_file_read"]["do_not_use_when"])
         self.assertNotIn("tests/<module_name>/developer", overrides["op_file_write"]["use_when"])
-        self.assertNotIn("op_git", overrides)
         self.assertNotIn("op_exec_shell", overrides)
 
         for profile in (
@@ -1130,7 +1116,6 @@ workspace_policy: {}
         ):
             with self.subTest(profile=profile):
                 capabilities = self._pack(profile).allowed_capabilities
-                self.assertNotIn("op_search", capabilities)
                 self.assertNotIn("op_path_delete", capabilities)
 
         reviewer_overrides = dict(
@@ -1145,16 +1130,6 @@ workspace_policy: {}
         )
         self.assertNotIn("op_exec_shell", reviewer_overrides)
         self.assertNotIn("op_exec_shell", verifier_overrides)
-        self.assertNotIn("op_git", reviewer_overrides)
-        self.assertNotIn("op_git", verifier_overrides)
-        self.assertNotIn(
-            "op_git",
-            self._pack("software_engineering.v2_reviewer").allowed_capabilities,
-        )
-        self.assertNotIn(
-            "op_git",
-            self._pack("software_engineering.v2_verifier").allowed_capabilities,
-        )
 
         verifier_behavior = str(
             self._pack("software_engineering.v2_verifier").resolved_profile["behavior_fragment"]

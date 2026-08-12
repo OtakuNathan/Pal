@@ -8,6 +8,23 @@ from pal.execution import register_with_core as register_execution_with_core
 from pal.execution.contracts import CapabilityCall
 from pal.lsp import build_lsp_plugin
 from pal.lsp.plugin import LspManagerPluginProvider
+from pal.shared import RuntimeStatus
+
+
+def test_attach_failure_is_reported_as_failure_not_applied_success() -> None:
+    provider = LspManagerPluginProvider(runtime_root=Path(tempfile.mkdtemp()))
+
+    def fail_startup() -> None:
+        raise RuntimeError("sidecar unavailable")
+
+    provider._ensure_manager_started = fail_startup  # type: ignore[method-assign]
+
+    result = provider.attach()
+
+    assert result.status == RuntimeStatus.ERROR
+    assert result.text == "lsp manager attach failed"
+    assert result.structured is not None
+    assert "sidecar unavailable" in str(result.structured)
 
 
 def test_prepare_workspace_result_points_to_indirect_lsp_tools() -> None:

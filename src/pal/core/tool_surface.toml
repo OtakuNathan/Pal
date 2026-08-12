@@ -14,7 +14,6 @@ capabilities = [
     "op_file_edit",
     "op_file_write",
     "op_path_delete",
-    "op_git",
     "op_tool_call",
     "op_tool_result_page",
     # -- behavior (affordance + skill) --

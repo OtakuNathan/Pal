@@ -802,8 +802,8 @@ def _render_git_result(
 def _blocked_text(policy: GitCommandPolicy) -> str:
     reason = policy.reason or "git command is not allowed"
     return (
-        f"Blocked git command: {reason}. Use this git tool for read-only repository inspection and conservative audited "
-        "mutations only; use checkpoint completion tools for commits."
+        f"Blocked git command: {reason}. Git commands issued through run_shell are routed through the audited git trap; "
+        "use read-only inspection or conservative mutations, and use checkpoint completion tools for commits."
     )
 
 

@@ -641,16 +641,13 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
 
 DEFAULT_MINION_DENIED_CAPABILITIES = frozenset(
     {
-        "op_git",
         "op_path_delete",
-        "op_search",
         "op_behavior_advise",
         "op_behavior_save",
         "op_channel_send_attachment",
         "op_memory_write",
         "op_memory_update",
         "op_memory_delete",
-        "op_memory_refresh_indexes",
         "op_plugin_mgmt_disable",
         "op_plugin_mgmt_enable",
         "op_plugin_mgmt_rescan",

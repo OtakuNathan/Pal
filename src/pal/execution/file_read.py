@@ -3,8 +3,9 @@
 Reads a text file, returns a line-numbered slice, and records whether the
 caller actually saw the complete file before a later mutation.
 
-Only UTF-8 (and compatible) text files are supported.  Binary files,
-images, and PDFs should be handled through artifact / vision tools instead.
+Only UTF-8 (and compatible) text files are supported. Binary files and PDFs
+use artifact capabilities; inline images can be inspected directly by a
+vision-capable model.
 """
 
 from __future__ import annotations
